@@ -7,6 +7,9 @@ from typing import Protocol
 from .constants import MODEL_ID, MODEL_REVISION
 from .model import Block
 
+MULTI_PAGE_PROMPT = "<image>Multi page parsing."
+GUNDAM_PROMPT = "<image>document parsing."
+
 DETECTION = re.compile(
     r"<\|det\|>\s*([^\[]+?)\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]\s*<\|/det\|>",
     re.DOTALL,
@@ -39,7 +42,7 @@ class OcrBackend(Protocol):
 
     def recognize(self, image: Path) -> tuple[str, dict[str, object]]: ...
 
-    def recognize_pages(self, images: list[Path]) -> list[tuple[str, dict[str, object]]]: ...
+    def recognize_pages(self, images: list[Path]) -> tuple[str, dict[str, object]]: ...
 
 
 class MlxUnlimitedOcr:
@@ -61,10 +64,15 @@ class MlxUnlimitedOcr:
 
     def recognize(self, image: Path) -> tuple[str, dict[str, object]]:
         return self._recognize(
-            image, task="document parsing.", cropping=True, image_size=640, mode="gundam"
+            image,
+            task=GUNDAM_PROMPT.removeprefix("<image>"),
+            cropping=True,
+            image_size=640,
+            mode="gundam",
+            ngram_window=128,
         )
 
-    def recognize_pages(self, images: list[Path]) -> list[tuple[str, dict[str, object]]]:
+    def recognize_pages(self, images: list[Path]) -> tuple[str, dict[str, object]]:
         """Port Unlimited-OCR's `infer_multi` contract to MLX.
 
         The reference implementation expands every page at one image-token position.
@@ -95,36 +103,33 @@ class MlxUnlimitedOcr:
             base_size=1024,
             logits_processors=[SlidingWindowNoRepeatNgramProcessor(35, 1024)],
         )
-        pages = split_multi_page_output(result.text, len(images))
-        common = {
+        return result.text, {
             "prompt_tokens": result.prompt_tokens,
             "generation_tokens": result.generation_tokens,
             "finish_reason": result.finish_reason,
             "peak_memory_gb": result.peak_memory,
             "mode": "multi_base",
             "group_size": len(images),
+            "contract": {
+                "prompt": MULTI_PAGE_PROMPT,
+                "base_size": 1024,
+                "image_size": 1024,
+                "crop_mode": False,
+                "temperature": 0.0,
+                "no_repeat_ngram_size": 35,
+                "ngram_window": 1024,
+            },
         }
-        return [
-            (page, {**common, "group_index": index})
-            for index, page in enumerate(pages)
-        ]
-
-    def recognize_retry(self, image: Path) -> tuple[str, dict[str, object]]:
-        return self._recognize(
-            image, task="document parsing.", cropping=False, image_size=1024, mode="base"
-        )
-
-    def recognize_recovery(self, image: Path) -> tuple[str, dict[str, object]]:
-        return self._recognize(
-            image,
-            task="<|grounding|>Convert the document to markdown.",
-            cropping=True,
-            image_size=640,
-            mode="grounded_markdown",
-        )
 
     def _recognize(
-        self, image: Path, *, task: str, cropping: bool, image_size: int, mode: str
+        self,
+        image: Path,
+        *,
+        task: str,
+        cropping: bool,
+        image_size: int,
+        mode: str,
+        ngram_window: int,
     ) -> tuple[str, dict[str, object]]:
         self._load()
         from mlx_vlm import generate
@@ -146,7 +151,7 @@ class MlxUnlimitedOcr:
             cropping=cropping,
             image_size=image_size,
             base_size=1024,
-            logits_processors=[SlidingWindowNoRepeatNgramProcessor(35, 128)],
+            logits_processors=[SlidingWindowNoRepeatNgramProcessor(35, ngram_window)],
         )
         return result.text, {
             "prompt_tokens": result.prompt_tokens,
@@ -154,6 +159,15 @@ class MlxUnlimitedOcr:
             "finish_reason": result.finish_reason,
             "peak_memory_gb": result.peak_memory,
             "mode": mode,
+            "contract": {
+                "prompt": GUNDAM_PROMPT,
+                "base_size": 1024,
+                "image_size": image_size,
+                "crop_mode": cropping,
+                "temperature": 0.0,
+                "no_repeat_ngram_size": 35,
+                "ngram_window": ngram_window,
+            },
         }
 
 
@@ -213,5 +227,6 @@ class SidecarOcr:
             raise RuntimeError(f"missing OCR sidecar: {sidecar}")
         return sidecar.read_text(encoding="utf-8"), {}
 
-    def recognize_pages(self, images: list[Path]) -> list[tuple[str, dict[str, object]]]:
-        return [self.recognize(image) for image in images]
+    def recognize_pages(self, images: list[Path]) -> tuple[str, dict[str, object]]:
+        values = [self.recognize(image)[0] for image in images]
+        return "\n<PAGE>\n".join(values), {"mode": "multi_base", "group_size": len(images)}

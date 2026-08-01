@@ -77,7 +77,14 @@ def _prefer_coarse_file_units(outline: list[dict], chapter_level: int, pages: li
         end = starts[index + 1] if index + 1 < len(starts) else max(page_numbers) + 1
         byte_sizes.append(sum(size for number, size in page_bytes.items() if start <= number < end))
     short_share = sum(size < 16 * 1024 for size in byte_sizes) / len(byte_sizes)
-    return len(chapters) > 32 or statistics.median(byte_sizes) < 16 * 1024 or short_share >= 0.6
+    part_starts = sorted(item["page"] for item in parts if item["page"] in page_numbers)
+    part_sizes = []
+    for index, start in enumerate(part_starts):
+        end = part_starts[index + 1] if index + 1 < len(part_starts) else max(page_numbers) + 1
+        part_sizes.append(sum(size for number, size in page_bytes.items() if start <= number < end))
+    parts_are_reasonable = bool(part_sizes) and max(part_sizes) <= 512 * 1024
+    short_chapters = len(chapters) > 32 or statistics.median(byte_sizes) < 16 * 1024 or short_share >= 0.6
+    return parts_are_reasonable and short_chapters
 
 
 def _coarse_boundaries(

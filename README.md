@@ -5,6 +5,13 @@ auditable Markdown bundles on Apple Silicon. Unlimited-OCR provides the visual
 interpretation; embedded PDF and DjVu text is retained only as comparison
 evidence and never silently replaces the visual result.
 
+The model contract is intentionally narrow and immutable: ordered page windows
+use Baidu's multi-page Base recipe, and affected pages use Baidu's Gundam recipe
+for local recovery. Raw output from both observations is retained untouched;
+deterministic Python code parses, validates, reconciles, structures, and renders
+the result. The model is never prompted to emit JSON or arbitrate between its
+own readings.
+
 ## Install
 
 The Nix app creates a locked `uv` environment in
@@ -54,6 +61,7 @@ accepts an explicit map:
 book.md
 chapters/                  # only when split
 pages/page-NNNN.json       # visual and embedded evidence
+raw/<observation-id>.txt   # untouched model invocation output
 assets/
   figures/
   originals/
@@ -67,6 +75,12 @@ All Markdown links are relative. Original embedded figures are preserved when
 possible; rendered PNG crops are used for page-composed graphics. Asset
 provenance and every placement remain available in the JSON artifacts.
 
+Each fixed-layout page record keeps `visual.multi_page`, `visual.gundam`,
+`embedded`, `comparison`, canonical normalized blocks, and recovery provenance
+separately. Markdown is rendered only from canonical blocks. A pinned
+`mdformat`/GFM pass and PyMarkdown lint/fix pass run after rendering, followed
+by a second byte-idempotent formatting pass and `ebook2md verify` checks.
+
 ## Supported inputs
 
 - PDF
@@ -77,7 +91,7 @@ provenance and every placement remain available in the JSON artifacts.
 - naturally sorted image directories
 
 DRM-protected books, MOBI/AZW, CBR, automatic embedded-text fusion, and
-handwriting-specialized recognition are intentionally outside version 0.1.
+handwriting-specialized recognition are intentionally outside version 0.2.
 
 ## OCR validation
 
@@ -86,4 +100,3 @@ Before changing the MLX-VLM or model revision, compare the result against the
 reference PyTorch implementation on the representative math/layout corpus and
 record latency, peak unified memory, missing figures, formula structure, and
 repetition failures.
-

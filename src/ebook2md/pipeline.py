@@ -18,9 +18,11 @@ from .assets import AssetStore
 from .chapters import chapters_from_map, detect_chapters
 from .compare import compare_text
 from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, MODEL_ID, MODEL_REVISION, SCHEMA_VERSION
-from .markdown import merge_html_tables, strict_page_markdown, write_markdown
-from .model import Block, PageResult
-from .ocr import MlxUnlimitedOcr, OcrBackend, parse_output
+from .formatting import format_and_lint
+from .markdown import merge_html_tables, normalize_table_blocks, strict_page_markdown, write_markdown
+from .model import Block, OcrObservation, PageResult
+from .native import observation_dict, parse_native_observation, reconcile_observations
+from .ocr import MlxUnlimitedOcr, OcrBackend, split_multi_page_output
 from .util import atomic_json, sha256_file, slugify
 from .util import atomic_text
 
@@ -50,6 +52,7 @@ def convert(
         shutil.rmtree(bundle)
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "pages").mkdir(exist_ok=True)
+    (bundle / "raw").mkdir(exist_ok=True)
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
     assets = AssetStore(bundle / "assets")
@@ -62,6 +65,7 @@ def convert(
         "pages": pages,
         "languages": languages or [],
         "multi_page": multi_page,
+        "pipeline_revision": 2,
     }
     previous = _read_json(bundle / "metadata.json")
     can_resume = resume and previous and previous.get("fingerprint") == fingerprint
@@ -82,26 +86,41 @@ def convert(
             page_results.extend(_page_from_dict(_read_json(path)) for path in page_paths)
             continue
         try:
-            recognize_pages = getattr(backend, "recognize_pages", None)
-            if multi_page and len(group) > 1 and callable(recognize_pages):
-                recognized = recognize_pages([page.image_path for page in group])
-            else:
-                recognized = [backend.recognize(page.image_path) for page in group]
+            group_observation, recognized = _recognize_primary(group, backend, bundle)
         except Exception as error:
             failed.extend({"page": page.number, "error": str(error)} for page in group)
             continue
         aligned = _align_multi_results(group, recognized)
-        aligned = _recover_corrupt_merged_segments(group, aligned, backend)
         for source_page, (raw, generation), page_path in zip(group, aligned, page_paths):
             try:
                 generation = dict(generation)
                 if len(group) > 1:
                     generation["group_pages"] = [page.number for page in group]
+                primary = parse_native_observation(
+                    raw,
+                    mode="multi_base",
+                    source_pages=list(generation.get("source_pages", [source_page.number])),
+                    generation=generation,
+                )
+                # Canonical spans originate from the immutable group invocation;
+                # page segmentation is a deterministic parser view of that raw file.
+                primary.id = group_observation.id
+                recoveries = _recover_page_if_needed(
+                    source_page,
+                    primary,
+                    group_observation,
+                    backend,
+                    bundle,
+                )
+                blocks, recovery, validation_warnings = reconcile_observations(primary, recoveries)
                 result = _page_result(
                     source_page,
-                    raw,
-                    generation,
-                    backend,
+                    primary,
+                    group_observation,
+                    recoveries,
+                    blocks,
+                    recovery,
+                    validation_warnings,
                     assets,
                     document.outline,
                 )
@@ -111,16 +130,19 @@ def convert(
                 failed.append({"page": source_page.number, "error": str(error)})
 
     page_results.sort(key=lambda item: item.number)
+    _normalize_document_blocks(page_results)
     _merge_continued_tables(page_results)
+    for result in page_results:
+        normalize_table_blocks(result.blocks)
     available_pages = {page.number for page in page_results}
     for result in page_results:
         # Re-render resumed page records too, so assembly-only changes are applied.
+        _apply_links_to_blocks(result.blocks, result.embedded.links)
         result.visual_markdown = strict_page_markdown(result, document.outline)
-        result.visual_markdown = _apply_links(result.visual_markdown, result.embedded.links)
         retained_warnings = [
             warning
             for warning in result.warnings
-            if warning in {"multi_page_recovered_corrupt_segment", "unresolved_internal_link"}
+            if warning.startswith("visual_") or warning == "unresolved_internal_link"
         ]
         if result.generation.get("multi_page_recovery"):
             retained_warnings.append("multi_page_recovered_corrupt_segment")
@@ -130,6 +152,8 @@ def convert(
         if unresolved:
             result.warnings.append("unresolved_internal_link")
             result.comparison.warnings.append("unresolved_internal_link")
+        result.visual.setdefault("canonical", {})["blocks"] = [asdict(block) for block in result.blocks]
+        result.visual["canonical"]["markdown"] = result.visual_markdown
         atomic_json(bundle / "pages" / f"page-{result.number:04d}.json", result.to_dict())
     chapters = chapters_from_map(chapter_map, [page.number for page in page_results]) if chapter_map else detect_chapters(document, page_results)
     combined_size = sum(len(page.visual_markdown.encode("utf-8")) for page in page_results)
@@ -152,6 +176,21 @@ def convert(
         title=_title(document, source),
         outline=document.outline,
     )
+    format_result = format_and_lint([bundle / path for path in files])
+    if not format_result.idempotent:
+        warnings.append("markdown_formatter_not_idempotent")
+    if format_result.lint_errors:
+        warnings.append("markdown_lint_failed")
+    output_fingerprints = {path: sha256_file(bundle / path) for path in files}
+    resume_stable = not (
+        can_resume
+        and not previous.get("failed_pages")
+        and previous.get("page_count") == previous.get("requested_page_count")
+        and previous.get("output_fingerprints")
+        and previous["output_fingerprints"] != output_fingerprints
+    )
+    if not resume_stable:
+        warnings.append("resume_output_changed")
     assets.write_manifest()
     document_json = {
         "schema_version": SCHEMA_VERSION,
@@ -175,6 +214,14 @@ def convert(
         "split": split,
         "markdown_files": files,
         "warnings": sorted(set(warnings)),
+        "formatting": {
+            "formatter": "mdformat==1.0.0 + mdformat-gfm==1.0.0",
+            "linter": "pymarkdownlnt==0.9.38",
+            "idempotent": format_result.idempotent,
+            "lint_errors": format_result.lint_errors,
+        },
+        "output_fingerprints": output_fingerprints,
+        "resume_stable": resume_stable,
         "failed_pages": failed,
         "duration_seconds": round(time.time() - started, 3),
         "platform": platform.platform(),
@@ -187,59 +234,29 @@ def convert(
     return bundle
 
 
-def _page_result(source_page, raw, generation, backend, assets, outline) -> PageResult:
-    visual_markdown, blocks = parse_output(raw)
-    visual_markdown = _blocks_markdown(blocks, visual_markdown)
+def _page_result(
+    source_page,
+    primary: OcrObservation,
+    group_observation: OcrObservation,
+    recoveries: list[OcrObservation],
+    blocks: list[Block],
+    recovery: list[dict[str, Any]],
+    validation_warnings: list[str],
+    assets,
+    outline,
+) -> PageResult:
+    visual_markdown = _blocks_markdown(blocks, "")
     comparison = compare_text(visual_markdown, source_page.embedded.text)
-    retry = getattr(backend, "recognize_retry", None)
-    if callable(retry) and not generation.get("merged_into") and _should_retry(comparison):
-        retry_raw, retry_generation = retry(source_page.image_path)
-        retry_markdown, retry_blocks = parse_output(retry_raw)
-        retry_markdown = _blocks_markdown(retry_blocks, retry_markdown)
-        retry_comparison = compare_text(retry_markdown, source_page.embedded.text)
-        attempts = [
-            {"generation": dict(generation), "quality": _comparison_quality(comparison)},
-            {"generation": dict(retry_generation), "quality": _comparison_quality(retry_comparison)},
-        ]
-        if _comparison_quality(retry_comparison) > _comparison_quality(comparison):
-            raw, generation, visual_markdown, blocks, comparison = (
-                retry_raw,
-                retry_generation,
-                retry_markdown,
-                retry_blocks,
-                retry_comparison,
-            )
-        recovery = getattr(backend, "recognize_recovery", None)
-        if callable(recovery) and _should_retry(comparison):
-            recovery_raw, recovery_generation = recovery(source_page.image_path)
-            recovery_markdown, recovery_blocks = parse_output(recovery_raw)
-            recovery_markdown = _blocks_markdown(recovery_blocks, recovery_markdown)
-            recovery_comparison = compare_text(recovery_markdown, source_page.embedded.text)
-            attempts.append(
-                {
-                    "generation": dict(recovery_generation),
-                    "quality": _comparison_quality(recovery_comparison),
-                }
-            )
-            if _comparison_quality(recovery_comparison) > _comparison_quality(comparison):
-                raw, generation, visual_markdown, blocks, comparison = (
-                    recovery_raw,
-                    recovery_generation,
-                    recovery_markdown,
-                    recovery_blocks,
-                    recovery_comparison,
-                )
-        generation["attempts"] = attempts
-        if _should_retry(comparison):
-            comparison.warnings.append("visual_ocr_low_agreement_after_retry")
     _materialize_figures(
         blocks,
         source_page.image_path,
         source_page.number,
         assets,
         source_page.source_assets,
-        include_unclaimed=not generation.get("merged_into"),
+        include_unclaimed=not primary.generation.get("merged_into"),
     )
+    _apply_links_to_blocks(blocks, source_page.embedded.links)
+    raw_root = "raw"
     result = PageResult(
         number=source_page.number,
         image=source_page.image_path.name,
@@ -247,16 +264,130 @@ def _page_result(source_page, raw, generation, backend, assets, outline) -> Page
         blocks=blocks,
         embedded=source_page.embedded,
         comparison=comparison,
-        warnings=list(comparison.warnings),
-        generation=generation,
+        warnings=sorted(set([*comparison.warnings, *validation_warnings])),
+        generation=primary.generation,
         source_assets=source_page.source_assets,
-        raw_ocr=raw,
+        raw_ocr=primary.raw,
+        visual={
+            "multi_page": observation_dict(
+                group_observation,
+                raw_path=f"{raw_root}/{group_observation.id}.txt",
+            ),
+            "gundam": [
+                observation_dict(item, raw_path=f"{raw_root}/{item.id}.txt") for item in recoveries
+            ],
+            "canonical": {
+                "blocks": [asdict(block) for block in blocks],
+                "authoritative_observation": group_observation.id,
+            },
+        },
+        recovery=recovery,
     )
-    result.visual_markdown = strict_page_markdown(result, outline)
-    result.visual_markdown = _apply_links(result.visual_markdown, source_page.embedded.links)
-    if generation.get("multi_page_recovery"):
-        result.warnings.append("multi_page_recovered_corrupt_segment")
     return result
+
+
+def _recognize_primary(group, backend, bundle: Path):
+    recognize_pages = getattr(backend, "recognize_pages", None)
+    if callable(recognize_pages):
+        value = recognize_pages([page.image_path for page in group])
+        if _is_invocation(value):
+            raw, generation = value
+            parts = split_multi_page_output(raw, len(group))
+            recognized = [
+                (part, {**dict(generation), "group_index": index})
+                for index, part in enumerate(parts)
+            ]
+        else:
+            recognized = list(value)
+            raw = "\n<PAGE>\n".join(item[0] for item in recognized)
+            generation = {"mode": "multi_base", "group_size": len(group), "compat_backend": True}
+    else:
+        # Fixture compatibility. The production backend always exposes the
+        # documented multi-page Base contract, including for one-page windows.
+        recognized = [backend.recognize(page.image_path) for page in group]
+        raw = "\n<PAGE>\n".join(item[0] for item in recognized)
+        generation = {"mode": "multi_base", "group_size": len(group), "compat_backend": True}
+    observation = parse_native_observation(
+        raw,
+        mode="multi_base",
+        source_pages=[page.number for page in group],
+        generation=generation,
+    )
+    if _segments_appear_reordered(group, recognized):
+        observation.warnings = sorted(set([*observation.warnings, "visual_page_order_suspicious"]))
+    _store_raw_observation(bundle, observation)
+    return observation, recognized
+
+
+def _segments_appear_reordered(group, recognized) -> bool:
+    if len(group) != len(recognized) or len(group) < 2:
+        return False
+    from difflib import SequenceMatcher
+    from .compare import normalize
+
+    embedded = [normalize(page.embedded.text) for page in group]
+    if sum(bool(value) for value in embedded) < 2:
+        return False
+    matches = []
+    for raw, generation in recognized:
+        observation = parse_native_observation(
+            raw,
+            mode="multi_base",
+            source_pages=[page.number for page in group],
+            generation=generation,
+        )
+        visual = normalize(_blocks_markdown(observation.blocks, ""))
+        scores = [SequenceMatcher(None, visual, evidence, autojunk=False).ratio() for evidence in embedded]
+        matches.append(max(range(len(scores)), key=scores.__getitem__))
+    return matches != sorted(matches)
+
+
+def _recover_page_if_needed(source_page, primary, group_observation, backend, bundle):
+    critical = {
+        "visual_empty_output",
+        "visual_malformed_grounding",
+        "visual_implausible_coordinates",
+        "visual_text_repetition",
+        "visual_truncated",
+        "visual_malformed_table",
+        "visual_page_transition_mismatch",
+        "visual_page_order_suspicious",
+    }
+    markdown = _blocks_markdown(primary.blocks, "")
+    comparison = compare_text(markdown, source_page.embedded.text)
+    disagreement = (
+        comparison.character_similarity is not None
+        and comparison.character_similarity < 0.75
+        and not (comparison.length_ratio is not None and comparison.length_ratio < 0.65)
+    )
+    group_problem = bool(set(group_observation.warnings) & critical)
+    if not (set(primary.warnings) & critical or group_problem or disagreement):
+        return []
+    raw, generation = backend.recognize(source_page.image_path)
+    recovery = parse_native_observation(
+        raw,
+        mode="gundam",
+        source_pages=[source_page.number],
+        generation=generation,
+    )
+    _store_raw_observation(bundle, recovery)
+    return [recovery]
+
+
+def _store_raw_observation(bundle: Path, observation: OcrObservation) -> Path:
+    path = bundle / "raw" / f"{observation.id}.txt"
+    if not path.exists():
+        atomic_text(path, observation.raw)
+    return path
+
+
+def _is_invocation(value) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and isinstance(value[0], str)
+        and isinstance(value[1], dict)
+    )
 
 
 def _ocr_groups(pages, outline: list[dict], *, multi_page: bool, maximum: int = 24):
@@ -302,7 +433,20 @@ def _align_multi_results(group, recognized):
     from difflib import SequenceMatcher
     from .compare import normalize
 
-    segment_texts = [normalize(parse_output(raw)[0]) for raw, _ in recognized]
+    segment_texts = [
+        normalize(
+            _blocks_markdown(
+                parse_native_observation(
+                    raw,
+                    mode="multi_base",
+                    source_pages=[page.number for page in group],
+                    generation=generation,
+                ).blocks,
+                "",
+            )
+        )
+        for raw, generation in recognized
+    ]
     embedded = [normalize(page.embedded.text) for page in group]
     segment_count, page_count = len(recognized), len(group)
     scores: dict[tuple[int, int], tuple[float, list[tuple[int, int]]]] = {(0, 0): (0.0, [])}
@@ -347,37 +491,9 @@ def _align_multi_results(group, recognized):
     return output
 
 
-def _recover_corrupt_merged_segments(group, aligned, backend):
-    pages = {page.number: page for page in group}
-    output = list(aligned)
-    index = 0
-    while index < len(output):
-        raw, generation = output[index]
-        source_pages = generation.get("source_pages", [])
-        if len(source_pages) > 1:
-            markdown = parse_output(raw)[0]
-            corrupt = "visual_text_repetition" in compare_text(markdown, "").warnings
-            if corrupt:
-                replacements = []
-                for page_number in source_pages:
-                    retry_raw, retry_generation = backend.recognize(pages[page_number].image_path)
-                    replacements.append(
-                        (
-                            retry_raw,
-                            {
-                                **dict(retry_generation),
-                                "source_pages": [page_number],
-                                "multi_page_recovery": "corrupt_merged_segment",
-                            },
-                        )
-                    )
-                output[index : index + len(source_pages)] = replacements
-        index += 1
-    return output
-
-
 def _merge_continued_tables(pages: list[PageResult]) -> None:
     active: Block | None = None
+    active_page: int | None = None
     for page in pages:
         retained: list[Block] = []
         suppressed_embedded = False
@@ -401,19 +517,104 @@ def _merge_continued_tables(pages: list[PageResult]) -> None:
                 continue
             if block.kind == "table":
                 if active is not None:
-                    merged = merge_html_tables(active.markdown, block.markdown)
+                    boundary_geometry = bool(
+                        active.bbox
+                        and block.bbox
+                        and active.bbox[3] >= 800
+                        and block.bbox[1] <= 250
+                    )
+                    merged = merge_html_tables(
+                        active.markdown,
+                        block.markdown,
+                        adjacent=active_page is not None and page.number == active_page + 1,
+                        boundary_geometry=boundary_geometry,
+                    )
                     if merged is not None:
                         active.markdown = merged
+                        active.source_pages = sorted(set([*active.source_pages, *block.source_pages, page.number]))
+                        active.provenance.extend(block.provenance)
+                        active.metadata["multi_page_table"] = True
+                        active_page = page.number
                         continue
                 active = block
+                active_page = page.number
                 retained.append(block)
             else:
                 retained.append(block)
                 if block.kind not in FIGURE_KINDS | {"embedded_figure", "footer"} and block.markdown.strip():
                     active = None
+                    active_page = None
         page.blocks = retained
         if suppressed_embedded and not retained:
             page.visual_markdown = ""
+
+
+def _normalize_document_blocks(pages: list[PageResult]) -> None:
+    """Apply deterministic structural cleanup to normalized blocks, never raw OCR."""
+    from collections import Counter
+    from .compare import normalize
+
+    repeated = Counter()
+    for page in pages:
+        for block in page.blocks:
+            if not block.markdown.strip() or not block.bbox:
+                continue
+            if block.kind in {"header", "footer"} or block.bbox[1] <= 80 or block.bbox[3] >= 940:
+                key = normalize(block.markdown)
+                if key:
+                    repeated[key] += 1
+    boilerplate = {key for key, count in repeated.items() if count >= 3}
+    for page in pages:
+        page.blocks = [
+            block
+            for block in page.blocks
+            if not (
+                block.bbox
+                and normalize(block.markdown) in boilerplate
+                and (block.kind in {"header", "footer"} or block.bbox[1] <= 80 or block.bbox[3] >= 940)
+            )
+        ]
+
+    for previous, current in zip(pages, pages[1:]):
+        if current.number != previous.number + 1 or not previous.blocks or not current.blocks:
+            continue
+        left, right = previous.blocks[-1], current.blocks[0]
+        if (
+            left.kind == right.kind == "paragraph"
+            and left.markdown.rstrip()
+            and right.markdown.lstrip()
+            and left.markdown.rstrip()[-1] not in ".!?;:"
+            and right.markdown.lstrip()[0].islower()
+        ):
+            left.markdown = f"{left.markdown.rstrip()} {right.markdown.lstrip()}"
+            left.source_pages = sorted(set([*left.source_pages, *right.source_pages, previous.number, current.number]))
+            left.provenance.extend(right.provenance)
+            left.metadata["cross_page_paragraph"] = True
+            current.blocks.pop(0)
+
+    for page in pages:
+        retained: list[Block] = []
+        index = 0
+        while index < len(page.blocks):
+            block = page.blocks[index]
+            if block.kind in FIGURE_KINDS | {"embedded_figure"} and index + 1 < len(page.blocks):
+                caption = page.blocks[index + 1]
+                caption_text = caption.markdown.strip()
+                close = bool(
+                    block.bbox
+                    and caption.bbox
+                    and 0 <= caption.bbox[1] - block.bbox[3] <= 120
+                )
+                if caption.kind == "caption" or (close and re.match(r"^(?:figure|fig\.)\s*\d*", caption_text, re.I)):
+                    block.markdown = f"{block.markdown.rstrip()}\n\n*{caption_text}*"
+                    block.metadata["caption"] = caption_text
+                    block.provenance.extend(caption.provenance)
+                    retained.append(block)
+                    index += 2
+                    continue
+            retained.append(block)
+            index += 1
+        page.blocks = retained
 
 
 def _materialize_figures(
@@ -515,6 +716,28 @@ def _apply_links(markdown: str, links) -> str:
     return markdown
 
 
+def _apply_links_to_blocks(blocks: list[Block], links) -> None:
+    for link in links:
+        label = " ".join(link.text.split())
+        if not label or not link.target:
+            continue
+        pattern = re.compile(re.escape(label), re.IGNORECASE)
+        for block in blocks:
+            if block.kind in {"table", "figure", "embedded_figure"} or f"]({link.target})" in block.markdown:
+                continue
+            updated, count = pattern.subn(
+                lambda match: f"[{match.group(0)}]({link.target})",
+                block.markdown,
+                count=1,
+            )
+            if count:
+                block.markdown = updated
+                block.metadata.setdefault("links", []).append(
+                    {"target": link.target, "source": "embedded_link_geometry"}
+                )
+                break
+
+
 def _sanitize_page_links(markdown: str, available_pages: set[int]) -> tuple[str, list[int]]:
     import re
 
@@ -583,8 +806,15 @@ def _write_epub(bundle: Path, source: Path, document, assets: AssetStore, finger
             body.extend([f"## {item['title']}", "", item["markdown"], ""])
             chapters.append({"title": item["title"], "file": "book.md", "evidence": "epub_spine"})
         atomic_text(bundle / "book.md", "\n".join(body).rstrip() + "\n")
+    format_result = format_and_lint([bundle / path for path in files])
+    output_fingerprints = {path: sha256_file(bundle / path) for path in files}
     assets.write_manifest()
     atomic_json(bundle / "document.json", {"schema_version": SCHEMA_VERSION, "kind": "epub", "chapters": chapters})
+    formatting_warnings = []
+    if not format_result.idempotent:
+        formatting_warnings.append("markdown_formatter_not_idempotent")
+    if format_result.lint_errors:
+        formatting_warnings.append("markdown_lint_failed")
     atomic_json(bundle / "metadata.json", {
         "schema_version": SCHEMA_VERSION,
         "fingerprint": fingerprint,
@@ -592,8 +822,16 @@ def _write_epub(bundle: Path, source: Path, document, assets: AssetStore, finger
         "source_kind": "epub",
         "split": split,
         "markdown_files": files,
-        "warnings": [],
+        "warnings": formatting_warnings,
         "failed_pages": [],
+        "formatting": {
+            "formatter": "mdformat==1.0.0 + mdformat-gfm==1.0.0",
+            "linter": "pymarkdownlnt==0.9.38",
+            "idempotent": format_result.idempotent,
+            "lint_errors": format_result.lint_errors,
+        },
+        "output_fingerprints": output_fingerprints,
+        "resume_stable": True,
         "duration_seconds": round(time.time() - started, 3),
     })
     _write_log(bundle, _read_json(bundle / "metadata.json"))
@@ -637,6 +875,8 @@ def _page_from_dict(value: dict[str, Any]) -> PageResult:
         generation=value.get("generation", {}),
         source_assets=value.get("source_assets", []),
         raw_ocr=value.get("raw_ocr", ""),
+        visual=value.get("visual", {}),
+        recovery=value.get("recovery", []),
     )
 
 
