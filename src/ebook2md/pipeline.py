@@ -36,6 +36,12 @@ from .verify import verify_bundle
 
 FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
 FORMULA_KINDS = {"formula", "equation", "display_formula"}
+SEMANTIC_LEAD = re.compile(
+    r"^(?P<label>\d+(?:\.\d+)+\.\s+"
+    r"(?:Definition|Theorem|Lemma|Proposition|Corollary|Example|Examples|Remark)"
+    r"(?:\s+\([^\n)]{1,120}\))?)\.?(?:\s+)(?P<body>.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def convert(
@@ -107,7 +113,17 @@ def convert(
 
     page_results: list[PageResult] = []
     failed: list[dict[str, Any]] = []
-    for group in _ocr_groups(document.pages, document.outline, multi_page=multi_page):
+    ocr_pages = []
+    for page in document.pages:
+        blank, ink_fraction = _is_visually_blank(page.image_path)
+        if not blank:
+            ocr_pages.append(page)
+            continue
+        result = _blank_page_result(page, ink_fraction)
+        atomic_json(bundle / "pages" / f"page-{page.number:04d}.json", result.to_dict())
+        page_results.append(result)
+
+    for group in _ocr_groups(ocr_pages, document.outline, multi_page=multi_page):
         page_paths = [bundle / "pages" / f"page-{page.number:04d}.json" for page in group]
         if can_resume and all(path.exists() for path in page_paths):
             page_results.extend(_page_from_dict(_read_json(path)) for path in page_paths)
@@ -321,6 +337,40 @@ def _page_result(
     return result
 
 
+def _is_visually_blank(image_path: Path, *, maximum_ink_fraction: float = 0.0005) -> tuple[bool, float]:
+    """Conservatively identify empty raster pages before asking the VLM to decode them."""
+    with Image.open(image_path) as source:
+        grayscale = source.convert("L")
+        grayscale.thumbnail((256, 256), Image.Resampling.LANCZOS)
+        histogram = grayscale.histogram()
+    total = sum(histogram)
+    ink_fraction = sum(histogram[:245]) / total if total else 0.0
+    return ink_fraction <= maximum_ink_fraction, ink_fraction
+
+
+def _blank_page_result(source_page, ink_fraction: float) -> PageResult:
+    comparison = compare_text("", source_page.embedded.text)
+    warning = "visual_blank_page"
+    return PageResult(
+        number=source_page.number,
+        image=source_page.image_path.name,
+        visual_markdown="",
+        blocks=[],
+        embedded=source_page.embedded,
+        comparison=comparison,
+        warnings=sorted(set([*comparison.warnings, warning])),
+        generation={"mode": "blank", "ink_fraction": ink_fraction},
+        source_assets=source_page.source_assets,
+        visual={
+            "canonical": {
+                "blocks": [],
+                "markdown": "",
+                "authoritative_observation": "visual_blank_page_detector",
+            }
+        },
+    )
+
+
 def _recognize_primary(group, backend, bundle: Path):
     recognize_pages = getattr(backend, "recognize_pages", None)
     if callable(recognize_pages):
@@ -447,7 +497,13 @@ def _ocr_groups(pages, outline: list[dict], *, multi_page: bool, maximum: int = 
     for index, start in enumerate(boundaries):
         end = boundaries[index + 1] - 1 if index + 1 < len(boundaries) else numbers[-1]
         section = [by_number[number] for number in numbers if start <= number <= end]
-        groups.extend(section[offset : offset + maximum] for offset in range(0, len(section), maximum))
+        runs = []
+        for page in section:
+            if not runs or page.number != runs[-1][-1].number + 1:
+                runs.append([])
+            runs[-1].append(page)
+        for run in runs:
+            groups.extend(run[offset : offset + maximum] for offset in range(0, len(run), maximum))
     covered = {page.number for group in groups for page in group}
     groups.extend([[by_number[number]] for number in numbers if number not in covered])
     return sorted(groups, key=lambda group: group[0].number)
@@ -603,10 +659,11 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
         page.blocks = [
             block
             for block in page.blocks
-            if not (
+            if block.kind not in {"page_number", "header", "footer"}
+            and not (
                 block.bbox
                 and normalize(block.markdown) in boilerplate
-                and (block.kind in {"header", "footer"} or block.bbox[1] <= 80 or block.bbox[3] >= 940)
+                and (block.bbox[1] <= 80 or block.bbox[3] >= 940)
             )
         ]
 
@@ -628,6 +685,11 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
             current.blocks.pop(0)
 
     for page in pages:
+        semantic_blocks: list[Block] = []
+        for block in page.blocks:
+            semantic_blocks.extend(_split_semantic_lead(block))
+        page.blocks = semantic_blocks
+
         retained: list[Block] = []
         index = 0
         while index < len(page.blocks):
@@ -650,6 +712,31 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
             retained.append(block)
             index += 1
         page.blocks = retained
+
+
+def _split_semantic_lead(block: Block) -> list[Block]:
+    if block.kind not in {"paragraph", "heading"}:
+        return [block]
+    match = SEMANTIC_LEAD.match(block.markdown.strip())
+    if match is None:
+        return [block]
+
+    def copy(kind: str, markdown: str, role: str) -> Block:
+        return Block(
+            kind=kind,
+            markdown=markdown,
+            bbox=block.bbox,
+            confidence=block.confidence,
+            asset_id=block.asset_id,
+            source_pages=list(block.source_pages),
+            provenance=list(block.provenance),
+            metadata={**block.metadata, "semantic_split": role},
+        )
+
+    return [
+        copy("heading", match.group("label"), "label"),
+        copy("paragraph", match.group("body").strip(), "body"),
+    ]
 
 
 def _materialize_figures(

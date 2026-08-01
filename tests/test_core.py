@@ -14,7 +14,8 @@ from ebook2md.chapters import detect_chapters
 from ebook2md.compare import compare_text
 from ebook2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, parse_output, split_multi_page_output
 from ebook2md.native import parse_native_observation, reconcile_observations
-from ebook2md.pipeline import _align_multi_results, _apply_links_to_blocks, _merge_continued_tables, _normalize_document_blocks, convert
+from ebook2md.adapters import _link_target
+from ebook2md.pipeline import _align_multi_results, _apply_links_to_blocks, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, convert
 from ebook2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from ebook2md.verify import verify_bundle
 
@@ -426,6 +427,65 @@ def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
     assert resumed_metadata["output_fingerprints"]
 
 
+def test_pdf_link_targets_accept_string_page_numbers():
+    assert _link_target({"page": "15"}) == "#page-16"
+    assert _link_target({"page": 15}) == "#page-16"
+    assert _link_target({"uri": "https://example.com", "page": "15"}) == "https://example.com"
+    assert _link_target({"page": "named-destination"}) == ""
+
+
+def test_blank_pages_are_not_grouped_with_content(tmp_path: Path):
+    blank = tmp_path / "blank.png"
+    content = tmp_path / "content.png"
+    Image.new("RGB", (300, 300), "white").save(blank)
+    content_image = Image.new("RGB", (300, 300), "white")
+    for x in range(50, 250):
+        for y in range(100, 130):
+            content_image.putpixel((x, y), (0, 0, 0))
+    content_image.save(content)
+
+    assert _is_visually_blank(blank)[0] is True
+    assert _is_visually_blank(content)[0] is False
+    pages = [
+        SourcePage(1, content),
+        SourcePage(3, content),
+    ]
+    assert [[page.number for page in group] for group in _ocr_groups(pages, [], multi_page=True)] == [[1], [3]]
+
+
+def test_document_normalization_drops_running_matter_and_promotes_semantic_labels():
+    page = PageResult(
+        number=25,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("header", "2. Rings and Fields", bbox=(100, 60, 300, 80)),
+            Block("page_number", "11", bbox=(850, 60, 880, 80)),
+            Block(
+                "paragraph",
+                "1.28. Definition. A ring is a set with two binary operations.",
+                bbox=(100, 400, 900, 500),
+            ),
+            Block(
+                "heading",
+                "1.31. Theorem. Every finite integral domain is a field.",
+                bbox=(100, 800, 900, 840),
+            ),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert [(block.kind, block.markdown) for block in page.blocks] == [
+        ("heading", "1.28. Definition"),
+        ("paragraph", "A ring is a set with two binary operations."),
+        ("heading", "1.31. Theorem"),
+        ("paragraph", "Every finite integral domain is a field."),
+    ]
+
+
 def test_recovery_observations_and_provenance_are_preserved(tmp_path: Path):
     pdf = tmp_path / "recovery.pdf"
     document = fitz.open()
@@ -519,7 +579,13 @@ def test_embedded_links_are_geometry_aware_and_idempotent():
 def test_embedded_table_image_is_preserved_but_not_displayed_twice(tmp_path: Path):
     pdf = tmp_path / "table.pdf"
     image_path = tmp_path / "table.png"
-    Image.new("RGB", (200, 200), "white").save(image_path)
+    table_image = Image.new("RGB", (200, 200), "white")
+    for coordinate in (20, 100, 180):
+        for offset in range(3):
+            for value in range(20, 181):
+                table_image.putpixel((coordinate + offset, value), (0, 0, 0))
+                table_image.putpixel((value, coordinate + offset), (0, 0, 0))
+    table_image.save(image_path)
     document = fitz.open()
     page = document.new_page(width=612, height=792)
     page.insert_image(fitz.Rect(92, 277, 257, 475), filename=str(image_path))

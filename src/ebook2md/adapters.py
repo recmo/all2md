@@ -20,6 +20,18 @@ from .util import natural_key, parse_pages
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
 
+def _link_target(link: dict[str, object]) -> str:
+    uri = link.get("uri")
+    if isinstance(uri, str) and uri:
+        return uri
+    page = link.get("page", -1)
+    try:
+        page_number = int(page)
+    except (TypeError, ValueError):
+        return ""
+    return f"#page-{page_number + 1}" if page_number >= 0 else ""
+
+
 def detect_kind(path: Path) -> str:
     if path.is_dir():
         return "images"
@@ -100,7 +112,7 @@ def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int, page_sp
                     })
             links = []
             for link in page.get_links():
-                target = link.get("uri") or (f"#page-{link['page'] + 1}" if link.get("page", -1) >= 0 else "")
+                target = _link_target(link)
                 if target:
                     rect = link.get("from")
                     label = page.get_textbox(rect).strip() if rect else ""
@@ -393,9 +405,7 @@ def _open_fixed_epub(
                     })
             links = []
             for link in page.get_links():
-                target = link.get("uri") or (
-                    f"#page-{link['page'] + 1}" if link.get("page", -1) >= 0 else ""
-                )
+                target = _link_target(link)
                 rect = link.get("from")
                 if target:
                     links.append(Link(

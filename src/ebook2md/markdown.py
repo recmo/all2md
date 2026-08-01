@@ -12,7 +12,7 @@ from .util import atomic_text, slugify
 
 LOCAL_LINK = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)")
 IMAGE_LINK = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
-HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 TITLE_KINDS = {"title", "page_title", "heading", "section_header", "header"}
 FIGURE_KINDS = {"embedded_figure", "figure", "image", "picture"}
@@ -354,9 +354,24 @@ def write_markdown(
     rendered_title = title_case_heading(title)
     if not split:
         shutil.rmtree(root / "chapters", ignore_errors=True)
-        content = f"# {rendered_title}\n\n" + "\n".join(
-            page_markdown(page, chapter=False, heading_delta=1) for page in pages
+        context = _outline_context(outline, pages[0].number) if pages else []
+        context_markdown = "\n\n".join(
+            f"{'#' * min(6, item.get('level', 1) + 1)} {title_case_heading(item['title'])}"
+            for item in context
         )
+        rendered_pages = "\n".join(
+            page_markdown(
+                page,
+                chapter=False,
+                heading_delta=1,
+                suppress_title=context[-1]["title"] if index == 0 and context else None,
+            )
+            for index, page in enumerate(pages)
+        )
+        preamble = f"# {rendered_title}"
+        if context_markdown:
+            preamble += f"\n\n{context_markdown}"
+        content = f"{preamble}\n\n{rendered_pages}"
         content = _rewrite_page_links(
             content,
             _page_targets(pages, chapters, ["book.md"] * len(chapters)),
@@ -448,7 +463,22 @@ def _remove_duplicate_heading(markdown: str, title: str) -> str:
         if _same_heading(match.group(2), title):
             return (markdown[: match.start()] + markdown[match.end() :]).strip()
         break
+    first_line = re.match(r"^([^\n]+)(?:\n+|$)", markdown)
+    if first_line and _same_heading(first_line.group(1), title):
+        return markdown[first_line.end() :].strip()
     return markdown
+
+
+def _outline_context(outline: list[dict], first_page: int) -> list[dict]:
+    context: list[dict] = []
+    for item in outline:
+        page = item.get("page")
+        level = item.get("level", 1)
+        if not isinstance(page, int) or page >= first_page or not isinstance(level, int):
+            continue
+        context = [candidate for candidate in context if candidate.get("level", 1) < level]
+        context.append(item)
+    return context
 
 
 def _relevel_headings(markdown: str, delta: int) -> str:

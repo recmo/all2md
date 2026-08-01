@@ -201,6 +201,32 @@ def test_heading_links_keep_their_destinations():
     )
 
 
+def test_partial_single_file_includes_outline_context(tmp_path: Path):
+    page = PageResult(
+        number=23,
+        image="page.png",
+        visual_markdown="1. Groups\n\n### 1.17. Definition\n\nA kernel is a subgroup.",
+        blocks=[],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    write_markdown(
+        tmp_path,
+        [page],
+        [],
+        split=False,
+        title="Finite Fields",
+        outline=[
+            {"level": 1, "title": "Algebraic Foundations", "page": 15},
+            {"level": 2, "title": "1 Groups", "page": 16},
+        ],
+    )
+    markdown = (tmp_path / "book.md").read_text()
+    assert "## Algebraic Foundations\n\n### 1 Groups" in markdown
+    assert markdown.count("1 Groups") == 1
+    assert "\n\n#### 1.17. Definition\n\nA kernel" in markdown
+
+
 def test_cover_style_front_matter_suppresses_display_titles():
     result = PageResult(
         number=1,
