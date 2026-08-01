@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -27,10 +27,13 @@ class Asset:
     source_object: str | None = None
     caption: str | None = None
     alt_text: str = "Figure"
+    display_sha256: str | None = None
+    evidence_path: str | None = None
+    placements: list[dict[str, Any]] = field(default_factory=list)
 
 
 class AssetStore:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, load_existing: bool = True):
         self.root = root
         self.figures = root / "figures"
         self.originals = root / "originals"
@@ -40,7 +43,7 @@ class AssetStore:
         manifest = root / "manifest.json"
         self.assets: list[Asset] = []
         seen: set[tuple[object, ...]] = set()
-        if manifest.exists():
+        if load_existing and manifest.exists():
             for item in json.loads(manifest.read_text(encoding="utf-8")).get("assets", []):
                 if item.get("bbox") is not None:
                     item["bbox"] = tuple(item["bbox"])
@@ -56,7 +59,8 @@ class AssetStore:
                     self.assets.append(asset)
                     seen.add(identity)
         self._display_by_hash: dict[str, str] = {
-            asset.sha256: asset.path.removeprefix("assets/") for asset in self.assets
+            (asset.display_sha256 or asset.sha256): asset.path.removeprefix("assets/")
+            for asset in self.assets
         }
 
     def add_bytes(
@@ -124,6 +128,7 @@ class AssetStore:
             source_object=source_object,
             caption=caption,
             alt_text=alt_text[:160] or "Figure",
+            display_sha256=display_hash,
         )
         self.assets.append(asset)
         return asset
@@ -164,7 +169,43 @@ class AssetStore:
             source = self.root.parent / asset.path
             evidence_rel = f"evidence/equation-page-{page:04d}-{asset.id[4:]}.png"
             (self.root / evidence_rel).write_bytes(source.read_bytes())
+            asset.evidence_path = f"assets/{evidence_rel}"
         return asset
+
+    def add_placement(
+        self,
+        asset_id: str,
+        *,
+        page: int,
+        bbox: tuple[float, float, float, float] | list[float] | None,
+        method: str,
+        source_object: str | None = None,
+        caption: str | None = None,
+        alt_text: str | None = None,
+    ) -> None:
+        asset = self.get(asset_id)
+        if asset is None:
+            return
+        placement = {
+            "page": page,
+            "bbox": list(bbox) if bbox is not None else None,
+            "extraction_method": method,
+            "source_object": source_object,
+            "caption": caption,
+            "alt_text": alt_text,
+        }
+        identity = (page, tuple(bbox) if bbox is not None else None, method, source_object)
+        existing = {
+            (
+                item.get("page"),
+                tuple(item["bbox"]) if item.get("bbox") is not None else None,
+                item.get("extraction_method"),
+                item.get("source_object"),
+            )
+            for item in asset.placements
+        }
+        if identity not in existing:
+            asset.placements.append(placement)
 
     def write_manifest(self) -> None:
         atomic_json(self.root / "manifest.json", {"version": 1, "assets": [asdict(asset) for asset in self.assets]})

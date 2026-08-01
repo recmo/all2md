@@ -10,7 +10,9 @@ use Baidu's multi-page Base recipe, and affected pages use Baidu's Gundam recipe
 for local recovery. Raw output from both observations is retained untouched;
 deterministic Python code parses, validates, reconciles, structures, and renders
 the result. The model is never prompted to emit JSON or arbitrate between its
-own readings.
+own readings. The MLX runtime keeps the vision stack and image tensors in FP32
+and the language decoder in BF16; effective precision is recorded with each
+invocation.
 
 ## Install
 
@@ -74,18 +76,23 @@ metadata.json
 All Markdown links are relative. Original embedded figures are preserved when
 possible; rendered PNG crops are used for page-composed graphics. Asset
 provenance and every placement remain available in the JSON artifacts.
+Byte-identical display files are deduplicated independently from placement
+records, so a reused PDF object still records every page and box.
 
 Each fixed-layout page record keeps `visual.multi_page`, `visual.gundam`,
 `embedded`, `comparison`, canonical normalized blocks, and recovery provenance
 separately. Markdown is rendered only from canonical blocks. A pinned
-`mdformat`/GFM pass and PyMarkdown lint/fix pass run after rendering, followed
-by a second byte-idempotent formatting pass and `ebook2md verify` checks.
+`mdformat`/GFM pass runs only when it preserves page markers, image targets, and
+semantic tokens; PyMarkdown is scan-only. Conversion runs `ebook2md verify`
+before reporting success. Missing optional evidence remains a warning because
+OCR and extraction are intentionally best effort and can be rerun.
 
 ## Supported inputs
 
 - PDF
-- DjVu (requires DjVuLibre)
-- EPUB
+- DjVu (requires DjVuLibre; structured text, annotations, and outlines are kept
+  when exposed by the file)
+- EPUB, including visual OCR for pre-paginated fixed-layout books
 - CBZ
 - PNG, JPEG, WebP, and single- or multi-page TIFF
 - naturally sorted image directories

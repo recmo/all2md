@@ -17,6 +17,10 @@ HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 TITLE_KINDS = {"title", "page_title", "heading", "section_header", "header"}
 FIGURE_KINDS = {"embedded_figure", "figure", "image", "picture"}
 BODY_BOUNDARY = re.compile(r"^(?:part|chapter)\b", re.IGNORECASE)
+FRONT_MATTER_BOUNDARY = re.compile(
+    r"^(?:praise|title page|copyright|contents|table of contents|dedication|foreword|preface)\b",
+    re.IGNORECASE,
+)
 MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 SMALL_TITLE_WORDS = {
     "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into",
@@ -65,8 +69,17 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
         if BODY_BOUNDARY.match(str(item.get("title", "")).strip())
         and isinstance(item.get("page"), int)
     ]
-    in_front_matter = bool(body_pages) and page.number < min(body_pages)
-    cover_style = in_front_matter and _is_cover_style_page(page, boundary)
+    if not body_pages:
+        body_pages = [
+            item.get("page")
+            for item in outline
+            if not FRONT_MATTER_BOUNDARY.match(str(item.get("title", "")).strip())
+            and isinstance(item.get("page"), int)
+        ]
+    cover_style = _is_cover_style_page(page, boundary)
+    in_front_matter = (bool(body_pages) and page.number < min(body_pages)) or (
+        page.number <= 3 and cover_style
+    )
 
     current_level = 1
     preceding = [item for item in outline if item.get("page", 0) <= page.number]

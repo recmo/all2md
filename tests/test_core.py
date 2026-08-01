@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import zipfile
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -13,8 +14,8 @@ from ebook2md.chapters import detect_chapters
 from ebook2md.compare import compare_text
 from ebook2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, parse_output, split_multi_page_output
 from ebook2md.native import parse_native_observation, reconcile_observations
-from ebook2md.pipeline import _align_multi_results, _merge_continued_tables, _normalize_document_blocks, convert
-from ebook2md.model import Block, Comparison, EmbeddedEvidence, PageResult, SourceDocument, SourcePage
+from ebook2md.pipeline import _align_multi_results, _apply_links_to_blocks, _merge_continued_tables, _normalize_document_blocks, convert
+from ebook2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from ebook2md.verify import verify_bundle
 
 
@@ -203,6 +204,7 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
         "temperature": 0.0,
         "no_repeat_ngram_size": 35,
         "ngram_window": 1024,
+        "precision": {"vision": "float32", "decoder": "bfloat16"},
     }
     assert gundam["contract"] == {
         "prompt": GUNDAM_PROMPT,
@@ -212,9 +214,38 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
         "temperature": 0.0,
         "no_repeat_ngram_size": 35,
         "ngram_window": 128,
+        "precision": {"vision": "float32", "decoder": "bfloat16"},
     }
     assert calls[0]["cropping"] is False and calls[0]["image_size"] == 1024
     assert calls[1]["cropping"] is True and calls[1]["image_size"] == 640
+
+
+def test_mlx_backend_enforces_component_precision():
+    import mlx.core as mx
+
+    class Component:
+        dtype = None
+
+        def set_dtype(self, dtype):
+            self.dtype = dtype
+
+    processor = SimpleNamespace(
+        process_one=lambda: {"images": [mx.ones((1,), dtype=mx.bfloat16)]}
+    )
+    backend = MlxUnlimitedOcr()
+    backend._model = SimpleNamespace(
+        sam_model=Component(),
+        vision_model=Component(),
+        projector=Component(),
+        language_model=Component(),
+    )
+    backend._processor = processor
+    backend._configure_precision()
+    assert backend._model.sam_model.dtype == mx.float32
+    assert backend._model.vision_model.dtype == mx.float32
+    assert backend._model.projector.dtype == mx.float32
+    assert backend._model.language_model.dtype == mx.bfloat16
+    assert processor.process_one()["images"][0].dtype == mx.float32
 
 
 def test_multi_page_segments_align_to_physical_page_ranges(tmp_path: Path):
@@ -435,6 +466,56 @@ def test_interrupted_conversion_resumes_atomically_without_reprocessing(tmp_path
     assert verify_bundle(bundle).ok
 
 
+def test_assembly_changes_reuse_ocr_without_reporting_instability(tmp_path: Path):
+    pdf = tmp_path / "book.pdf"
+    document = fitz.open()
+    for number in range(1, 3):
+        page = document.new_page(width=612, height=792)
+        page.insert_text((72, 72), f"Page {number} content.")
+    document.save(pdf)
+    document.close()
+    chapter_map = tmp_path / "chapters.json"
+    chapter_map.write_text(json.dumps([
+        {"title": "One", "start_page": 1},
+        {"title": "Two", "start_page": 2},
+    ]))
+    backend = InterruptingFixtureOcr()
+    backend.fail_page_two = False
+    convert(
+        pdf,
+        tmp_path / "out",
+        backend=backend,
+        split_mode="single",
+        chapter_map=chapter_map,
+        multi_page=False,
+    )
+    calls = dict(backend.calls)
+    bundle = convert(
+        pdf,
+        tmp_path / "out",
+        backend=backend,
+        split_mode="chapters",
+        chapter_map=chapter_map,
+        multi_page=False,
+    )
+    metadata = json.loads((bundle / "metadata.json").read_text())
+    assert backend.calls == calls
+    assert metadata["resume_stable"] is True
+    assert verify_bundle(bundle).ok
+
+
+def test_embedded_links_are_geometry_aware_and_idempotent():
+    blocks = [
+        Block("paragraph", "Foo first", bbox=(0, 0, 1000, 200)),
+        Block("paragraph", "Foo second", bbox=(0, 400, 1000, 600)),
+    ]
+    links = [Link("Foo", "https://example.com", bbox=(100, 450, 200, 500))]
+    _apply_links_to_blocks(blocks, links)
+    _apply_links_to_blocks(blocks, links)
+    assert blocks[0].markdown == "Foo first"
+    assert blocks[1].markdown == "[Foo](https://example.com) second"
+
+
 def test_embedded_table_image_is_preserved_but_not_displayed_twice(tmp_path: Path):
     pdf = tmp_path / "table.pdf"
     image_path = tmp_path / "table.png"
@@ -450,3 +531,68 @@ def test_embedded_table_image_is_preserved_but_not_displayed_twice(tmp_path: Pat
     assert "![Embedded figure]" not in markdown
     manifest = json.loads((bundle / "assets/manifest.json").read_text())
     assert manifest["assets"]
+
+
+def test_reused_pdf_image_records_distinct_placements(tmp_path: Path):
+    pdf = tmp_path / "reused.pdf"
+    image_path = tmp_path / "source.png"
+    Image.new("RGB", (100, 100), "navy").save(image_path)
+    document = fitz.open()
+    first = document.new_page(width=612, height=792)
+    xref = first.insert_image(fitz.Rect(100, 300, 250, 450), filename=str(image_path))
+    second = document.new_page(width=612, height=792)
+    second.insert_image(fitz.Rect(300, 200, 450, 350), xref=xref)
+    document.save(pdf)
+    document.close()
+
+    bundle = convert(
+        pdf,
+        tmp_path / "out",
+        backend=FixtureOcr(),
+        split_mode="single",
+        multi_page=False,
+    )
+    manifest = json.loads((bundle / "assets/manifest.json").read_text())
+    embedded = next(
+        asset for asset in manifest["assets"]
+        if asset.get("source_object") == f"xref:{xref}"
+    )
+    assert {placement["page"] for placement in embedded["placements"]} == {1, 2}
+    assert all(placement["bbox"] for placement in embedded["placements"])
+
+
+def test_pre_paginated_epub_uses_visual_page_pipeline(tmp_path: Path):
+    epub = tmp_path / "fixed.epub"
+    with zipfile.ZipFile(epub, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        archive.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" '
+            'version="1.0"><rootfiles><rootfile full-path="OEBPS/package.opf" '
+            'media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        archive.writestr(
+            "OEBPS/package.opf",
+            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+            'unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:identifier id="id">fixed</dc:identifier><dc:title>Fixed Book</dc:title>'
+            '<meta property="rendition:layout">pre-paginated</meta></metadata>'
+            '<manifest><item id="page" href="page.xhtml" media-type="application/xhtml+xml"/></manifest>'
+            '<spine><itemref idref="page"/></spine></package>',
+        )
+        archive.writestr(
+            "OEBPS/page.xhtml",
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Page One</title></head>'
+            '<body><h1>Page One</h1><p>Visual page content.</p></body></html>',
+        )
+    bundle = convert(
+        epub,
+        tmp_path / "out",
+        backend=FixtureOcr(),
+        split_mode="single",
+        multi_page=False,
+    )
+    metadata = json.loads((bundle / "metadata.json").read_text())
+    assert metadata["source_kind"] == "epub-fixed"
+    assert (bundle / "pages/page-0001.json").exists()
+    assert "<!-- page: 1 -->" in (bundle / "book.md").read_text()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import shutil
 import subprocess
 import zipfile
@@ -52,7 +53,7 @@ def open_document(
     if kind == "djvu":
         return _open_djvu(source, work, dpi=dpi, page_spec=page_spec)
     if kind == "epub":
-        return _open_epub(source, assets)
+        return _open_epub(source, work, assets, dpi=dpi, page_spec=page_spec)
     if kind == "cbz":
         return _open_cbz(source, work, page_spec=page_spec)
     return _open_images(source, work, page_spec=page_spec)
@@ -86,14 +87,30 @@ def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int, page_sp
                     lines.append("".join(span.get("text", "") for span in line.get("spans", [])))
                 text = "\n".join(lines).strip()
                 if text:
-                    embedded_blocks.append({"text": text, "bbox": list(block.get("bbox", ()))})
+                    bbox = block.get("bbox", ())
+                    embedded_blocks.append({
+                        "text": text,
+                        "bbox": [
+                            bbox[0] * 1000 / page.rect.width,
+                            bbox[1] * 1000 / page.rect.height,
+                            bbox[2] * 1000 / page.rect.width,
+                            bbox[3] * 1000 / page.rect.height,
+                        ] if len(bbox) == 4 else [],
+                        "space": "normalized_1000",
+                    })
             links = []
             for link in page.get_links():
                 target = link.get("uri") or (f"#page-{link['page'] + 1}" if link.get("page", -1) >= 0 else "")
                 if target:
                     rect = link.get("from")
                     label = page.get_textbox(rect).strip() if rect else ""
-                    links.append(Link(text=label, target=target, bbox=tuple(rect) if rect else None, external=bool(link.get("uri"))))
+                    bbox = (
+                        rect.x0 * 1000 / page.rect.width,
+                        rect.y0 * 1000 / page.rect.height,
+                        rect.x1 * 1000 / page.rect.width,
+                        rect.y1 * 1000 / page.rect.height,
+                    ) if rect else None
+                    links.append(Link(text=label, target=target, bbox=bbox, external=bool(link.get("uri"))))
             source_assets: list[dict[str, object]] = []
             for image in page.get_images(full=True):
                 xref = image[0]
@@ -113,14 +130,22 @@ def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int, page_sp
                     asset_id = asset.id
                     extracted_xrefs[xref] = asset_id
                 for rect in page.get_image_rects(xref):
+                    bbox = [
+                        rect.x0 * 1000 / page.rect.width,
+                        rect.y0 * 1000 / page.rect.height,
+                        rect.x1 * 1000 / page.rect.width,
+                        rect.y1 * 1000 / page.rect.height,
+                    ]
+                    assets.add_placement(
+                        asset_id,
+                        page=page_number,
+                        bbox=bbox,
+                        method="pdf_embedded_placement",
+                        source_object=f"xref:{xref}",
+                    )
                     source_assets.append({
                         "asset_id": asset_id,
-                        "bbox": [
-                            rect.x0 * 1000 / page.rect.width,
-                            rect.y0 * 1000 / page.rect.height,
-                            rect.x1 * 1000 / page.rect.width,
-                            rect.y1 * 1000 / page.rect.height,
-                        ],
+                        "bbox": bbox,
                         "space": "normalized_1000",
                     })
             embedded = EmbeddedEvidence(
@@ -145,6 +170,20 @@ def _open_djvu(source: Path, work: Path, *, dpi: int, page_spec: str | None) -> 
     pages_dir = work / "rendered"
     pages_dir.mkdir(parents=True, exist_ok=True)
     result = SourceDocument(path=source, kind="djvu")
+    outline_output = subprocess.run(
+        ["djvused", str(source), "-e", "print-outline"],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout
+    result.outline = [
+        {
+            "level": 1,
+            "title": title.replace(r'\"', '"').replace(r"\\", "\\"),
+            "page": int(page),
+        }
+        for title, page in re.findall(r'\("((?:\\.|[^"\\])*)"\s+"#(\d+)"', outline_output)
+    ]
     for page_number in selected:
         image_path = pages_dir / f"page-{page_number:04d}.png"
         subprocess.run(
@@ -157,8 +196,34 @@ def _open_djvu(source: Path, work: Path, *, dpi: int, page_spec: str | None) -> 
             capture_output=True,
             text=True,
         ).stdout.strip()
+        structured = subprocess.run(
+            ["djvused", str(source), "-e", f"select {page_number}; print-txt"],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        annotations = subprocess.run(
+            ["djvused", str(source), "-e", f"select {page_number}; print-ant"],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         result.pages.append(
-            SourcePage(page_number, image_path, EmbeddedEvidence(text=text, extractor="djvused"))
+            SourcePage(
+                page_number,
+                image_path,
+                EmbeddedEvidence(
+                    text=text,
+                    blocks=[
+                        {
+                            "format": "djvused-s_expression",
+                            "structured_text": structured,
+                            "annotations": annotations,
+                        }
+                    ],
+                    extractor="djvused:print-pure-txt+print-txt+print-ant",
+                ),
+            )
         )
     return result
 
@@ -202,7 +267,14 @@ def _open_cbz(source: Path, work: Path, *, page_spec: str | None) -> SourceDocum
     return _open_images(extracted, work, page_spec=page_spec)
 
 
-def _open_epub(source: Path, assets: AssetStore) -> SourceDocument:
+def _open_epub(
+    source: Path,
+    work: Path,
+    assets: AssetStore,
+    *,
+    dpi: int,
+    page_spec: str | None,
+) -> SourceDocument:
     result = SourceDocument(path=source, kind="epub")
     with zipfile.ZipFile(source) as archive:
         container = BeautifulSoup(archive.read("META-INF/container.xml"), "xml")
@@ -211,6 +283,17 @@ def _open_epub(source: Path, assets: AssetStore) -> SourceDocument:
             raise ValueError("EPUB has no package document")
         package_path = Path(unquote(rootfile["full-path"]))
         package = BeautifulSoup(archive.read(str(package_path)), "xml")
+        package_title = package.find("dc:title") or package.find("title")
+        if package_title and package_title.get_text(" ", strip=True):
+            result.metadata["title"] = package_title.get_text(" ", strip=True)
+        rendition = package.find("meta", attrs={"property": "rendition:layout"})
+        if rendition is None:
+            rendition = package.find("meta", attrs={"name": "rendition:layout"})
+        layout = (
+            rendition.get("content", "") or rendition.get_text(" ", strip=True)
+            if rendition is not None
+            else ""
+        )
         manifest = {item.get("id"): item for item in package.find_all("item")}
         spine = [itemref.get("idref") for itemref in package.find_all("itemref")]
         asset_by_member: dict[str, str] = {}
@@ -262,4 +345,78 @@ def _open_epub(source: Path, assets: AssetStore) -> SourceDocument:
                 else:
                     markdown_lines.append(text)
             result.semantic_chapters.append({"title": title, "markdown": "\n\n".join(markdown_lines), "source": member})
+    if layout.casefold() == "pre-paginated":
+        return _open_fixed_epub(source, work, result, dpi=dpi, page_spec=page_spec)
+    return result
+
+
+def _open_fixed_epub(
+    source: Path,
+    work: Path,
+    semantic: SourceDocument,
+    *,
+    dpi: int,
+    page_spec: str | None,
+) -> SourceDocument:
+    pages_dir = work / "rendered"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    result = SourceDocument(
+        path=source,
+        kind="epub-fixed",
+        semantic_chapters=semantic.semantic_chapters,
+        metadata=semantic.metadata,
+    )
+    with fitz.open(source) as document:
+        result.outline = [
+            {"level": level, "title": title, "page": page}
+            for level, title, page, *_ in document.get_toc(simple=False)
+            if page > 0
+        ]
+        selected = parse_pages(page_spec, document.page_count)
+        matrix = fitz.Matrix(dpi / 72, dpi / 72)
+        for page_number in selected:
+            page = document[page_number - 1]
+            image_path = pages_dir / f"page-{page_number:04d}.png"
+            page.get_pixmap(matrix=matrix, alpha=False).save(image_path)
+            blocks = []
+            for block in page.get_text("blocks", sort=True):
+                if len(block) >= 5 and str(block[4]).strip():
+                    blocks.append({
+                        "text": str(block[4]).strip(),
+                        "bbox": [
+                            block[0] * 1000 / page.rect.width,
+                            block[1] * 1000 / page.rect.height,
+                            block[2] * 1000 / page.rect.width,
+                            block[3] * 1000 / page.rect.height,
+                        ],
+                        "space": "normalized_1000",
+                    })
+            links = []
+            for link in page.get_links():
+                target = link.get("uri") or (
+                    f"#page-{link['page'] + 1}" if link.get("page", -1) >= 0 else ""
+                )
+                rect = link.get("from")
+                if target:
+                    links.append(Link(
+                        text=page.get_textbox(rect).strip() if rect else "",
+                        target=target,
+                        bbox=(
+                            rect.x0 * 1000 / page.rect.width,
+                            rect.y0 * 1000 / page.rect.height,
+                            rect.x1 * 1000 / page.rect.width,
+                            rect.y1 * 1000 / page.rect.height,
+                        ) if rect else None,
+                        external=bool(link.get("uri")),
+                    ))
+            result.pages.append(SourcePage(
+                page_number,
+                image_path,
+                EmbeddedEvidence(
+                    text="\n\n".join(block["text"] for block in blocks),
+                    blocks=blocks,
+                    links=links,
+                    extractor="pymupdf-epub-fixed",
+                ),
+            ))
     return result

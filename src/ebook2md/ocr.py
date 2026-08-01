@@ -46,10 +46,17 @@ class OcrBackend(Protocol):
 
 
 class MlxUnlimitedOcr:
-    identity = {"engine": "mlx-vlm", "model": MODEL_ID, "revision": MODEL_REVISION}
-
     def __init__(self, max_tokens: int = 32768):
         self.max_tokens = max_tokens
+        self.precision = {"vision": "float32", "decoder": "bfloat16"}
+        self.identity = {
+            "engine": "mlx-vlm",
+            "model": MODEL_ID,
+            "revision": MODEL_REVISION,
+            "max_tokens": str(max_tokens),
+            "vision_precision": self.precision["vision"],
+            "decoder_precision": self.precision["decoder"],
+        }
         self._model = None
         self._processor = None
 
@@ -61,6 +68,36 @@ class MlxUnlimitedOcr:
         except ImportError as error:
             raise RuntimeError("MLX OCR dependencies are missing; install ebook2md[ocr]") from error
         self._model, self._processor = load(MODEL_ID, revision=MODEL_REVISION)
+        self._configure_precision()
+
+    def _configure_precision(self) -> None:
+        import mlx.core as mx
+
+        for name in ("sam_model", "vision_model", "projector"):
+            component = getattr(self._model, name, None)
+            if component is not None:
+                component.set_dtype(mx.float32)
+        for name in ("image_newline", "view_separator"):
+            value = getattr(self._model, name, None)
+            if value is not None and hasattr(value, "astype"):
+                setattr(self._model, name, value.astype(mx.float32))
+        language_model = getattr(self._model, "language_model", None)
+        if language_model is not None:
+            language_model.set_dtype(mx.bfloat16)
+
+        processor = self._processor
+        original = getattr(processor, "process_one", None)
+        if not callable(original) or getattr(processor, "_ebook2md_fp32_images", False):
+            return
+
+        def process_one(*args, **kwargs):
+            value = original(*args, **kwargs)
+            if isinstance(value, dict) and "images" in value:
+                value["images"] = _cast_arrays(value["images"], mx.float32)
+            return value
+
+        processor.process_one = process_one
+        processor._ebook2md_fp32_images = True
 
     def recognize(self, image: Path) -> tuple[str, dict[str, object]]:
         return self._recognize(
@@ -118,6 +155,7 @@ class MlxUnlimitedOcr:
                 "temperature": 0.0,
                 "no_repeat_ngram_size": 35,
                 "ngram_window": 1024,
+                "precision": self.precision,
             },
         }
 
@@ -167,6 +205,7 @@ class MlxUnlimitedOcr:
                 "temperature": 0.0,
                 "no_repeat_ngram_size": 35,
                 "ngram_window": ngram_window,
+                "precision": self.precision,
             },
         }
 
@@ -205,6 +244,14 @@ class SlidingWindowNoRepeatNgramProcessor:
             rows.append(row)
         result = mx.stack(rows)
         return result[0] if logits.ndim == 1 else result
+
+
+def _cast_arrays(value, dtype):
+    if isinstance(value, list):
+        return [_cast_arrays(item, dtype) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_cast_arrays(item, dtype) for item in value)
+    return value.astype(dtype) if hasattr(value, "astype") and hasattr(value, "dtype") else value
 
 
 def split_multi_page_output(raw: str, expected_pages: int) -> list[str]:

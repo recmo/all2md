@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import platform
 import re
@@ -12,19 +13,26 @@ from typing import Any
 
 from PIL import Image
 
-from . import __version__
 from .adapters import open_document
 from .assets import AssetStore
 from .chapters import chapters_from_map, detect_chapters
 from .compare import compare_text
-from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, MODEL_ID, MODEL_REVISION, SCHEMA_VERSION
+from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, SCHEMA_VERSION
 from .formatting import format_and_lint
-from .markdown import merge_html_tables, normalize_table_blocks, strict_page_markdown, write_markdown
+from .markdown import (
+    merge_html_tables,
+    normalize_heading_case,
+    normalize_table_blocks,
+    strict_page_markdown,
+    title_case_heading,
+    write_markdown,
+)
 from .model import Block, OcrObservation, PageResult
 from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, split_multi_page_output
 from .util import atomic_json, sha256_file, slugify
 from .util import atomic_text
+from .verify import verify_bundle
 
 FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
 FORMULA_KINDS = {"formula", "equation", "display_formula"}
@@ -50,34 +58,53 @@ def convert(
     bundle = output.resolve() / slugify(source.stem if source.is_file() else source.name, "document")
     if force and bundle.exists():
         shutil.rmtree(bundle)
+    backend = backend or MlxUnlimitedOcr()
+    ocr_fingerprint = {
+        "source_sha256": _source_hash(source),
+        "backend": dict(backend.identity),
+        "dpi": dpi,
+        "pages": pages,
+        "languages": languages or [],
+        "multi_page": multi_page,
+        "code": _code_fingerprint(
+            "adapters.py", "assets.py", "compare.py", "model.py", "native.py", "ocr.py", "pipeline.py"
+        ),
+    }
+    assembly_fingerprint = {
+        "split_mode": split_mode,
+        "chapter_map_sha256": sha256_file(chapter_map) if chapter_map else None,
+        "code": _code_fingerprint(
+            "chapters.py", "formatting.py", "markdown.py", "model.py", "pipeline.py", "verify.py"
+        ),
+    }
+    previous = _read_json(bundle / "metadata.json")
+    can_resume = bool(resume and previous and previous.get("ocr_fingerprint") == ocr_fingerprint)
+    same_assembly = bool(previous and previous.get("assembly_fingerprint") == assembly_fingerprint)
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "pages").mkdir(exist_ok=True)
     (bundle / "raw").mkdir(exist_ok=True)
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
-    assets = AssetStore(bundle / "assets")
-    fingerprint = {
-        "source_sha256": _source_hash(source),
-        "tool_version": __version__,
-        "model": MODEL_ID,
-        "model_revision": MODEL_REVISION,
-        "dpi": dpi,
-        "pages": pages,
-        "languages": languages or [],
-        "multi_page": multi_page,
-        "pipeline_revision": 2,
-    }
-    previous = _read_json(bundle / "metadata.json")
-    can_resume = resume and previous and previous.get("fingerprint") == fingerprint
+    assets = AssetStore(bundle / "assets", load_existing=can_resume)
+    fingerprint = {"ocr": ocr_fingerprint, "assembly": assembly_fingerprint}
     started = time.time()
     document = open_document(source, work, assets, dpi=dpi, page_spec=pages)
 
     if document.kind == "epub":
-        result = _write_epub(bundle, source, document, assets, fingerprint, started, split_mode)
+        result = _write_epub(
+            bundle,
+            source,
+            document,
+            assets,
+            fingerprint,
+            ocr_fingerprint,
+            assembly_fingerprint,
+            started,
+            split_mode,
+        )
         shutil.rmtree(work, ignore_errors=True)
         return result
 
-    backend = backend or MlxUnlimitedOcr()
     page_results: list[PageResult] = []
     failed: list[dict[str, Any]] = []
     for group in _ocr_groups(document.pages, document.outline, multi_page=multi_page):
@@ -179,11 +206,14 @@ def convert(
     format_result = format_and_lint([bundle / path for path in files])
     if not format_result.idempotent:
         warnings.append("markdown_formatter_not_idempotent")
+    if format_result.preservation_skips:
+        warnings.append("markdown_formatter_skipped_unsafe_change")
     if format_result.lint_errors:
         warnings.append("markdown_lint_failed")
     output_fingerprints = {path: sha256_file(bundle / path) for path in files}
     resume_stable = not (
         can_resume
+        and same_assembly
         and not previous.get("failed_pages")
         and previous.get("page_count") == previous.get("requested_page_count")
         and previous.get("output_fingerprints")
@@ -205,6 +235,8 @@ def convert(
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "fingerprint": fingerprint,
+        "ocr_fingerprint": ocr_fingerprint,
+        "assembly_fingerprint": assembly_fingerprint,
         "source": str(source),
         "source_kind": document.kind,
         "page_count": len(page_results),
@@ -219,6 +251,7 @@ def convert(
             "linter": "pymarkdownlnt==0.9.38",
             "idempotent": format_result.idempotent,
             "lint_errors": format_result.lint_errors,
+            "preservation_skips": format_result.preservation_skips,
         },
         "output_fingerprints": output_fingerprints,
         "resume_stable": resume_stable,
@@ -231,6 +264,9 @@ def convert(
     shutil.rmtree(work, ignore_errors=True)
     if failed:
         raise RuntimeError(f"{len(failed)} page(s) failed; successful pages are resumable in {bundle}")
+    verification = verify_bundle(bundle)
+    if not verification.ok:
+        raise RuntimeError(f"bundle verification failed: {'; '.join(verification.errors)}")
     return bundle
 
 
@@ -255,7 +291,6 @@ def _page_result(
         source_page.source_assets,
         include_unclaimed=not primary.generation.get("merged_into"),
     )
-    _apply_links_to_blocks(blocks, source_page.embedded.links)
     raw_root = "raw"
     result = PageResult(
         number=source_page.number,
@@ -641,12 +676,18 @@ def _materialize_figures(
             asset = _matching_original(block.bbox, source_assets, assets)
             if asset is None:
                 asset = assets.add_crop(page_image, block.bbox, page=page, caption=caption, alt_text=alt)
-            else:
-                asset.caption = caption
-                asset.alt_text = alt
+            assets.add_placement(
+                asset.id,
+                page=page,
+                bbox=block.bbox,
+                method="ocr_detected_figure",
+                source_object=asset.source_object,
+                caption=caption,
+                alt_text=alt,
+            )
             block.asset_id = asset.id
             claimed_assets.add(asset.id)
-            block.markdown = f"![{asset.alt_text}]({asset.path})"
+            block.markdown = f"![{alt}]({asset.path})"
             if caption:
                 block.markdown += f"\n\n*{caption}*"
         elif block.bbox and block.kind in FORMULA_KINDS and not _looks_like_math(block.markdown):
@@ -721,10 +762,21 @@ def _apply_links_to_blocks(blocks: list[Block], links) -> None:
         label = " ".join(link.text.split())
         if not label or not link.target:
             continue
+        if any(f"]({link.target})" in block.markdown for block in blocks):
+            continue
         pattern = re.compile(re.escape(label), re.IGNORECASE)
-        for block in blocks:
-            if block.kind in {"table", "figure", "embedded_figure"} or f"]({link.target})" in block.markdown:
-                continue
+        candidates = [
+            block
+            for block in blocks
+            if block.kind not in {"table", "figure", "embedded_figure"}
+            and pattern.search(block.markdown)
+        ]
+        if link.bbox:
+            candidates.sort(
+                key=lambda block: _bbox_coverage(link.bbox, block.bbox) if block.bbox else 0.0,
+                reverse=True,
+            )
+        for block in candidates:
             updated, count = pattern.subn(
                 lambda match: f"[{match.group(0)}]({link.target})",
                 block.markdown,
@@ -736,6 +788,14 @@ def _apply_links_to_blocks(blocks: list[Block], links) -> None:
                     {"target": link.target, "source": "embedded_link_geometry"}
                 )
                 break
+
+
+def _bbox_coverage(subject, container) -> float:
+    left, top = max(subject[0], container[0]), max(subject[1], container[1])
+    right, bottom = min(subject[2], container[2]), min(subject[3], container[3])
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    area = max(1.0, (subject[2] - subject[0]) * (subject[3] - subject[1]))
+    return intersection / area
 
 
 def _sanitize_page_links(markdown: str, available_pages: set[int]) -> tuple[str, list[int]]:
@@ -778,7 +838,17 @@ def _comparison_quality(comparison) -> float:
     return similarity + 0.2 * length_score - repetition_penalty
 
 
-def _write_epub(bundle: Path, source: Path, document, assets: AssetStore, fingerprint, started: float, split_mode: str) -> Path:
+def _write_epub(
+    bundle: Path,
+    source: Path,
+    document,
+    assets: AssetStore,
+    fingerprint,
+    ocr_fingerprint,
+    assembly_fingerprint,
+    started: float,
+    split_mode: str,
+) -> Path:
     total_size = sum(len(item["markdown"].encode("utf-8")) for item in document.semantic_chapters)
     split = split_mode == "chapters" or (split_mode == "auto" and total_size > AUTO_SPLIT_BYTES and len(document.semantic_chapters) >= 2)
     files = ["book.md"]
@@ -787,23 +857,29 @@ def _write_epub(bundle: Path, source: Path, document, assets: AssetStore, finger
     if split:
         chapters_dir = bundle / "chapters"
         chapters_dir.mkdir(exist_ok=True)
-        index = [f"# {_title(document, source)}", "", "## Contents", ""]
+        index = [f"# {title_case_heading(_title(document, source))}", "", "## Contents", ""]
         filenames = [f"{number:03d}-{slugify(item['title'])}.md" for number, item in enumerate(document.semantic_chapters, 1)]
         source_to_file = {item["source"]: filenames[number] for number, item in enumerate(document.semantic_chapters)}
         for index_number, item in enumerate(document.semantic_chapters):
             filename = filenames[index_number]
-            markdown = item["markdown"].replace("](assets/", "](../assets/")
+            item_title = title_case_heading(item["title"])
+            markdown = normalize_heading_case(item["markdown"]).replace("](assets/", "](../assets/")
             for source_name, target_file in source_to_file.items():
                 markdown = markdown.replace(f"]({Path(source_name).name}", f"]({target_file}")
-            atomic_text(chapters_dir / filename, f"# {item['title']}\n\n{markdown.rstrip()}\n")
-            index.append(f"- [{item['title']}](chapters/{filename})")
+            atomic_text(chapters_dir / filename, f"# {item_title}\n\n{markdown.rstrip()}\n")
+            index.append(f"- [{item_title}](chapters/{filename})")
             files.append(f"chapters/{filename}")
             chapters.append({"title": item["title"], "file": f"chapters/{filename}", "evidence": "epub_spine"})
         atomic_text(bundle / "book.md", "\n".join(index) + "\n")
     else:
-        body = [f"# {_title(document, source)}", ""]
+        body = [f"# {title_case_heading(_title(document, source))}", ""]
         for item in document.semantic_chapters:
-            body.extend([f"## {item['title']}", "", item["markdown"], ""])
+            body.extend([
+                f"## {title_case_heading(item['title'])}",
+                "",
+                normalize_heading_case(item["markdown"]),
+                "",
+            ])
             chapters.append({"title": item["title"], "file": "book.md", "evidence": "epub_spine"})
         atomic_text(bundle / "book.md", "\n".join(body).rstrip() + "\n")
     format_result = format_and_lint([bundle / path for path in files])
@@ -813,11 +889,15 @@ def _write_epub(bundle: Path, source: Path, document, assets: AssetStore, finger
     formatting_warnings = []
     if not format_result.idempotent:
         formatting_warnings.append("markdown_formatter_not_idempotent")
+    if format_result.preservation_skips:
+        formatting_warnings.append("markdown_formatter_skipped_unsafe_change")
     if format_result.lint_errors:
         formatting_warnings.append("markdown_lint_failed")
     atomic_json(bundle / "metadata.json", {
         "schema_version": SCHEMA_VERSION,
         "fingerprint": fingerprint,
+        "ocr_fingerprint": ocr_fingerprint,
+        "assembly_fingerprint": assembly_fingerprint,
         "source": str(source),
         "source_kind": "epub",
         "split": split,
@@ -829,12 +909,16 @@ def _write_epub(bundle: Path, source: Path, document, assets: AssetStore, finger
             "linter": "pymarkdownlnt==0.9.38",
             "idempotent": format_result.idempotent,
             "lint_errors": format_result.lint_errors,
+            "preservation_skips": format_result.preservation_skips,
         },
         "output_fingerprints": output_fingerprints,
         "resume_stable": True,
         "duration_seconds": round(time.time() - started, 3),
     })
     _write_log(bundle, _read_json(bundle / "metadata.json"))
+    verification = verify_bundle(bundle)
+    if not verification.ok:
+        raise RuntimeError(f"bundle verification failed: {'; '.join(verification.errors)}")
     return bundle
 
 
@@ -849,6 +933,16 @@ def _source_hash(source: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted((item for item in source.rglob("*") if item.is_file())):
         digest.update(str(path.relative_to(source)).encode())
+        digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
+
+
+def _code_fingerprint(*names: str) -> str:
+    digest = hashlib.sha256()
+    root = Path(__file__).parent
+    for name in sorted(names):
+        path = root / name
+        digest.update(name.encode())
         digest.update(bytes.fromhex(sha256_file(path)))
     return digest.hexdigest()
 

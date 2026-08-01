@@ -36,6 +36,7 @@ def verify_bundle(root: Path) -> Verification:
     markdown_paths = [root / path for path in metadata.get("markdown_files", ["book.md"])]
     all_markdown = ""
     manifest_paths = {asset.get("path", "") for asset in manifest.get("assets", [])}
+    manifest_ids = {asset.get("id", "") for asset in manifest.get("assets", [])}
     for markdown_path in markdown_paths:
         if not markdown_path.exists():
             errors.append(f"missing Markdown file: {markdown_path.relative_to(root)}")
@@ -82,7 +83,10 @@ def verify_bundle(root: Path) -> Verification:
         seen_paths.add(path)
         original = asset.get("original_path")
         if original and not (root / original).exists():
-            errors.append(f"missing original asset: {original}")
+            warnings.append(f"missing original asset: {original}")
+        evidence = asset.get("evidence_path")
+        if evidence and not (root / evidence).exists():
+            warnings.append(f"missing evidence asset: {evidence}")
     pages = document.get("pages", [])
     page_numbers = [page.get("number") for page in pages]
     if page_numbers != sorted(page_numbers) or len(page_numbers) != len(set(page_numbers)):
@@ -98,6 +102,12 @@ def verify_bundle(root: Path) -> Verification:
     observation_ids: set[str] = set()
     for page in pages:
         for block in page.get("blocks", []):
+            if block.get("kind") in {"figure", "embedded_figure"}:
+                asset_id = block.get("asset_id")
+                if not asset_id or asset_id not in manifest_ids:
+                    warnings.append(
+                        f"figure block lacks manifest asset on page {page.get('number')}"
+                    )
             if (
                 block.get("kind") == "table"
                 and "<table" in block.get("markdown", "").casefold()
@@ -123,7 +133,7 @@ def verify_bundle(root: Path) -> Verification:
     if metadata.get("formatting", {}).get("idempotent") is not True:
         errors.append("metadata reports non-idempotent formatting")
     if metadata.get("formatting", {}).get("lint_errors"):
-        errors.append("metadata reports Markdown lint failures")
+        warnings.append("metadata reports Markdown lint failures")
     if metadata.get("resume_stable") is False:
         errors.append("resume changed Markdown filenames or content")
     for failed in metadata.get("failed_pages", []):

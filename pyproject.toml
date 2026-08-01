@@ -12,6 +12,7 @@ license = "MIT"
 dependencies = [
   "beautifulsoup4>=4.13.0,<5",
   "huggingface-hub>=0.34.0,<2",
+  "lxml>=5.4.0,<7",
   "mdformat==1.0.0",
   "mdformat-gfm==1.0.0",
   "pillow>=11.0.0,<13",

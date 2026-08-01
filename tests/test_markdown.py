@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ebook2md.formatting import format_markdown
+from ebook2md.formatting import format_and_lint, format_markdown
 from ebook2md.markdown import html_tables_to_markdown, local_links, markdown_anchors, merge_html_tables, normalize_heading_case, normalize_table_blocks, strict_page_markdown, title_case_heading, write_markdown
 from ebook2md.model import Block, Chapter, Comparison, EmbeddedEvidence, PageResult
 
@@ -103,6 +103,21 @@ def test_formatter_is_gfm_idempotent_and_preserves_evidence_syntax():
     assert "assets/figures/diagram.png" in once
 
 
+def test_formatter_does_not_delete_pages_after_counting_noise(tmp_path: Path):
+    path = tmp_path / "book.md"
+    sequence = " ".join(f"{number}." for number in range(1, 100))
+    path.write_text(
+        f"# Front Matter\n\n<!-- page: 4 -->\n\n{sequence}\n\n"
+        "<!-- page: 5 -->\n\n## Copyright\n\nAll rights reserved.\n"
+    )
+    result = format_and_lint([path])
+    rendered = path.read_text()
+    assert result.idempotent
+    assert "<!-- page: 4 -->" in rendered
+    assert "<!-- page: 5 -->" in rendered
+    assert "All rights reserved." in rendered
+
+
 def test_outline_and_visual_titles_become_markdown_hierarchy():
     result = PageResult(
         number=10,
@@ -199,10 +214,7 @@ def test_cover_style_front_matter_suppresses_display_titles():
         embedded=EmbeddedEvidence(),
         comparison=Comparison(),
     )
-    markdown = strict_page_markdown(
-        result,
-        [{"level": 1, "title": "Part I: The Beginning", "page": 10}],
-    )
+    markdown = strict_page_markdown(result, [])
     assert "THE GREAT CEO WITHIN" not in markdown
     assert "# " not in markdown
     assert "A tactical guide." in markdown
