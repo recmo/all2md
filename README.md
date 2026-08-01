@@ -20,6 +20,12 @@ The model is never prompted to emit JSON or arbitrate between its own readings.
 The MLX runtime keeps the vision stack and image tensors in FP32 and the
 language decoder in BF16; effective precision is recorded with each invocation.
 
+Lists are normalized structurally from OCR labels, markers, indentation, and
+geometry before Markdown rendering. Visual bullets become compact `-` lists;
+decimal lists retain explicit source ordinals; alphabetic and Roman labels are
+kept visibly as bold labels inside semantic Markdown list items. The original
+marker, nesting, geometry, source pages, and provenance remain in page JSON.
+
 ## Install
 
 The Nix app creates a locked `uv` environment in

@@ -19,6 +19,7 @@ from .chapters import chapters_from_map, detect_chapters
 from .compare import compare_text
 from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, SCHEMA_VERSION
 from .formatting import format_and_lint
+from .lists import normalize_lists
 from .markdown import (
     merge_html_tables,
     normalize_heading_case,
@@ -76,7 +77,7 @@ def convert(
         "split_mode": split_mode,
         "chapter_map_sha256": sha256_file(chapter_map) if chapter_map else None,
         "code": _code_fingerprint(
-            "chapters.py", "formatting.py", "markdown.py", "model.py", "pipeline.py", "verify.py"
+            "chapters.py", "formatting.py", "lists.py", "markdown.py", "model.py", "pipeline.py", "verify.py"
         ),
     }
     previous = _read_json(bundle / "metadata.json")
@@ -752,6 +753,9 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
                     repeated[key] += 1
     boilerplate = {key for key, count in repeated.items() if count >= 3}
     for page in pages:
+        for block in page.blocks:
+            if not block.source_pages:
+                block.source_pages = [page.number]
         page.blocks = [
             block
             for block in page.blocks
@@ -762,6 +766,8 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
                 and (block.bbox[1] <= 80 or block.bbox[3] >= 940)
             )
         ]
+
+    normalize_lists(pages)
 
     for previous, current in zip(pages, pages[1:]):
         if current.number != previous.number + 1 or not previous.blocks or not current.blocks:
@@ -784,7 +790,6 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
         for block in page.blocks:
             if block.kind == "paragraph":
                 block.markdown = _clean_prose(block.markdown)
-        page.blocks = _group_enumerated_blocks(page.blocks)
 
         retained: list[Block] = []
         index = 0
@@ -815,88 +820,6 @@ def _clean_prose(value: str) -> str:
     value = "\n".join(lines).strip()
     value = re.sub(r"\\\)\s+([,.;:!?])", lambda match: r"\)" + match.group(1), value)
     return value
-
-
-def _group_enumerated_blocks(blocks: list[Block]) -> list[Block]:
-    roman = re.compile(r"^\([ivxlcdm]+\)\s+", re.IGNORECASE)
-    arabic = re.compile(r"^\d+[.)]\s+")
-    output: list[Block] = []
-    index = 0
-    while index < len(blocks):
-        first = blocks[index]
-        style = "roman" if first.kind == "paragraph" and roman.match(first.markdown) else (
-            "arabic" if first.kind == "paragraph" and arabic.match(first.markdown) else None
-        )
-        if style is None:
-            output.append(first)
-            index += 1
-            continue
-        matcher = roman if style == "roman" else arabic
-        end = index + 1
-        while end < len(blocks) and blocks[end].kind == "paragraph" and matcher.match(blocks[end].markdown):
-            end += 1
-        items = blocks[index:end]
-        if len(items) < 2:
-            output.append(first)
-            index += 1
-            continue
-        markdown = "\n".join(
-            f"- {item.markdown}" if style == "roman" else item.markdown
-            for item in items
-        )
-        boxes = [item.bbox for item in items if item.bbox]
-        bbox = (
-            min(box[0] for box in boxes),
-            min(box[1] for box in boxes),
-            max(box[2] for box in boxes),
-            max(box[3] for box in boxes),
-        ) if boxes else None
-        review_items = [item for item in items if item.metadata.get("review_required")]
-        metadata = {"normalized_enumeration": style}
-        if review_items:
-            unresolved = [
-                item for item in review_items
-                if item.metadata.get("review_reason") == "targeted_ocr_unresolved"
-            ]
-            if unresolved:
-                metadata.update({
-                    "review_required": True,
-                    "review_reason": "targeted_ocr_unresolved",
-                    "review_confidence": min(
-                        float(item.metadata.get("review_confidence", 0.0))
-                        for item in unresolved
-                    ),
-                    "review_base": " | ".join(
-                        str(item.metadata.get("review_base", "")) for item in unresolved
-                    ),
-                    "review_detail": " | ".join(
-                        str(item.metadata.get("review_detail", "")) for item in unresolved
-                        if item.metadata.get("review_detail")
-                    ) or None,
-                })
-            else:
-                metadata.update({
-                    "review_required": True,
-                    "review_reason": "ocr_candidates_disagree",
-                    "review_consensus": min(
-                        float(item.metadata.get("review_consensus", 0.0)) for item in review_items
-                    ),
-                    "review_candidates": sorted({
-                        candidate
-                        for item in review_items
-                        for candidate in item.metadata.get("review_candidates", [])
-                    }),
-                })
-        output.append(Block(
-            kind="list",
-            markdown=markdown,
-            bbox=bbox,
-            source_pages=sorted({page for item in items for page in item.source_pages}),
-            provenance=[entry for item in items for entry in item.provenance],
-            metadata=metadata,
-        ))
-        index = end
-    return output
 
 
 def _materialize_figures(

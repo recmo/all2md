@@ -9,6 +9,7 @@ from urllib.parse import unquote
 from bs4 import BeautifulSoup
 
 from .formatting import is_formatted_idempotently
+from .lists import BULLETS, validate_list_node
 from .markdown import local_links, markdown_anchors
 
 
@@ -52,6 +53,7 @@ def verify_bundle(root: Path) -> Verification:
         if re.search(r"\]\((?:file://|/Users/|/[A-Za-z0-9_.-]+/)", markdown):
             errors.append(f"absolute path: {markdown_path.relative_to(root)}")
         _verify_tables(markdown, markdown_path, root, errors)
+        _verify_rendered_lists(markdown, markdown_path, root, errors)
         for target in local_links(markdown):
             clean_target, _, anchor = target.partition("#")
             target_path = markdown_path if not clean_target else markdown_path.parent / clean_target
@@ -102,6 +104,16 @@ def verify_bundle(root: Path) -> Verification:
     observation_ids: set[str] = set()
     for page in pages:
         for block in page.get("blocks", []):
+            if block.get("kind") == "list":
+                node = block.get("metadata", {}).get("list")
+                if not isinstance(node, dict):
+                    errors.append(f"list block lacks normalized node on page {page.get('number')}")
+                else:
+                    errors.extend(
+                        f"invalid list on page {page.get('number')}: {error}"
+                        for error in validate_list_node(node)
+                    )
+                    _verify_preserved_list_labels(block, node, page.get("number"), errors)
             if block.get("kind") in {"figure", "embedded_figure"}:
                 asset_id = block.get("asset_id")
                 if not asset_id or asset_id not in manifest_ids:
@@ -164,6 +176,31 @@ def _verify_tables(markdown: str, markdown_path: Path, root: Path, errors: list[
                 errors.append(f"inconsistent GFM table: {markdown_path.relative_to(root)}:{row + 1}")
                 break
             row += 1
+
+
+def _verify_rendered_lists(markdown: str, markdown_path: Path, root: Path, errors: list[str]) -> None:
+    visual_bullet = re.compile(rf"^[ \t]*[{re.escape(BULLETS)}]\s+", re.MULTILINE)
+    if visual_bullet.search(markdown):
+        errors.append(f"raw visual list bullet: {markdown_path.relative_to(root)}")
+    marker = re.compile(r"^(?P<indent> +)(?:[-+*]|\d+\.)\s+", re.MULTILINE)
+    for match in marker.finditer(markdown):
+        width = len(match.group("indent"))
+        if width < 2:
+            line = markdown.count("\n", 0, match.start()) + 1
+            errors.append(f"invalid nested list indentation: {markdown_path.relative_to(root)}:{line}")
+
+
+def _verify_preserved_list_labels(
+    block: dict, node: dict, page: int | None, errors: list[str]
+) -> None:
+    markdown = block.get("markdown", "")
+    for item in node.get("items", []):
+        if node.get("marker_style") in {"alpha", "roman"}:
+            marker = item.get("source_marker", "")
+            if marker and f"**{marker}**" not in markdown:
+                errors.append(f"list label {marker!r} was not rendered on page {page}")
+        for child in item.get("children", []):
+            _verify_preserved_list_labels({"markdown": markdown}, child, page, errors)
 
 
 def _pipe_width(line: str) -> int:

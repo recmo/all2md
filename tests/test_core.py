@@ -580,7 +580,7 @@ def test_document_normalization_cleans_prose_without_rewriting_math():
     _normalize_document_blocks([page])
     assert page.blocks[0].markdown == r"Proof. Let \( J \) be an ideal and \( J = \langle ra : r \in R \rangle \)."
     assert page.blocks[1].kind == "list"
-    assert page.blocks[1].markdown == "- (i) First case.\n- (ii) Second case."
+    assert page.blocks[1].markdown == "- **(i)** First case.\n- **(ii)** Second case."
     assert r"na \equiv nh \mod J" in page.blocks[2].markdown
     assert r"\mathbb{Z}" in page.blocks[2].markdown
     assert r"\\)" not in page.blocks[0].markdown

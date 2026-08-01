@@ -30,7 +30,7 @@ class FormatResult:
 def format_markdown(text: str) -> str:
     return mdformat.text(
         text,
-        options={"wrap": "keep", "number": False},
+        options={"wrap": "keep", "number": True},
         extensions={"gfm"},
     )
 

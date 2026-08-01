@@ -10,6 +10,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from .compare import compare_text, normalize
+from .lists import annotate_native_list_block
 from .model import Block, OcrObservation
 
 PAGE_TOKEN = re.compile(r"\s*<PAGE>\s*")
@@ -19,7 +20,6 @@ RAW_GROUNDING = re.compile(r"<\|/?(?:ref|det)\|>")
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 COORDINATE = re.compile(r"-?\d+(?:\.\d+)?")
 HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
-LIST_ITEM = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
 
 KIND_ALIASES = {
     "page_title": "heading",
@@ -74,6 +74,8 @@ def parse_native_observation(
     for segment_index, segment in enumerate(segments):
         pages = segment_pages[min(segment_index, len(segment_pages) - 1)] if segment_pages else source_pages
         observation.blocks.extend(_parse_segment(segment, pages, observation.id))
+    for block in observation.blocks:
+        annotate_native_list_block(block)
     _apply_block_confidence(observation, confidence_spans)
     observation.warnings = validate_observation(observation)
     return observation
@@ -174,7 +176,7 @@ def _parse_segment(segment: str, pages: list[int], observation: str) -> list[Blo
                 metadata={"native_label": label or None},
             )
         )
-    return [block for block in blocks if block.markdown or block.kind in {"figure", "formula"}]
+    return [block for block in blocks if block.markdown or block.kind in {"figure", "formula", "list"}]
 
 
 def _parse_ungrounded(content: str, pages: list[int], observation: str) -> list[Block]:
@@ -207,8 +209,6 @@ def _plain_blocks(content: str, pages: list[int], observation: str) -> list[Bloc
         first = piece.splitlines()[0]
         if HEADING.match(first):
             kind = "heading"
-        elif all(LIST_ITEM.match(line) for line in piece.splitlines() if line.strip()):
-            kind = "list"
         elif _looks_like_formula(piece):
             kind = "formula"
         else:
