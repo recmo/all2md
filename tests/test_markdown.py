@@ -260,7 +260,7 @@ def test_mid_page_outline_boundary_stays_after_carry_over_text():
     assert markdown.count("Rings and Fields") == 1
 
 
-def test_uncertain_block_emits_review_comment():
+def test_uncertain_block_does_not_annotate_markdown():
     result = PageResult(
         number=27,
         image="page.png",
@@ -277,10 +277,10 @@ def test_uncertain_block_emits_review_comment():
     )
     markdown = strict_page_markdown(result, [])
     assert "The value is" in markdown
-    assert "<!-- ebook2md-review: OCR candidates disagree on page 27, block 1; consensus=0.812 -->" in markdown
+    assert "ebook2md-review" not in markdown
 
 
-def test_unresolved_targeted_span_emits_alternatives():
+def test_unresolved_targeted_span_does_not_annotate_markdown():
     result = PageResult(
         number=27,
         image="page.png",
@@ -300,9 +300,8 @@ def test_unresolved_targeted_span_emits_alternatives():
         comparison=Comparison(),
     )
     markdown = strict_page_markdown(result, [])
-    assert "unresolved targeted OCR on page 27, block 1; confidence=0.607" in markdown
-    assert 'base="na \\equiv nh"' in markdown
-    assert 'detail="na \\equiv nb"' in markdown
+    assert markdown == r"The value is \( na \equiv nh \)."
+    assert "ebook2md-review" not in markdown
 
 
 def test_cover_style_front_matter_suppresses_display_titles():

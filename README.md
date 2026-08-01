@@ -12,10 +12,9 @@ Only pages containing such spans, structural failures, or strong embedded-text
 disagreement receive one page-local Gundam pass, always with cropping enabled
 at 1024 pixels. Base remains the layout authority; an aligned Gundam block is
 selected only when local probability, format integrity, and auxiliary embedded
-text make it the best supported reading. An unresolved targeted reread emits a
-hidden `ebook2md-review` comment containing both alternatives. `balanced`
-targets structural failures and strong embedded-text disagreement without using
-token probability; `fast` uses Base alone.
+text make it the best supported reading. `balanced` targets structural failures
+and strong embedded-text disagreement without using token probability; `fast`
+uses Base alone.
 
 The model is never prompted to emit JSON or arbitrate between its own readings.
 The MLX runtime keeps the vision stack and image tensors in FP32 and the
@@ -96,8 +95,8 @@ Each fixed-layout page record keeps `visual.multi_page`, `visual.candidates`,
 `embedded`, `comparison`, canonical normalized blocks, and selection provenance
 separately. Markdown is rendered only from the best canonical blocks. An
 unresolved targeted reread sets block-level review metadata, increments
-`metadata.json`'s `review_required_blocks`, and emits a portable HTML comment
-immediately after the affected Markdown; it does not withhold a best guess.
+`metadata.json`'s `review_required_blocks`, and remains available in the JSON
+artifacts without annotating the reading output; it does not withhold a best guess.
 A pinned `mdformat`/GFM pass runs only when it preserves page markers, image
 targets, and semantic tokens; PyMarkdown is scan-only. Conversion runs
 `ebook2md verify` before reporting success. Missing optional evidence remains a

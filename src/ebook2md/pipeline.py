@@ -938,10 +938,10 @@ def _materialize_figures(
             if caption:
                 block.markdown += f"\n\n*{caption}*"
         elif block.bbox and block.kind in FORMULA_KINDS and not _looks_like_math(block.markdown):
-            assets.add_crop(
+            evidence = assets.add_crop(
                 page_image, block.bbox, page=page, caption=block.markdown or None, alt_text="Equation evidence", evidence=True
             )
-            block.markdown = f"{block.markdown}\n\n<!-- uncertain equation; evidence crop retained -->".strip()
+            block.metadata["equation_evidence_asset_id"] = evidence.id
     if not include_unclaimed:
         return
     for placement in source_assets:

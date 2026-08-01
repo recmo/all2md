@@ -101,7 +101,7 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
     if boundary and inline_boundary is None:
         title = title_case_heading(boundary["title"].strip())
         pieces.append(f"{'#' * min(6, max(1, boundary.get('level', 1)))} {title}")
-    for block_index, block in enumerate(blocks, 1):
+    for block in blocks:
         content = block.markdown.strip()
         if not content:
             continue
@@ -114,37 +114,11 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
                 content = f"{'#' * min(6, current_level + 1)} {content}"
         content = normalize_heading_case(content)
         pieces.append(content)
-        if block.metadata.get("review_required"):
-            if block.metadata.get("review_reason") == "targeted_ocr_unresolved":
-                confidence = block.metadata.get("review_confidence")
-                rendered = f"; confidence={confidence:.3f}" if isinstance(confidence, (int, float)) else ""
-                base = _comment_value(block.metadata.get("review_base"))
-                detail = _comment_value(block.metadata.get("review_detail"))
-                alternatives = f'; base="{base}"' if base else ""
-                alternatives += f'; detail="{detail}"' if detail else ""
-                pieces.append(
-                    f"<!-- ebook2md-review: unresolved targeted OCR on page {page.number}, "
-                    f"block {block_index}{rendered}{alternatives} -->"
-                )
-            else:
-                consensus = block.metadata.get("review_consensus")
-                rendered = f"; consensus={consensus:.3f}" if isinstance(consensus, (int, float)) else ""
-                pieces.append(
-                    f"<!-- ebook2md-review: OCR candidates disagree on page {page.number}, "
-                    f"block {block_index}{rendered} -->"
-                )
     fallback = page.visual_markdown.strip()
     rendered = "\n\n".join(pieces).strip()
     if rendered:
         return rendered
     return normalize_heading_case(fallback)
-
-
-def _comment_value(value) -> str:
-    if not isinstance(value, str):
-        return ""
-    return " ".join(value.replace("--", "-").replace('"', "'").split())[:96]
-
 
 def normalize_heading_case(markdown: str) -> str:
     """Title-case Markdown headings without touching link destinations."""
