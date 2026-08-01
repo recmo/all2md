@@ -207,7 +207,7 @@ def test_targeted_detail_uses_embedded_evidence_for_confident_base_error():
     assert "visual_targeted_ocr_unresolved" not in warnings
 
 
-def test_clean_gundam_table_replaces_corrupt_page_local_columns():
+def test_clean_gundam_replacement_does_not_filter_content_by_language_pattern():
     primary = parse_native_observation(
         "<|det|>title [100,100,200,120]<|/det|>Department"
         + "".join(
@@ -224,9 +224,10 @@ def test_clean_gundam_table_replaces_corrupt_page_local_columns():
         source_pages=[95],
     )
     blocks, provenance, warnings = reconcile_observations(primary, [recovery])
-    assert [block.kind for block in blocks] == ["table"]
+    assert [block.kind for block in blocks] == ["paragraph", "table"]
+    assert blocks[0].markdown == "2014年1月1日"
     assert provenance[0]["action"] == "replaced_corrupt_page_local_content"
-    assert "visual_suspicious_ungrounded_preamble" in warnings
+    assert "visual_suspicious_ungrounded_preamble" not in warnings
 
 
 def test_split_multi_page_output_requires_one_segment_per_image():
@@ -528,7 +529,7 @@ def test_blank_pages_are_not_grouped_with_content(tmp_path: Path):
     assert [[page.number for page in group] for group in _ocr_groups(pages, [], multi_page=True)] == [[1], [3]]
 
 
-def test_document_normalization_drops_running_matter_and_promotes_semantic_labels():
+def test_document_normalization_drops_running_matter_without_inventing_semantics():
     page = PageResult(
         number=25,
         image="page.png",
@@ -554,10 +555,8 @@ def test_document_normalization_drops_running_matter_and_promotes_semantic_label
     _normalize_document_blocks([page])
 
     assert [(block.kind, block.markdown) for block in page.blocks] == [
-        ("heading", "1.28. Definition"),
-        ("paragraph", "A ring is a set with two binary operations."),
-        ("heading", "1.31. Theorem"),
-        ("paragraph", "Every finite integral domain is a field."),
+        ("paragraph", "1.28. Definition. A ring is a set with two binary operations."),
+        ("heading", "1.31. Theorem. Every finite integral domain is a field."),
     ]
 
 
@@ -579,12 +578,31 @@ def test_document_normalization_cleans_prose_without_rewriting_math():
         comparison=Comparison(),
     )
     _normalize_document_blocks([page])
-    assert page.blocks[0].markdown == r"**Proof.** Let \( J \) be an ideal and \( J = \langle ra : r \in R \rangle \)."
+    assert page.blocks[0].markdown == r"Proof. Let \( J \) be an ideal and \( J = \langle ra : r \in R \rangle \)."
     assert page.blocks[1].kind == "list"
     assert page.blocks[1].markdown == "- (i) First case.\n- (ii) Second case."
     assert r"na \equiv nh \mod J" in page.blocks[2].markdown
     assert r"\mathbb{Z}" in page.blocks[2].markdown
     assert r"\\)" not in page.blocks[0].markdown
+
+
+def test_document_normalization_does_not_infer_caption_from_wording():
+    page = PageResult(
+        number=28,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("figure", "Diagram", bbox=(100, 100, 900, 600)),
+            Block("paragraph", "Figure 3 discusses the result.", bbox=(100, 620, 900, 680)),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert [block.kind for block in page.blocks] == ["figure", "paragraph"]
+    assert page.blocks[1].markdown == "Figure 3 discusses the result."
 
 
 def test_recovery_observations_and_provenance_are_preserved(tmp_path: Path):

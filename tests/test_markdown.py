@@ -61,6 +61,18 @@ def test_html_table_becomes_pipe_table():
     )
 
 
+def test_table_rows_are_not_reinterpreted_from_department_wording():
+    source = (
+        "<table><tr><td>Department</td><td>Owner</td></tr>"
+        "<tr><td>Department Sales</td><td>Owner</td></tr></table>"
+    )
+    assert html_tables_to_markdown(source) == (
+        "| Department | Owner |\n"
+        "| --- | --- |\n"
+        "| Department Sales | Owner |"
+    )
+
+
 def test_matching_table_continuations_merge_without_repeated_header():
     first = "<table><tr><td>A</td><td></td><td>B</td></tr><tr><td>1</td><td>2</td><td></td></tr></table>"
     second = "<table><tr><td>A</td><td>B</td></tr><tr><td>3</td><td>4</td></tr></table>"
@@ -103,7 +115,7 @@ def test_formatter_is_gfm_idempotent_and_preserves_evidence_syntax():
     assert "assets/figures/diagram.png" in once
 
 
-def test_formatter_does_not_delete_pages_after_counting_noise(tmp_path: Path):
+def test_formatter_preserves_page_markers_and_numeric_content(tmp_path: Path):
     path = tmp_path / "book.md"
     sequence = " ".join(f"{number}." for number in range(1, 100))
     path.write_text(
@@ -368,7 +380,7 @@ def test_title_page_boundary_does_not_promote_display_title():
     assert markdown == "# Title Page\n\nMatt Mochary"
 
 
-def test_front_matter_counting_noise_is_suppressed():
+def test_front_matter_numeric_content_is_preserved():
     result = PageResult(
         number=4,
         image="page.png",
@@ -380,4 +392,4 @@ def test_front_matter_counting_noise_is_suppressed():
     assert strict_page_markdown(
         result,
         [{"level": 1, "title": "Part I: The Beginning", "page": 10}],
-    ) == ""
+    ) == "1. 2. 3. 4. 5. 6. 7. 8. 9. 10."

@@ -98,16 +98,12 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
     if preceding:
         current_level = preceding[-1].get("level", 1)
     pieces: list[str] = []
-    suppressed_noise = False
     if boundary and inline_boundary is None:
         title = title_case_heading(boundary["title"].strip())
         pieces.append(f"{'#' * min(6, max(1, boundary.get('level', 1)))} {title}")
     for block_index, block in enumerate(blocks, 1):
         content = block.markdown.strip()
         if not content:
-            continue
-        if in_front_matter and _is_counting_noise(content):
-            suppressed_noise = True
             continue
         if block.kind in TITLE_KINDS:
             if in_front_matter and cover_style:
@@ -139,7 +135,7 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
                 )
     fallback = page.visual_markdown.strip()
     rendered = "\n\n".join(pieces).strip()
-    if rendered or suppressed_noise:
+    if rendered:
         return rendered
     return normalize_heading_case(fallback)
 
@@ -231,13 +227,6 @@ def _is_cover_style_page(page: PageResult, boundary: dict | None) -> bool:
         if max(block.bbox) <= 1100 and max(0, right - left) * max(0, bottom - top) >= 450_000:
             return True
     return False
-
-
-def _is_counting_noise(value: str) -> bool:
-    if re.search(r"[A-Za-z]", value):
-        return False
-    numbers = [int(number) for number in re.findall(r"\b(\d{1,3})\s*\.", value)]
-    return len(numbers) >= 10 and numbers == list(range(numbers[0], numbers[0] + len(numbers)))
 
 
 def html_tables_to_markdown(markdown: str) -> str:
@@ -339,15 +328,6 @@ def _table_to_markdown(source: str) -> str:
         folded = [value.casefold() for value in row if value]
         if folded[:width] == header_folded:
             continue
-        if (
-            len(row) >= width
-            and row[0].casefold().startswith("department ")
-            and [value.casefold() for value in row[1:] if value] == header_folded[1:]
-        ):
-            current_group = row[0][len("Department ") :].strip()
-            group_rows_remaining = max(0, int(cell_nodes[0].get("rowspan", 1)) - 1)
-            continue
-
         first_span = int(cell_nodes[0].get("rowspan", 1)) if cell_nodes else 1
         if first_span > 1:
             if row and row[0]:
@@ -550,7 +530,6 @@ def _same_heading(left: str, right: str) -> bool:
 
     def canonical(value: str) -> str:
         value = re.sub(r"^#{1,6}\s+", "", value.strip())
-        value = re.sub(r"\bCHAPTER\s+I\b", "CHAPTER 1", value, flags=re.I)
         value = re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
         return value
 

@@ -36,14 +36,6 @@ from .verify import verify_bundle
 
 FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
 FORMULA_KINDS = {"formula", "equation", "display_formula"}
-SEMANTIC_LEAD = re.compile(
-    r"^(?P<label>\d+(?:\.\d+)+\.\s+"
-    r"(?:Definition|Theorem|Lemma|Proposition|Corollary|Example|Examples|Remark)"
-    r"(?:\s+\([^\n)]{1,120}\))?)\.?(?:\s+)(?P<body>.+)$",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
 def convert(
     source: Path,
     output: Path,
@@ -789,13 +781,10 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
             current.blocks.pop(0)
 
     for page in pages:
-        semantic_blocks: list[Block] = []
         for block in page.blocks:
-            semantic_blocks.extend(_split_semantic_lead(block))
-        for block in semantic_blocks:
             if block.kind == "paragraph":
                 block.markdown = _clean_prose(block.markdown)
-        page.blocks = _group_enumerated_blocks(semantic_blocks)
+        page.blocks = _group_enumerated_blocks(page.blocks)
 
         retained: list[Block] = []
         index = 0
@@ -809,7 +798,7 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
                     and caption.bbox
                     and 0 <= caption.bbox[1] - block.bbox[3] <= 120
                 )
-                if caption.kind == "caption" or (close and re.match(r"^(?:figure|fig\.)\s*\d*", caption_text, re.I)):
+                if caption.kind == "caption" and close:
                     block.markdown = f"{block.markdown.rstrip()}\n\n*{caption_text}*"
                     block.metadata["caption"] = caption_text
                     block.provenance.extend(caption.provenance)
@@ -821,59 +810,9 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
         page.blocks = retained
 
 
-def _split_semantic_lead(block: Block) -> list[Block]:
-    if block.kind not in {"paragraph", "heading"}:
-        return [block]
-    match = SEMANTIC_LEAD.match(block.markdown.strip())
-    if match is None:
-        return [block]
-
-    def copy(kind: str, markdown: str, role: str) -> Block:
-        metadata = {**block.metadata, "semantic_split": role}
-        if role == "label":
-            for key in tuple(metadata):
-                if key.startswith("review_") or key == "uncertain_spans":
-                    metadata.pop(key)
-        elif "uncertain_spans" in metadata:
-            body_start = match.start("body")
-            adjusted = []
-            for span in metadata["uncertain_spans"]:
-                if int(span.get("end", 0)) <= body_start:
-                    continue
-                start = max(0, int(span.get("start", 0)) - body_start)
-                end = min(len(markdown), int(span.get("end", 0)) - body_start)
-                if start < end:
-                    adjusted.append({
-                        **span,
-                        "start": start,
-                        "end": end,
-                        "text": markdown[start:end],
-                    })
-            if adjusted:
-                metadata["uncertain_spans"] = adjusted
-            else:
-                metadata.pop("uncertain_spans", None)
-        return Block(
-            kind=kind,
-            markdown=markdown,
-            bbox=block.bbox,
-            confidence=block.confidence,
-            asset_id=block.asset_id,
-            source_pages=list(block.source_pages),
-            provenance=list(block.provenance),
-            metadata=metadata,
-        )
-
-    return [
-        copy("heading", match.group("label"), "label"),
-        copy("paragraph", match.group("body").strip(), "body"),
-    ]
-
-
 def _clean_prose(value: str) -> str:
     lines = [re.sub(r"[ \t]{2,}", " ", line).rstrip() for line in value.splitlines()]
     value = "\n".join(lines).strip()
-    value = re.sub(r"^Proof\.\s+", "**Proof.** ", value)
     value = re.sub(r"\\\)\s+([,.;:!?])", lambda match: r"\)" + match.group(1), value)
     return value
 

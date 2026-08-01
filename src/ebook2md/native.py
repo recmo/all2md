@@ -284,12 +284,7 @@ def reconcile_observations(
     """Keep multi-page structure and apply only confidently aligned Gundam spans."""
     provenance: list[dict[str, Any]] = []
     warnings: list[str] = list(primary.warnings)
-    canonical = []
-    for block in primary.blocks:
-        if _suspicious_ungrounded(block):
-            warnings.append("visual_suspicious_ungrounded_preamble")
-        else:
-            canonical.append(_copy_block(block))
+    canonical = [_copy_block(block) for block in primary.blocks]
     primary_bad = bool(
         set(primary.warnings)
         & {"visual_empty_output", "visual_malformed_grounding", "visual_text_repetition", "visual_truncated"}
@@ -327,9 +322,6 @@ def reconcile_observations(
             ]
             canonical = retained_headings
             for candidate in recovery.blocks:
-                if _suspicious_ungrounded(candidate):
-                    warnings.append("visual_suspicious_ungrounded_preamble")
-                    continue
                 adopted = _copy_block(candidate)
                 adopted.provenance.append(
                     {"observation": primary.id, "action": "replaced_corrupt_page_local_content"}
@@ -377,9 +369,6 @@ def reconcile_observations(
                 used.add(candidate_index)
         if primary_bad and not canonical:
             for candidate in recovery.blocks:
-                if _suspicious_ungrounded(candidate):
-                    warnings.append("visual_suspicious_ungrounded_preamble")
-                    continue
                 adopted = _copy_block(candidate)
                 adopted.provenance.append({"observation": primary.id, "action": "filled_empty_primary"})
                 canonical.append(adopted)
@@ -664,14 +653,6 @@ def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObs
     recovery_tokens = set(normalize(_observation_text(recovery)).casefold().split())
     overlap = len(primary_tokens & recovery_tokens) / max(1, min(len(primary_tokens), len(recovery_tokens)))
     return not primary.blocks or overlap >= 0.35
-
-
-def _suspicious_ungrounded(block: Block) -> bool:
-    return bool(
-        block.metadata.get("native_ungrounded")
-        and block.bbox is None
-        and re.fullmatch(r"\d{4}年\d{1,2}月\d{1,2}日", block.markdown.strip())
-    )
 
 
 def observation_dict(observation: OcrObservation, *, raw_path: str) -> dict[str, Any]:
