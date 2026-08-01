@@ -65,8 +65,9 @@ def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
     assert "![A useful diagram.]" in markdown
     page_json = json.loads((bundle / "pages/page-0001.json").read_text())
     assert "broken embedded text" in page_json["embedded"]["text"]
+    assert "<|det|>diagram" in page_json["raw_ocr"]
+    assert (bundle / "conversion.log").exists()
     manifest = json.loads((bundle / "assets/manifest.json").read_text())
     assert len(manifest["assets"]) >= 2
     verification = verify_bundle(bundle)
     assert verification.ok, verification.errors
-

@@ -20,7 +20,7 @@ def verify_bundle(root: Path) -> Verification:
     root = root.resolve()
     errors: list[str] = []
     warnings: list[str] = []
-    for required in ("book.md", "document.json", "metadata.json", "assets/manifest.json"):
+    for required in ("book.md", "document.json", "metadata.json", "conversion.log", "assets/manifest.json"):
         if not (root / required).exists():
             errors.append(f"missing {required}")
     if errors:
@@ -56,4 +56,3 @@ def verify_bundle(root: Path) -> Verification:
         warnings.append(f"page {failed.get('page')} failed: {failed.get('error')}")
     warnings.extend(metadata.get("warnings", []))
     return Verification(not errors, errors, sorted(set(warnings)), len(markdown_paths), len(manifest.get("assets", [])))
-

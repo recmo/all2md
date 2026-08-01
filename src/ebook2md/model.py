@@ -54,6 +54,7 @@ class PageResult:
     warnings: list[str] = field(default_factory=list)
     generation: dict[str, Any] = field(default_factory=dict)
     source_assets: list[dict[str, Any]] = field(default_factory=list)
+    raw_ocr: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

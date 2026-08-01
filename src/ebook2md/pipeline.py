@@ -21,6 +21,7 @@ from .markdown import write_markdown
 from .model import Block, PageResult
 from .ocr import MlxUnlimitedOcr, OcrBackend, parse_output
 from .util import atomic_json, sha256_file, slugify
+from .util import atomic_text
 
 FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
 FORMULA_KINDS = {"formula", "equation", "display_formula"}
@@ -94,6 +95,7 @@ def convert(
                 warnings=list(comparison.warnings),
                 generation=generation,
                 source_assets=source_page.source_assets,
+                raw_ocr=raw,
             )
             atomic_json(page_path, result.to_dict())
             page_results.append(result)
@@ -142,6 +144,7 @@ def convert(
         "platform": platform.platform(),
     }
     atomic_json(bundle / "metadata.json", metadata)
+    _write_log(bundle, metadata)
     shutil.rmtree(work, ignore_errors=True)
     if failed:
         raise RuntimeError(f"{len(failed)} page(s) failed; successful pages are resumable in {bundle}")
@@ -255,6 +258,7 @@ def _write_epub(bundle: Path, source: Path, document, assets: AssetStore, finger
         "failed_pages": [],
         "duration_seconds": round(time.time() - started, 3),
     })
+    _write_log(bundle, _read_json(bundle / "metadata.json"))
     return bundle
 
 
@@ -294,4 +298,17 @@ def _page_from_dict(value: dict[str, Any]) -> PageResult:
         comparison=Comparison(**value.get("comparison", {})), warnings=value.get("warnings", []),
         generation=value.get("generation", {}),
         source_assets=value.get("source_assets", []),
+        raw_ocr=value.get("raw_ocr", ""),
     )
+
+
+def _write_log(bundle: Path, metadata: dict[str, Any]) -> None:
+    lines = [
+        f"source={metadata.get('source')}",
+        f"kind={metadata.get('source_kind')}",
+        f"pages={metadata.get('page_count', 0)}",
+        f"duration_seconds={metadata.get('duration_seconds')}",
+    ]
+    lines.extend(f"warning={warning}" for warning in metadata.get("warnings", []))
+    lines.extend(f"failed_page={item.get('page')} error={item.get('error')}" for item in metadata.get("failed_pages", []))
+    atomic_text(bundle / "conversion.log", "\n".join(lines) + "\n")
