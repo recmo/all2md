@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from ebook2md.formatting import format_markdown
-from ebook2md.markdown import html_tables_to_markdown, local_links, markdown_anchors, merge_html_tables, normalize_table_blocks, strict_page_markdown, write_markdown
+from ebook2md.markdown import html_tables_to_markdown, local_links, markdown_anchors, merge_html_tables, normalize_heading_case, normalize_table_blocks, strict_page_markdown, title_case_heading, write_markdown
 from ebook2md.model import Block, Chapter, Comparison, EmbeddedEvidence, PageResult
 
 
@@ -122,7 +122,7 @@ def test_outline_and_visual_titles_become_markdown_hierarchy():
         [{"level": 2, "title": "Chapter 1: Start", "page": 10}],
     )
     assert markdown.startswith("## Chapter 1: Start\n\nBody")
-    assert "### A SECTION" in markdown
+    assert "### A Section" in markdown
     assert "<table" not in markdown
     assert "| A | B |" in markdown
 
@@ -156,5 +156,124 @@ def test_synthetic_matter_file_contains_level_two_sections(tmp_path: Path):
         title="Book",
     )
     markdown = (tmp_path / "chapters/000-front-matter.md").read_text()
-    assert markdown.startswith("# Front matter")
+    assert markdown.startswith("# Front Matter")
     assert "## Introduction" in markdown
+
+
+def test_all_caps_headings_are_title_cased_conservatively():
+    assert normalize_heading_case(
+        "### WRITING VERSUS TALKING (ISSUES AND PROPOSED SOLUTIONS)"
+    ) == "### Writing Versus Talking (Issues and Proposed Solutions)"
+    assert title_case_heading("CHAPTER 21: AREAS OF RESPONSIBILITY (AORS)") == (
+        "Chapter 21: Areas of Responsibility (AORs)"
+    )
+    assert title_case_heading("PART IV: INFRASTRUCTURE") == "Part IV: Infrastructure"
+    assert title_case_heading("KEY PERFORMANCE INDICATORS (KPIS)") == (
+        "Key Performance Indicators (KPIs)"
+    )
+    assert title_case_heading("Already Mixed-Case") == "Already Mixed-Case"
+    assert title_case_heading("TITLE PAGE") == "Title Page"
+    assert title_case_heading("Appendix: to IPO, or not to IPO?") == (
+        "Appendix: To IPO, or Not to IPO?"
+    )
+    assert title_case_heading("OpenAI and eBay") == "OpenAI and eBay"
+
+
+def test_heading_links_keep_their_destinations():
+    source = "## [PART IV: INFRASTRUCTURE](chapters/004-part-iv.md#part-iv-infrastructure)"
+    assert normalize_heading_case(source) == (
+        "## [Part IV: Infrastructure](chapters/004-part-iv.md#part-iv-infrastructure)"
+    )
+
+
+def test_cover_style_front_matter_suppresses_display_titles():
+    result = PageResult(
+        number=1,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("title", "THE GREAT CEO WITHIN", (200, 100, 800, 300)),
+            Block("text", "A tactical guide."),
+            Block("embedded_figure", "![Cover](assets/figures/cover.png)", (0, 0, 1000, 1000)),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(
+        result,
+        [{"level": 1, "title": "Part I: The Beginning", "page": 10}],
+    )
+    assert "THE GREAT CEO WITHIN" not in markdown
+    assert "# " not in markdown
+    assert "A tactical guide." in markdown
+    assert "![Cover]" in markdown
+
+
+def test_unsupported_front_matter_title_is_demoted_to_linked_text():
+    result = PageResult(
+        number=7,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("title", "[PART IV: INFRASTRUCTURE](#page-93)")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(
+        result,
+        [{"level": 1, "title": "Part I: The Beginning", "page": 10}],
+    )
+    assert markdown == "[PART IV: INFRASTRUCTURE](#page-93)"
+    assert not markdown.startswith("#")
+
+
+def test_front_matter_outline_boundary_remains_authoritative():
+    result = PageResult(
+        number=6,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("title", "CONTENTS"), Block("text", "Part I ........ 10")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(
+        result,
+        [
+            {"level": 2, "title": "CONTENTS", "page": 6},
+            {"level": 1, "title": "Part I: The Beginning", "page": 10},
+        ],
+    )
+    assert markdown == "## Contents\n\nPart I ........ 10"
+
+
+def test_title_page_boundary_does_not_promote_display_title():
+    result = PageResult(
+        number=3,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("title", "THE GREAT CEO WITHIN"), Block("text", "Matt Mochary")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(
+        result,
+        [
+            {"level": 1, "title": "Title page", "page": 3},
+            {"level": 1, "title": "Part I: The Beginning", "page": 10},
+        ],
+    )
+    assert markdown == "# Title Page\n\nMatt Mochary"
+
+
+def test_front_matter_counting_noise_is_suppressed():
+    result = PageResult(
+        number=4,
+        image="page.png",
+        visual_markdown="1. 2. 3. 4. 5. 6. 7. 8. 9. 10.",
+        blocks=[Block("text", "1. 2. 3. 4. 5. 6. 7. 8. 9. 10.")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    assert strict_page_markdown(
+        result,
+        [{"level": 1, "title": "Part I: The Beginning", "page": 10}],
+    ) == ""

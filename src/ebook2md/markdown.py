@@ -15,6 +15,21 @@ IMAGE_LINK = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 TITLE_KINDS = {"title", "page_title", "heading", "section_header", "header"}
+FIGURE_KINDS = {"embedded_figure", "figure", "image", "picture"}
+BODY_BOUNDARY = re.compile(r"^(?:part|chapter)\b", re.IGNORECASE)
+MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+SMALL_TITLE_WORDS = {
+    "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into",
+    "nor", "of", "on", "or", "over", "per", "the", "to", "up", "via", "with",
+}
+HEADING_ACRONYMS = {
+    "ai": "AI", "aor": "AOR", "aors": "AORs", "api": "API", "apis": "APIs",
+    "cbz": "CBZ", "ceo": "CEO", "ceos": "CEOs", "cfo": "CFO", "crm": "CRM",
+    "djvu": "DjVu", "epub": "EPUB", "faq": "FAQ", "faqs": "FAQs", "gfm": "GFM",
+    "hr": "HR", "ipo": "IPO", "kpi": "KPI", "kpis": "KPIs", "mlx": "MLX",
+    "ocr": "OCR", "okr": "OKR", "okrs": "OKRs", "pdf": "PDF", "saas": "SaaS",
+    "svg": "SVG", "ui": "UI", "ux": "UX", "vc": "VC",
+}
 
 
 def page_markdown(
@@ -29,6 +44,7 @@ def page_markdown(
         body = _remove_duplicate_heading(body, suppress_title)
     if heading_delta:
         body = _relevel_headings(body, heading_delta)
+    body = normalize_heading_case(body)
     if chapter:
         body = body.replace("](assets/", "](../assets/")
     return f"<!-- page: {page.number} -->\n\n{body}\n"
@@ -43,22 +59,135 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
     if boundary:
         blocks = _drop_visual_boundary_title(blocks, boundary["title"])
 
+    body_pages = [
+        item.get("page")
+        for item in outline
+        if BODY_BOUNDARY.match(str(item.get("title", "")).strip())
+        and isinstance(item.get("page"), int)
+    ]
+    in_front_matter = bool(body_pages) and page.number < min(body_pages)
+    cover_style = in_front_matter and _is_cover_style_page(page, boundary)
+
     current_level = 1
     preceding = [item for item in outline if item.get("page", 0) <= page.number]
     if preceding:
         current_level = preceding[-1].get("level", 1)
     pieces: list[str] = []
+    suppressed_noise = False
     if boundary:
-        pieces.append(f"{'#' * min(6, max(1, boundary.get('level', 1)))} {boundary['title'].strip()}")
+        title = title_case_heading(boundary["title"].strip())
+        pieces.append(f"{'#' * min(6, max(1, boundary.get('level', 1)))} {title}")
     for block in blocks:
         content = block.markdown.strip()
         if not content:
             continue
-        if block.kind in TITLE_KINDS and not HEADING.match(content):
-            content = f"{'#' * min(6, current_level + 1)} {content}"
+        if in_front_matter and _is_counting_noise(content):
+            suppressed_noise = True
+            continue
+        if block.kind in TITLE_KINDS:
+            if in_front_matter and cover_style:
+                continue
+            if in_front_matter and boundary is None:
+                content = HEADING.sub(lambda match: match.group(2), content)
+            elif not HEADING.match(content):
+                content = f"{'#' * min(6, current_level + 1)} {content}"
+        content = normalize_heading_case(content)
         pieces.append(content)
     fallback = page.visual_markdown.strip()
-    return "\n\n".join(pieces).strip() or fallback
+    rendered = "\n\n".join(pieces).strip()
+    if rendered or suppressed_noise:
+        return rendered
+    return normalize_heading_case(fallback)
+
+
+def normalize_heading_case(markdown: str) -> str:
+    """Title-case Markdown headings without touching link destinations."""
+    return HEADING.sub(
+        lambda match: f"{match.group(1)} {title_case_heading(match.group(2))}",
+        markdown,
+    )
+
+
+def title_case_heading(value: str) -> str:
+    visible = MARKDOWN_LINK.sub(lambda match: match.group(1), value)
+    if not any(character.isalpha() for character in visible):
+        return value
+
+    def normalize_text(text: str) -> str:
+        words = re.split(r"(\s+)", text)
+        word_indexes = [index for index, word in enumerate(words) if word and not word.isspace()]
+        last = word_indexes[-1] if word_indexes else -1
+        normalized: list[str] = []
+        capitalize_next = True
+        for index, word in enumerate(words):
+            if index not in word_indexes:
+                normalized.append(word)
+                continue
+            rendered = _title_case_token(
+                word,
+                first=index == word_indexes[0] or capitalize_next,
+                last=index == last,
+            )
+            normalized.append(rendered)
+            capitalize_next = word.rstrip("*_`])}").endswith(":")
+        return "".join(normalized)
+
+    links: list[str] = []
+
+    def protect_link(match: re.Match) -> str:
+        links.append(f"[{normalize_text(match.group(1))}]({match.group(2)})")
+        return f"§{len(links) - 1}§"
+
+    protected = MARKDOWN_LINK.sub(protect_link, value)
+    normalized = normalize_text(protected)
+    for index, link in enumerate(links):
+        normalized = normalized.replace(f"§{index}§", link)
+    return normalized
+
+
+def _title_case_token(token: str, *, first: bool, last: bool) -> str:
+    match = re.match(r"^([^A-Za-z0-9]*)(.*?)([^A-Za-z0-9']*)$", token)
+    if match is None or not match.group(2):
+        return token
+    prefix, core, suffix = match.groups()
+    parts = re.split(r"(-)", core)
+    normalized: list[str] = []
+    word_parts = [index for index, part in enumerate(parts) if part != "-"]
+    for index, part in enumerate(parts):
+        if part == "-":
+            normalized.append(part)
+            continue
+        folded = part.casefold()
+        if folded in HEADING_ACRONYMS:
+            normalized.append(HEADING_ACRONYMS[folded])
+        elif re.fullmatch(r"[IVXLCDM]+", part):
+            normalized.append(part)
+        elif folded in SMALL_TITLE_WORDS and not (first and index == word_parts[0]) and not (last and index == word_parts[-1]):
+            normalized.append(folded)
+        elif any(character.islower() for character in part) and any(character.isupper() for character in part):
+            normalized.append(part)
+        else:
+            normalized.append(folded[:1].upper() + folded[1:])
+    return prefix + "".join(normalized) + suffix
+
+
+def _is_cover_style_page(page: PageResult, boundary: dict | None) -> bool:
+    if boundary and str(boundary.get("title", "")).casefold() == "title page":
+        return True
+    for block in page.blocks:
+        if block.kind not in FIGURE_KINDS or block.bbox is None:
+            continue
+        left, top, right, bottom = block.bbox
+        if max(block.bbox) <= 1100 and max(0, right - left) * max(0, bottom - top) >= 450_000:
+            return True
+    return False
+
+
+def _is_counting_noise(value: str) -> bool:
+    if re.search(r"[A-Za-z]", value):
+        return False
+    numbers = [int(number) for number in re.findall(r"\b(\d{1,3})\s*\.", value)]
+    return len(numbers) >= 10 and numbers == list(range(numbers[0], numbers[0] + len(numbers)))
 
 
 def html_tables_to_markdown(markdown: str) -> str:
@@ -209,9 +338,10 @@ def write_markdown(
 ) -> list[str]:
     outline = outline or []
     written: list[str] = []
+    rendered_title = title_case_heading(title)
     if not split:
         shutil.rmtree(root / "chapters", ignore_errors=True)
-        content = f"# {title}\n\n" + "\n".join(
+        content = f"# {rendered_title}\n\n" + "\n".join(
             page_markdown(page, chapter=False, heading_delta=1) for page in pages
         )
         content = _rewrite_page_links(
@@ -226,7 +356,7 @@ def write_markdown(
     chapter_dir.mkdir(parents=True, exist_ok=True)
     for stale_markdown in chapter_dir.glob("*.md"):
         stale_markdown.unlink()
-    index_lines = [f"# {title}", "", "## Contents", ""]
+    index_lines = [f"# {rendered_title}", "", "## Contents", ""]
     chapter_files = [f"{index:03d}-{chapter.slug}.md" for index, chapter in enumerate(chapters)]
     targets = _page_targets(pages, chapters, chapter_files)
     for index, chapter in enumerate(chapters):
@@ -238,7 +368,8 @@ def write_markdown(
             heading_delta = -1
         else:
             heading_delta = 0
-        content = f"# {chapter.title}\n\n" + "\n".join(
+        chapter_title = title_case_heading(chapter.title)
+        content = f"# {chapter_title}\n\n" + "\n".join(
             page_markdown(
                 page,
                 chapter=True,
@@ -249,7 +380,7 @@ def write_markdown(
         )
         content = _rewrite_page_links(content, targets, filename)
         atomic_text(chapter_dir / filename, content.rstrip() + "\n")
-        index_lines.append(f"- [{chapter.title}](chapters/{filename})")
+        index_lines.append(f"- [{chapter_title}](chapters/{filename})")
         written.append(f"chapters/{filename}")
     atomic_text(root / "book.md", "\n".join(index_lines) + "\n")
     return ["book.md", *written]
