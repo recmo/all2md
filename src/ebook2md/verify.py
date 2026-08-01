@@ -115,7 +115,10 @@ def verify_bundle(root: Path) -> Verification:
             ):
                 errors.append(f"HTML table lacks fallback reason on page {page.get('number')}")
         visual = page.get("visual", {})
-        observations = [visual.get("multi_page", {}), *visual.get("gundam", [])]
+        observations = [
+            visual.get("multi_page", {}),
+            *visual.get("candidates", visual.get("gundam", [])),
+        ]
         for observation in observations:
             if not observation:
                 continue

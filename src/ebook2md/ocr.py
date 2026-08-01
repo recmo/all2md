@@ -44,6 +44,8 @@ class OcrBackend(Protocol):
 
     def recognize_pages(self, images: list[Path]) -> tuple[str, dict[str, object]]: ...
 
+    def recognize_detail(self, image: Path) -> tuple[str, dict[str, object]]: ...
+
 
 class MlxUnlimitedOcr:
     def __init__(self, max_tokens: int = 32768):
@@ -106,6 +108,16 @@ class MlxUnlimitedOcr:
             cropping=True,
             image_size=640,
             mode="gundam",
+            ngram_window=128,
+        )
+
+    def recognize_detail(self, image: Path) -> tuple[str, dict[str, object]]:
+        return self._recognize(
+            image,
+            task=GUNDAM_PROMPT.removeprefix("<image>"),
+            cropping=True,
+            image_size=1024,
+            mode="gundam_detail",
             ngram_window=128,
         )
 

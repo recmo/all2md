@@ -51,6 +51,7 @@ def convert(
     dpi: int = DEFAULT_DPI,
     pages: str | None = None,
     split_mode: str = "auto",
+    quality: str = "thorough",
     chapter_map: Path | None = None,
     languages: list[str] | None = None,
     resume: bool = True,
@@ -58,6 +59,8 @@ def convert(
     force: bool = False,
     backend: OcrBackend | None = None,
 ) -> Path:
+    if quality not in {"fast", "balanced", "thorough"}:
+        raise ValueError(f"unsupported OCR quality: {quality}")
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
@@ -72,6 +75,7 @@ def convert(
         "pages": pages,
         "languages": languages or [],
         "multi_page": multi_page,
+        "quality": quality,
         "code": _code_fingerprint(
             "adapters.py", "assets.py", "compare.py", "model.py", "native.py", "ocr.py", "pipeline.py"
         ),
@@ -148,19 +152,21 @@ def convert(
                 # Canonical spans originate from the immutable group invocation;
                 # page segmentation is a deterministic parser view of that raw file.
                 primary.id = group_observation.id
-                recoveries = _recover_page_if_needed(
+                candidates, candidate_warnings = _collect_page_candidates(
                     source_page,
                     primary,
                     group_observation,
                     backend,
                     bundle,
+                    quality=quality,
                 )
-                blocks, recovery, validation_warnings = reconcile_observations(primary, recoveries)
+                blocks, recovery, validation_warnings = reconcile_observations(primary, candidates)
+                validation_warnings.extend(candidate_warnings)
                 result = _page_result(
                     source_page,
                     primary,
                     group_observation,
-                    recoveries,
+                    candidates,
                     blocks,
                     recovery,
                     validation_warnings,
@@ -259,6 +265,7 @@ def convert(
         "requested_page_count": len(document.pages),
         "model": dict(backend.identity),
         "multi_page": multi_page,
+        "quality": quality,
         "split": split,
         "markdown_files": files,
         "warnings": sorted(set(warnings)),
@@ -272,6 +279,11 @@ def convert(
         "output_fingerprints": output_fingerprints,
         "resume_stable": resume_stable,
         "failed_pages": failed,
+        "review_required_blocks": sum(
+            bool(block.metadata.get("review_required"))
+            for page in page_results
+            for block in page.blocks
+        ),
         "duration_seconds": round(time.time() - started, 3),
         "platform": platform.platform(),
     }
@@ -308,6 +320,11 @@ def _page_result(
         include_unclaimed=not primary.generation.get("merged_into"),
     )
     raw_root = "raw"
+    consensus_observations = sorted({
+        entry["recovery_observation"]
+        for entry in recovery
+        if entry.get("action") == "selected_ocr_consensus" and entry.get("recovery_observation")
+    })
     result = PageResult(
         number=source_page.number,
         image=source_page.image_path.name,
@@ -324,12 +341,15 @@ def _page_result(
                 group_observation,
                 raw_path=f"{raw_root}/{group_observation.id}.txt",
             ),
-            "gundam": [
+            "candidates": [
                 observation_dict(item, raw_path=f"{raw_root}/{item.id}.txt") for item in recoveries
             ],
             "canonical": {
                 "blocks": [asdict(block) for block in blocks],
-                "authoritative_observation": group_observation.id,
+                "authoritative_observation": (
+                    "ocr_consensus" if consensus_observations else group_observation.id
+                ),
+                "selected_observations": consensus_observations,
             },
         },
         recovery=recovery,
@@ -427,7 +447,15 @@ def _segments_appear_reordered(group, recognized) -> bool:
     return matches != sorted(matches)
 
 
-def _recover_page_if_needed(source_page, primary, group_observation, backend, bundle):
+def _collect_page_candidates(
+    source_page,
+    primary,
+    group_observation,
+    backend,
+    bundle,
+    *,
+    quality: str,
+):
     critical = {
         "visual_empty_output",
         "visual_malformed_grounding",
@@ -446,17 +474,60 @@ def _recover_page_if_needed(source_page, primary, group_observation, backend, bu
         and not (comparison.length_ratio is not None and comparison.length_ratio < 0.65)
     )
     group_problem = bool(set(group_observation.warnings) & critical)
-    if not (set(primary.warnings) & critical or group_problem or disagreement):
-        return []
-    raw, generation = backend.recognize(source_page.image_path)
-    recovery = parse_native_observation(
-        raw,
-        mode="gundam",
-        source_pages=[source_page.number],
-        generation=generation,
-    )
-    _store_raw_observation(bundle, recovery)
-    return [recovery]
+    needs_recovery = bool(set(primary.warnings) & critical or group_problem or disagreement)
+    if quality == "fast" or (quality == "balanced" and not needs_recovery):
+        return [], []
+
+    candidates: list[OcrObservation] = []
+    warnings: list[str] = []
+    try:
+        raw, generation = backend.recognize(source_page.image_path)
+        candidate = parse_native_observation(
+            raw,
+            mode="gundam",
+            source_pages=[source_page.number],
+            generation=generation,
+        )
+        _store_raw_observation(bundle, candidate)
+        candidates.append(candidate)
+    except Exception:
+        warnings.append("visual_auxiliary_ocr_failed")
+
+    recognize_detail = getattr(backend, "recognize_detail", None)
+    if quality == "thorough" and callable(recognize_detail):
+        try:
+            raw, generation = recognize_detail(source_page.image_path)
+            candidate = parse_native_observation(
+                raw,
+                mode="gundam_detail",
+                source_pages=[source_page.number],
+                generation=generation,
+            )
+            _store_raw_observation(bundle, candidate)
+            candidates.append(candidate)
+        except Exception:
+            warnings.append("visual_auxiliary_ocr_failed")
+
+    group_pages = primary.generation.get("group_pages", [])
+    recognize_pages = getattr(backend, "recognize_pages", None)
+    if quality == "thorough" and len(group_pages) > 1 and callable(recognize_pages):
+        try:
+            value = recognize_pages([source_page.image_path])
+            if _is_invocation(value):
+                raw, generation = value
+            else:
+                raw, generation = list(value)[0]
+            candidate = parse_native_observation(
+                raw,
+                mode="single_base",
+                source_pages=[source_page.number],
+                generation={**dict(generation), "mode": "single_base"},
+            )
+            _store_raw_observation(bundle, candidate)
+            candidates.append(candidate)
+        except Exception:
+            warnings.append("visual_auxiliary_ocr_failed")
+    return candidates, sorted(set(warnings))
 
 
 def _store_raw_observation(bundle: Path, observation: OcrObservation) -> Path:
@@ -725,6 +796,11 @@ def _split_semantic_lead(block: Block) -> list[Block]:
         return [block]
 
     def copy(kind: str, markdown: str, role: str) -> Block:
+        metadata = {**block.metadata, "semantic_split": role}
+        if role == "label":
+            for key in tuple(metadata):
+                if key.startswith("review_"):
+                    metadata.pop(key)
         return Block(
             kind=kind,
             markdown=markdown,
@@ -733,7 +809,7 @@ def _split_semantic_lead(block: Block) -> list[Block]:
             asset_id=block.asset_id,
             source_pages=list(block.source_pages),
             provenance=list(block.provenance),
-            metadata={**block.metadata, "semantic_split": role},
+            metadata=metadata,
         )
 
     return [
@@ -784,13 +860,28 @@ def _group_enumerated_blocks(blocks: list[Block]) -> list[Block]:
             max(box[2] for box in boxes),
             max(box[3] for box in boxes),
         ) if boxes else None
+        review_items = [item for item in items if item.metadata.get("review_required")]
+        metadata = {"normalized_enumeration": style}
+        if review_items:
+            metadata.update({
+                "review_required": True,
+                "review_reason": "ocr_candidates_disagree",
+                "review_consensus": min(
+                    float(item.metadata.get("review_consensus", 0.0)) for item in review_items
+                ),
+                "review_candidates": sorted({
+                    candidate
+                    for item in review_items
+                    for candidate in item.metadata.get("review_candidates", [])
+                }),
+            })
         output.append(Block(
             kind="list",
             markdown=markdown,
             bbox=bbox,
             source_pages=sorted({page for item in items for page in item.source_pages}),
             provenance=[entry for item in items for entry in item.provenance],
-            metadata={"normalized_enumeration": style},
+            metadata=metadata,
         ))
         index = end
     return output

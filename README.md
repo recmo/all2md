@@ -5,14 +5,19 @@ auditable Markdown bundles on Apple Silicon. Unlimited-OCR provides the visual
 interpretation; embedded PDF and DjVu text is retained only as comparison
 evidence and never silently replaces the visual result.
 
-The model contract is intentionally narrow and immutable: ordered page windows
-use Baidu's multi-page Base recipe, and affected pages use Baidu's Gundam recipe
-for local recovery. Raw output from both observations is retained untouched;
-deterministic Python code parses, validates, reconciles, structures, and renders
-the result. The model is never prompted to emit JSON or arbitrate between its
-own readings. The MLX runtime keeps the vision stack and image tensors in FP32
-and the language decoder in BF16; effective precision is recorded with each
-invocation.
+The default `thorough` quality mode collects independent readings before it
+commits to Markdown: an ordered multi-page Base pass, Gundam crops at 640 and
+1024 pixels, and (for multi-page windows) a single-page Base pass. Deterministic
+Python code aligns the observations and selects the reading with the strongest
+cross-pass agreement, using only format integrity as a tie-breaker. It does not
+guess mathematical meaning. Disagreements remain visible as hidden
+`ebook2md-review` comments beside the best available rendering. `balanced` runs
+Gundam only when structural validation detects trouble; `fast` uses the primary
+Base pass alone.
+
+The model is never prompted to emit JSON or arbitrate between its own readings.
+The MLX runtime keeps the vision stack and image tensors in FP32 and the
+language decoder in BF16; effective precision is recorded with each invocation.
 
 ## Install
 
@@ -43,8 +48,14 @@ The OCR dependency is pinned to MLX-VLM revision
 ebook2md convert paper.pdf --output result
 ebook2md convert book.djvu --output result --split auto
 ebook2md convert scans/ --output result --pages 1-20
+ebook2md convert draft.pdf --output result --quality balanced
 ebook2md verify result/book
 ```
+
+`--quality thorough|balanced|fast` defaults to `thorough`. Thorough conversion
+is deliberately slower: it spends additional inference time on every visual
+page so the emitted Markdown is always the pipeline's best consensus, not just
+its first reading.
 
 For a large document, `--split auto` creates chapter files only when reliable
 structural boundaries exist. `--split chapters --chapter-map chapters.json`
@@ -79,13 +90,17 @@ provenance and every placement remain available in the JSON artifacts.
 Byte-identical display files are deduplicated independently from placement
 records, so a reused PDF object still records every page and box.
 
-Each fixed-layout page record keeps `visual.multi_page`, `visual.gundam`,
-`embedded`, `comparison`, canonical normalized blocks, and recovery provenance
-separately. Markdown is rendered only from canonical blocks. A pinned
-`mdformat`/GFM pass runs only when it preserves page markers, image targets, and
-semantic tokens; PyMarkdown is scan-only. Conversion runs `ebook2md verify`
-before reporting success. Missing optional evidence remains a warning because
-OCR and extraction are intentionally best effort and can be rerun.
+Each fixed-layout page record keeps `visual.multi_page`, `visual.candidates`,
+`embedded`, `comparison`, canonical normalized blocks, and selection provenance
+separately. Markdown is rendered only from the best canonical blocks. Candidate
+disagreement sets block-level review metadata, increments
+`metadata.json`'s `review_required_blocks`, and emits a portable HTML comment
+immediately after the affected Markdown; it does not withhold a best guess.
+A pinned `mdformat`/GFM pass runs only when it preserves page markers, image
+targets, and semantic tokens; PyMarkdown is scan-only. Conversion runs
+`ebook2md verify` before reporting success. Missing optional evidence remains a
+warning because OCR and extraction are intentionally best effort and can be
+rerun.
 
 ## Supported inputs
 

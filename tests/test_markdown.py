@@ -248,6 +248,26 @@ def test_mid_page_outline_boundary_stays_after_carry_over_text():
     assert markdown.count("Rings and Fields") == 1
 
 
+def test_uncertain_block_emits_review_comment():
+    result = PageResult(
+        number=27,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block(
+                "paragraph",
+                r"The value is \( a_i a = e \).",
+                metadata={"review_required": True, "review_consensus": 0.81234},
+            )
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(result, [])
+    assert "The value is" in markdown
+    assert "<!-- ebook2md-review: OCR candidates disagree on page 27, block 1; consensus=0.812 -->" in markdown
+
+
 def test_cover_style_front_matter_suppresses_display_titles():
     result = PageResult(
         number=1,

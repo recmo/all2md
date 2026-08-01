@@ -144,6 +144,27 @@ def test_gundam_reconciliation_is_local_and_never_replaces_tables():
     assert "visual_truncated" in warnings
 
 
+def test_three_pass_consensus_selects_majority_and_marks_disagreement():
+    primary = parse_native_observation(
+        r"<|det|>text [10,10,900,200]<|/det|>The value is \( a, a = e \).",
+        mode="multi_base",
+        source_pages=[27],
+    )
+    candidates = [
+        parse_native_observation(
+            r"<|det|>text [10,10,900,200]<|/det|>The value is \( a_i a = e \).",
+            mode=mode,
+            source_pages=[27],
+        )
+        for mode in ("gundam", "gundam_detail")
+    ]
+    blocks, provenance, warnings = reconcile_observations(primary, candidates)
+    assert r"a_i a = e" in blocks[0].markdown
+    assert blocks[0].metadata["review_required"] is True
+    assert provenance[0]["action"] == "selected_ocr_consensus"
+    assert "visual_ocr_disagreement" in warnings
+
+
 def test_clean_gundam_table_replaces_corrupt_page_local_columns():
     primary = parse_native_observation(
         "<|det|>title [100,100,200,120]<|/det|>Department"
@@ -197,6 +218,7 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
     images = [tmp_path / "1.png", tmp_path / "2.png"]
     _, multi = backend.recognize_pages(images)
     _, gundam = backend.recognize(images[0])
+    _, detail = backend.recognize_detail(images[0])
     assert multi["contract"] == {
         "prompt": MULTI_PAGE_PROMPT,
         "base_size": 1024,
@@ -217,8 +239,19 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
         "ngram_window": 128,
         "precision": {"vision": "float32", "decoder": "bfloat16"},
     }
+    assert detail["contract"] == {
+        "prompt": GUNDAM_PROMPT,
+        "base_size": 1024,
+        "image_size": 1024,
+        "crop_mode": True,
+        "temperature": 0.0,
+        "no_repeat_ngram_size": 35,
+        "ngram_window": 128,
+        "precision": {"vision": "float32", "decoder": "bfloat16"},
+    }
     assert calls[0]["cropping"] is False and calls[0]["image_size"] == 1024
     assert calls[1]["cropping"] is True and calls[1]["image_size"] == 640
+    assert calls[2]["cropping"] is True and calls[2]["image_size"] == 1024
 
 
 def test_mlx_backend_enforces_component_precision():
@@ -522,9 +555,9 @@ def test_recovery_observations_and_provenance_are_preserved(tmp_path: Path):
     bundle = convert(pdf, tmp_path / "out", backend=RecoveryFixtureOcr(), split_mode="single")
     page_json = json.loads((bundle / "pages/page-0001.json").read_text())
     assert page_json["visual"]["multi_page"]["raw_path"].startswith("raw/")
-    assert len(page_json["visual"]["gundam"]) == 1
+    assert len(page_json["visual"]["candidates"]) == 1
     assert page_json["recovery"][0]["action"] == "replaced_corrupt_page_local_content"
-    for observation in [page_json["visual"]["multi_page"], *page_json["visual"]["gundam"]]:
+    for observation in [page_json["visual"]["multi_page"], *page_json["visual"]["candidates"]]:
         assert (bundle / observation["raw_path"]).exists()
     verification = verify_bundle(bundle)
     assert verification.ok, verification.errors
@@ -540,12 +573,26 @@ def test_interrupted_conversion_resumes_atomically_without_reprocessing(tmp_path
     document.close()
     backend = InterruptingFixtureOcr()
     try:
-        convert(pdf, tmp_path / "out", backend=backend, split_mode="single", multi_page=False)
+        convert(
+            pdf,
+            tmp_path / "out",
+            backend=backend,
+            split_mode="single",
+            multi_page=False,
+            quality="balanced",
+        )
     except RuntimeError as error:
         assert "1 page(s) failed" in str(error)
     else:
         raise AssertionError("the first conversion should be interrupted")
-    bundle = convert(pdf, tmp_path / "out", backend=backend, split_mode="single", multi_page=False)
+    bundle = convert(
+        pdf,
+        tmp_path / "out",
+        backend=backend,
+        split_mode="single",
+        multi_page=False,
+        quality="balanced",
+    )
     assert backend.calls == {1: 1, 2: 2, 3: 1}
     metadata = json.loads((bundle / "metadata.json").read_text())
     assert metadata["resume_stable"] is True
@@ -574,6 +621,7 @@ def test_assembly_changes_reuse_ocr_without_reporting_instability(tmp_path: Path
         split_mode="single",
         chapter_map=chapter_map,
         multi_page=False,
+        quality="balanced",
     )
     calls = dict(backend.calls)
     bundle = convert(
@@ -583,6 +631,7 @@ def test_assembly_changes_reuse_ocr_without_reporting_instability(tmp_path: Path
         split_mode="chapters",
         chapter_map=chapter_map,
         multi_page=False,
+        quality="balanced",
     )
     metadata = json.loads((bundle / "metadata.json").read_text())
     assert backend.calls == calls

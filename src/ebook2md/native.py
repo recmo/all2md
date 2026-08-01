@@ -225,6 +225,8 @@ def reconcile_observations(
         set(primary.warnings)
         & {"visual_empty_output", "visual_malformed_grounding", "visual_text_repetition", "visual_truncated"}
     )
+    if len(recoveries) >= 2 and not primary_bad:
+        return _reconcile_consensus(primary, recoveries, canonical, warnings)
     for recovery in recoveries:
         warnings.extend(recovery.warnings)
         if _should_replace_corrupt_local_page(primary, recovery):
@@ -311,6 +313,86 @@ def reconcile_observations(
         elif any(index not in used for index in range(len(recovery.blocks))) and primary_bad:
             warnings.append("visual_reconciliation_uncertain")
     return canonical, provenance, sorted(set(warnings))
+
+
+def _reconcile_consensus(
+    primary: OcrObservation,
+    candidates: list[OcrObservation],
+    canonical: list[Block],
+    warnings: list[str],
+) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
+    provenance: list[dict[str, Any]] = []
+    warnings.extend(warning for candidate in candidates for warning in candidate.warnings)
+    for index, block in enumerate(canonical):
+        variants: list[tuple[str, Block]] = [(primary.id, block)]
+        for observation in candidates:
+            compatible = [candidate for candidate in observation.blocks if _compatible(block, candidate)]
+            if not compatible:
+                continue
+            candidate = max(compatible, key=lambda item: _alignment_score(block, item))
+            if _alignment_score(block, candidate) >= 0.55:
+                variants.append((observation.id, candidate))
+        if len(variants) < 2:
+            continue
+
+        normalized = [normalize(candidate.markdown) for _, candidate in variants]
+        similarities = [
+            SequenceMatcher(None, left, right, autojunk=False).ratio()
+            for left_index, left in enumerate(normalized)
+            for right in normalized[left_index + 1 :]
+        ]
+        minimum_similarity = min(similarities, default=1.0)
+        scores = []
+        for candidate_index, (_, candidate) in enumerate(variants):
+            peers = [
+                SequenceMatcher(None, normalized[candidate_index], peer, autojunk=False).ratio()
+                for peer_index, peer in enumerate(normalized)
+                if peer_index != candidate_index
+            ]
+            consensus = sum(peers) / max(1, len(peers))
+            scores.append(consensus - _structural_penalty(candidate.markdown))
+
+        winner_index = max(range(len(variants)), key=lambda item: (scores[item], item == 0))
+        winner_id, winner = variants[winner_index]
+        if block.kind != "table" and winner_index:
+            block.kind = winner.kind
+            block.markdown = winner.markdown
+            block.provenance.append(
+                {
+                    "observation": winner_id,
+                    "action": "selected_ocr_consensus",
+                    "score": round(scores[winner_index], 6),
+                }
+            )
+            provenance.append(
+                {
+                    "block": index,
+                    "primary_observation": primary.id,
+                    "recovery_observation": winner_id,
+                    "action": "selected_ocr_consensus",
+                    "score": round(scores[winner_index], 6),
+                }
+            )
+        if minimum_similarity < 0.985:
+            warnings.append("visual_ocr_disagreement")
+            block.metadata.update(
+                {
+                    "review_required": True,
+                    "review_reason": "ocr_candidates_disagree",
+                    "review_consensus": round(max(scores), 6),
+                    "review_candidates": [identifier for identifier, _ in variants],
+                }
+            )
+    return canonical, provenance, sorted(set(warnings))
+
+
+def _structural_penalty(value: str) -> float:
+    penalty = 0.0
+    for opening, closing in ((r"\(", r"\)"), (r"\[", r"\]")):
+        penalty += 0.08 * abs(value.count(opening) - value.count(closing))
+    penalty += 0.08 * (value.count("$") % 2)
+    penalty += 0.2 * value.count("�")
+    return penalty
 
 
 def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObservation) -> bool:
