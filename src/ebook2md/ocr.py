@@ -39,6 +39,8 @@ class OcrBackend(Protocol):
 
     def recognize(self, image: Path) -> tuple[str, dict[str, object]]: ...
 
+    def recognize_pages(self, images: list[Path]) -> list[tuple[str, dict[str, object]]]: ...
+
 
 class MlxUnlimitedOcr:
     identity = {"engine": "mlx-vlm", "model": MODEL_ID, "revision": MODEL_REVISION}
@@ -61,6 +63,51 @@ class MlxUnlimitedOcr:
         return self._recognize(
             image, task="document parsing.", cropping=True, image_size=640, mode="gundam"
         )
+
+    def recognize_pages(self, images: list[Path]) -> list[tuple[str, dict[str, object]]]:
+        """Port Unlimited-OCR's `infer_multi` contract to MLX.
+
+        The reference implementation expands every page at one image-token position.
+        mlx-vlm requires one marker per image, but with no text between the markers it
+        produces the same contiguous image-token sequence.
+        """
+        if not images:
+            return []
+        self._load()
+        from mlx_vlm import generate
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        prompt = apply_chat_template(
+            self._processor,
+            self._model.config,
+            "Multi page parsing.",
+            num_images=len(images),
+        )
+        result = generate(
+            model=self._model,
+            processor=self._processor,
+            image=[str(image) for image in images],
+            prompt=prompt,
+            max_tokens=self.max_tokens,
+            temperature=0.0,
+            cropping=False,
+            image_size=1024,
+            base_size=1024,
+            logits_processors=[SlidingWindowNoRepeatNgramProcessor(35, 1024)],
+        )
+        pages = split_multi_page_output(result.text, len(images))
+        common = {
+            "prompt_tokens": result.prompt_tokens,
+            "generation_tokens": result.generation_tokens,
+            "finish_reason": result.finish_reason,
+            "peak_memory_gb": result.peak_memory,
+            "mode": "multi_base",
+            "group_size": len(images),
+        }
+        return [
+            (page, {**common, "group_index": index})
+            for index, page in enumerate(pages)
+        ]
 
     def recognize_retry(self, image: Path) -> tuple[str, dict[str, object]]:
         return self._recognize(
@@ -146,6 +193,15 @@ class SlidingWindowNoRepeatNgramProcessor:
         return result[0] if logits.ndim == 1 else result
 
 
+def split_multi_page_output(raw: str, expected_pages: int) -> list[str]:
+    pages = [part.strip() for part in re.split(r"\s*<PAGE>\s*", raw) if part.strip()]
+    if not pages or len(pages) > expected_pages:
+        raise RuntimeError(
+            f"multi-page OCR returned {len(pages)} page segment(s) for {expected_pages} input page(s)"
+        )
+    return pages
+
+
 class SidecarOcr:
     """Test/debug backend reading `<page-image>.ocr.txt` files."""
 
@@ -156,3 +212,6 @@ class SidecarOcr:
         if not sidecar.exists():
             raise RuntimeError(f"missing OCR sidecar: {sidecar}")
         return sidecar.read_text(encoding="utf-8"), {}
+
+    def recognize_pages(self, images: list[Path]) -> list[tuple[str, dict[str, object]]]:
+        return [self.recognize(image) for image in images]

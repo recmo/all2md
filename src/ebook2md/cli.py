@@ -27,6 +27,12 @@ def parser() -> argparse.ArgumentParser:
     convert_parser.add_argument("--split", choices=("auto", "single", "chapters"), default="auto")
     convert_parser.add_argument("--chapter-map", type=Path)
     convert_parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    convert_parser.add_argument(
+        "--multi-page",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="analyze adjacent fixed-layout pages together (default: enabled)",
+    )
     convert_parser.add_argument("--force", action="store_true")
     convert_parser.add_argument("--json", action="store_true")
     convert_parser.add_argument("--sidecar-ocr", action="store_true", help=argparse.SUPPRESS)
@@ -60,6 +66,7 @@ def main(argv: list[str] | None = None) -> None:
                     chapter_map=arguments.chapter_map,
                     languages=arguments.language,
                     resume=arguments.resume,
+                    multi_page=arguments.multi_page,
                     force=arguments.force,
                     backend=backend,
                 )

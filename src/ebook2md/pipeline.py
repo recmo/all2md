@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import shutil
 import tempfile
 import time
@@ -17,7 +18,7 @@ from .assets import AssetStore
 from .chapters import chapters_from_map, detect_chapters
 from .compare import compare_text
 from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, MODEL_ID, MODEL_REVISION, SCHEMA_VERSION
-from .markdown import write_markdown
+from .markdown import merge_html_tables, strict_page_markdown, write_markdown
 from .model import Block, PageResult
 from .ocr import MlxUnlimitedOcr, OcrBackend, parse_output
 from .util import atomic_json, sha256_file, slugify
@@ -37,6 +38,7 @@ def convert(
     chapter_map: Path | None = None,
     languages: list[str] | None = None,
     resume: bool = True,
+    multi_page: bool = True,
     force: bool = False,
     backend: OcrBackend | None = None,
 ) -> Path:
@@ -59,6 +61,7 @@ def convert(
         "dpi": dpi,
         "pages": pages,
         "languages": languages or [],
+        "multi_page": multi_page,
     }
     previous = _read_json(bundle / "metadata.json")
     can_resume = resume and previous and previous.get("fingerprint") == fingerprint
@@ -73,85 +76,61 @@ def convert(
     backend = backend or MlxUnlimitedOcr()
     page_results: list[PageResult] = []
     failed: list[dict[str, Any]] = []
-    for source_page in document.pages:
-        page_path = bundle / "pages" / f"page-{source_page.number:04d}.json"
-        if can_resume and page_path.exists():
-            page_results.append(_page_from_dict(_read_json(page_path)))
+    for group in _ocr_groups(document.pages, document.outline, multi_page=multi_page):
+        page_paths = [bundle / "pages" / f"page-{page.number:04d}.json" for page in group]
+        if can_resume and all(path.exists() for path in page_paths):
+            page_results.extend(_page_from_dict(_read_json(path)) for path in page_paths)
             continue
         try:
-            raw, generation = backend.recognize(source_page.image_path)
-            visual_markdown, blocks = parse_output(raw)
-            visual_markdown = _blocks_markdown(blocks, visual_markdown)
-            comparison = compare_text(visual_markdown, source_page.embedded.text)
-            retry = getattr(backend, "recognize_retry", None)
-            if callable(retry) and _should_retry(comparison):
-                retry_raw, retry_generation = retry(source_page.image_path)
-                retry_markdown, retry_blocks = parse_output(retry_raw)
-                retry_markdown = _blocks_markdown(retry_blocks, retry_markdown)
-                retry_comparison = compare_text(retry_markdown, source_page.embedded.text)
-                attempts = [
-                    {"generation": dict(generation), "quality": _comparison_quality(comparison)},
-                    {"generation": dict(retry_generation), "quality": _comparison_quality(retry_comparison)},
-                ]
-                if _comparison_quality(retry_comparison) > _comparison_quality(comparison):
-                    raw, generation, visual_markdown, blocks, comparison = (
-                        retry_raw,
-                        retry_generation,
-                        retry_markdown,
-                        retry_blocks,
-                        retry_comparison,
-                    )
-                recovery = getattr(backend, "recognize_recovery", None)
-                if callable(recovery) and _should_retry(comparison):
-                    recovery_raw, recovery_generation = recovery(source_page.image_path)
-                    recovery_markdown, recovery_blocks = parse_output(recovery_raw)
-                    recovery_markdown = _blocks_markdown(recovery_blocks, recovery_markdown)
-                    recovery_comparison = compare_text(recovery_markdown, source_page.embedded.text)
-                    attempts.append(
-                        {
-                            "generation": dict(recovery_generation),
-                            "quality": _comparison_quality(recovery_comparison),
-                        }
-                    )
-                    if _comparison_quality(recovery_comparison) > _comparison_quality(comparison):
-                        raw, generation, visual_markdown, blocks, comparison = (
-                            recovery_raw,
-                            recovery_generation,
-                            recovery_markdown,
-                            recovery_blocks,
-                            recovery_comparison,
-                        )
-                generation["attempts"] = attempts
-                if _should_retry(comparison):
-                    comparison.warnings.append("visual_ocr_low_agreement_after_retry")
-            _materialize_figures(blocks, source_page.image_path, source_page.number, assets, source_page.source_assets)
-            visual_markdown = _blocks_markdown(blocks, visual_markdown)
-            visual_markdown = _apply_links(visual_markdown, source_page.embedded.links)
-            result = PageResult(
-                number=source_page.number,
-                image=source_page.image_path.name,
-                visual_markdown=visual_markdown,
-                blocks=blocks,
-                embedded=source_page.embedded,
-                comparison=comparison,
-                warnings=list(comparison.warnings),
-                generation=generation,
-                source_assets=source_page.source_assets,
-                raw_ocr=raw,
-            )
-            atomic_json(page_path, result.to_dict())
-            page_results.append(result)
+            recognize_pages = getattr(backend, "recognize_pages", None)
+            if multi_page and len(group) > 1 and callable(recognize_pages):
+                recognized = recognize_pages([page.image_path for page in group])
+            else:
+                recognized = [backend.recognize(page.image_path) for page in group]
         except Exception as error:
-            failed.append({"page": source_page.number, "error": str(error)})
+            failed.extend({"page": page.number, "error": str(error)} for page in group)
+            continue
+        aligned = _align_multi_results(group, recognized)
+        aligned = _recover_corrupt_merged_segments(group, aligned, backend)
+        for source_page, (raw, generation), page_path in zip(group, aligned, page_paths):
+            try:
+                generation = dict(generation)
+                if len(group) > 1:
+                    generation["group_pages"] = [page.number for page in group]
+                result = _page_result(
+                    source_page,
+                    raw,
+                    generation,
+                    backend,
+                    assets,
+                    document.outline,
+                )
+                atomic_json(page_path, result.to_dict())
+                page_results.append(result)
+            except Exception as error:
+                failed.append({"page": source_page.number, "error": str(error)})
 
     page_results.sort(key=lambda item: item.number)
+    _merge_continued_tables(page_results)
     available_pages = {page.number for page in page_results}
     for result in page_results:
+        # Re-render resumed page records too, so assembly-only changes are applied.
+        result.visual_markdown = strict_page_markdown(result, document.outline)
+        result.visual_markdown = _apply_links(result.visual_markdown, result.embedded.links)
+        retained_warnings = [
+            warning
+            for warning in result.warnings
+            if warning in {"multi_page_recovered_corrupt_segment", "unresolved_internal_link"}
+        ]
+        if result.generation.get("multi_page_recovery"):
+            retained_warnings.append("multi_page_recovered_corrupt_segment")
+        result.comparison = compare_text(result.visual_markdown, result.embedded.text)
+        result.warnings = sorted(set([*result.comparison.warnings, *retained_warnings]))
         result.visual_markdown, unresolved = _sanitize_page_links(result.visual_markdown, available_pages)
         if unresolved:
             result.warnings.append("unresolved_internal_link")
             result.comparison.warnings.append("unresolved_internal_link")
-            atomic_json(bundle / "pages" / f"page-{result.number:04d}.json", result.to_dict())
+        atomic_json(bundle / "pages" / f"page-{result.number:04d}.json", result.to_dict())
     chapters = chapters_from_map(chapter_map, [page.number for page in page_results]) if chapter_map else detect_chapters(document, page_results)
     combined_size = sum(len(page.visual_markdown.encode("utf-8")) for page in page_results)
     if split_mode == "single":
@@ -165,7 +144,14 @@ def convert(
     warnings = sorted({warning for page in page_results for warning in page.warnings})
     if split_mode == "auto" and combined_size > AUTO_SPLIT_BYTES and len(chapters) < 2:
         warnings.append("chapter_boundaries_uncertain")
-    files = write_markdown(bundle, page_results, chapters, split=split, title=_title(document, source))
+    files = write_markdown(
+        bundle,
+        page_results,
+        chapters,
+        split=split,
+        title=_title(document, source),
+        outline=document.outline,
+    )
     assets.write_manifest()
     document_json = {
         "schema_version": SCHEMA_VERSION,
@@ -185,6 +171,7 @@ def convert(
         "page_count": len(page_results),
         "requested_page_count": len(document.pages),
         "model": dict(backend.identity),
+        "multi_page": multi_page,
         "split": split,
         "markdown_files": files,
         "warnings": sorted(set(warnings)),
@@ -200,10 +187,252 @@ def convert(
     return bundle
 
 
+def _page_result(source_page, raw, generation, backend, assets, outline) -> PageResult:
+    visual_markdown, blocks = parse_output(raw)
+    visual_markdown = _blocks_markdown(blocks, visual_markdown)
+    comparison = compare_text(visual_markdown, source_page.embedded.text)
+    retry = getattr(backend, "recognize_retry", None)
+    if callable(retry) and not generation.get("merged_into") and _should_retry(comparison):
+        retry_raw, retry_generation = retry(source_page.image_path)
+        retry_markdown, retry_blocks = parse_output(retry_raw)
+        retry_markdown = _blocks_markdown(retry_blocks, retry_markdown)
+        retry_comparison = compare_text(retry_markdown, source_page.embedded.text)
+        attempts = [
+            {"generation": dict(generation), "quality": _comparison_quality(comparison)},
+            {"generation": dict(retry_generation), "quality": _comparison_quality(retry_comparison)},
+        ]
+        if _comparison_quality(retry_comparison) > _comparison_quality(comparison):
+            raw, generation, visual_markdown, blocks, comparison = (
+                retry_raw,
+                retry_generation,
+                retry_markdown,
+                retry_blocks,
+                retry_comparison,
+            )
+        recovery = getattr(backend, "recognize_recovery", None)
+        if callable(recovery) and _should_retry(comparison):
+            recovery_raw, recovery_generation = recovery(source_page.image_path)
+            recovery_markdown, recovery_blocks = parse_output(recovery_raw)
+            recovery_markdown = _blocks_markdown(recovery_blocks, recovery_markdown)
+            recovery_comparison = compare_text(recovery_markdown, source_page.embedded.text)
+            attempts.append(
+                {
+                    "generation": dict(recovery_generation),
+                    "quality": _comparison_quality(recovery_comparison),
+                }
+            )
+            if _comparison_quality(recovery_comparison) > _comparison_quality(comparison):
+                raw, generation, visual_markdown, blocks, comparison = (
+                    recovery_raw,
+                    recovery_generation,
+                    recovery_markdown,
+                    recovery_blocks,
+                    recovery_comparison,
+                )
+        generation["attempts"] = attempts
+        if _should_retry(comparison):
+            comparison.warnings.append("visual_ocr_low_agreement_after_retry")
+    _materialize_figures(
+        blocks,
+        source_page.image_path,
+        source_page.number,
+        assets,
+        source_page.source_assets,
+        include_unclaimed=not generation.get("merged_into"),
+    )
+    result = PageResult(
+        number=source_page.number,
+        image=source_page.image_path.name,
+        visual_markdown=visual_markdown,
+        blocks=blocks,
+        embedded=source_page.embedded,
+        comparison=comparison,
+        warnings=list(comparison.warnings),
+        generation=generation,
+        source_assets=source_page.source_assets,
+        raw_ocr=raw,
+    )
+    result.visual_markdown = strict_page_markdown(result, outline)
+    result.visual_markdown = _apply_links(result.visual_markdown, source_page.embedded.links)
+    if generation.get("multi_page_recovery"):
+        result.warnings.append("multi_page_recovered_corrupt_segment")
+    return result
+
+
+def _ocr_groups(pages, outline: list[dict], *, multi_page: bool, maximum: int = 24):
+    if not multi_page:
+        return [[page] for page in pages]
+    by_number = {page.number: page for page in pages}
+    numbers = sorted(by_number)
+    if not numbers:
+        return []
+    starts = sorted(
+        {
+            item["page"]
+            for item in outline
+            if item.get("page") in by_number
+            and (re.match(r"^\s*chapter\b", item.get("title", ""), re.I) or item.get("level") == 1)
+        }
+    )
+    boundaries = starts or [numbers[0]]
+    if boundaries[0] != numbers[0]:
+        boundaries.insert(0, numbers[0])
+    groups = []
+    for index, start in enumerate(boundaries):
+        end = boundaries[index + 1] - 1 if index + 1 < len(boundaries) else numbers[-1]
+        section = [by_number[number] for number in numbers if start <= number <= end]
+        groups.extend(section[offset : offset + maximum] for offset in range(0, len(section), maximum))
+    covered = {page.number for group in groups for page in group}
+    groups.extend([[by_number[number]] for number in numbers if number not in covered])
+    return sorted(groups, key=lambda group: group[0].number)
+
+
+def _align_multi_results(group, recognized):
+    """Align fewer logical OCR segments to consecutive physical page ranges."""
+    if len(recognized) == len(group):
+        return [
+            (raw, {**dict(generation), "source_pages": [page.number]})
+            for page, (raw, generation) in zip(group, recognized)
+        ]
+    if not recognized or len(recognized) > len(group):
+        raise RuntimeError(
+            f"cannot align {len(recognized)} OCR segment(s) to {len(group)} physical page(s)"
+        )
+
+    from difflib import SequenceMatcher
+    from .compare import normalize
+
+    segment_texts = [normalize(parse_output(raw)[0]) for raw, _ in recognized]
+    embedded = [normalize(page.embedded.text) for page in group]
+    segment_count, page_count = len(recognized), len(group)
+    scores: dict[tuple[int, int], tuple[float, list[tuple[int, int]]]] = {(0, 0): (0.0, [])}
+    for segment_index in range(segment_count):
+        for page_start in range(page_count):
+            state = scores.get((segment_index, page_start))
+            if state is None:
+                continue
+            remaining_segments = segment_count - segment_index - 1
+            for page_end in range(page_start + 1, page_count - remaining_segments + 1):
+                evidence = " ".join(embedded[page_start:page_end]).strip()
+                similarity = (
+                    SequenceMatcher(None, segment_texts[segment_index], evidence, autojunk=False).ratio()
+                    if evidence
+                    else 0.0
+                )
+                span_penalty = 0.01 * (page_end - page_start - 1)
+                candidate = state[0] + similarity - span_penalty
+                key = (segment_index + 1, page_end)
+                if key not in scores or candidate > scores[key][0]:
+                    scores[key] = (candidate, [*state[1], (page_start, page_end)])
+    alignment = scores.get((segment_count, page_count))
+    if alignment is None:
+        raise RuntimeError("multi-page OCR segments could not be aligned monotonically")
+
+    output: list[tuple[str, dict[str, object]]] = []
+    for (raw, generation), (start, end) in zip(recognized, alignment[1]):
+        source_pages = [page.number for page in group[start:end]]
+        output.append((raw, {**dict(generation), "source_pages": source_pages}))
+        for continuation in group[start + 1 : end]:
+            output.append(
+                (
+                    "",
+                    {
+                        "mode": "multi_continuation",
+                        "merged_into": group[start].number,
+                        "source_pages": source_pages,
+                        "group_size": len(group),
+                    },
+                )
+            )
+    return output
+
+
+def _recover_corrupt_merged_segments(group, aligned, backend):
+    pages = {page.number: page for page in group}
+    output = list(aligned)
+    index = 0
+    while index < len(output):
+        raw, generation = output[index]
+        source_pages = generation.get("source_pages", [])
+        if len(source_pages) > 1:
+            markdown = parse_output(raw)[0]
+            corrupt = "visual_text_repetition" in compare_text(markdown, "").warnings
+            if corrupt:
+                replacements = []
+                for page_number in source_pages:
+                    retry_raw, retry_generation = backend.recognize(pages[page_number].image_path)
+                    replacements.append(
+                        (
+                            retry_raw,
+                            {
+                                **dict(retry_generation),
+                                "source_pages": [page_number],
+                                "multi_page_recovery": "corrupt_merged_segment",
+                            },
+                        )
+                    )
+                output[index : index + len(source_pages)] = replacements
+        index += 1
+    return output
+
+
+def _merge_continued_tables(pages: list[PageResult]) -> None:
+    active: Block | None = None
+    for page in pages:
+        retained: list[Block] = []
+        suppressed_embedded = False
+        if (
+            active is not None
+            and not page.blocks
+            and re.fullmatch(r"(?:!\[[^\]]*\]\([^)]+\)\s*)+", page.visual_markdown.strip())
+        ):
+            # Resume compatibility for records written after an earlier pass
+            # removed the duplicate block but retained its rendered fallback.
+            page.visual_markdown = ""
+        for block in page.blocks:
+            # A logical multi-page result may store a continued table on its
+            # first physical page. Unclaimed PDF objects before the next prose
+            # block are then table slices already represented semantically.
+            # Preserve them in the manifest, but do not display them twice.
+            if block.kind == "embedded_figure" and (
+                page.generation.get("merged_into") or active is not None
+            ):
+                suppressed_embedded = True
+                continue
+            if block.kind == "table":
+                if active is not None:
+                    merged = merge_html_tables(active.markdown, block.markdown)
+                    if merged is not None:
+                        active.markdown = merged
+                        continue
+                active = block
+                retained.append(block)
+            else:
+                retained.append(block)
+                if block.kind not in FIGURE_KINDS | {"embedded_figure", "footer"} and block.markdown.strip():
+                    active = None
+        page.blocks = retained
+        if suppressed_embedded and not retained:
+            page.visual_markdown = ""
+
+
 def _materialize_figures(
-    blocks: list[Block], page_image: Path, page: int, assets: AssetStore, source_assets: list[dict[str, Any]]
+    blocks: list[Block],
+    page_image: Path,
+    page: int,
+    assets: AssetStore,
+    source_assets: list[dict[str, Any]],
+    *,
+    include_unclaimed: bool = True,
 ) -> None:
     claimed_assets: set[str] = set()
+    for block in blocks:
+        if block.kind != "table" or not block.bbox:
+            continue
+        for placement in source_assets:
+            candidate = tuple(placement.get("bbox", ()))
+            if len(candidate) == 4 and _iou(block.bbox, candidate) >= 0.25:
+                claimed_assets.add(placement.get("asset_id", ""))
     for block in blocks:
         if block.bbox and block.kind in FIGURE_KINDS:
             caption = block.markdown.strip() or None
@@ -224,6 +453,8 @@ def _materialize_figures(
                 page_image, block.bbox, page=page, caption=block.markdown or None, alt_text="Equation evidence", evidence=True
             )
             block.markdown = f"{block.markdown}\n\n<!-- uncertain equation; evidence crop retained -->".strip()
+    if not include_unclaimed:
+        return
     for placement in source_assets:
         bbox = tuple(placement.get("bbox", ()))
         asset = assets.get(placement.get("asset_id", ""))
@@ -301,13 +532,18 @@ def _sanitize_page_links(markdown: str, available_pages: set[int]) -> tuple[str,
 
 
 def _should_retry(comparison) -> bool:
+    if "visual_text_repetition" in comparison.warnings:
+        return True
     if comparison.character_similarity is None:
+        return False
+    # A much longer visual stream commonly means a table or diagram is absent
+    # from the embedded layer. That is evidence disagreement, not OCR failure.
+    if comparison.length_ratio is not None and comparison.length_ratio < 0.65:
         return False
     return (
         comparison.character_similarity < 0.75
         or comparison.length_ratio is None
         or not 0.65 <= comparison.length_ratio <= 1.5
-        or "visual_text_repetition" in comparison.warnings
     )
 
 

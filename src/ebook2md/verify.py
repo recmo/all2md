@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .markdown import local_links
+from .markdown import local_links, markdown_anchors
 
 
 @dataclass
@@ -44,7 +44,7 @@ def verify_bundle(root: Path) -> Verification:
                 errors.append(f"broken link: {markdown_path.relative_to(root)} -> {target}")
             elif anchor and target_path.exists():
                 target_markdown = target_path.read_text(encoding="utf-8")
-                anchors = set(re.findall(r'<a\s+id=["\']([^"\']+)["\']\s*></a>', target_markdown))
+                anchors = markdown_anchors(target_markdown)
                 if anchor not in anchors:
                     errors.append(f"broken anchor: {markdown_path.relative_to(root)} -> {target}")
     seen_paths = set()

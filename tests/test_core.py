@@ -9,9 +9,9 @@ from PIL import Image
 from ebook2md.chapters import chapters_from_map
 from ebook2md.chapters import detect_chapters
 from ebook2md.compare import compare_text
-from ebook2md.ocr import parse_output
-from ebook2md.pipeline import convert
-from ebook2md.model import Comparison, EmbeddedEvidence, PageResult, SourceDocument
+from ebook2md.ocr import parse_output, split_multi_page_output
+from ebook2md.pipeline import _align_multi_results, _merge_continued_tables, convert
+from ebook2md.model import Block, Comparison, EmbeddedEvidence, PageResult, SourceDocument, SourcePage
 from ebook2md.verify import verify_bundle
 
 
@@ -27,6 +27,17 @@ class FixtureOcr:
         )
 
 
+class TableFixtureOcr:
+    identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
+
+    def recognize(self, image: Path):
+        return (
+            "<|det|>table [150, 350, 420, 600]<|/det|>"
+            "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>",
+            {},
+        )
+
+
 def test_parse_unlimited_output():
     markdown, blocks = parse_output(
         "<|det|>title [1, 2, 3, 4]<|/det|>Hello\n<|det|>text [5,6,7,8]<|/det|>World"
@@ -34,6 +45,56 @@ def test_parse_unlimited_output():
     assert markdown == "Hello\n\nWorld"
     assert [block.kind for block in blocks] == ["title", "text"]
     assert blocks[0].bbox == (1.0, 2.0, 3.0, 4.0)
+
+
+def test_split_multi_page_output_requires_one_segment_per_image():
+    assert split_multi_page_output("<PAGE>\nOne\n<PAGE>\nTwo", 2) == ["One", "Two"]
+    assert split_multi_page_output("<PAGE>\nMerged", 2) == ["Merged"]
+
+
+def test_multi_page_segments_align_to_physical_page_ranges(tmp_path: Path):
+    pages = [
+        SourcePage(1, tmp_path / "1.png", EmbeddedEvidence(text="Alpha")),
+        SourcePage(2, tmp_path / "2.png", EmbeddedEvidence(text="Beta")),
+        SourcePage(3, tmp_path / "3.png", EmbeddedEvidence(text="Gamma")),
+    ]
+    aligned = _align_multi_results(
+        pages,
+        [("Alpha", {}), ("Beta Gamma", {})],
+    )
+    assert [item[1]["source_pages"] for item in aligned] == [[1], [2, 3], [2, 3]]
+    assert aligned[2][0] == ""
+    assert aligned[2][1]["merged_into"] == 2
+
+
+def test_multi_page_continuation_assets_are_preserved_but_not_rendered():
+    first = PageResult(
+        number=1,
+        image="",
+        visual_markdown="",
+        blocks=[Block(kind="table", markdown="<table><tr><td>A</td></tr></table>")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    continuation = PageResult(
+        number=2,
+        image="",
+        visual_markdown="![Embedded figure](assets/figures/table-slice.png)",
+        blocks=[
+            Block(
+                kind="embedded_figure",
+                markdown="![Embedded figure](assets/figures/table-slice.png)",
+                asset_id="fig-1",
+            )
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+        source_assets=[{"asset_id": "fig-1"}],
+    )
+    _merge_continued_tables([first, continuation])
+    assert continuation.blocks == []
+    assert continuation.visual_markdown == ""
+    assert continuation.source_assets == [{"asset_id": "fig-1"}]
 
 
 def test_embedded_text_is_only_comparison_evidence():
@@ -52,6 +113,15 @@ def test_small_token_disagreement_is_not_hidden_by_page_similarity():
 def test_short_repetition_loop_is_flagged():
     comparison = compare_text("2. 2. 2. 2. 2. 2. 2. 2.", "A normal numbered list")
     assert "visual_text_repetition" in comparison.warnings
+
+
+def test_repeated_table_cells_are_not_treated_as_generation_loop():
+    comparison = compare_text(
+        "<table><tr><td>Status</td></tr><tr><td>ON TRACK</td></tr>"
+        "<tr><td>ON TRACK</td></tr><tr><td>ON TRACK</td></tr></table>",
+        "",
+    )
+    assert "visual_text_repetition" not in comparison.warnings
 
 
 def test_chapter_map(tmp_path: Path):
@@ -80,6 +150,25 @@ def test_outline_splits_at_chapter_level_and_keeps_parts(tmp_path: Path):
     chapters = detect_chapters(source, pages)
     assert [chapter.title for chapter in chapters] == ["Part I", "Chapter 1: Start", "Chapter 2: Next", "Conclusion"]
     assert [chapter.start_page for chapter in chapters] == [1, 2, 4, 6]
+
+
+def test_many_short_chapters_use_parts_as_file_units(tmp_path: Path):
+    outline = [{"level": 1, "title": "Introduction", "page": 1}]
+    page = 2
+    for part in range(1, 4):
+        outline.append({"level": 1, "title": f"Part {part}", "page": page})
+        for chapter in range(1, 5):
+            page += 2
+            outline.append({"level": 2, "title": f"Chapter {part}-{chapter}", "page": page})
+    page += 2
+    outline.append({"level": 1, "title": "Acknowledgments", "page": page})
+    pages = [
+        PageResult(number=number, image="", visual_markdown="", blocks=[], embedded=EmbeddedEvidence(), comparison=Comparison())
+        for number in range(1, page + 3)
+    ]
+    source = SourceDocument(path=tmp_path / "book.pdf", kind="pdf", outline=outline)
+    chapters = detect_chapters(source, pages)
+    assert [chapter.title for chapter in chapters] == ["Front matter", "Part 1", "Part 2", "Part 3", "Back matter"]
 
 
 def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
@@ -111,3 +200,20 @@ def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
     resumed = convert(pdf, tmp_path / "out", backend=FixtureOcr(), split_mode="single")
     resumed_manifest = json.loads((resumed / "assets/manifest.json").read_text())
     assert len(resumed_manifest["assets"]) == len(manifest["assets"])
+
+
+def test_embedded_table_image_is_preserved_but_not_displayed_twice(tmp_path: Path):
+    pdf = tmp_path / "table.pdf"
+    image_path = tmp_path / "table.png"
+    Image.new("RGB", (200, 200), "white").save(image_path)
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_image(fitz.Rect(92, 277, 257, 475), filename=str(image_path))
+    document.save(pdf)
+    document.close()
+    bundle = convert(pdf, tmp_path / "out", backend=TableFixtureOcr(), split_mode="single")
+    markdown = (bundle / "book.md").read_text()
+    assert "| A | B |" in markdown
+    assert "![Embedded figure]" not in markdown
+    manifest = json.loads((bundle / "assets/manifest.json").read_text())
+    assert manifest["assets"]

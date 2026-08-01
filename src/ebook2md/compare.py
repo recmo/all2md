@@ -13,6 +13,8 @@ def normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"(?m)^#{1,6}\s+", "", text)
+    text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -20,7 +22,8 @@ def normalize(text: str) -> str:
 def compare_text(visual: str, embedded: str) -> Comparison:
     visual_norm = normalize(visual)
     embedded_norm = normalize(embedded)
-    visual_repeats = _has_severe_repetition(visual_norm)
+    contains_table = "<table" in visual.casefold() or bool(re.search(r"(?m)^\|.*\|\s*$", visual))
+    visual_repeats = not contains_table and _has_severe_repetition(visual_norm)
     if not embedded_norm:
         warnings = ["embedded_text_absent"]
         if visual_repeats:

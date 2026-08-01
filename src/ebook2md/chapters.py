@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import statistics
 from difflib import SequenceMatcher
 
 from .model import Chapter, PageResult, SourceDocument
@@ -29,11 +30,15 @@ def detect_chapters(source: SourceDocument, pages: list[PageResult]) -> list[Cha
             if re.match(r"^\s*chapter\b", item["title"], re.IGNORECASE)
         ]
         boundary_level = min(chapter_levels) if chapter_levels else minimum_level
-        starts = [
-            (item["title"], item["page"])
-            for item in source.outline
-            if item["level"] <= boundary_level and item["page"] in page_numbers
-        ]
+        coarse = chapter_levels and _prefer_coarse_file_units(source.outline, boundary_level, pages)
+        if coarse:
+            starts = _coarse_boundaries(source.outline, boundary_level, page_numbers)
+        else:
+            starts = [
+                (item["title"], item["page"])
+                for item in source.outline
+                if item["level"] <= boundary_level and item["page"] in page_numbers
+            ]
         if len(starts) >= 2:
             return _boundaries_to_chapters(starts, page_numbers, "document_outline", 1.0)
 
@@ -54,6 +59,51 @@ def detect_chapters(source: SourceDocument, pages: list[PageResult]) -> list[Cha
     if len(starts) >= 2:
         return _boundaries_to_chapters(starts, page_numbers, "visual_headings", 0.8)
     return []
+
+
+def _prefer_coarse_file_units(outline: list[dict], chapter_level: int, pages: list[PageResult]) -> bool:
+    page_numbers = [page.number for page in pages]
+    parts = [
+        item for item in outline
+        if item["level"] < chapter_level and re.match(r"^\s*part\b", item["title"], re.IGNORECASE)
+    ]
+    chapters = [item for item in outline if item["level"] == chapter_level and item["page"] in page_numbers]
+    if len(parts) < 2 or len(chapters) < 2:
+        return False
+    starts = sorted(item["page"] for item in chapters)
+    byte_sizes: list[int] = []
+    page_bytes = {page.number: len(page.visual_markdown.encode("utf-8")) for page in pages}
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else max(page_numbers) + 1
+        byte_sizes.append(sum(size for number, size in page_bytes.items() if start <= number < end))
+    short_share = sum(size < 16 * 1024 for size in byte_sizes) / len(byte_sizes)
+    return len(chapters) > 32 or statistics.median(byte_sizes) < 16 * 1024 or short_share >= 0.6
+
+
+def _coarse_boundaries(
+    outline: list[dict], chapter_level: int, page_numbers: list[int]
+) -> list[tuple[str, int]]:
+    parts = [
+        item
+        for item in outline
+        if item["level"] < chapter_level
+        and re.match(r"^\s*part\b", item["title"], re.IGNORECASE)
+        and item["page"] in page_numbers
+    ]
+    if not parts:
+        return []
+    starts = [(item["title"], item["page"]) for item in parts]
+    after_parts = [
+        item
+        for item in outline
+        if item["level"] < chapter_level
+        and item["page"] > parts[-1]["page"]
+        and item["page"] in page_numbers
+        and not re.match(r"^\s*chapter\b", item["title"], re.IGNORECASE)
+    ]
+    if after_parts:
+        starts.append(("Back matter", after_parts[0]["page"]))
+    return starts
 
 
 def _toc_boundaries(pages: list[PageResult]) -> list[tuple[str, int]]:
