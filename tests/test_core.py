@@ -144,6 +144,22 @@ def test_gundam_reconciliation_is_local_and_never_replaces_tables():
     assert "visual_truncated" in warnings
 
 
+def test_gundam_reconciliation_repairs_confident_math_disagreement():
+    primary = parse_native_observation(
+        "<|det|>text [10,10,900,200]<|/det|>Since R is commutative, we have also a, a = e.",
+        mode="multi_base",
+        source_pages=[27],
+    )
+    recovery = parse_native_observation(
+        r"<|det|>text [10,10,900,200]<|/det|>Since \( R \) is commutative, we have also \( a_i a = e \).",
+        mode="gundam",
+        source_pages=[27],
+    )
+    blocks, provenance, _ = reconcile_observations(primary, [recovery])
+    assert r"a_i a = e" in blocks[0].markdown
+    assert provenance[0]["action"] == "repaired_math_disagreement"
+
+
 def test_clean_gundam_table_replaces_corrupt_page_local_columns():
     primary = parse_native_observation(
         "<|det|>title [100,100,200,120]<|/det|>Department"
@@ -484,6 +500,32 @@ def test_document_normalization_drops_running_matter_and_promotes_semantic_label
         ("heading", "1.31. Theorem"),
         ("paragraph", "Every finite integral domain is a field."),
     ]
+
+
+def test_document_normalization_cleans_math_prose_and_enumerations():
+    page = PageResult(
+        number=27,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", r"Proof.  Let \( J \) be an ideal and \( J = \langle ra : r \in R \rangle \) ."),
+            Block("paragraph", "(i) First case."),
+            Block("paragraph", "(ii) Second case."),
+            Block(
+                "paragraph",
+                r"If \( a \equiv b \mod J \), then \( na \equiv nh \mod J \) for \(n \in \mathbb{Z}\).",
+            ),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    _normalize_document_blocks([page])
+    assert page.blocks[0].markdown == r"**Proof.** Let \( J \) be an ideal and \( J = \{ra : r \in R\} \)."
+    assert page.blocks[1].kind == "list"
+    assert page.blocks[1].markdown == "- (i) First case.\n- (ii) Second case."
+    assert r"na \equiv nb \mod J" in page.blocks[2].markdown
+    assert r"\mathbb{Z}" in page.blocks[2].markdown
+    assert r"\\)" not in page.blocks[0].markdown
 
 
 def test_recovery_observations_and_provenance_are_preserved(tmp_path: Path):

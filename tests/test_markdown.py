@@ -227,6 +227,27 @@ def test_partial_single_file_includes_outline_context(tmp_path: Path):
     assert "\n\n#### 1.17. Definition\n\nA kernel" in markdown
 
 
+def test_mid_page_outline_boundary_stays_after_carry_over_text():
+    result = PageResult(
+        number=25,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", "Proof continued from the previous page.", (100, 100, 900, 280)),
+            Block("heading", "2. RINGS AND FIELDS", (100, 320, 500, 350)),
+            Block("paragraph", "A ring has two operations.", (100, 360, 900, 450)),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(
+        result,
+        [{"level": 2, "title": "2 Rings and Fields", "page": 25}],
+    )
+    assert markdown.index("Proof continued") < markdown.index("## 2 Rings and Fields")
+    assert markdown.count("Rings and Fields") == 1
+
+
 def test_cover_style_front_matter_suppresses_display_titles():
     result = PageResult(
         number=1,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import re
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -60,7 +61,18 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
     boundary = max(entries, key=lambda item: item.get("level", 1), default=None)
     blocks = list(page.blocks)
     normalize_table_blocks(blocks)
-    if boundary:
+    inline_boundary = _visual_boundary_index(blocks, boundary["title"]) if boundary else None
+    if boundary and inline_boundary is not None:
+        block = blocks[inline_boundary]
+        blocks[inline_boundary] = replace(
+            block,
+            kind="heading",
+            markdown=(
+                f"{'#' * min(6, max(1, boundary.get('level', 1)))} "
+                f"{title_case_heading(boundary['title'].strip())}"
+            ),
+        )
+    elif boundary:
         blocks = _drop_visual_boundary_title(blocks, boundary["title"])
 
     body_pages = [
@@ -87,7 +99,7 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
         current_level = preceding[-1].get("level", 1)
     pieces: list[str] = []
     suppressed_noise = False
-    if boundary:
+    if boundary and inline_boundary is None:
         title = title_case_heading(boundary["title"].strip())
         pieces.append(f"{'#' * min(6, max(1, boundary.get('level', 1)))} {title}")
     for block in blocks:
@@ -497,6 +509,15 @@ def _drop_visual_boundary_title(blocks, title: str):
         if blocks[count - 1].bbox and blocks[count - 1].bbox[1] > 320:
             break
     return blocks
+
+
+def _visual_boundary_index(blocks, title: str) -> int | None:
+    for index, block in enumerate(blocks[:8]):
+        if block.bbox and block.bbox[1] > 500:
+            break
+        if block.kind in TITLE_KINDS and _same_heading(block.markdown, title):
+            return index
+    return None
 
 
 def _same_heading(left: str, right: str) -> bool:

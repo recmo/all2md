@@ -276,17 +276,25 @@ def reconcile_observations(
             score = _alignment_score(block, candidate)
             old_text, new_text = normalize(block.markdown), normalize(candidate.markdown)
             improves = len(new_text) > len(old_text) and (primary_bad or len(old_text) < 24)
-            if score >= 0.65 and improves:
+            math_improves = (
+                score >= 0.8
+                and _math_anomaly_score(candidate.markdown) < _math_anomaly_score(block.markdown)
+            )
+            if score >= 0.65 and (improves or math_improves):
                 block.markdown = candidate.markdown
                 block.provenance.append(
-                    {"observation": recovery.id, "action": "replaced_local_content", "score": round(score, 4)}
+                    {
+                        "observation": recovery.id,
+                        "action": "repaired_math_disagreement" if math_improves else "replaced_local_content",
+                        "score": round(score, 4),
+                    }
                 )
                 provenance.append(
                     {
                         "block": index,
                         "primary_observation": primary.id,
                         "recovery_observation": recovery.id,
-                        "action": "replaced_local_content",
+                        "action": "repaired_math_disagreement" if math_improves else "replaced_local_content",
                         "score": round(score, 4),
                     }
                 )
@@ -361,6 +369,16 @@ def _alignment_score(left: Block, right: Block) -> float:
     text = SequenceMatcher(None, normalize(left.markdown), normalize(right.markdown), autojunk=False).ratio()
     geometry = _iou(left.bbox, right.bbox) if left.bbox and right.bbox else 0.5
     return 0.75 * text + 0.25 * geometry
+
+
+def _math_anomaly_score(value: str) -> int:
+    """Count narrow OCR patterns that are very unlikely in intentional mathematics."""
+    patterns = (
+        r"\b([A-Za-z])\s*,\s*\1\s*=",  # dropped subscript: `a, a = e`
+        r"\b[A-Z]\(\([A-Za-z]\)\)",  # doubled delimiters: `N((a))`
+        r"\\\([^\n]*=\s*\([^\n]*\\in[^\n]*:[^\n]*\)\s*\\\)",  # set builder as parentheses
+    )
+    return sum(len(re.findall(pattern, value)) for pattern in patterns)
 
 
 def _iou(a, b) -> float:
