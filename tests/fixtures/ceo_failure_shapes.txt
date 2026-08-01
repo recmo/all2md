@@ -1,0 +1,7 @@
+<|ref|>title<|/ref|><|det|>[[110,80,890,145]]<|/det|>PART II: OPERATING HABITS
+<|ref|>title<|/ref|><|det|>[[120,170,870,225]]<|/det|>CHAPTER 7: CLEAR OWNERSHIP
+<|ref|>text<|/ref|><|det|>[[120,250,875,390]]<|/det|>Assign every responsibility to one owner.
+<|ref|>table<|/ref|><|det|>[[120,610,880,980]]<|/det|><table><tr><td>Team</td><td>Responsibility</td><td>Owner</td></tr><tr><td rowspan="2">Product</td><td>Roadmap</td><td>Ada</td></tr></table>
+<PAGE>
+<|ref|>table<|/ref|><|det|>[[120,20,880,410]]<|/det|><table><tr><td>Team</td><td>Responsibility</td><td>Owner</td></tr><tr><td>Product</td><td>Research</td><td>Grace</td></tr></table>
+<|ref|>text<|/ref|><|det|>[[120,450,875,620]]<|/det|>Review the ownership map every quarter.

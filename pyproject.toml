@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ebook2md"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first ebook and document conversion to auditable Markdown"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,10 @@ license = "MIT"
 dependencies = [
   "beautifulsoup4>=4.13.0,<5",
   "huggingface-hub>=0.34.0,<2",
+  "mdformat==1.0.0",
+  "mdformat-gfm==1.0.0",
   "pillow>=11.0.0,<13",
+  "pymarkdownlnt==0.9.38",
   "pymupdf>=1.26.0,<2",
 ]
 

@@ -31,6 +31,20 @@ class Block:
     bbox: Box | None = None
     confidence: float | None = None
     asset_id: str | None = None
+    source_pages: list[int] = field(default_factory=list)
+    provenance: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class OcrObservation:
+    id: str
+    mode: str
+    raw: str
+    source_pages: list[int]
+    generation: dict[str, Any] = field(default_factory=dict)
+    blocks: list[Block] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -56,6 +70,8 @@ class PageResult:
     generation: dict[str, Any] = field(default_factory=dict)
     source_assets: list[dict[str, Any]] = field(default_factory=list)
     raw_ocr: str = ""
+    visual: dict[str, Any] = field(default_factory=dict)
+    recovery: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

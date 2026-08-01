@@ -15,7 +15,7 @@ from .verify import verify_bundle
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="ebook2md", description="Convert ebooks and documents to auditable Markdown")
-    root.add_argument("--version", action="version", version="ebook2md 0.1.0")
+    root.add_argument("--version", action="version", version="ebook2md 0.2.0")
     commands = root.add_subparsers(dest="command", required=True)
 
     convert_parser = commands.add_parser("convert", help="convert one or more inputs")
@@ -31,7 +31,7 @@ def parser() -> argparse.ArgumentParser:
         "--multi-page",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="analyze adjacent fixed-layout pages together (default: enabled)",
+        help="use cross-page Base windows; --no-multi-page uses one-page Base windows",
     )
     convert_parser.add_argument("--force", action="store_true")
     convert_parser.add_argument("--json", action="store_true")

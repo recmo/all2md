@@ -7,7 +7,7 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-from .model import Chapter, PageResult
+from .model import Block, Chapter, PageResult
 from .util import atomic_text, slugify
 
 LOCAL_LINK = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)")
@@ -39,6 +39,7 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
     entries = [item for item in outline if item.get("page") == page.number]
     boundary = max(entries, key=lambda item: item.get("level", 1), default=None)
     blocks = list(page.blocks)
+    normalize_table_blocks(blocks)
     if boundary:
         blocks = _drop_visual_boundary_title(blocks, boundary["title"])
 
@@ -50,13 +51,13 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
     if boundary:
         pieces.append(f"{'#' * min(6, max(1, boundary.get('level', 1)))} {boundary['title'].strip()}")
     for block in blocks:
-        content = html_tables_to_markdown(block.markdown.strip())
+        content = block.markdown.strip()
         if not content:
             continue
         if block.kind in TITLE_KINDS and not HEADING.match(content):
             content = f"{'#' * min(6, current_level + 1)} {content}"
         pieces.append(content)
-    fallback = html_tables_to_markdown(page.visual_markdown.strip())
+    fallback = page.visual_markdown.strip()
     return "\n\n".join(pieces).strip() or fallback
 
 
@@ -64,16 +65,55 @@ def html_tables_to_markdown(markdown: str) -> str:
     return HTML_TABLE.sub(lambda match: _table_to_markdown(match.group(0)), markdown)
 
 
-def merge_html_tables(first: str, continuation: str) -> str | None:
+def normalize_table_blocks(blocks: list[Block]) -> None:
+    for block in blocks:
+        if block.kind != "table" or "<table" not in block.markdown.casefold():
+            continue
+        reason = table_fallback_reason(block.markdown)
+        if reason:
+            block.metadata["render_format"] = "html"
+            block.metadata["html_fallback_reason"] = reason
+        else:
+            block.markdown = _table_to_markdown(block.markdown)
+            block.metadata["render_format"] = "gfm"
+
+
+def table_fallback_reason(source: str) -> str | None:
+    soup = BeautifulSoup(source, "html.parser")
+    table = soup.find("table")
+    if table is None or not table.find("tr"):
+        return "malformed_table"
+    if table.find("table") is not None:
+        return "nested_table"
+    for cell in table.find_all(["th", "td"]):
+        if int(cell.get("colspan", 1)) > 1:
+            return "column_span"
+        if cell.find(["p", "ul", "ol", "pre", "blockquote", "br"]):
+            return "multiline_or_nested_cell"
+    return None
+
+
+def merge_html_tables(
+    first: str,
+    continuation: str,
+    *,
+    adjacent: bool = False,
+    boundary_geometry: bool = False,
+) -> str | None:
     first_soup = BeautifulSoup(first, "html.parser")
     next_soup = BeautifulSoup(continuation, "html.parser")
     first_table, next_table = first_soup.find("table"), next_soup.find("table")
     if first_table is None or next_table is None:
         return None
     first_rows, next_rows = first_table.find_all("tr"), next_table.find_all("tr")
-    if not first_rows or not next_rows or _row_signature(first_rows[0]) != _row_signature(next_rows[0]):
+    if not first_rows or not next_rows:
         return None
-    for row in next_rows[1:]:
+    repeated_header = _row_signature(first_rows[0]) == _row_signature(next_rows[0])
+    if not repeated_header and not (adjacent and boundary_geometry):
+        return None
+    if not repeated_header and _row_width(first_rows[0]) != _row_width(next_rows[0]):
+        return None
+    for row in next_rows[1 if repeated_header else 0 :]:
         first_table.append(row.extract())
     return str(first_table)
 
@@ -83,7 +123,13 @@ def _row_signature(row) -> tuple[str, ...]:
     return tuple(value for value in values if value)
 
 
+def _row_width(row) -> int:
+    return sum(max(1, int(cell.get("colspan", 1))) for cell in row.find_all(["th", "td"], recursive=False))
+
+
 def _table_to_markdown(source: str) -> str:
+    if table_fallback_reason(source):
+        return source.strip()
     soup = BeautifulSoup(source, "html.parser")
     table = soup.find("table")
     if table is None:
