@@ -103,6 +103,13 @@ def convert(
             failed.append({"page": source_page.number, "error": str(error)})
 
     page_results.sort(key=lambda item: item.number)
+    available_pages = {page.number for page in page_results}
+    for result in page_results:
+        result.visual_markdown, unresolved = _sanitize_page_links(result.visual_markdown, available_pages)
+        if unresolved:
+            result.warnings.append("unresolved_internal_link")
+            result.comparison.warnings.append("unresolved_internal_link")
+            atomic_json(bundle / "pages" / f"page-{result.number:04d}.json", result.to_dict())
     chapters = chapters_from_map(chapter_map, [page.number for page in page_results]) if chapter_map else detect_chapters(document, page_results)
     combined_size = sum(len(page.visual_markdown.encode("utf-8")) for page in page_results)
     if split_mode == "single":
@@ -154,6 +161,7 @@ def convert(
 def _materialize_figures(
     blocks: list[Block], page_image: Path, page: int, assets: AssetStore, source_assets: list[dict[str, Any]]
 ) -> None:
+    claimed_assets: set[str] = set()
     for block in blocks:
         if block.bbox and block.kind in FIGURE_KINDS:
             caption = block.markdown.strip() or None
@@ -165,6 +173,7 @@ def _materialize_figures(
                 asset.caption = caption
                 asset.alt_text = alt
             block.asset_id = asset.id
+            claimed_assets.add(asset.id)
             block.markdown = f"![{asset.alt_text}]({asset.path})"
             if caption:
                 block.markdown += f"\n\n*{caption}*"
@@ -173,6 +182,22 @@ def _materialize_figures(
                 page_image, block.bbox, page=page, caption=block.markdown or None, alt_text="Equation evidence", evidence=True
             )
             block.markdown = f"{block.markdown}\n\n<!-- uncertain equation; evidence crop retained -->".strip()
+    for placement in source_assets:
+        bbox = tuple(placement.get("bbox", ()))
+        asset = assets.get(placement.get("asset_id", ""))
+        if asset is None or asset.id in claimed_assets or len(bbox) != 4:
+            continue
+        area = max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+        if area < 10_000:
+            continue
+        blocks.append(
+            Block(
+                kind="embedded_figure",
+                markdown=f"![{asset.alt_text}]({asset.path})",
+                bbox=bbox,
+                asset_id=asset.id,
+            )
+        )
 
 
 def _blocks_markdown(blocks: list[Block], fallback: str) -> str:
@@ -215,6 +240,22 @@ def _apply_links(markdown: str, links) -> str:
         pattern = re.compile(re.escape(label), re.IGNORECASE)
         markdown, count = pattern.subn(lambda match: f"[{match.group(0)}]({link.target})", markdown, count=1)
     return markdown
+
+
+def _sanitize_page_links(markdown: str, available_pages: set[int]) -> tuple[str, list[int]]:
+    import re
+
+    unresolved: list[int] = []
+    pattern = re.compile(r"\[([^\]]+)\]\(#page-(\d+)\)")
+
+    def replace(match):
+        page_number = int(match.group(2))
+        if page_number in available_pages:
+            return match.group(0)
+        unresolved.append(page_number)
+        return match.group(1)
+
+    return pattern.sub(replace, markdown), sorted(set(unresolved))
 
 
 def _write_epub(bundle: Path, source: Path, document, assets: AssetStore, fingerprint, started: float, split_mode: str) -> Path:

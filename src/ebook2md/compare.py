@@ -11,6 +11,8 @@ MATH = set("∑∏∫√∞≈≠≤≥±×÷∂∇∈∉⊂⊆∪∩∀∃λμ�
 
 def normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
     return re.sub(r"\s+", " ", text).strip()
 

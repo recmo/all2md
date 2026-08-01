@@ -56,6 +56,6 @@ def write_markdown(
 def local_links(markdown: str) -> list[str]:
     links = [target for _, target in IMAGE_LINK.findall(markdown)]
     links.extend(
-        target for _, target in LOCAL_LINK.findall(markdown) if not target.startswith(("http://", "https://", "mailto:", "#"))
+        target for _, target in LOCAL_LINK.findall(markdown) if not target.startswith(("http://", "https://", "mailto:"))
     )
     return links

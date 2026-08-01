@@ -30,3 +30,6 @@ def test_chapter_links_are_relative(tmp_path: Path):
     assert "../assets/figures/fig-0001.png" in chapter
     assert local_links(chapter) == ["../assets/figures/fig-0001.png"]
 
+
+def test_anchor_links_are_local_links():
+    assert local_links("[Target](#page-4)") == ["#page-4"]

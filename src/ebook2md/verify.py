@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,12 +34,19 @@ def verify_bundle(root: Path) -> Verification:
         if not markdown_path.exists():
             errors.append(f"missing Markdown file: {markdown_path.relative_to(root)}")
             continue
-        for target in local_links(markdown_path.read_text(encoding="utf-8")):
-            clean_target = target.split("#", 1)[0]
+        markdown = markdown_path.read_text(encoding="utf-8")
+        for target in local_links(markdown):
+            clean_target, _, anchor = target.partition("#")
+            target_path = markdown_path if not clean_target else markdown_path.parent / clean_target
             if clean_target and not (markdown_path.parent / clean_target).resolve().is_relative_to(root):
                 errors.append(f"link escapes bundle: {markdown_path.relative_to(root)} -> {target}")
-            elif clean_target and not (markdown_path.parent / clean_target).exists():
+            elif clean_target and not target_path.exists():
                 errors.append(f"broken link: {markdown_path.relative_to(root)} -> {target}")
+            elif anchor and target_path.exists():
+                target_markdown = target_path.read_text(encoding="utf-8")
+                anchors = set(re.findall(r'<a\s+id=["\']([^"\']+)["\']\s*></a>', target_markdown))
+                if anchor not in anchors:
+                    errors.append(f"broken anchor: {markdown_path.relative_to(root)} -> {target}")
     seen_paths = set()
     for asset in manifest.get("assets", []):
         path = asset.get("path", "")

@@ -70,6 +70,7 @@ def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
     assert "The visual text has $x^2$." in markdown
     assert "broken embedded text" not in markdown
     assert "![A useful diagram.]" in markdown
+    assert "![Embedded figure]" in markdown
     page_json = json.loads((bundle / "pages/page-0001.json").read_text())
     assert "broken embedded text" in page_json["embedded"]["text"]
     assert "<|det|>diagram" in page_json["raw_ocr"]
