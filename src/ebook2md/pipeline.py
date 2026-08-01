@@ -28,7 +28,7 @@ from .markdown import (
     write_markdown,
 )
 from .model import Block, OcrObservation, PageResult
-from .native import _math_anomaly_score, observation_dict, parse_native_observation, reconcile_observations
+from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, split_multi_page_output
 from .util import atomic_json, sha256_file, slugify
 from .util import atomic_text
@@ -446,8 +446,7 @@ def _recover_page_if_needed(source_page, primary, group_observation, backend, bu
         and not (comparison.length_ratio is not None and comparison.length_ratio < 0.65)
     )
     group_problem = bool(set(group_observation.warnings) & critical)
-    math_problem = any(_math_anomaly_score(block.markdown) for block in primary.blocks)
-    if not (set(primary.warnings) & critical or group_problem or disagreement or math_problem):
+    if not (set(primary.warnings) & critical or group_problem or disagreement):
         return []
     raw, generation = backend.recognize(source_page.image_path)
     recovery = parse_native_observation(
@@ -691,7 +690,7 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
             semantic_blocks.extend(_split_semantic_lead(block))
         for block in semantic_blocks:
             if block.kind == "paragraph":
-                block.markdown = _clean_prose_and_math(block.markdown)
+                block.markdown = _clean_prose(block.markdown)
         page.blocks = _group_enumerated_blocks(semantic_blocks)
 
         retained: list[Block] = []
@@ -743,50 +742,11 @@ def _split_semantic_lead(block: Block) -> list[Block]:
     ]
 
 
-def _clean_prose_and_math(value: str) -> str:
+def _clean_prose(value: str) -> str:
     lines = [re.sub(r"[ \t]{2,}", " ", line).rstrip() for line in value.splitlines()]
     value = "\n".join(lines).strip()
     value = re.sub(r"^Proof\.\s+", "**Proof.** ", value)
     value = re.sub(r"\\\)\s+([,.;:!?])", lambda match: r"\)" + match.group(1), value)
-    if re.search(r"\b(?:set|ideal)\b", value, re.IGNORECASE):
-        value = re.sub(
-            r"\\langle(?P<body>[^\n]{1,500}?:[^\n]{1,500}?)\\rangle",
-            lambda match: rf"\{{{match.group('body').strip()}\}}",
-            value,
-        )
-    if "defined as the set" in value.casefold():
-        value = re.sub(
-            r"(?P<prefix>\\\([^\n]*?=\s*)\((?P<body>[^\n)]*?\\in[^\n)]*?:[^\n)]*)\)(?P<suffix>\s*\\\))",
-            r"\g<prefix>\\{\g<body>\\}\g<suffix>",
-            value,
-        )
-    if "number of conjugates" in value.casefold():
-        value = re.sub(
-            r"N\(\\langle\s*([A-Za-z])\s*\\rangle\)",
-            r"N(\\{\1\\})",
-            value,
-        )
-    value = _repair_scaled_congruence(value)
-    return value
-
-
-def _repair_scaled_congruence(value: str) -> str:
-    for left, right, modulus in re.findall(
-        r"\b([a-z])\s*\\equiv\s*([a-z])\s*\\mod\s*([A-Za-z])",
-        value,
-    ):
-        pattern = re.compile(
-            rf"\bn{re.escape(left)}(?P<middle>\s*\\equiv\s*)n(?P<right>[a-z])"
-            rf"(?P<modulus>\s*\\mod\s*{re.escape(modulus)})"
-        )
-        value = pattern.sub(
-            lambda match: (
-                f"n{left}{match.group('middle')}n{right}{match.group('modulus')}"
-                if match.group("right") != right
-                else match.group(0)
-            ),
-            value,
-        )
     return value
 
 
