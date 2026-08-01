@@ -5,15 +5,17 @@ auditable Markdown bundles on Apple Silicon. Unlimited-OCR provides the visual
 interpretation; embedded PDF and DjVu text is retained only as comparison
 evidence and never silently replaces the visual result.
 
-The default `thorough` quality mode collects independent readings before it
-commits to Markdown: an ordered multi-page Base pass, Gundam crops at 640 and
-1024 pixels, and (for multi-page windows) a single-page Base pass. Deterministic
-Python code aligns the observations and selects the reading with the strongest
-cross-pass agreement, using only format integrity as a tie-breaker. It does not
-guess mathematical meaning. Disagreements remain visible as hidden
-`ebook2md-review` comments beside the best available rendering. `balanced` runs
-Gundam only when structural validation detects trouble; `fast` uses the primary
-Base pass alone.
+The default `thorough` quality mode begins with one ordered multi-page Base
+pass. The MLX streaming decoder retains selected-token probabilities, aligns
+them back to exact output substrings, and records local low-probability spans.
+Only pages containing such spans, structural failures, or strong embedded-text
+disagreement receive one page-local Gundam pass, always with cropping enabled
+at 1024 pixels. Base remains the layout authority; an aligned Gundam block is
+selected only when local probability, format integrity, and auxiliary embedded
+text make it the best supported reading. An unresolved targeted reread emits a
+hidden `ebook2md-review` comment containing both alternatives. `balanced`
+targets structural failures and strong embedded-text disagreement without using
+token probability; `fast` uses Base alone.
 
 The model is never prompted to emit JSON or arbitrate between its own readings.
 The MLX runtime keeps the vision stack and image tensors in FP32 and the
@@ -53,9 +55,9 @@ ebook2md verify result/book
 ```
 
 `--quality thorough|balanced|fast` defaults to `thorough`. Thorough conversion
-is deliberately slower: it spends additional inference time on every visual
-page so the emitted Markdown is always the pipeline's best consensus, not just
-its first reading.
+spends additional inference time only where Base reports low confidence or a
+structural problem, or disagrees strongly with an available embedded layer. It
+runs at most one maximum-resolution Gundam reread per eligible page.
 
 For a large document, `--split auto` creates chapter files only when reliable
 structural boundaries exist. `--split chapters --chapter-map chapters.json`
@@ -92,8 +94,8 @@ records, so a reused PDF object still records every page and box.
 
 Each fixed-layout page record keeps `visual.multi_page`, `visual.candidates`,
 `embedded`, `comparison`, canonical normalized blocks, and selection provenance
-separately. Markdown is rendered only from the best canonical blocks. Candidate
-disagreement sets block-level review metadata, increments
+separately. Markdown is rendered only from the best canonical blocks. An
+unresolved targeted reread sets block-level review metadata, increments
 `metadata.json`'s `review_required_blocks`, and emits a portable HTML comment
 immediately after the affected Markdown; it does not withhold a best guess.
 A pinned `mdformat`/GFM pass runs only when it preserves page markers, image

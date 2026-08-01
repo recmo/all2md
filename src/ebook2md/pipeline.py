@@ -29,7 +29,7 @@ from .markdown import (
 )
 from .model import Block, OcrObservation, PageResult
 from .native import observation_dict, parse_native_observation, reconcile_observations
-from .ocr import MlxUnlimitedOcr, OcrBackend, split_multi_page_output
+from .ocr import MlxUnlimitedOcr, OcrBackend, confidence_summary, split_multi_page_output
 from .util import atomic_json, sha256_file, slugify
 from .util import atomic_text
 from .verify import verify_bundle
@@ -160,7 +160,11 @@ def convert(
                     bundle,
                     quality=quality,
                 )
-                blocks, recovery, validation_warnings = reconcile_observations(primary, candidates)
+                blocks, recovery, validation_warnings = reconcile_observations(
+                    primary,
+                    candidates,
+                    embedded_text=source_page.embedded.text,
+                )
                 validation_warnings.extend(candidate_warnings)
                 result = _page_result(
                     source_page,
@@ -323,7 +327,8 @@ def _page_result(
     consensus_observations = sorted({
         entry["recovery_observation"]
         for entry in recovery
-        if entry.get("action") == "selected_ocr_consensus" and entry.get("recovery_observation")
+        if entry.get("action") in {"selected_ocr_consensus", "selected_targeted_detail"}
+        and entry.get("recovery_observation")
     })
     result = PageResult(
         number=source_page.number,
@@ -347,7 +352,7 @@ def _page_result(
             "canonical": {
                 "blocks": [asdict(block) for block in blocks],
                 "authoritative_observation": (
-                    "ocr_consensus" if consensus_observations else group_observation.id
+                    "multi_base_with_targeted_detail" if consensus_observations else group_observation.id
                 ),
                 "selected_observations": consensus_observations,
             },
@@ -399,7 +404,14 @@ def _recognize_primary(group, backend, bundle: Path):
             raw, generation = value
             parts = split_multi_page_output(raw, len(group))
             recognized = [
-                (part, {**dict(generation), "group_index": index})
+                (
+                    part,
+                    {
+                        **dict(generation),
+                        **_segment_confidence(raw, part, generation),
+                        "group_index": index,
+                    },
+                )
                 for index, part in enumerate(parts)
             ]
         else:
@@ -468,23 +480,50 @@ def _collect_page_candidates(
     }
     markdown = _blocks_markdown(primary.blocks, "")
     comparison = compare_text(markdown, source_page.embedded.text)
-    disagreement = (
+    embedded_disagreement = (
         comparison.character_similarity is not None
         and comparison.character_similarity < 0.75
         and not (comparison.length_ratio is not None and comparison.length_ratio < 0.65)
     )
     group_problem = bool(set(group_observation.warnings) & critical)
-    needs_recovery = bool(set(primary.warnings) & critical or group_problem or disagreement)
+    target_blocks = [
+        (index, block)
+        for index, block in enumerate(primary.blocks)
+        if _block_needs_detail(block) and block.bbox is not None
+    ]
+    low_confidence = bool(target_blocks)
+    structural_problem = bool(set(primary.warnings) & critical or group_problem)
+    needs_recovery = bool(
+        structural_problem
+        or (quality in {"balanced", "thorough"} and embedded_disagreement)
+        or (quality == "thorough" and low_confidence)
+    )
     if quality == "fast" or (quality == "balanced" and not needs_recovery):
+        return [], []
+    if quality == "thorough" and not needs_recovery:
         return [], []
 
     candidates: list[OcrObservation] = []
     warnings: list[str] = []
+    recognize_detail = getattr(backend, "recognize_detail", None)
+    if not callable(recognize_detail):
+        recognize_detail = getattr(backend, "recognize", None)
+    if not callable(recognize_detail):
+        return [], ["visual_auxiliary_ocr_unavailable"]
     try:
-        raw, generation = backend.recognize(source_page.image_path)
+        raw, generation = recognize_detail(source_page.image_path)
+        generation = {
+            **dict(generation),
+            "target_block_indices": [index for index, _ in target_blocks],
+            "target_reason": (
+                "structural_or_embedded_disagreement"
+                if structural_problem or embedded_disagreement
+                else "local_token_confidence"
+            ),
+        }
         candidate = parse_native_observation(
             raw,
-            mode="gundam",
+            mode="gundam_detail",
             source_pages=[source_page.number],
             generation=generation,
         )
@@ -492,42 +531,36 @@ def _collect_page_candidates(
         candidates.append(candidate)
     except Exception:
         warnings.append("visual_auxiliary_ocr_failed")
-
-    recognize_detail = getattr(backend, "recognize_detail", None)
-    if quality == "thorough" and callable(recognize_detail):
-        try:
-            raw, generation = recognize_detail(source_page.image_path)
-            candidate = parse_native_observation(
-                raw,
-                mode="gundam_detail",
-                source_pages=[source_page.number],
-                generation=generation,
-            )
-            _store_raw_observation(bundle, candidate)
-            candidates.append(candidate)
-        except Exception:
-            warnings.append("visual_auxiliary_ocr_failed")
-
-    group_pages = primary.generation.get("group_pages", [])
-    recognize_pages = getattr(backend, "recognize_pages", None)
-    if quality == "thorough" and len(group_pages) > 1 and callable(recognize_pages):
-        try:
-            value = recognize_pages([source_page.image_path])
-            if _is_invocation(value):
-                raw, generation = value
-            else:
-                raw, generation = list(value)[0]
-            candidate = parse_native_observation(
-                raw,
-                mode="single_base",
-                source_pages=[source_page.number],
-                generation={**dict(generation), "mode": "single_base"},
-            )
-            _store_raw_observation(bundle, candidate)
-            candidates.append(candidate)
-        except Exception:
-            warnings.append("visual_auxiliary_ocr_failed")
     return candidates, sorted(set(warnings))
+
+
+def _block_needs_detail(block: Block) -> bool:
+    return bool(block.metadata.get("uncertain_spans"))
+
+
+def _segment_confidence(raw: str, part: str, generation: dict[str, object]) -> dict[str, object]:
+    spans = generation.get("_confidence_spans", [])
+    if not isinstance(spans, list) or not spans:
+        return {"confidence": generation.get("confidence")}
+    start = raw.find(part)
+    if start < 0:
+        return {"confidence": generation.get("confidence")}
+    end = start + len(part)
+    selected = []
+    values: list[float] = []
+    for span in spans:
+        span_start = int(span.get("start", 0))
+        span_end = int(span.get("end", 0))
+        if span_end <= start or span_start >= end:
+            continue
+        logprobs = [float(value) for value in span.get("logprobs", [])]
+        values.extend(logprobs)
+        selected.append({
+            "start": max(0, span_start - start),
+            "end": min(len(part), span_end - start),
+            "logprobs": logprobs,
+        })
+    return {"confidence": confidence_summary(values), "_confidence_spans": selected}
 
 
 def _store_raw_observation(bundle: Path, observation: OcrObservation) -> Path:
@@ -799,8 +832,27 @@ def _split_semantic_lead(block: Block) -> list[Block]:
         metadata = {**block.metadata, "semantic_split": role}
         if role == "label":
             for key in tuple(metadata):
-                if key.startswith("review_"):
+                if key.startswith("review_") or key == "uncertain_spans":
                     metadata.pop(key)
+        elif "uncertain_spans" in metadata:
+            body_start = match.start("body")
+            adjusted = []
+            for span in metadata["uncertain_spans"]:
+                if int(span.get("end", 0)) <= body_start:
+                    continue
+                start = max(0, int(span.get("start", 0)) - body_start)
+                end = min(len(markdown), int(span.get("end", 0)) - body_start)
+                if start < end:
+                    adjusted.append({
+                        **span,
+                        "start": start,
+                        "end": end,
+                        "text": markdown[start:end],
+                    })
+            if adjusted:
+                metadata["uncertain_spans"] = adjusted
+            else:
+                metadata.pop("uncertain_spans", None)
         return Block(
             kind=kind,
             markdown=markdown,
@@ -863,18 +915,39 @@ def _group_enumerated_blocks(blocks: list[Block]) -> list[Block]:
         review_items = [item for item in items if item.metadata.get("review_required")]
         metadata = {"normalized_enumeration": style}
         if review_items:
-            metadata.update({
-                "review_required": True,
-                "review_reason": "ocr_candidates_disagree",
-                "review_consensus": min(
-                    float(item.metadata.get("review_consensus", 0.0)) for item in review_items
-                ),
-                "review_candidates": sorted({
-                    candidate
-                    for item in review_items
-                    for candidate in item.metadata.get("review_candidates", [])
-                }),
-            })
+            unresolved = [
+                item for item in review_items
+                if item.metadata.get("review_reason") == "targeted_ocr_unresolved"
+            ]
+            if unresolved:
+                metadata.update({
+                    "review_required": True,
+                    "review_reason": "targeted_ocr_unresolved",
+                    "review_confidence": min(
+                        float(item.metadata.get("review_confidence", 0.0))
+                        for item in unresolved
+                    ),
+                    "review_base": " | ".join(
+                        str(item.metadata.get("review_base", "")) for item in unresolved
+                    ),
+                    "review_detail": " | ".join(
+                        str(item.metadata.get("review_detail", "")) for item in unresolved
+                        if item.metadata.get("review_detail")
+                    ) or None,
+                })
+            else:
+                metadata.update({
+                    "review_required": True,
+                    "review_reason": "ocr_candidates_disagree",
+                    "review_consensus": min(
+                        float(item.metadata.get("review_consensus", 0.0)) for item in review_items
+                    ),
+                    "review_candidates": sorted({
+                        candidate
+                        for item in review_items
+                        for candidate in item.metadata.get("review_candidates", [])
+                    }),
+                })
         output.append(Block(
             kind="list",
             markdown=markdown,

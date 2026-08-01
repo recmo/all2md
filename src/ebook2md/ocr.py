@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Protocol
@@ -131,7 +132,6 @@ class MlxUnlimitedOcr:
         if not images:
             return []
         self._load()
-        from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
         prompt = apply_chat_template(
@@ -140,7 +140,7 @@ class MlxUnlimitedOcr:
             "Multi page parsing.",
             num_images=len(images),
         )
-        result = generate(
+        result, confidence = self._generate_with_confidence(
             model=self._model,
             processor=self._processor,
             image=[str(image) for image in images],
@@ -159,6 +159,8 @@ class MlxUnlimitedOcr:
             "peak_memory_gb": result.peak_memory,
             "mode": "multi_base",
             "group_size": len(images),
+            "confidence": confidence["summary"],
+            "_confidence_spans": confidence["spans"],
             "contract": {
                 "prompt": MULTI_PAGE_PROMPT,
                 "base_size": 1024,
@@ -182,7 +184,6 @@ class MlxUnlimitedOcr:
         ngram_window: int,
     ) -> tuple[str, dict[str, object]]:
         self._load()
-        from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
         prompt = apply_chat_template(
@@ -191,7 +192,7 @@ class MlxUnlimitedOcr:
             task,
             num_images=1,
         )
-        result = generate(
+        result, confidence = self._generate_with_confidence(
             model=self._model,
             processor=self._processor,
             image=str(image),
@@ -209,6 +210,8 @@ class MlxUnlimitedOcr:
             "finish_reason": result.finish_reason,
             "peak_memory_gb": result.peak_memory,
             "mode": mode,
+            "confidence": confidence["summary"],
+            "_confidence_spans": confidence["spans"],
             "contract": {
                 "prompt": GUNDAM_PROMPT,
                 "base_size": 1024,
@@ -219,6 +222,52 @@ class MlxUnlimitedOcr:
                 "ngram_window": ngram_window,
                 "precision": self.precision,
             },
+        }
+
+    def _generate_with_confidence(self, **kwargs):
+        """Stream generation so selected-token probabilities are not discarded."""
+        try:
+            from mlx_vlm import stream_generate
+        except ImportError:
+            # Compatibility for fixture shims and older mlx-vlm builds.
+            from mlx_vlm import generate
+
+            return generate(**kwargs), {"summary": None, "spans": []}
+
+        text = ""
+        all_logprobs: list[float] = []
+        generated: list[tuple[int, float | None]] = []
+        last_generation_tokens = 0
+        last_response = None
+        tokenizer = self._processor.tokenizer if hasattr(self._processor, "tokenizer") else self._processor
+        special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
+        for response in stream_generate(**kwargs):
+            generation_tokens = int(response.generation_tokens or 0)
+            if generation_tokens > last_generation_tokens:
+                selected = _selected_logprob(response.token, response.logprobs)
+                token = int(response.token)
+                generated.append((token, selected))
+                if selected is not None and token not in special_ids:
+                    all_logprobs.append(selected)
+                last_generation_tokens = generation_tokens
+            segment = response.text or ""
+            if segment:
+                text += segment
+            last_response = response
+
+        if last_response is None:
+            from types import SimpleNamespace
+
+            last_response = SimpleNamespace(
+                prompt_tokens=0,
+                generation_tokens=0,
+                finish_reason="length",
+                peak_memory=0.0,
+            )
+        last_response.text = text
+        return last_response, {
+            "summary": confidence_summary(all_logprobs),
+            "spans": _align_token_confidence(text, generated, tokenizer, special_ids),
         }
 
 
@@ -264,6 +313,55 @@ def _cast_arrays(value, dtype):
     if isinstance(value, tuple):
         return tuple(_cast_arrays(item, dtype) for item in value)
     return value.astype(dtype) if hasattr(value, "astype") and hasattr(value, "dtype") else value
+
+
+def _selected_logprob(token, logprobs) -> float | None:
+    if token is None or logprobs is None:
+        return None
+    try:
+        value = logprobs[int(token)]
+        return float(value.item() if hasattr(value, "item") else value)
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _align_token_confidence(text, generated, tokenizer, special_ids) -> list[dict[str, object]]:
+    spans: list[dict[str, object]] = []
+    cursor = 0
+    for token, logprob in generated:
+        piece = tokenizer.decode(
+            [token],
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        if not piece:
+            continue
+        start = text.find(piece, cursor)
+        if start < 0:
+            stripped = piece.lstrip()
+            start = text.find(stripped, cursor) if stripped else -1
+            piece = stripped if start >= 0 else piece
+        if start < 0:
+            continue
+        end = start + len(piece)
+        cursor = end
+        if logprob is not None and token not in special_ids:
+            spans.append({"start": start, "end": end, "logprobs": [logprob]})
+    return spans
+
+
+def confidence_summary(logprobs: list[float]) -> dict[str, float | int] | None:
+    if not logprobs:
+        return None
+    probabilities = sorted(math.exp(max(-100.0, min(0.0, value))) for value in logprobs)
+    fifth = probabilities[max(0, math.ceil(len(probabilities) * 0.05) - 1)]
+    return {
+        "token_count": len(probabilities),
+        "geometric_mean_probability": round(math.exp(sum(logprobs) / len(logprobs)), 6),
+        "p05_probability": round(fifth, 6),
+        "minimum_probability": round(probabilities[0], 6),
+        "below_half_fraction": round(sum(value < 0.5 for value in probabilities) / len(probabilities), 6),
+    }
 
 
 def split_multi_page_output(raw: str, expected_pages: int) -> list[str]:

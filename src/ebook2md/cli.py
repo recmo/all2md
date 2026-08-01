@@ -29,7 +29,7 @@ def parser() -> argparse.ArgumentParser:
         "--quality",
         choices=("fast", "balanced", "thorough"),
         default="thorough",
-        help="OCR pass depth; thorough runs independent page-local candidates (default: thorough)",
+        help="OCR pass depth; thorough targets low-confidence Base pages with 1024px Gundam (default: thorough)",
     )
     convert_parser.add_argument("--chapter-map", type=Path)
     convert_parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)

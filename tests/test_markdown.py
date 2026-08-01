@@ -268,6 +268,31 @@ def test_uncertain_block_emits_review_comment():
     assert "<!-- ebook2md-review: OCR candidates disagree on page 27, block 1; consensus=0.812 -->" in markdown
 
 
+def test_unresolved_targeted_span_emits_alternatives():
+    result = PageResult(
+        number=27,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block(
+            "paragraph",
+            r"The value is \( na \equiv nh \).",
+            metadata={
+                "review_required": True,
+                "review_reason": "targeted_ocr_unresolved",
+                "review_confidence": 0.606531,
+                "review_base": "na \\equiv nh",
+                "review_detail": "na \\equiv nb",
+            },
+        )],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(result, [])
+    assert "unresolved targeted OCR on page 27, block 1; confidence=0.607" in markdown
+    assert 'base="na \\equiv nh"' in markdown
+    assert 'detail="na \\equiv nb"' in markdown
+
+
 def test_cover_style_front_matter_suppresses_display_titles():
     result = PageResult(
         number=1,

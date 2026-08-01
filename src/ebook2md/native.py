@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import asdict
 from difflib import SequenceMatcher
@@ -54,12 +55,14 @@ def parse_native_observation(
     generation: dict[str, Any] | None = None,
 ) -> OcrObservation:
     """Parse Unlimited-OCR's native hybrid stream without rewriting its raw text."""
+    supplied_generation = dict(generation or {})
+    confidence_spans = supplied_generation.pop("_confidence_spans", [])
     observation = OcrObservation(
         id=observation_id(mode, raw, source_pages),
         mode=mode,
         raw=raw,
         source_pages=list(source_pages),
-        generation=dict(generation or {}),
+        generation=supplied_generation,
     )
     segments = PAGE_TOKEN.split(raw)
     if segments and not segments[0].strip():
@@ -71,8 +74,72 @@ def parse_native_observation(
     for segment_index, segment in enumerate(segments):
         pages = segment_pages[min(segment_index, len(segment_pages) - 1)] if segment_pages else source_pages
         observation.blocks.extend(_parse_segment(segment, pages, observation.id))
+    _apply_block_confidence(observation, confidence_spans)
     observation.warnings = validate_observation(observation)
     return observation
+
+
+def _apply_block_confidence(observation: OcrObservation, spans: list[dict[str, Any]]) -> None:
+    if not spans:
+        return
+    cursor = 0
+    for block in observation.blocks:
+        start = observation.raw.find(block.markdown, cursor)
+        if start < 0:
+            continue
+        end = start + len(block.markdown)
+        cursor = end
+        overlapping = [
+            span
+            for span in spans
+            if int(span.get("end", 0)) > start and int(span.get("start", 0)) < end
+        ]
+        logprobs = [float(value) for span in overlapping for value in span.get("logprobs", [])]
+        if not logprobs:
+            continue
+        probabilities = sorted(math.exp(max(-100.0, min(0.0, value))) for value in logprobs)
+        fifth = probabilities[max(0, math.ceil(len(probabilities) * 0.05) - 1)]
+        block.confidence = round(math.exp(sum(logprobs) / len(logprobs)), 6)
+        block.metadata["token_confidence"] = {
+            "token_count": len(probabilities),
+            "p05_probability": round(fifth, 6),
+            "minimum_probability": round(probabilities[0], 6),
+            "below_half_fraction": round(
+                sum(value < 0.5 for value in probabilities) / len(probabilities), 6
+            ),
+        }
+        uncertain = []
+        for span in overlapping:
+            values = [float(value) for value in span.get("logprobs", [])]
+            if not values:
+                continue
+            local_confidence = math.exp(sum(values) / len(values))
+            if local_confidence >= 0.7:
+                continue
+            local_start = max(0, int(span.get("start", 0)) - start)
+            local_end = min(len(block.markdown), int(span.get("end", 0)) - start)
+            if local_start >= local_end:
+                continue
+            uncertain.append({
+                "start": local_start,
+                "end": local_end,
+                "text": block.markdown[local_start:local_end],
+                "confidence": round(local_confidence, 6),
+            })
+        if uncertain:
+            block.metadata["uncertain_spans"] = _merge_uncertain_spans(uncertain, block.markdown)
+
+
+def _merge_uncertain_spans(spans: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for span in sorted(spans, key=lambda item: (item["start"], item["end"])):
+        if merged and span["start"] <= merged[-1]["end"] + 1:
+            merged[-1]["end"] = max(merged[-1]["end"], span["end"])
+            merged[-1]["confidence"] = min(merged[-1]["confidence"], span["confidence"])
+            merged[-1]["text"] = text[merged[-1]["start"] : merged[-1]["end"]]
+        else:
+            merged.append(dict(span))
+    return merged
 
 
 def _parse_segment(segment: str, pages: list[int], observation: str) -> list[Block]:
@@ -211,6 +278,8 @@ def validate_observation(observation: OcrObservation) -> list[str]:
 def reconcile_observations(
     primary: OcrObservation,
     recoveries: list[OcrObservation],
+    *,
+    embedded_text: str = "",
 ) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
     """Keep multi-page structure and apply only confidently aligned Gundam spans."""
     provenance: list[dict[str, Any]] = []
@@ -225,6 +294,19 @@ def reconcile_observations(
         set(primary.warnings)
         & {"visual_empty_output", "visual_malformed_grounding", "visual_text_repetition", "visual_truncated"}
     )
+    page_detail = [
+        recovery
+        for recovery in recoveries
+        if isinstance(recovery.generation.get("target_block_indices"), list)
+    ]
+    if page_detail and not primary_bad:
+        return _reconcile_page_detail(
+            primary,
+            page_detail[0],
+            canonical,
+            warnings,
+            embedded_text=embedded_text,
+        )
     if len(recoveries) >= 2 and not primary_bad:
         return _reconcile_consensus(primary, recoveries, canonical, warnings)
     for recovery in recoveries:
@@ -312,7 +394,175 @@ def reconcile_observations(
                 )
         elif any(index not in used for index in range(len(recovery.blocks))) and primary_bad:
             warnings.append("visual_reconciliation_uncertain")
+    for block in canonical:
+        if _low_confidence(block) and not block.metadata.get("review_required"):
+            _mark_unresolved(block, detail=None)
+            warnings.append("visual_low_ocr_confidence")
     return canonical, provenance, sorted(set(warnings))
+
+
+def _reconcile_page_detail(
+    primary: OcrObservation,
+    recovery: OcrObservation,
+    canonical: list[Block],
+    warnings: list[str],
+    *,
+    embedded_text: str,
+) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
+    provenance: list[dict[str, Any]] = []
+    warnings.extend(recovery.warnings)
+    targeted = {
+        int(index)
+        for index in recovery.generation.get("target_block_indices", [])
+        if isinstance(index, int) or str(index).isdigit()
+    }
+    for index, block in enumerate(canonical):
+        compatible = [candidate for candidate in recovery.blocks if _compatible(block, candidate)]
+        candidate = max(compatible, key=lambda item: _alignment_score(block, item), default=None)
+        if candidate is None or _alignment_score(block, candidate) < 0.55:
+            if index in targeted:
+                _mark_unresolved(block, detail=None)
+                warnings.append("visual_target_alignment_failed")
+            continue
+        block = canonical[index]
+        if _evidence_normalize(candidate.markdown) == _evidence_normalize(block.markdown):
+            block.metadata.pop("uncertain_spans", None)
+            block.metadata["targeted_detail_agreed"] = recovery.id
+            continue
+
+        base_local = _local_confidence(block)
+        candidate_local = _local_confidence(candidate)
+        base_evidence = _embedded_support(block.markdown, embedded_text)
+        candidate_evidence = _embedded_support(candidate.markdown, embedded_text)
+        evidence_delta = candidate_evidence - base_evidence
+        detail_preferred = bool(
+            _structural_penalty(candidate.markdown) <= _structural_penalty(block.markdown)
+            and (
+                evidence_delta > 0.0005
+                or candidate_local >= base_local + 0.25
+                or (
+                    candidate.confidence is not None
+                    and block.confidence is not None
+                    and candidate.confidence >= block.confidence + 0.0005
+                )
+                or (abs(evidence_delta) <= 0.0005 and candidate_local >= base_local + 0.1)
+            )
+        )
+        base_preferred = bool(
+            evidence_delta < -0.0005
+            or (
+                abs(evidence_delta) <= 0.0005
+                and base_local >= candidate_local + 0.1
+            )
+        )
+        if detail_preferred:
+            replacement = _copy_block(candidate)
+            replacement.source_pages = list(block.source_pages)
+            replacement.bbox = block.bbox
+            replacement.metadata["targeted_from_spans"] = block.metadata.get("uncertain_spans", [])
+            replacement.metadata.pop("uncertain_spans", None)
+            replacement.provenance = [
+                *block.provenance,
+                {
+                    "observation": recovery.id,
+                    "action": "selected_targeted_detail",
+                    "base_local_confidence": round(base_local, 6),
+                    "detail_local_confidence": round(candidate_local, 6),
+                    "embedded_support_delta": round(evidence_delta, 6),
+                },
+            ]
+            canonical[index] = replacement
+            provenance.append({
+                "block": index,
+                "primary_observation": primary.id,
+                "recovery_observation": recovery.id,
+                "action": "selected_targeted_detail",
+                "base_local_confidence": round(base_local, 6),
+                "detail_local_confidence": round(candidate_local, 6),
+                "embedded_support_delta": round(evidence_delta, 6),
+            })
+        elif base_preferred:
+            block.metadata.pop("uncertain_spans", None)
+            block.metadata["targeted_detail_rejected"] = recovery.id
+        elif index in targeted:
+            # Keep Base on a tie because it preserves the multi-page reading order.
+            _mark_unresolved(block, detail=candidate)
+            warnings.append("visual_targeted_ocr_unresolved")
+    for index, block in enumerate(canonical):
+        if _low_confidence(block) and index not in targeted:
+            _mark_unresolved(block, detail=None)
+            warnings.append("visual_low_ocr_confidence")
+    return canonical, provenance, sorted(set(warnings))
+
+
+def _local_confidence(block: Block) -> float:
+    spans = block.metadata.get("uncertain_spans", [])
+    if spans:
+        return min(float(span.get("confidence", 0.0)) for span in spans)
+    return float(block.confidence if block.confidence is not None else 1.0)
+
+
+def _mark_unresolved(block: Block, detail: Block | None) -> None:
+    base_excerpt, detail_excerpt = _changed_excerpts(
+        block.markdown,
+        detail.markdown if detail is not None else "",
+    )
+    block.metadata.update({
+        "review_required": True,
+        "review_reason": "targeted_ocr_unresolved",
+        "review_confidence": _local_confidence(block),
+        "review_base": base_excerpt,
+        "review_detail": detail_excerpt or None,
+    })
+
+
+def _changed_excerpts(base: str, detail: str, *, context: int = 24) -> tuple[str, str]:
+    if not detail:
+        spans = []
+        return base[: context * 2].strip(), ""
+    matcher = SequenceMatcher(None, base, detail, autojunk=False)
+    opcode = next((item for item in matcher.get_opcodes() if item[0] != "equal"), None)
+    if opcode is None:
+        return base[: context * 2].strip(), detail[: context * 2].strip()
+    _, left_start, left_end, right_start, right_end = opcode
+    return (
+        base[max(0, left_start - context) : min(len(base), left_end + context)].strip(),
+        detail[max(0, right_start - context) : min(len(detail), right_end + context)].strip(),
+    )
+
+
+def _low_confidence(block: Block) -> bool:
+    return bool(block.metadata.get("uncertain_spans"))
+
+
+def _embedded_support(value: str, embedded: str) -> float:
+    if not embedded:
+        return 0.0
+    visual = _evidence_normalize(value)
+    evidence = _evidence_normalize(embedded)
+    if not visual or not evidence:
+        return 0.0
+    matcher = SequenceMatcher(None, visual, evidence, autojunk=False)
+    return 2 * sum(block.size for block in matcher.get_matching_blocks()) / (
+        len(visual) + len(evidence)
+    )
+
+
+def _evidence_normalize(value: str) -> str:
+    value = re.sub(
+        r"\\(?:mathbb|mathbf|mathrm|operatorname|text)\s*\{([^{}]*)\}",
+        r"\1",
+        value,
+    )
+    value = value.replace(r"\{", "{").replace(r"\}", "}")
+    value = value.replace(r"\(", " ").replace(r"\)", " ")
+    value = value.replace(r"\[", " ").replace(r"\]", " ")
+    value = value.replace("**", "").replace("□", " ").replace("•", " ")
+    value = value.replace(r"\colon", ":")
+    value = re.sub(r"\\([A-Za-z]+)", r"\1", value)
+    value = re.sub(r"_\{([^{}]+)\}", r"_\1", value)
+    value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+    return normalize(value).casefold()
 
 
 def _reconcile_consensus(

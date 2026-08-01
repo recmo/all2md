@@ -12,7 +12,7 @@ from PIL import Image
 from ebook2md.chapters import chapters_from_map
 from ebook2md.chapters import detect_chapters
 from ebook2md.compare import compare_text
-from ebook2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, parse_output, split_multi_page_output
+from ebook2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
 from ebook2md.native import parse_native_observation, reconcile_observations
 from ebook2md.adapters import _link_target
 from ebook2md.pipeline import _align_multi_results, _apply_links_to_blocks, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, convert
@@ -163,6 +163,48 @@ def test_three_pass_consensus_selects_majority_and_marks_disagreement():
     assert blocks[0].metadata["review_required"] is True
     assert provenance[0]["action"] == "selected_ocr_consensus"
     assert "visual_ocr_disagreement" in warnings
+
+
+def test_token_confidence_is_aligned_to_exact_decoded_pieces():
+    class Tokenizer:
+        pieces = {1: "a", 2: "_i", 3: " a"}
+
+        def decode(self, token_ids, **_kwargs):
+            return self.pieces[token_ids[0]]
+
+    spans = _align_token_confidence(
+        "a_i a",
+        [(1, -0.01), (2, -0.5), (3, -0.02)],
+        Tokenizer(),
+        set(),
+    )
+    assert spans[1] == {"start": 1, "end": 3, "logprobs": [-0.5]}
+
+
+def test_targeted_detail_uses_embedded_evidence_for_confident_base_error():
+    primary = parse_native_observation(
+        r"<|det|>text [10,10,900,200]<|/det|>cosets modulo \( N((a)) \)",
+        mode="multi_base",
+        source_pages=[25],
+    )
+    primary.blocks[0].metadata["uncertain_spans"] = [
+        {"start": 0, "end": 6, "text": "cosets", "confidence": 0.6}
+    ]
+    detail = parse_native_observation(
+        r"<|det|>text [10,10,900,200]<|/det|>cosets modulo \( N(\{a\}) \)",
+        mode="gundam_detail",
+        source_pages=[25],
+        generation={"target_block_indices": [0]},
+    )
+    blocks, provenance, warnings = reconcile_observations(
+        primary,
+        [detail],
+        embedded_text="cosets modulo N({a})",
+    )
+    assert r"N(\{a\})" in blocks[0].markdown
+    assert provenance[0]["action"] == "selected_targeted_detail"
+    assert not blocks[0].metadata.get("review_required")
+    assert "visual_targeted_ocr_unresolved" not in warnings
 
 
 def test_clean_gundam_table_replaces_corrupt_page_local_columns():
