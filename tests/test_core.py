@@ -40,6 +40,13 @@ def test_embedded_text_is_only_comparison_evidence():
     assert "embedded_text_low_similarity" in comparison.warnings
 
 
+def test_small_token_disagreement_is_not_hidden_by_page_similarity():
+    comparison = compare_text("CHAPTER I: GETTING STARTED", "CHAPTER 1: GETTING STARTED")
+    assert comparison.character_similarity > 0.9
+    assert comparison.disagreements == [{"operation": "replace", "visual": "I", "embedded": "1"}]
+    assert "embedded_text_token_disagreement" in comparison.warnings
+
+
 def test_chapter_map(tmp_path: Path):
     path = tmp_path / "chapters.json"
     path.write_text(json.dumps([{"title": "Intro", "start_page": 1}, {"title": "Next", "start_page": 3}]))

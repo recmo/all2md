@@ -41,6 +41,7 @@ class Comparison:
     reading_order_differs: bool = False
     math_symbol_differs: bool = False
     warnings: list[str] = field(default_factory=list)
+    disagreements: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass

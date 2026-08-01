@@ -31,6 +31,7 @@ def compare_text(visual: str, embedded: str) -> Comparison:
     ratio = len(embedded_norm) / max(1, len(visual_norm))
     math_differs = (set(visual_norm) & MATH) != (set(embedded_norm) & MATH)
     reading_order_differs = coverage >= 0.7 and similarity < 0.65
+    disagreements = _token_disagreements(visual_norm, embedded_norm)
     warnings: list[str] = []
     if similarity < 0.90:
         warnings.append("embedded_text_low_similarity")
@@ -40,6 +41,8 @@ def compare_text(visual: str, embedded: str) -> Comparison:
         warnings.append("embedded_text_math_mismatch")
     if reading_order_differs:
         warnings.append("embedded_text_reading_order_mismatch")
+    if disagreements:
+        warnings.append("embedded_text_token_disagreement")
     if "\ufffd" in visual or "\ufffd" in embedded:
         warnings.append("replacement_character_present")
     if visual_repeats:
@@ -53,6 +56,7 @@ def compare_text(visual: str, embedded: str) -> Comparison:
         reading_order_differs=reading_order_differs,
         math_symbol_differs=math_differs,
         warnings=warnings,
+        disagreements=disagreements,
     )
 
 
@@ -64,3 +68,27 @@ def _has_severe_repetition(text: str) -> bool:
             if phrase == words[start + size : start + 2 * size] == words[start + 2 * size : start + 3 * size]:
                 return True
     return False
+
+
+def _token_disagreements(visual: str, embedded: str) -> list[dict[str, str]]:
+    token_pattern = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+    visual_tokens = token_pattern.findall(visual)
+    embedded_tokens = token_pattern.findall(embedded)
+    matcher = SequenceMatcher(
+        None,
+        [token.casefold() for token in visual_tokens],
+        [token.casefold() for token in embedded_tokens],
+        autojunk=False,
+    )
+    disagreements: list[dict[str, str]] = []
+    for operation, visual_start, visual_end, embedded_start, embedded_end in matcher.get_opcodes():
+        if operation == "equal":
+            continue
+        visual_value = " ".join(visual_tokens[visual_start:visual_end])
+        embedded_value = " ".join(embedded_tokens[embedded_start:embedded_end])
+        if not any(character.isalnum() for character in visual_value + embedded_value):
+            continue
+        disagreements.append({"operation": operation, "visual": visual_value, "embedded": embedded_value})
+        if len(disagreements) == 50:
+            break
+    return disagreements
