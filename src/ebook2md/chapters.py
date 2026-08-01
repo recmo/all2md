@@ -23,10 +23,16 @@ def detect_chapters(source: SourceDocument, pages: list[PageResult]) -> list[Cha
     page_numbers = [page.number for page in pages]
     if source.outline:
         minimum_level = min(item["level"] for item in source.outline)
+        chapter_levels = [
+            item["level"]
+            for item in source.outline
+            if re.match(r"^\s*chapter\b", item["title"], re.IGNORECASE)
+        ]
+        boundary_level = min(chapter_levels) if chapter_levels else minimum_level
         starts = [
             (item["title"], item["page"])
             for item in source.outline
-            if item["level"] == minimum_level and item["page"] in page_numbers
+            if item["level"] <= boundary_level and item["page"] in page_numbers
         ]
         if len(starts) >= 2:
             return _boundaries_to_chapters(starts, page_numbers, "document_outline", 1.0)

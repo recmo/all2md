@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 from .model import Chapter, PageResult
@@ -27,12 +28,15 @@ def write_markdown(
 ) -> list[str]:
     written: list[str] = []
     if not split:
+        shutil.rmtree(root / "chapters", ignore_errors=True)
         content = f"# {title}\n\n" + "\n".join(page_markdown(page, chapter=False) for page in pages)
         atomic_text(root / "book.md", content.rstrip() + "\n")
         return ["book.md"]
 
     chapter_dir = root / "chapters"
     chapter_dir.mkdir(parents=True, exist_ok=True)
+    for stale_markdown in chapter_dir.glob("*.md"):
+        stale_markdown.unlink()
     index_lines = [f"# {title}", "", "## Contents", ""]
     chapter_files = [f"{index:03d}-{chapter.slug}.md" for index, chapter in enumerate(chapters)]
     page_files = {

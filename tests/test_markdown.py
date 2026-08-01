@@ -29,6 +29,15 @@ def test_chapter_links_are_relative(tmp_path: Path):
     chapter = (tmp_path / "chapters/000-one.md").read_text()
     assert "../assets/figures/fig-0001.png" in chapter
     assert local_links(chapter) == ["../assets/figures/fig-0001.png"]
+    (tmp_path / "chapters/stale.md").write_text("stale")
+    write_markdown(
+        tmp_path,
+        [page(1), page(2)],
+        [Chapter("One", 1, 1, "one"), Chapter("Two", 2, 2, "two")],
+        split=True,
+        title="Book",
+    )
+    assert not (tmp_path / "chapters/stale.md").exists()
 
 
 def test_anchor_links_are_local_links():

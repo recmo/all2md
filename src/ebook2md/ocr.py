@@ -58,6 +58,27 @@ class MlxUnlimitedOcr:
         self._model, self._processor = load(MODEL_ID, revision=MODEL_REVISION)
 
     def recognize(self, image: Path) -> tuple[str, dict[str, object]]:
+        return self._recognize(
+            image, task="document parsing.", cropping=True, image_size=640, mode="gundam"
+        )
+
+    def recognize_retry(self, image: Path) -> tuple[str, dict[str, object]]:
+        return self._recognize(
+            image, task="document parsing.", cropping=False, image_size=1024, mode="base"
+        )
+
+    def recognize_recovery(self, image: Path) -> tuple[str, dict[str, object]]:
+        return self._recognize(
+            image,
+            task="<|grounding|>Convert the document to markdown.",
+            cropping=True,
+            image_size=640,
+            mode="grounded_markdown",
+        )
+
+    def _recognize(
+        self, image: Path, *, task: str, cropping: bool, image_size: int, mode: str
+    ) -> tuple[str, dict[str, object]]:
         self._load()
         from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
@@ -65,7 +86,7 @@ class MlxUnlimitedOcr:
         prompt = apply_chat_template(
             self._processor,
             self._model.config,
-            "document parsing.",
+            task,
             num_images=1,
         )
         result = generate(
@@ -75,8 +96,8 @@ class MlxUnlimitedOcr:
             prompt=prompt,
             max_tokens=self.max_tokens,
             temperature=0.0,
-            cropping=True,
-            image_size=640,
+            cropping=cropping,
+            image_size=image_size,
             base_size=1024,
             logits_processors=[SlidingWindowNoRepeatNgramProcessor(35, 128)],
         )
@@ -85,6 +106,7 @@ class MlxUnlimitedOcr:
             "generation_tokens": result.generation_tokens,
             "finish_reason": result.finish_reason,
             "peak_memory_gb": result.peak_memory,
+            "mode": mode,
         }
 
 

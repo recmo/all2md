@@ -39,11 +39,22 @@ class AssetStore:
             path.mkdir(parents=True, exist_ok=True)
         manifest = root / "manifest.json"
         self.assets: list[Asset] = []
+        seen: set[tuple[object, ...]] = set()
         if manifest.exists():
             for item in json.loads(manifest.read_text(encoding="utf-8")).get("assets", []):
                 if item.get("bbox") is not None:
                     item["bbox"] = tuple(item["bbox"])
-                self.assets.append(Asset(**item))
+                asset = Asset(**item)
+                identity = self._identity(
+                    asset.sha256,
+                    asset.page,
+                    asset.source_object,
+                    asset.extraction_method,
+                    asset.bbox,
+                )
+                if identity not in seen:
+                    self.assets.append(asset)
+                    seen.add(identity)
         self._display_by_hash: dict[str, str] = {
             asset.sha256: asset.path.removeprefix("assets/") for asset in self.assets
         }
@@ -62,6 +73,24 @@ class AssetStore:
         preserve_original: bool = True,
     ) -> Asset:
         digest = sha256_bytes(data)
+        identity = self._identity(digest, page, source_object, method, bbox)
+        existing = next(
+            (
+                asset
+                for asset in self.assets
+                if self._identity(
+                    asset.sha256,
+                    asset.page,
+                    asset.source_object,
+                    asset.extraction_method,
+                    asset.bbox,
+                )
+                == identity
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
         asset_number = len(self.assets) + 1
         asset_id = f"fig-{asset_number:04d}"
         extension = extension.lower().lstrip(".") or "bin"
@@ -142,6 +171,16 @@ class AssetStore:
 
     def get(self, asset_id: str) -> Asset | None:
         return next((asset for asset in self.assets if asset.id == asset_id), None)
+
+    @staticmethod
+    def _identity(
+        digest: str,
+        page: int,
+        source_object: str | None,
+        method: str,
+        bbox: tuple[float, float, float, float] | None,
+    ) -> tuple[object, ...]:
+        return digest, page, source_object, method, bbox
 
     @staticmethod
     def _display(data: bytes, extension: str) -> tuple[bytes, str, int | None, int | None]:

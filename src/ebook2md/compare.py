@@ -64,10 +64,11 @@ def compare_text(visual: str, embedded: str) -> Comparison:
 
 def _has_severe_repetition(text: str) -> bool:
     words = text.split()
-    for size in range(8, min(36, len(words) // 3 + 1)):
+    for size in range(1, min(36, len(words) // 3 + 1)):
         for start in range(0, len(words) - size * 3 + 1):
             phrase = words[start : start + size]
-            if phrase == words[start + size : start + 2 * size] == words[start + 2 * size : start + 3 * size]:
+            repeats = phrase == words[start + size : start + 2 * size] == words[start + 2 * size : start + 3 * size]
+            if repeats and (size > 1 or len(words) >= 6):
                 return True
     return False
 

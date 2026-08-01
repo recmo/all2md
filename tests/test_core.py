@@ -7,9 +7,11 @@ import fitz
 from PIL import Image
 
 from ebook2md.chapters import chapters_from_map
+from ebook2md.chapters import detect_chapters
 from ebook2md.compare import compare_text
 from ebook2md.ocr import parse_output
 from ebook2md.pipeline import convert
+from ebook2md.model import Comparison, EmbeddedEvidence, PageResult, SourceDocument
 from ebook2md.verify import verify_bundle
 
 
@@ -47,11 +49,37 @@ def test_small_token_disagreement_is_not_hidden_by_page_similarity():
     assert "embedded_text_token_disagreement" in comparison.warnings
 
 
+def test_short_repetition_loop_is_flagged():
+    comparison = compare_text("2. 2. 2. 2. 2. 2. 2. 2.", "A normal numbered list")
+    assert "visual_text_repetition" in comparison.warnings
+
+
 def test_chapter_map(tmp_path: Path):
     path = tmp_path / "chapters.json"
     path.write_text(json.dumps([{"title": "Intro", "start_page": 1}, {"title": "Next", "start_page": 3}]))
     chapters = chapters_from_map(path, [1, 2, 3, 4])
     assert [(item.start_page, item.end_page) for item in chapters] == [(1, 2), (3, 4)]
+
+
+def test_outline_splits_at_chapter_level_and_keeps_parts(tmp_path: Path):
+    source = SourceDocument(
+        path=tmp_path / "book.pdf",
+        kind="pdf",
+        outline=[
+            {"level": 1, "title": "Part I", "page": 1},
+            {"level": 2, "title": "Chapter 1: Start", "page": 2},
+            {"level": 3, "title": "A section", "page": 3},
+            {"level": 2, "title": "Chapter 2: Next", "page": 4},
+            {"level": 1, "title": "Conclusion", "page": 6},
+        ],
+    )
+    pages = [
+        PageResult(number=number, image="", visual_markdown="", blocks=[], embedded=EmbeddedEvidence(), comparison=Comparison())
+        for number in range(1, 7)
+    ]
+    chapters = detect_chapters(source, pages)
+    assert [chapter.title for chapter in chapters] == ["Part I", "Chapter 1: Start", "Chapter 2: Next", "Conclusion"]
+    assert [chapter.start_page for chapter in chapters] == [1, 2, 4, 6]
 
 
 def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
@@ -79,3 +107,7 @@ def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
     assert len(manifest["assets"]) >= 2
     verification = verify_bundle(bundle)
     assert verification.ok, verification.errors
+
+    resumed = convert(pdf, tmp_path / "out", backend=FixtureOcr(), split_mode="single")
+    resumed_manifest = json.loads((resumed / "assets/manifest.json").read_text())
+    assert len(resumed_manifest["assets"]) == len(manifest["assets"])

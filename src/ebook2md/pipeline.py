@@ -81,10 +81,52 @@ def convert(
         try:
             raw, generation = backend.recognize(source_page.image_path)
             visual_markdown, blocks = parse_output(raw)
+            visual_markdown = _blocks_markdown(blocks, visual_markdown)
+            comparison = compare_text(visual_markdown, source_page.embedded.text)
+            retry = getattr(backend, "recognize_retry", None)
+            if callable(retry) and _should_retry(comparison):
+                retry_raw, retry_generation = retry(source_page.image_path)
+                retry_markdown, retry_blocks = parse_output(retry_raw)
+                retry_markdown = _blocks_markdown(retry_blocks, retry_markdown)
+                retry_comparison = compare_text(retry_markdown, source_page.embedded.text)
+                attempts = [
+                    {"generation": dict(generation), "quality": _comparison_quality(comparison)},
+                    {"generation": dict(retry_generation), "quality": _comparison_quality(retry_comparison)},
+                ]
+                if _comparison_quality(retry_comparison) > _comparison_quality(comparison):
+                    raw, generation, visual_markdown, blocks, comparison = (
+                        retry_raw,
+                        retry_generation,
+                        retry_markdown,
+                        retry_blocks,
+                        retry_comparison,
+                    )
+                recovery = getattr(backend, "recognize_recovery", None)
+                if callable(recovery) and _should_retry(comparison):
+                    recovery_raw, recovery_generation = recovery(source_page.image_path)
+                    recovery_markdown, recovery_blocks = parse_output(recovery_raw)
+                    recovery_markdown = _blocks_markdown(recovery_blocks, recovery_markdown)
+                    recovery_comparison = compare_text(recovery_markdown, source_page.embedded.text)
+                    attempts.append(
+                        {
+                            "generation": dict(recovery_generation),
+                            "quality": _comparison_quality(recovery_comparison),
+                        }
+                    )
+                    if _comparison_quality(recovery_comparison) > _comparison_quality(comparison):
+                        raw, generation, visual_markdown, blocks, comparison = (
+                            recovery_raw,
+                            recovery_generation,
+                            recovery_markdown,
+                            recovery_blocks,
+                            recovery_comparison,
+                        )
+                generation["attempts"] = attempts
+                if _should_retry(comparison):
+                    comparison.warnings.append("visual_ocr_low_agreement_after_retry")
             _materialize_figures(blocks, source_page.image_path, source_page.number, assets, source_page.source_assets)
             visual_markdown = _blocks_markdown(blocks, visual_markdown)
             visual_markdown = _apply_links(visual_markdown, source_page.embedded.links)
-            comparison = compare_text(visual_markdown, source_page.embedded.text)
             result = PageResult(
                 number=source_page.number,
                 image=source_page.image_path.name,
@@ -256,6 +298,25 @@ def _sanitize_page_links(markdown: str, available_pages: set[int]) -> tuple[str,
         return match.group(1)
 
     return pattern.sub(replace, markdown), sorted(set(unresolved))
+
+
+def _should_retry(comparison) -> bool:
+    if comparison.character_similarity is None:
+        return False
+    return (
+        comparison.character_similarity < 0.75
+        or comparison.length_ratio is None
+        or not 0.65 <= comparison.length_ratio <= 1.5
+        or "visual_text_repetition" in comparison.warnings
+    )
+
+
+def _comparison_quality(comparison) -> float:
+    similarity = comparison.character_similarity or 0.0
+    ratio = comparison.length_ratio or 0.0
+    length_score = max(0.0, 1.0 - abs(1.0 - ratio))
+    repetition_penalty = 1.0 if "visual_text_repetition" in comparison.warnings else 0.0
+    return similarity + 0.2 * length_score - repetition_penalty
 
 
 def _write_epub(bundle: Path, source: Path, document, assets: AssetStore, fingerprint, started: float, split_mode: str) -> Path:
