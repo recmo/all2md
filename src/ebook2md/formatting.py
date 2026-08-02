@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import mdformat
+
+from .util import atomic_text
 
 DISABLED_LINT_RULES = ",".join(
     (
@@ -21,12 +24,13 @@ DISABLED_LINT_RULES = ",".join(
 class FormatResult:
     idempotent: bool = True
     lint_errors: list[str] = field(default_factory=list)
+    preservation_skips: list[str] = field(default_factory=list)
 
 
 def format_markdown(text: str) -> str:
     return mdformat.text(
         text,
-        options={"wrap": "keep", "number": False},
+        options={"wrap": "keep", "number": True},
         extensions={"gfm"},
     )
 
@@ -34,14 +38,17 @@ def format_markdown(text: str) -> str:
 def format_and_lint(paths: list[Path]) -> FormatResult:
     result = FormatResult()
     for path in paths:
-        first = format_markdown(path.read_text(encoding="utf-8"))
-        path.write_text(first, encoding="utf-8")
-    _pymarkdown("fix", paths, check=False)
-    for path in paths:
-        second = format_markdown(path.read_text(encoding="utf-8"))
-        path.write_text(second, encoding="utf-8")
-        if format_markdown(second) != second:
-            result.idempotent = False
+        source = path.read_text(encoding="utf-8")
+        formatted = format_markdown(source)
+        if _structural_signature(formatted) != _structural_signature(source):
+            formatted = source
+            result.preservation_skips.append(str(path))
+        else:
+            atomic_text(path, formatted)
+        if format_markdown(formatted) != formatted:
+            reformatted = format_markdown(formatted)
+            if _structural_signature(reformatted) == _structural_signature(formatted):
+                result.idempotent = False
     scan = _pymarkdown("scan", paths, check=False)
     if scan.returncode:
         result.lint_errors = [line for line in scan.stdout.splitlines() if line.strip()]
@@ -50,7 +57,16 @@ def format_and_lint(paths: list[Path]) -> FormatResult:
 
 def is_formatted_idempotently(text: str) -> bool:
     once = format_markdown(text)
+    if _structural_signature(once) != _structural_signature(text):
+        return True
     return once == text and format_markdown(once) == once
+
+
+def _structural_signature(text: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    pages = tuple(re.findall(r"<!-- page: (\d+) -->", text))
+    images = tuple(re.findall(r"!\[[^\]]*\]\(([^)]+)\)", text))
+    tokens = tuple(re.findall(r"[\w]+|[^\w\s]", text, re.UNICODE))
+    return pages, images, tokens
 
 
 def _pymarkdown(command: str, paths: list[Path], *, check: bool):

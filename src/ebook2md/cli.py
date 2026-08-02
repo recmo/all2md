@@ -25,6 +25,12 @@ def parser() -> argparse.ArgumentParser:
     convert_parser.add_argument("--language", action="append", default=[])
     convert_parser.add_argument("--dpi", type=int, default=DEFAULT_DPI)
     convert_parser.add_argument("--split", choices=("auto", "single", "chapters"), default="auto")
+    convert_parser.add_argument(
+        "--quality",
+        choices=("fast", "balanced", "thorough"),
+        default="thorough",
+        help="OCR pass depth; thorough targets low-confidence Base pages with 1024px Gundam (default: thorough)",
+    )
     convert_parser.add_argument("--chapter-map", type=Path)
     convert_parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     convert_parser.add_argument(
@@ -63,6 +69,7 @@ def main(argv: list[str] | None = None) -> None:
                     dpi=arguments.dpi,
                     pages=arguments.pages,
                     split_mode=arguments.split,
+                    quality=arguments.quality,
                     chapter_map=arguments.chapter_map,
                     languages=arguments.language,
                     resume=arguments.resume,

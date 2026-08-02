@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Protocol
@@ -44,12 +45,21 @@ class OcrBackend(Protocol):
 
     def recognize_pages(self, images: list[Path]) -> tuple[str, dict[str, object]]: ...
 
+    def recognize_detail(self, image: Path) -> tuple[str, dict[str, object]]: ...
+
 
 class MlxUnlimitedOcr:
-    identity = {"engine": "mlx-vlm", "model": MODEL_ID, "revision": MODEL_REVISION}
-
     def __init__(self, max_tokens: int = 32768):
         self.max_tokens = max_tokens
+        self.precision = {"vision": "float32", "decoder": "bfloat16"}
+        self.identity = {
+            "engine": "mlx-vlm",
+            "model": MODEL_ID,
+            "revision": MODEL_REVISION,
+            "max_tokens": str(max_tokens),
+            "vision_precision": self.precision["vision"],
+            "decoder_precision": self.precision["decoder"],
+        }
         self._model = None
         self._processor = None
 
@@ -61,6 +71,36 @@ class MlxUnlimitedOcr:
         except ImportError as error:
             raise RuntimeError("MLX OCR dependencies are missing; install ebook2md[ocr]") from error
         self._model, self._processor = load(MODEL_ID, revision=MODEL_REVISION)
+        self._configure_precision()
+
+    def _configure_precision(self) -> None:
+        import mlx.core as mx
+
+        for name in ("sam_model", "vision_model", "projector"):
+            component = getattr(self._model, name, None)
+            if component is not None:
+                component.set_dtype(mx.float32)
+        for name in ("image_newline", "view_separator"):
+            value = getattr(self._model, name, None)
+            if value is not None and hasattr(value, "astype"):
+                setattr(self._model, name, value.astype(mx.float32))
+        language_model = getattr(self._model, "language_model", None)
+        if language_model is not None:
+            language_model.set_dtype(mx.bfloat16)
+
+        processor = self._processor
+        original = getattr(processor, "process_one", None)
+        if not callable(original) or getattr(processor, "_ebook2md_fp32_images", False):
+            return
+
+        def process_one(*args, **kwargs):
+            value = original(*args, **kwargs)
+            if isinstance(value, dict) and "images" in value:
+                value["images"] = _cast_arrays(value["images"], mx.float32)
+            return value
+
+        processor.process_one = process_one
+        processor._ebook2md_fp32_images = True
 
     def recognize(self, image: Path) -> tuple[str, dict[str, object]]:
         return self._recognize(
@@ -69,6 +109,16 @@ class MlxUnlimitedOcr:
             cropping=True,
             image_size=640,
             mode="gundam",
+            ngram_window=128,
+        )
+
+    def recognize_detail(self, image: Path) -> tuple[str, dict[str, object]]:
+        return self._recognize(
+            image,
+            task=GUNDAM_PROMPT.removeprefix("<image>"),
+            cropping=True,
+            image_size=1024,
+            mode="gundam_detail",
             ngram_window=128,
         )
 
@@ -82,7 +132,6 @@ class MlxUnlimitedOcr:
         if not images:
             return []
         self._load()
-        from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
         prompt = apply_chat_template(
@@ -91,7 +140,7 @@ class MlxUnlimitedOcr:
             "Multi page parsing.",
             num_images=len(images),
         )
-        result = generate(
+        result, confidence = self._generate_with_confidence(
             model=self._model,
             processor=self._processor,
             image=[str(image) for image in images],
@@ -110,6 +159,8 @@ class MlxUnlimitedOcr:
             "peak_memory_gb": result.peak_memory,
             "mode": "multi_base",
             "group_size": len(images),
+            "confidence": confidence["summary"],
+            "_confidence_spans": confidence["spans"],
             "contract": {
                 "prompt": MULTI_PAGE_PROMPT,
                 "base_size": 1024,
@@ -118,6 +169,7 @@ class MlxUnlimitedOcr:
                 "temperature": 0.0,
                 "no_repeat_ngram_size": 35,
                 "ngram_window": 1024,
+                "precision": self.precision,
             },
         }
 
@@ -132,7 +184,6 @@ class MlxUnlimitedOcr:
         ngram_window: int,
     ) -> tuple[str, dict[str, object]]:
         self._load()
-        from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
         prompt = apply_chat_template(
@@ -141,7 +192,7 @@ class MlxUnlimitedOcr:
             task,
             num_images=1,
         )
-        result = generate(
+        result, confidence = self._generate_with_confidence(
             model=self._model,
             processor=self._processor,
             image=str(image),
@@ -159,6 +210,8 @@ class MlxUnlimitedOcr:
             "finish_reason": result.finish_reason,
             "peak_memory_gb": result.peak_memory,
             "mode": mode,
+            "confidence": confidence["summary"],
+            "_confidence_spans": confidence["spans"],
             "contract": {
                 "prompt": GUNDAM_PROMPT,
                 "base_size": 1024,
@@ -167,7 +220,54 @@ class MlxUnlimitedOcr:
                 "temperature": 0.0,
                 "no_repeat_ngram_size": 35,
                 "ngram_window": ngram_window,
+                "precision": self.precision,
             },
+        }
+
+    def _generate_with_confidence(self, **kwargs):
+        """Stream generation so selected-token probabilities are not discarded."""
+        try:
+            from mlx_vlm import stream_generate
+        except ImportError:
+            # Compatibility for fixture shims and older mlx-vlm builds.
+            from mlx_vlm import generate
+
+            return generate(**kwargs), {"summary": None, "spans": []}
+
+        text = ""
+        all_logprobs: list[float] = []
+        generated: list[tuple[int, float | None]] = []
+        last_generation_tokens = 0
+        last_response = None
+        tokenizer = self._processor.tokenizer if hasattr(self._processor, "tokenizer") else self._processor
+        special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
+        for response in stream_generate(**kwargs):
+            generation_tokens = int(response.generation_tokens or 0)
+            if generation_tokens > last_generation_tokens:
+                selected = _selected_logprob(response.token, response.logprobs)
+                token = int(response.token)
+                generated.append((token, selected))
+                if selected is not None and token not in special_ids:
+                    all_logprobs.append(selected)
+                last_generation_tokens = generation_tokens
+            segment = response.text or ""
+            if segment:
+                text += segment
+            last_response = response
+
+        if last_response is None:
+            from types import SimpleNamespace
+
+            last_response = SimpleNamespace(
+                prompt_tokens=0,
+                generation_tokens=0,
+                finish_reason="length",
+                peak_memory=0.0,
+            )
+        last_response.text = text
+        return last_response, {
+            "summary": confidence_summary(all_logprobs),
+            "spans": _align_token_confidence(text, generated, tokenizer, special_ids),
         }
 
 
@@ -207,9 +307,66 @@ class SlidingWindowNoRepeatNgramProcessor:
         return result[0] if logits.ndim == 1 else result
 
 
+def _cast_arrays(value, dtype):
+    if isinstance(value, list):
+        return [_cast_arrays(item, dtype) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_cast_arrays(item, dtype) for item in value)
+    return value.astype(dtype) if hasattr(value, "astype") and hasattr(value, "dtype") else value
+
+
+def _selected_logprob(token, logprobs) -> float | None:
+    if token is None or logprobs is None:
+        return None
+    try:
+        value = logprobs[int(token)]
+        return float(value.item() if hasattr(value, "item") else value)
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _align_token_confidence(text, generated, tokenizer, special_ids) -> list[dict[str, object]]:
+    spans: list[dict[str, object]] = []
+    cursor = 0
+    for token, logprob in generated:
+        piece = tokenizer.decode(
+            [token],
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        if not piece:
+            continue
+        start = text.find(piece, cursor)
+        if start < 0:
+            stripped = piece.lstrip()
+            start = text.find(stripped, cursor) if stripped else -1
+            piece = stripped if start >= 0 else piece
+        if start < 0:
+            continue
+        end = start + len(piece)
+        cursor = end
+        if logprob is not None and token not in special_ids:
+            spans.append({"start": start, "end": end, "logprobs": [logprob]})
+    return spans
+
+
+def confidence_summary(logprobs: list[float]) -> dict[str, float | int] | None:
+    if not logprobs:
+        return None
+    probabilities = sorted(math.exp(max(-100.0, min(0.0, value))) for value in logprobs)
+    fifth = probabilities[max(0, math.ceil(len(probabilities) * 0.05) - 1)]
+    return {
+        "token_count": len(probabilities),
+        "geometric_mean_probability": round(math.exp(sum(logprobs) / len(logprobs)), 6),
+        "p05_probability": round(fifth, 6),
+        "minimum_probability": round(probabilities[0], 6),
+        "below_half_fraction": round(sum(value < 0.5 for value in probabilities) / len(probabilities), 6),
+    }
+
+
 def split_multi_page_output(raw: str, expected_pages: int) -> list[str]:
     pages = [part.strip() for part in re.split(r"\s*<PAGE>\s*", raw) if part.strip()]
-    if not pages or len(pages) > expected_pages:
+    if not pages:
         raise RuntimeError(
             f"multi-page OCR returned {len(pages)} page segment(s) for {expected_pages} input page(s)"
         )

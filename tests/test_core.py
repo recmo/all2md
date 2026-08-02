@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import zipfile
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -11,10 +12,11 @@ from PIL import Image
 from ebook2md.chapters import chapters_from_map
 from ebook2md.chapters import detect_chapters
 from ebook2md.compare import compare_text
-from ebook2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, parse_output, split_multi_page_output
+from ebook2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
 from ebook2md.native import parse_native_observation, reconcile_observations
-from ebook2md.pipeline import _align_multi_results, _merge_continued_tables, _normalize_document_blocks, convert
-from ebook2md.model import Block, Comparison, EmbeddedEvidence, PageResult, SourceDocument, SourcePage
+from ebook2md.adapters import _link_target
+from ebook2md.pipeline import _align_multi_results, _apply_links_to_blocks, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, convert
+from ebook2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from ebook2md.verify import verify_bundle
 
 
@@ -121,7 +123,7 @@ def test_native_stream_flags_malformed_grounding_and_coordinates():
     assert "visual_implausible_coordinates" in observation.warnings
 
 
-def test_gundam_reconciliation_is_local_and_never_replaces_tables():
+def test_clean_gundam_replaces_a_table_from_a_truncated_primary():
     primary = parse_native_observation(
         "<|det|>text [10,10,500,100]<|/det|>A short sentnce."
         "<|det|>table [10,200,900,900]<|/det|><table><tr><td>A</td></tr></table>",
@@ -137,12 +139,75 @@ def test_gundam_reconciliation_is_local_and_never_replaces_tables():
     )
     blocks, provenance, warnings = reconcile_observations(primary, [recovery])
     assert blocks[0].markdown == "A short sentence with recovered detail."
-    assert "DIFFERENT" not in blocks[1].markdown
+    assert "DIFFERENT" in blocks[1].markdown
     assert provenance[0]["recovery_observation"] == recovery.id
     assert "visual_truncated" in warnings
 
 
-def test_clean_gundam_table_replaces_corrupt_page_local_columns():
+def test_three_pass_consensus_selects_majority_and_marks_disagreement():
+    primary = parse_native_observation(
+        r"<|det|>text [10,10,900,200]<|/det|>The value is \( a, a = e \).",
+        mode="multi_base",
+        source_pages=[27],
+    )
+    candidates = [
+        parse_native_observation(
+            r"<|det|>text [10,10,900,200]<|/det|>The value is \( a_i a = e \).",
+            mode=mode,
+            source_pages=[27],
+        )
+        for mode in ("gundam", "gundam_detail")
+    ]
+    blocks, provenance, warnings = reconcile_observations(primary, candidates)
+    assert r"a_i a = e" in blocks[0].markdown
+    assert blocks[0].metadata["review_required"] is True
+    assert provenance[0]["action"] == "selected_ocr_consensus"
+    assert "visual_ocr_disagreement" in warnings
+
+
+def test_token_confidence_is_aligned_to_exact_decoded_pieces():
+    class Tokenizer:
+        pieces = {1: "a", 2: "_i", 3: " a"}
+
+        def decode(self, token_ids, **_kwargs):
+            return self.pieces[token_ids[0]]
+
+    spans = _align_token_confidence(
+        "a_i a",
+        [(1, -0.01), (2, -0.5), (3, -0.02)],
+        Tokenizer(),
+        set(),
+    )
+    assert spans[1] == {"start": 1, "end": 3, "logprobs": [-0.5]}
+
+
+def test_targeted_detail_uses_embedded_evidence_for_confident_base_error():
+    primary = parse_native_observation(
+        r"<|det|>text [10,10,900,200]<|/det|>cosets modulo \( N((a)) \)",
+        mode="multi_base",
+        source_pages=[25],
+    )
+    primary.blocks[0].metadata["uncertain_spans"] = [
+        {"start": 0, "end": 6, "text": "cosets", "confidence": 0.6}
+    ]
+    detail = parse_native_observation(
+        r"<|det|>text [10,10,900,200]<|/det|>cosets modulo \( N(\{a\}) \)",
+        mode="gundam_detail",
+        source_pages=[25],
+        generation={"target_block_indices": [0]},
+    )
+    blocks, provenance, warnings = reconcile_observations(
+        primary,
+        [detail],
+        embedded_text="cosets modulo N({a})",
+    )
+    assert r"N(\{a\})" in blocks[0].markdown
+    assert provenance[0]["action"] == "selected_targeted_detail"
+    assert not blocks[0].metadata.get("review_required")
+    assert "visual_targeted_ocr_unresolved" not in warnings
+
+
+def test_recovery_keeps_ungrounded_content_until_document_evidence_filtering():
     primary = parse_native_observation(
         "<|det|>title [100,100,200,120]<|/det|>Department"
         + "".join(
@@ -159,14 +224,38 @@ def test_clean_gundam_table_replaces_corrupt_page_local_columns():
         source_pages=[95],
     )
     blocks, provenance, warnings = reconcile_observations(primary, [recovery])
-    assert [block.kind for block in blocks] == ["table"]
+    assert [block.kind for block in blocks] == ["paragraph", "table"]
+    assert blocks[0].markdown == "2014年1月1日"
     assert provenance[0]["action"] == "replaced_corrupt_page_local_content"
-    assert "visual_suspicious_ungrounded_preamble" in warnings
+    assert "visual_suspicious_ungrounded_preamble" not in warnings
 
 
 def test_split_multi_page_output_requires_one_segment_per_image():
     assert split_multi_page_output("<PAGE>\nOne\n<PAGE>\nTwo", 2) == ["One", "Two"]
     assert split_multi_page_output("<PAGE>\nMerged", 2) == ["Merged"]
+    assert split_multi_page_output("<PAGE>\nOne A\n<PAGE>\nOne B\n<PAGE>\nTwo", 2) == [
+        "One A", "One B", "Two"
+    ]
+
+
+def test_oversegmented_multi_page_output_is_merged_monotonically(tmp_path: Path):
+    image = tmp_path / "page.png"
+    Image.new("RGB", (10, 10), "white").save(image)
+    group = [
+        SourcePage(1, image, embedded=EmbeddedEvidence(text="Alpha first continuation")),
+        SourcePage(2, image, embedded=EmbeddedEvidence(text="Beta second")),
+    ]
+    recognized = [
+        ("Alpha first", {"mode": "multi_base"}),
+        ("continuation", {"mode": "multi_base"}),
+        ("Beta second", {"mode": "multi_base"}),
+    ]
+
+    aligned = _align_multi_results(group, recognized)
+
+    assert [item[0] for item in aligned] == ["Alpha first\ncontinuation", "Beta second"]
+    assert aligned[0][1]["merged_output_segments"] == 2
+    assert aligned[1][1]["merged_output_segments"] == 1
 
 
 def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path: Path):
@@ -195,6 +284,7 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
     images = [tmp_path / "1.png", tmp_path / "2.png"]
     _, multi = backend.recognize_pages(images)
     _, gundam = backend.recognize(images[0])
+    _, detail = backend.recognize_detail(images[0])
     assert multi["contract"] == {
         "prompt": MULTI_PAGE_PROMPT,
         "base_size": 1024,
@@ -203,6 +293,7 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
         "temperature": 0.0,
         "no_repeat_ngram_size": 35,
         "ngram_window": 1024,
+        "precision": {"vision": "float32", "decoder": "bfloat16"},
     }
     assert gundam["contract"] == {
         "prompt": GUNDAM_PROMPT,
@@ -212,9 +303,49 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
         "temperature": 0.0,
         "no_repeat_ngram_size": 35,
         "ngram_window": 128,
+        "precision": {"vision": "float32", "decoder": "bfloat16"},
+    }
+    assert detail["contract"] == {
+        "prompt": GUNDAM_PROMPT,
+        "base_size": 1024,
+        "image_size": 1024,
+        "crop_mode": True,
+        "temperature": 0.0,
+        "no_repeat_ngram_size": 35,
+        "ngram_window": 128,
+        "precision": {"vision": "float32", "decoder": "bfloat16"},
     }
     assert calls[0]["cropping"] is False and calls[0]["image_size"] == 1024
     assert calls[1]["cropping"] is True and calls[1]["image_size"] == 640
+    assert calls[2]["cropping"] is True and calls[2]["image_size"] == 1024
+
+
+def test_mlx_backend_enforces_component_precision():
+    import mlx.core as mx
+
+    class Component:
+        dtype = None
+
+        def set_dtype(self, dtype):
+            self.dtype = dtype
+
+    processor = SimpleNamespace(
+        process_one=lambda: {"images": [mx.ones((1,), dtype=mx.bfloat16)]}
+    )
+    backend = MlxUnlimitedOcr()
+    backend._model = SimpleNamespace(
+        sam_model=Component(),
+        vision_model=Component(),
+        projector=Component(),
+        language_model=Component(),
+    )
+    backend._processor = processor
+    backend._configure_precision()
+    assert backend._model.sam_model.dtype == mx.float32
+    assert backend._model.vision_model.dtype == mx.float32
+    assert backend._model.projector.dtype == mx.float32
+    assert backend._model.language_model.dtype == mx.bfloat16
+    assert processor.process_one()["images"][0].dtype == mx.float32
 
 
 def test_multi_page_segments_align_to_physical_page_ranges(tmp_path: Path):
@@ -395,6 +526,201 @@ def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
     assert resumed_metadata["output_fingerprints"]
 
 
+def test_pdf_link_targets_accept_string_page_numbers():
+    assert _link_target({"page": "15"}) == "#page-16"
+    assert _link_target({"page": 15}) == "#page-16"
+    assert _link_target({"uri": "https://example.com", "page": "15"}) == "https://example.com"
+    assert _link_target({"page": "named-destination"}) == ""
+
+
+def test_blank_pages_are_not_grouped_with_content(tmp_path: Path):
+    blank = tmp_path / "blank.png"
+    content = tmp_path / "content.png"
+    Image.new("RGB", (300, 300), "white").save(blank)
+    content_image = Image.new("RGB", (300, 300), "white")
+    for x in range(50, 250):
+        for y in range(100, 130):
+            content_image.putpixel((x, y), (0, 0, 0))
+    content_image.save(content)
+
+    assert _is_visually_blank(blank)[0] is True
+    assert _is_visually_blank(content)[0] is False
+    pages = [
+        SourcePage(1, content),
+        SourcePage(3, content),
+    ]
+    assert [[page.number for page in group] for group in _ocr_groups(pages, [], multi_page=True)] == [[1], [3]]
+
+
+def test_multi_page_ocr_windows_are_bounded_for_atomic_progress(tmp_path: Path):
+    image = tmp_path / "page.png"
+    Image.new("RGB", (10, 10), "white").save(image)
+    pages = [SourcePage(number, image) for number in range(1, 21)]
+
+    groups = _ocr_groups(pages, [], multi_page=True)
+
+    assert [[page.number for page in group] for group in groups] == [
+        list(range(1, 9)),
+        list(range(9, 17)),
+        list(range(17, 21)),
+    ]
+
+
+def test_document_normalization_drops_running_matter_without_inventing_semantics():
+    page = PageResult(
+        number=25,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("header", "2. Rings and Fields", bbox=(100, 60, 300, 80)),
+            Block("page_number", "11", bbox=(850, 60, 880, 80)),
+            Block(
+                "paragraph",
+                "1.28. Definition. A ring is a set with two binary operations.",
+                bbox=(100, 400, 900, 500),
+            ),
+            Block(
+                "heading",
+                "1.31. Theorem. Every finite integral domain is a field.",
+                bbox=(100, 800, 900, 840),
+            ),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert [(block.kind, block.markdown) for block in page.blocks] == [
+        ("paragraph", "1.28. Definition. A ring is a set with two binary operations."),
+        ("heading", "1.31. Theorem. Every finite integral domain is a field."),
+    ]
+
+
+def test_document_normalization_drops_repeated_ungrounded_running_headers():
+    pages = [
+        PageResult(
+            number=number,
+            image="page.png",
+            visual_markdown="",
+            blocks=[
+                Block("paragraph", "Exercises", metadata={"native_ungrounded": True}),
+                Block("paragraph", str(70 + number), metadata={"native_ungrounded": True}),
+                Block("paragraph", f"Exercise content for page {number}."),
+            ],
+            embedded=EmbeddedEvidence(),
+            comparison=Comparison(),
+        )
+        for number in (1, 2)
+    ]
+
+    _normalize_document_blocks(pages)
+
+    assert [[block.markdown for block in page.blocks] for page in pages] == [
+        ["Exercise content for page 1."],
+        ["Exercise content for page 2."],
+    ]
+
+
+def test_document_normalization_drops_unsupported_ungrounded_preamble():
+    page = PageResult(
+        number=26,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", "2014年1月1日", metadata={"native_ungrounded": True}),
+            Block("heading", "Chapter 3", bbox=(100, 100, 900, 150)),
+        ],
+        embedded=EmbeddedEvidence(text="Chapter 3"),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert [block.markdown for block in page.blocks] == ["Chapter 3"]
+    assert "visual_unsupported_ungrounded_text" in page.warnings
+
+
+def test_document_normalization_keeps_embedded_supported_ungrounded_content():
+    continuation = "3. The hiring manager conducts three reference interviews."
+    page = PageResult(
+        number=27,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", continuation, metadata={"native_ungrounded": True}),
+            Block("paragraph", "Here's a sample script:", bbox=(100, 200, 900, 230)),
+        ],
+        embedded=EmbeddedEvidence(text=f"{continuation}\n\nHere's a sample script:"),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert page.blocks[0].markdown == continuation
+    assert page.blocks[0].metadata["embedded_token_support"] == 1.0
+
+
+def test_document_normalization_keeps_ungrounded_only_result_as_best_available_ocr():
+    page = PageResult(
+        number=28,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("paragraph", "Only OCR result", metadata={"native_ungrounded": True})],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert [block.markdown for block in page.blocks] == ["Only OCR result"]
+
+
+def test_document_normalization_cleans_prose_without_rewriting_math():
+    page = PageResult(
+        number=27,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", r"Proof.  Let \( J \) be an ideal and \( J = \langle ra : r \in R \rangle \) ."),
+            Block("paragraph", "(i) First case."),
+            Block("paragraph", "(ii) Second case."),
+            Block(
+                "paragraph",
+                r"If \( a \equiv b \mod J \), then \( na \equiv nh \mod J \) for \(n \in \mathbb{Z}\).",
+            ),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    _normalize_document_blocks([page])
+    assert page.blocks[0].markdown == r"Proof. Let \( J \) be an ideal and \( J = \langle ra : r \in R \rangle \)."
+    assert page.blocks[1].kind == "list"
+    assert page.blocks[1].markdown == "- **(i)** First case.\n- **(ii)** Second case."
+    assert r"na \equiv nh \mod J" in page.blocks[2].markdown
+    assert r"\mathbb{Z}" in page.blocks[2].markdown
+    assert r"\\)" not in page.blocks[0].markdown
+
+
+def test_document_normalization_does_not_infer_caption_from_wording():
+    page = PageResult(
+        number=28,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("figure", "Diagram", bbox=(100, 100, 900, 600)),
+            Block("paragraph", "Figure 3 discusses the result.", bbox=(100, 620, 900, 680)),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert [block.kind for block in page.blocks] == ["figure", "paragraph"]
+    assert page.blocks[1].markdown == "Figure 3 discusses the result."
+
+
 def test_recovery_observations_and_provenance_are_preserved(tmp_path: Path):
     pdf = tmp_path / "recovery.pdf"
     document = fitz.open()
@@ -405,9 +731,9 @@ def test_recovery_observations_and_provenance_are_preserved(tmp_path: Path):
     bundle = convert(pdf, tmp_path / "out", backend=RecoveryFixtureOcr(), split_mode="single")
     page_json = json.loads((bundle / "pages/page-0001.json").read_text())
     assert page_json["visual"]["multi_page"]["raw_path"].startswith("raw/")
-    assert len(page_json["visual"]["gundam"]) == 1
+    assert len(page_json["visual"]["candidates"]) == 1
     assert page_json["recovery"][0]["action"] == "replaced_corrupt_page_local_content"
-    for observation in [page_json["visual"]["multi_page"], *page_json["visual"]["gundam"]]:
+    for observation in [page_json["visual"]["multi_page"], *page_json["visual"]["candidates"]]:
         assert (bundle / observation["raw_path"]).exists()
     verification = verify_bundle(bundle)
     assert verification.ok, verification.errors
@@ -423,22 +749,94 @@ def test_interrupted_conversion_resumes_atomically_without_reprocessing(tmp_path
     document.close()
     backend = InterruptingFixtureOcr()
     try:
-        convert(pdf, tmp_path / "out", backend=backend, split_mode="single", multi_page=False)
+        convert(
+            pdf,
+            tmp_path / "out",
+            backend=backend,
+            split_mode="single",
+            multi_page=False,
+            quality="balanced",
+        )
     except RuntimeError as error:
         assert "1 page(s) failed" in str(error)
     else:
         raise AssertionError("the first conversion should be interrupted")
-    bundle = convert(pdf, tmp_path / "out", backend=backend, split_mode="single", multi_page=False)
+    bundle = convert(
+        pdf,
+        tmp_path / "out",
+        backend=backend,
+        split_mode="single",
+        multi_page=False,
+        quality="balanced",
+    )
     assert backend.calls == {1: 1, 2: 2, 3: 1}
     metadata = json.loads((bundle / "metadata.json").read_text())
     assert metadata["resume_stable"] is True
     assert verify_bundle(bundle).ok
 
 
+def test_assembly_changes_reuse_ocr_without_reporting_instability(tmp_path: Path):
+    pdf = tmp_path / "book.pdf"
+    document = fitz.open()
+    for number in range(1, 3):
+        page = document.new_page(width=612, height=792)
+        page.insert_text((72, 72), f"Page {number} content.")
+    document.save(pdf)
+    document.close()
+    chapter_map = tmp_path / "chapters.json"
+    chapter_map.write_text(json.dumps([
+        {"title": "One", "start_page": 1},
+        {"title": "Two", "start_page": 2},
+    ]))
+    backend = InterruptingFixtureOcr()
+    backend.fail_page_two = False
+    convert(
+        pdf,
+        tmp_path / "out",
+        backend=backend,
+        split_mode="single",
+        chapter_map=chapter_map,
+        multi_page=False,
+        quality="balanced",
+    )
+    calls = dict(backend.calls)
+    bundle = convert(
+        pdf,
+        tmp_path / "out",
+        backend=backend,
+        split_mode="chapters",
+        chapter_map=chapter_map,
+        multi_page=False,
+        quality="balanced",
+    )
+    metadata = json.loads((bundle / "metadata.json").read_text())
+    assert backend.calls == calls
+    assert metadata["resume_stable"] is True
+    assert verify_bundle(bundle).ok
+
+
+def test_embedded_links_are_geometry_aware_and_idempotent():
+    blocks = [
+        Block("paragraph", "Foo first", bbox=(0, 0, 1000, 200)),
+        Block("paragraph", "Foo second", bbox=(0, 400, 1000, 600)),
+    ]
+    links = [Link("Foo", "https://example.com", bbox=(100, 450, 200, 500))]
+    _apply_links_to_blocks(blocks, links)
+    _apply_links_to_blocks(blocks, links)
+    assert blocks[0].markdown == "Foo first"
+    assert blocks[1].markdown == "[Foo](https://example.com) second"
+
+
 def test_embedded_table_image_is_preserved_but_not_displayed_twice(tmp_path: Path):
     pdf = tmp_path / "table.pdf"
     image_path = tmp_path / "table.png"
-    Image.new("RGB", (200, 200), "white").save(image_path)
+    table_image = Image.new("RGB", (200, 200), "white")
+    for coordinate in (20, 100, 180):
+        for offset in range(3):
+            for value in range(20, 181):
+                table_image.putpixel((coordinate + offset, value), (0, 0, 0))
+                table_image.putpixel((value, coordinate + offset), (0, 0, 0))
+    table_image.save(image_path)
     document = fitz.open()
     page = document.new_page(width=612, height=792)
     page.insert_image(fitz.Rect(92, 277, 257, 475), filename=str(image_path))
@@ -450,3 +848,68 @@ def test_embedded_table_image_is_preserved_but_not_displayed_twice(tmp_path: Pat
     assert "![Embedded figure]" not in markdown
     manifest = json.loads((bundle / "assets/manifest.json").read_text())
     assert manifest["assets"]
+
+
+def test_reused_pdf_image_records_distinct_placements(tmp_path: Path):
+    pdf = tmp_path / "reused.pdf"
+    image_path = tmp_path / "source.png"
+    Image.new("RGB", (100, 100), "navy").save(image_path)
+    document = fitz.open()
+    first = document.new_page(width=612, height=792)
+    xref = first.insert_image(fitz.Rect(100, 300, 250, 450), filename=str(image_path))
+    second = document.new_page(width=612, height=792)
+    second.insert_image(fitz.Rect(300, 200, 450, 350), xref=xref)
+    document.save(pdf)
+    document.close()
+
+    bundle = convert(
+        pdf,
+        tmp_path / "out",
+        backend=FixtureOcr(),
+        split_mode="single",
+        multi_page=False,
+    )
+    manifest = json.loads((bundle / "assets/manifest.json").read_text())
+    embedded = next(
+        asset for asset in manifest["assets"]
+        if asset.get("source_object") == f"xref:{xref}"
+    )
+    assert {placement["page"] for placement in embedded["placements"]} == {1, 2}
+    assert all(placement["bbox"] for placement in embedded["placements"])
+
+
+def test_pre_paginated_epub_uses_visual_page_pipeline(tmp_path: Path):
+    epub = tmp_path / "fixed.epub"
+    with zipfile.ZipFile(epub, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        archive.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" '
+            'version="1.0"><rootfiles><rootfile full-path="OEBPS/package.opf" '
+            'media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        archive.writestr(
+            "OEBPS/package.opf",
+            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+            'unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:identifier id="id">fixed</dc:identifier><dc:title>Fixed Book</dc:title>'
+            '<meta property="rendition:layout">pre-paginated</meta></metadata>'
+            '<manifest><item id="page" href="page.xhtml" media-type="application/xhtml+xml"/></manifest>'
+            '<spine><itemref idref="page"/></spine></package>',
+        )
+        archive.writestr(
+            "OEBPS/page.xhtml",
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Page One</title></head>'
+            '<body><h1>Page One</h1><p>Visual page content.</p></body></html>',
+        )
+    bundle = convert(
+        epub,
+        tmp_path / "out",
+        backend=FixtureOcr(),
+        split_mode="single",
+        multi_page=False,
+    )
+    metadata = json.loads((bundle / "metadata.json").read_text())
+    assert metadata["source_kind"] == "epub-fixed"
+    assert (bundle / "pages/page-0001.json").exists()
+    assert "<!-- page: 1 -->" in (bundle / "book.md").read_text()

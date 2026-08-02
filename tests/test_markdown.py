@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from ebook2md.formatting import format_markdown
-from ebook2md.markdown import html_tables_to_markdown, local_links, markdown_anchors, merge_html_tables, normalize_table_blocks, strict_page_markdown, write_markdown
+from ebook2md.formatting import format_and_lint, format_markdown
+from ebook2md.markdown import html_tables_to_markdown, local_links, markdown_anchors, merge_html_tables, normalize_heading_case, normalize_table_blocks, strict_page_markdown, title_case_heading, write_markdown
 from ebook2md.model import Block, Chapter, Comparison, EmbeddedEvidence, PageResult
 
 
@@ -61,6 +61,18 @@ def test_html_table_becomes_pipe_table():
     )
 
 
+def test_table_rows_are_not_reinterpreted_from_department_wording():
+    source = (
+        "<table><tr><td>Department</td><td>Owner</td></tr>"
+        "<tr><td>Department Sales</td><td>Owner</td></tr></table>"
+    )
+    assert html_tables_to_markdown(source) == (
+        "| Department | Owner |\n"
+        "| --- | --- |\n"
+        "| Department Sales | Owner |"
+    )
+
+
 def test_matching_table_continuations_merge_without_repeated_header():
     first = "<table><tr><td>A</td><td></td><td>B</td></tr><tr><td>1</td><td>2</td><td></td></tr></table>"
     second = "<table><tr><td>A</td><td>B</td></tr><tr><td>3</td><td>4</td></tr></table>"
@@ -86,8 +98,8 @@ def test_complex_table_records_html_fallback_reason():
         '<table><tr><td colspan="2">Spanning header</td></tr><tr><td>A</td><td>B</td></tr></table>',
     )
     normalize_table_blocks([block])
-    assert block.markdown.startswith("<table")
-    assert block.metadata["html_fallback_reason"] == "column_span"
+    assert block.markdown.startswith("| Spanning header |")
+    assert block.metadata["render_format"] == "gfm"
 
 
 def test_formatter_is_gfm_idempotent_and_preserves_evidence_syntax():
@@ -101,6 +113,21 @@ def test_formatter_is_gfm_idempotent_and_preserves_evidence_syntax():
     assert "<!-- page: 93 -->" in once
     assert "$x^2$" in once
     assert "assets/figures/diagram.png" in once
+
+
+def test_formatter_preserves_page_markers_and_numeric_content(tmp_path: Path):
+    path = tmp_path / "book.md"
+    sequence = " ".join(f"{number}." for number in range(1, 100))
+    path.write_text(
+        f"# Front Matter\n\n<!-- page: 4 -->\n\n{sequence}\n\n"
+        "<!-- page: 5 -->\n\n## Copyright\n\nAll rights reserved.\n"
+    )
+    result = format_and_lint([path])
+    rendered = path.read_text()
+    assert result.idempotent
+    assert "<!-- page: 4 -->" in rendered
+    assert "<!-- page: 5 -->" in rendered
+    assert "All rights reserved." in rendered
 
 
 def test_outline_and_visual_titles_become_markdown_hierarchy():
@@ -122,7 +149,7 @@ def test_outline_and_visual_titles_become_markdown_hierarchy():
         [{"level": 2, "title": "Chapter 1: Start", "page": 10}],
     )
     assert markdown.startswith("## Chapter 1: Start\n\nBody")
-    assert "### A SECTION" in markdown
+    assert "### A Section" in markdown
     assert "<table" not in markdown
     assert "| A | B |" in markdown
 
@@ -132,6 +159,43 @@ def test_markdown_headings_are_valid_link_anchors():
         "part-i-beginning",
         "chapter-1-start",
     }
+    assert markdown_anchors(r"### 7.51. Lemma. The sequence \( w_0, w_1, \ldots \)") == {
+        "7-51-lemma-the-sequence-w0-w1-ldots"
+    }
+
+
+def test_strict_markdown_drops_leaked_grounding_lines():
+    result = PageResult(
+        number=12,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", "[Non-Text]"),
+            Block("paragraph", "<|det|>text [999, 684, 999,"),
+            Block("paragraph", "Valid content."),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    markdown = strict_page_markdown(result, [])
+
+    assert "<|det|>" not in markdown
+    assert "Valid content." in markdown
+
+
+def test_strict_markdown_does_not_restore_evidence_filtered_fallback():
+    result = PageResult(
+        number=12,
+        image="page.png",
+        visual_markdown="2017年1月1日\n\nDuplicated prose.",
+        blocks=[],
+        embedded=EmbeddedEvidence(text="Duplicated prose."),
+        comparison=Comparison(),
+        warnings=["visual_unsupported_ungrounded_text"],
+    )
+
+    assert strict_page_markdown(result, []) == ""
 
 
 def test_single_file_accepts_multiple_structural_boundaries(tmp_path: Path):
@@ -156,5 +220,212 @@ def test_synthetic_matter_file_contains_level_two_sections(tmp_path: Path):
         title="Book",
     )
     markdown = (tmp_path / "chapters/000-front-matter.md").read_text()
-    assert markdown.startswith("# Front matter")
+    assert markdown.startswith("# Front Matter")
     assert "## Introduction" in markdown
+
+
+def test_all_caps_headings_are_title_cased_conservatively():
+    assert normalize_heading_case(
+        "### WRITING VERSUS TALKING (ISSUES AND PROPOSED SOLUTIONS)"
+    ) == "### Writing Versus Talking (Issues and Proposed Solutions)"
+    assert title_case_heading("CHAPTER 21: AREAS OF RESPONSIBILITY (AORS)") == (
+        "Chapter 21: Areas of Responsibility (AORs)"
+    )
+    assert title_case_heading("PART IV: INFRASTRUCTURE") == "Part IV: Infrastructure"
+    assert title_case_heading("KEY PERFORMANCE INDICATORS (KPIS)") == (
+        "Key Performance Indicators (KPIs)"
+    )
+    assert title_case_heading("Already Mixed-Case") == "Already Mixed-Case"
+    assert title_case_heading("TITLE PAGE") == "Title Page"
+    assert title_case_heading("Appendix: to IPO, or not to IPO?") == (
+        "Appendix: To IPO, or Not to IPO?"
+    )
+    assert title_case_heading("OpenAI and eBay") == "OpenAI and eBay"
+
+
+def test_heading_links_keep_their_destinations():
+    source = "## [PART IV: INFRASTRUCTURE](chapters/004-part-iv.md#part-iv-infrastructure)"
+    assert normalize_heading_case(source) == (
+        "## [Part IV: Infrastructure](chapters/004-part-iv.md#part-iv-infrastructure)"
+    )
+
+
+def test_partial_single_file_includes_outline_context(tmp_path: Path):
+    page = PageResult(
+        number=23,
+        image="page.png",
+        visual_markdown="1. Groups\n\n### 1.17. Definition\n\nA kernel is a subgroup.",
+        blocks=[],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    write_markdown(
+        tmp_path,
+        [page],
+        [],
+        split=False,
+        title="Finite Fields",
+        outline=[
+            {"level": 1, "title": "Algebraic Foundations", "page": 15},
+            {"level": 2, "title": "1 Groups", "page": 16},
+        ],
+    )
+    markdown = (tmp_path / "book.md").read_text()
+    assert "## Algebraic Foundations\n\n### 1 Groups" in markdown
+    assert markdown.count("1 Groups") == 1
+    assert "\n\n#### 1.17. Definition\n\nA kernel" in markdown
+
+
+def test_mid_page_outline_boundary_stays_after_carry_over_text():
+    result = PageResult(
+        number=25,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", "Proof continued from the previous page.", (100, 100, 900, 280)),
+            Block("heading", "2. RINGS AND FIELDS", (100, 320, 500, 350)),
+            Block("paragraph", "A ring has two operations.", (100, 360, 900, 450)),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(
+        result,
+        [{"level": 2, "title": "2 Rings and Fields", "page": 25}],
+    )
+    assert markdown.index("Proof continued") < markdown.index("## 2 Rings and Fields")
+    assert markdown.count("Rings and Fields") == 1
+
+
+def test_uncertain_block_does_not_annotate_markdown():
+    result = PageResult(
+        number=27,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block(
+                "paragraph",
+                r"The value is \( a_i a = e \).",
+                metadata={"review_required": True, "review_consensus": 0.81234},
+            )
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(result, [])
+    assert "The value is" in markdown
+    assert "ebook2md-review" not in markdown
+
+
+def test_unresolved_targeted_span_does_not_annotate_markdown():
+    result = PageResult(
+        number=27,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block(
+            "paragraph",
+            r"The value is \( na \equiv nh \).",
+            metadata={
+                "review_required": True,
+                "review_reason": "targeted_ocr_unresolved",
+                "review_confidence": 0.606531,
+                "review_base": "na \\equiv nh",
+                "review_detail": "na \\equiv nb",
+            },
+        )],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(result, [])
+    assert markdown == r"The value is \( na \equiv nh \)."
+    assert "ebook2md-review" not in markdown
+
+
+def test_cover_style_front_matter_suppresses_display_titles():
+    result = PageResult(
+        number=1,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("title", "THE GREAT CEO WITHIN", (200, 100, 800, 300)),
+            Block("text", "A tactical guide."),
+            Block("embedded_figure", "![Cover](assets/figures/cover.png)", (0, 0, 1000, 1000)),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(result, [])
+    assert "THE GREAT CEO WITHIN" not in markdown
+    assert "# " not in markdown
+    assert "A tactical guide." in markdown
+    assert "![Cover]" in markdown
+
+
+def test_unsupported_front_matter_title_is_demoted_to_linked_text():
+    result = PageResult(
+        number=7,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("title", "[PART IV: INFRASTRUCTURE](#page-93)")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(
+        result,
+        [{"level": 1, "title": "Part I: The Beginning", "page": 10}],
+    )
+    assert markdown == "[PART IV: INFRASTRUCTURE](#page-93)"
+    assert not markdown.startswith("#")
+
+
+def test_front_matter_outline_boundary_remains_authoritative():
+    result = PageResult(
+        number=6,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("title", "CONTENTS"), Block("text", "Part I ........ 10")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(
+        result,
+        [
+            {"level": 2, "title": "CONTENTS", "page": 6},
+            {"level": 1, "title": "Part I: The Beginning", "page": 10},
+        ],
+    )
+    assert markdown == "## Contents\n\nPart I ........ 10"
+
+
+def test_title_page_boundary_does_not_promote_display_title():
+    result = PageResult(
+        number=3,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("title", "THE GREAT CEO WITHIN"), Block("text", "Matt Mochary")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    markdown = strict_page_markdown(
+        result,
+        [
+            {"level": 1, "title": "Title page", "page": 3},
+            {"level": 1, "title": "Part I: The Beginning", "page": 10},
+        ],
+    )
+    assert markdown == "# Title Page\n\nMatt Mochary"
+
+
+def test_front_matter_numeric_content_is_preserved():
+    result = PageResult(
+        number=4,
+        image="page.png",
+        visual_markdown="1. 2. 3. 4. 5. 6. 7. 8. 9. 10.",
+        blocks=[Block("text", "1. 2. 3. 4. 5. 6. 7. 8. 9. 10.")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+    assert strict_page_markdown(
+        result,
+        [{"level": 1, "title": "Part I: The Beginning", "page": 10}],
+    ) == "1. 2. 3. 4. 5. 6. 7. 8. 9. 10."

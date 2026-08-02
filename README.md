@@ -5,12 +5,26 @@ auditable Markdown bundles on Apple Silicon. Unlimited-OCR provides the visual
 interpretation; embedded PDF and DjVu text is retained only as comparison
 evidence and never silently replaces the visual result.
 
-The model contract is intentionally narrow and immutable: ordered page windows
-use Baidu's multi-page Base recipe, and affected pages use Baidu's Gundam recipe
-for local recovery. Raw output from both observations is retained untouched;
-deterministic Python code parses, validates, reconciles, structures, and renders
-the result. The model is never prompted to emit JSON or arbitrate between its
-own readings.
+The default `thorough` quality mode begins with one ordered multi-page Base
+pass. The MLX streaming decoder retains selected-token probabilities, aligns
+them back to exact output substrings, and records local low-probability spans.
+Only pages containing such spans, structural failures, or strong embedded-text
+disagreement receive one page-local Gundam pass, always with cropping enabled
+at 1024 pixels. Base remains the layout authority; an aligned Gundam block is
+selected only when local probability, format integrity, and auxiliary embedded
+text make it the best supported reading. `balanced` targets structural failures
+and strong embedded-text disagreement without using token probability; `fast`
+uses Base alone.
+
+The model is never prompted to emit JSON or arbitrate between its own readings.
+The MLX runtime keeps the vision stack and image tensors in FP32 and the
+language decoder in BF16; effective precision is recorded with each invocation.
+
+Lists are normalized structurally from OCR labels, markers, indentation, and
+geometry before Markdown rendering. Visual bullets become compact `-` lists;
+decimal lists retain explicit source ordinals; alphabetic and Roman labels are
+kept visibly as bold labels inside semantic Markdown list items. The original
+marker, nesting, geometry, source pages, and provenance remain in page JSON.
 
 ## Install
 
@@ -41,8 +55,14 @@ The OCR dependency is pinned to MLX-VLM revision
 ebook2md convert paper.pdf --output result
 ebook2md convert book.djvu --output result --split auto
 ebook2md convert scans/ --output result --pages 1-20
+ebook2md convert draft.pdf --output result --quality balanced
 ebook2md verify result/book
 ```
+
+`--quality thorough|balanced|fast` defaults to `thorough`. Thorough conversion
+spends additional inference time only where Base reports low confidence or a
+structural problem, or disagrees strongly with an available embedded layer. It
+runs at most one maximum-resolution Gundam reread per eligible page.
 
 For a large document, `--split auto` creates chapter files only when reliable
 structural boundaries exist. `--split chapters --chapter-map chapters.json`
@@ -74,18 +94,27 @@ metadata.json
 All Markdown links are relative. Original embedded figures are preserved when
 possible; rendered PNG crops are used for page-composed graphics. Asset
 provenance and every placement remain available in the JSON artifacts.
+Byte-identical display files are deduplicated independently from placement
+records, so a reused PDF object still records every page and box.
 
-Each fixed-layout page record keeps `visual.multi_page`, `visual.gundam`,
-`embedded`, `comparison`, canonical normalized blocks, and recovery provenance
-separately. Markdown is rendered only from canonical blocks. A pinned
-`mdformat`/GFM pass and PyMarkdown lint/fix pass run after rendering, followed
-by a second byte-idempotent formatting pass and `ebook2md verify` checks.
+Each fixed-layout page record keeps `visual.multi_page`, `visual.candidates`,
+`embedded`, `comparison`, canonical normalized blocks, and selection provenance
+separately. Markdown is rendered only from the best canonical blocks. An
+unresolved targeted reread sets block-level review metadata, increments
+`metadata.json`'s `review_required_blocks`, and remains available in the JSON
+artifacts without annotating the reading output; it does not withhold a best guess.
+A pinned `mdformat`/GFM pass runs only when it preserves page markers, image
+targets, and semantic tokens; PyMarkdown is scan-only. Conversion runs
+`ebook2md verify` before reporting success. Missing optional evidence remains a
+warning because OCR and extraction are intentionally best effort and can be
+rerun.
 
 ## Supported inputs
 
 - PDF
-- DjVu (requires DjVuLibre)
-- EPUB
+- DjVu (requires DjVuLibre; structured text, annotations, and outlines are kept
+  when exposed by the file)
+- EPUB, including visual OCR for pre-paginated fixed-layout books
 - CBZ
 - PNG, JPEG, WebP, and single- or multi-page TIFF
 - naturally sorted image directories

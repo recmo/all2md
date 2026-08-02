@@ -8,6 +8,18 @@
     let
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
+      testPython = pkgs.python3.withPackages (
+        ps: with ps; [
+          beautifulsoup4
+          lxml
+          mdformat
+          mdformat-gfm
+          mlx
+          pillow
+          pymupdf
+          pytest
+        ]
+      );
       ebook2md = pkgs.writeShellApplication {
         name = "ebook2md";
         runtimeInputs = [
@@ -34,11 +46,19 @@
         program = "${ebook2md}/bin/ebook2md";
       };
 
-      checks.${system}.source = pkgs.runCommand "ebook2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-        export PYTHONPYCACHEPREFIX="$out/pycache"
-        python -m compileall -q ${self}/src
-        touch "$out/passed"
-      '';
+      checks.${system} = {
+        source = pkgs.runCommand "ebook2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          export PYTHONPYCACHEPREFIX="$out/pycache"
+          python -m compileall -q ${self}/src
+          touch "$out/passed"
+        '';
+        tests = pkgs.runCommand "ebook2md-tests" { nativeBuildInputs = [ testPython ]; } ''
+          export PYTHONPATH=${self}/src
+          export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+          pytest -q ${self}/tests
+          touch "$out"
+        '';
+      };
 
       devShells.${system}.default = pkgs.mkShell {
         packages = [
@@ -55,4 +75,3 @@
       formatter.${system} = pkgs.nixfmt;
     };
 }
-
