@@ -159,6 +159,43 @@ def test_markdown_headings_are_valid_link_anchors():
         "part-i-beginning",
         "chapter-1-start",
     }
+    assert markdown_anchors(r"### 7.51. Lemma. The sequence \( w_0, w_1, \ldots \)") == {
+        "7-51-lemma-the-sequence-w0-w1-ldots"
+    }
+
+
+def test_strict_markdown_drops_leaked_grounding_lines():
+    result = PageResult(
+        number=12,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", "[Non-Text]"),
+            Block("paragraph", "<|det|>text [999, 684, 999,"),
+            Block("paragraph", "Valid content."),
+        ],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    markdown = strict_page_markdown(result, [])
+
+    assert "<|det|>" not in markdown
+    assert "Valid content." in markdown
+
+
+def test_strict_markdown_does_not_restore_evidence_filtered_fallback():
+    result = PageResult(
+        number=12,
+        image="page.png",
+        visual_markdown="2017年1月1日\n\nDuplicated prose.",
+        blocks=[],
+        embedded=EmbeddedEvidence(text="Duplicated prose."),
+        comparison=Comparison(),
+        warnings=["visual_unsupported_ungrounded_text"],
+    )
+
+    assert strict_page_markdown(result, []) == ""
 
 
 def test_single_file_accepts_multiple_structural_boundaries(tmp_path: Path):

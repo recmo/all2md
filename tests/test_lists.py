@@ -8,6 +8,7 @@ import pytest
 
 from ebook2md.formatting import format_and_lint, format_markdown
 from ebook2md.lists import normalize_lists, parse_marker, validate_list_node
+from ebook2md.markdown import page_markdown, strict_page_markdown
 from ebook2md.model import Block, Comparison, EmbeddedEvidence, PageResult
 from ebook2md.native import parse_native_observation
 from ebook2md.pipeline import _normalize_document_blocks, convert
@@ -165,6 +166,141 @@ def test_multiline_and_multi_paragraph_items_render_as_loose_only_when_needed():
     assert len(list_node(result)["items"][0]["blocks"]) == 2
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "- Method 2 invites the team\n\n  to give feedback and determines the final answer.\n- Next method",
+            "- Method 2 invites the team to give feedback and determines the final answer.\n- Next method",
+        ),
+        (
+            "a. The goal is to avoid acrimony in the relationship\n\n  again. Person A goes first.\nb. Write down the plan.",
+            "- **a.** The goal is to avoid acrimony in the relationship again. Person A goes first.\n- **b.** Write down the plan.",
+        ),
+    ],
+)
+def test_mid_sentence_list_fragments_render_as_compact_items(source, expected):
+    result = page(1, [Block("list", source, (100, 100, 800, 300), source_pages=[1])])
+
+    normalize_lists([result])
+
+    assert result.blocks[0].markdown == expected
+    assert list_node(result)["continuation_repairs"] == 1
+
+
+def test_page_leading_fragment_is_reattached_after_nested_item_head():
+    nested = {
+        "ordered": True,
+        "marker_style": "alpha",
+        "marker_case": "lower",
+        "items": [{
+            "source_marker": "a.",
+            "source_label": "a",
+            "source_ordinal": 1,
+            "blocks": [{"kind": "paragraph", "markdown": "If the answer is yes, that person will create toxic"}],
+            "children": [],
+        }],
+    }
+    node = {
+        "ordered": True,
+        "marker_style": "decimal",
+        "marker_case": None,
+        "items": [
+            {
+                "source_marker": "1.",
+                "source_label": "1",
+                "source_ordinal": 1,
+                "blocks": [{"kind": "paragraph", "markdown": "Facilitator asks the question."}],
+                "children": [],
+            },
+            {
+                "source_marker": "2.",
+                "source_label": "2",
+                "source_ordinal": 2,
+                "blocks": [
+                    {"kind": "paragraph", "markdown": 'Person B: "No."'},
+                    {"kind": "paragraph", "markdown": "relationships with others and eventually leave the company anyway."},
+                ],
+                "children": [nested],
+            },
+        ],
+    }
+    result = page(76, [Block(
+        "list",
+        "stale rendering",
+        (147, 699, 825, 763),
+        metadata={"list": node},
+        source_pages=[76, 77],
+    )])
+
+    normalize_lists([result])
+
+    assert result.blocks[0].markdown == (
+        "1. Facilitator asks the question.\n"
+        '2. Person B: "No."\n'
+        "    - **a.** If the answer is yes, that person will create toxic relationships with others and eventually leave the company anyway."
+    )
+    assert len(node["items"][1]["blocks"]) == 1
+    assert nested["items"][0]["blocks"][0]["markdown"].endswith("company anyway.")
+    assert validate_list_node(node) == []
+
+
+def test_adjacent_normalized_list_blocks_preserve_numeric_to_alpha_nesting():
+    numeric = page(77, [Block(
+        "list", "5. Write down the action item.", (145, 135, 850, 262), source_pages=[77]
+    )])
+    alpha = page(77, [Block(
+        "list",
+        "a. Cocreate a plan.\nb. Write down the agreement.",
+        (165, 265, 848, 459),
+        source_pages=[77],
+    )])
+    normalize_lists([numeric])
+    normalize_lists([alpha])
+    result = page(77, [numeric.blocks[0], alpha.blocks[0]])
+
+    normalize_lists([result])
+
+    assert len(result.blocks) == 1
+    assert result.blocks[0].markdown == (
+        "5. Write down the action item.\n"
+        "    - **a.** Cocreate a plan.\n"
+        "    - **b.** Write down the agreement."
+    )
+    node = list_node(result)
+    assert node["items"][0]["children"][0]["nesting_level"] == 1
+    assert result.blocks[0].metadata["stitched_list_blocks"] == 1
+
+
+def test_cross_page_child_list_keeps_active_indent_and_page_comment():
+    first = page(53, [Block(
+        "list",
+        "2. The R schedules a decision meeting.\n    a. If urgent, schedule it immediately.",
+        (145, 700, 850, 900),
+        source_pages=[53],
+    )])
+    second = page(54, [Block(
+        "list",
+        "b. If it is not urgent, use the next team meeting.",
+        (165, 91, 782, 177),
+        source_pages=[54],
+    )])
+
+    normalize_lists([first, second])
+    second.visual_markdown = strict_page_markdown(second, [])
+    rendered = page_markdown(second, chapter=False)
+
+    left_child = list_node(first)["items"][-1]["children"][-1]
+    right = list_node(second)
+    assert left_child["continues_on_page"] == 54
+    assert right["continues_from_page"] == 53
+    assert second.blocks[0].metadata["render_indent"] == 4
+    assert rendered.startswith(
+        "    <!-- page: 54 -->\n\n"
+        "    - **b.** If it is not urgent, use the next team meeting."
+    )
+
+
 def test_nested_lists_are_inferred_from_geometry():
     result = page(1, [
         item("• Parent", 100, 100),
@@ -209,10 +345,11 @@ def test_item_continuation_can_cross_a_page_when_geometry_supports_it():
     assert not second.blocks
     node = list_node(first)
     assert node["items"][0]["source_pages"] == [1, 2]
-    assert first.blocks[0].markdown == "- An item that continues\n\n    onto the following page."
+    assert first.blocks[0].markdown == "- An item that continues onto the following page."
+    assert len(node["items"][0]["blocks"]) == 1
 
 
-def test_headings_prose_tables_and_figures_interrupt_list_grouping():
+def test_headings_prose_tables_and_figures_interrupt_but_preserve_visual_list_items():
     for barrier in (
         Block("heading", "Section", (80, 130, 800, 155)),
         Block("paragraph", "Unrelated prose.", (80, 130, 800, 155)),
@@ -221,7 +358,7 @@ def test_headings_prose_tables_and_figures_interrupt_list_grouping():
     ):
         result = page(1, [item("• First", 100), barrier, item("• Second", 330)])
         normalize_lists([result])
-        assert [block.kind for block in result.blocks] == ["paragraph", barrier.kind, "paragraph"]
+        assert [block.kind for block in result.blocks] == ["list", barrier.kind, "list"]
 
 
 def test_false_positive_shapes_remain_prose():
@@ -239,6 +376,43 @@ def test_false_positive_shapes_remain_prose():
 
     assert [block.kind for block in result.blocks] == ["paragraph"] * len(values)
     assert [block.markdown for block in result.blocks] == values
+
+
+def test_single_visual_bullet_is_normalized_without_contextual_evidence():
+    result = page(1, [item("• One day of internal meetings", 100)])
+
+    normalize_lists([result])
+
+    assert result.blocks[0].kind == "list"
+    assert result.blocks[0].markdown == "- One day of internal meetings"
+    assert list_node(result)["items"][0]["source_marker"] == "•"
+
+
+def test_empty_native_list_container_is_discarded():
+    result = page(1, [Block(
+        "list",
+        "",
+        (100, 100, 800, 200),
+        metadata={"list_container": True},
+        source_pages=[1],
+    )])
+
+    normalize_lists([result])
+
+    assert result.blocks == []
+
+
+def test_standalone_visual_markers_without_item_text_are_discarded():
+    result = page(1, [Block(
+        "paragraph",
+        "•\n•\n•",
+        (100, 100, 800, 200),
+        source_pages=[1],
+    )])
+
+    normalize_lists([result])
+
+    assert result.blocks == []
 
 
 def test_native_parser_retains_list_container_and_candidates():

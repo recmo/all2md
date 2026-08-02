@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .compare import compare_text
 from .model import Block, PageResult
 
 
@@ -80,11 +81,38 @@ def annotate_native_list_block(block: Block) -> None:
 
 
 def normalize_lists(pages: list[PageResult]) -> None:
-    """Build normalized list nodes and render every list block from that structure."""
+    """Normalize OCR structure before rendering list nodes."""
+    _filter_unsupported_ungrounded_blocks(pages)
     for page in pages:
         page.blocks = _normalize_page_blocks(page.blocks)
     _continue_items_across_pages(pages)
+    _stitch_list_hierarchy(pages)
     _link_lists_across_pages(pages)
+
+
+def _filter_unsupported_ungrounded_blocks(pages: list[PageResult]) -> None:
+    for page in pages:
+        has_grounded_content = any(
+            block.bbox is not None and block.markdown.strip()
+            for block in page.blocks
+        )
+        if not has_grounded_content:
+            continue
+        retained: list[Block] = []
+        removed_ungrounded = False
+        for block in page.blocks:
+            if not block.metadata.get("native_ungrounded"):
+                retained.append(block)
+                continue
+            support = compare_text(block.markdown, page.embedded.text).token_coverage
+            if support is not None and support >= 0.8:
+                block.metadata["embedded_token_support"] = support
+                retained.append(block)
+            else:
+                removed_ungrounded = True
+        if removed_ungrounded:
+            page.warnings = sorted(set([*page.warnings, "visual_unsupported_ungrounded_text"]))
+        page.blocks = retained
 
 
 def render_list(node: dict[str, Any], indent: int = 0) -> str:
@@ -122,6 +150,26 @@ def validate_list_node(node: dict[str, Any]) -> list[str]:
     for index, item in enumerate(items):
         if not isinstance(item.get("blocks"), list) or not item["blocks"]:
             errors.append(f"item {index + 1} has no content blocks")
+        else:
+            paragraphs = item["blocks"]
+            for left, right in zip(paragraphs, paragraphs[1:]):
+                if _is_soft_continuation(
+                    left.get("markdown", ""), right.get("markdown", "")
+                ):
+                    errors.append(f"item {index + 1} has unresolved sentence continuation")
+            children = item.get("children", [])
+            if len(paragraphs) > 1 and children:
+                target = _last_item(children[-1])
+                target_blocks = target.get("blocks", []) if target else []
+                if (
+                    target_blocks
+                    and _sentence_is_complete(paragraphs[-2].get("markdown", ""))
+                    and _is_soft_continuation(
+                        target_blocks[-1].get("markdown", ""),
+                        paragraphs[-1].get("markdown", ""),
+                    )
+                ):
+                    errors.append(f"item {index + 1} has misattached nested continuation")
         if not item.get("source_marker"):
             errors.append(f"item {index + 1} lacks source marker")
         if node.get("marker_style") == "decimal" and not isinstance(item.get("source_ordinal"), int):
@@ -145,11 +193,13 @@ def validate_list_node(node: dict[str, Any]) -> list[str]:
 def _normalize_page_blocks(blocks: list[Block]) -> list[Block]:
     for block in blocks:
         annotate_native_list_block(block)
+    blocks = [block for block in blocks if not _is_empty_marker_artifact(block.markdown)]
     output: list[Block] = []
     index = 0
     while index < len(blocks):
         normalized = blocks[index].metadata.get("list")
         if isinstance(normalized, dict):
+            _repair_node_continuations(normalized)
             blocks[index].markdown = render_list(normalized)
             output.append(blocks[index])
             index += 1
@@ -159,10 +209,13 @@ def _normalize_page_blocks(blocks: list[Block]) -> list[Block]:
         if start >= len(blocks):
             if not container:
                 output.append(blocks[index])
+            # Native OCR may emit an empty list container alongside the actual
+            # visual text.  It is structural scaffolding, not document content.
             break
         first_items = _items_from_block(blocks[start])
         if not first_items:
-            output.append(blocks[index])
+            if not container:
+                output.append(blocks[index])
             index += 1
             continue
 
@@ -186,7 +239,14 @@ def _normalize_page_blocks(blocks: list[Block]) -> list[Block]:
                 continue
             break
 
-        strong = bool(container) or any(block.kind in LIST_KINDS for block in run_blocks)
+        strong = (
+            bool(container)
+            or any(block.kind in LIST_KINDS for block in run_blocks)
+            or any(
+                item.get("source_marker") in BULLETS
+                for item in flat_items
+            )
+        )
         if not _list_evidence_is_sufficient(flat_items, run_blocks, strong=strong):
             output.append(blocks[index])
             index += 1
@@ -197,10 +257,17 @@ def _normalize_page_blocks(blocks: list[Block]) -> list[Block]:
         if consumed != len(flat_items):
             nodes.extend(_flat_nodes(flat_items[consumed:]))
         for node in nodes:
+            _repair_node_continuations(node)
             list_block = _node_block(node, run_blocks, container)
             output.append(list_block)
         index = cursor
     return output
+
+
+def _is_empty_marker_artifact(value: str) -> bool:
+    """Discard OCR blocks made only of list glyphs with no item content."""
+    compact = "".join(value.split())
+    return bool(compact) and all(character in BULLETS for character in compact)
 
 
 def _items_from_block(block: Block) -> list[dict[str, Any]]:
@@ -256,6 +323,106 @@ def _line_candidates(value: str) -> list[dict[str, Any]]:
         else:
             return []
     return items
+
+
+def _repair_node_continuations(node: dict[str, Any]) -> None:
+    """Join sentence fragments and reattach fragments assigned before a nested item."""
+    _recover_rendered_labels(node)
+    repairs = int(node.get("continuation_repairs", 0))
+    for item in node.get("items", []):
+        blocks = item.get("blocks", [])
+        children = item.get("children", [])
+
+        if len(blocks) > 1 and children:
+            fragment = blocks[-1].get("markdown", "").strip()
+            parent_text = blocks[-2].get("markdown", "").strip()
+            target = _last_item(children[-1])
+            target_blocks = target.get("blocks", []) if target else []
+            target_text = target_blocks[-1].get("markdown", "").strip() if target_blocks else ""
+            if (
+                fragment
+                and _sentence_is_complete(parent_text)
+                and _is_soft_continuation(target_text, fragment)
+            ):
+                target_blocks[-1]["markdown"] = f"{target_text} {fragment}".strip()
+                blocks.pop()
+                repairs += 1
+
+        index = 1
+        while index < len(blocks):
+            previous = blocks[index - 1].get("markdown", "").strip()
+            continuation = blocks[index].get("markdown", "").strip()
+            if _is_soft_continuation(previous, continuation):
+                blocks[index - 1]["markdown"] = f"{previous} {continuation}".strip()
+                blocks.pop(index)
+                repairs += 1
+            else:
+                index += 1
+
+        for child in children:
+            _repair_node_continuations(child)
+            repairs += int(child.pop("continuation_repairs", 0))
+    if repairs:
+        node["continuation_repairs"] = repairs
+
+
+def _recover_rendered_labels(node: dict[str, Any]) -> None:
+    """Restore labeled-list semantics from an older rendered bullet representation."""
+    items = node.get("items", [])
+    if node.get("marker_style") == "bullet" and items:
+        recovered: list[tuple[dict[str, Any], Marker]] = []
+        for item in items:
+            blocks = item.get("blocks", [])
+            text = blocks[0].get("markdown", "") if blocks else ""
+            match = re.match(r"^\*\*(\(?[A-Za-zIVXLCDMivxlcdm]+[.)])\*\*\s+(.+)$", text)
+            marker = parse_marker(f"{match.group(1)} {match.group(2)}") if match else None
+            if marker is None or marker.marker_style == "bullet":
+                recovered = []
+                break
+            recovered.append((item, marker))
+        if recovered:
+            for item, marker in recovered:
+                item["source_marker"] = marker.source_marker
+                item["source_label"] = marker.source_label
+                item["source_ordinal"] = marker.source_ordinal
+                item["marker_style"] = marker.marker_style
+                item["marker_case"] = marker.marker_case
+                item["blocks"][0]["markdown"] = marker.text
+            _resolve_marker_styles(items)
+            styles = {(item["marker_style"], item.get("marker_case")) for item in items}
+            if len(styles) == 1:
+                style, case = styles.pop()
+                node["ordered"] = True
+                node["marker_style"] = style
+                node["marker_case"] = case
+                node["recovered_rendered_labels"] = True
+
+
+def _last_item(node: dict[str, Any]) -> dict[str, Any] | None:
+    items = node.get("items", [])
+    return items[-1] if items else None
+
+
+def _is_soft_continuation(previous: str, continuation: str) -> bool:
+    return (
+        bool(previous)
+        and bool(continuation)
+        and not _sentence_is_complete(previous)
+        and _starts_lowercase(continuation)
+    )
+
+
+def _sentence_is_complete(value: str) -> bool:
+    return bool(re.search(r"[.!?…][\"'’”\)\]]*$", value.rstrip()))
+
+
+def _starts_lowercase(value: str) -> bool:
+    for character in value.lstrip():
+        if character.isalpha():
+            return character.islower()
+        if character.isdigit():
+            return False
+    return False
 
 
 def _list_evidence_is_sufficient(
@@ -458,10 +625,139 @@ def _continue_items_across_pages(pages: list[PageResult]) -> None:
         last_item["blocks"].append({"kind": "paragraph", "markdown": " ".join(continuation.markdown.split())})
         last_item["source_pages"] = sorted(set([*last_item["source_pages"], current.number]))
         last_item["provenance"].extend(continuation.provenance)
+        _repair_node_continuations(node)
         _finish_node(node)
         list_block.source_pages = list(node["source_pages"])
         list_block.markdown = render_list(node)
         current.blocks.pop(0)
+
+
+def _stitch_list_hierarchy(pages: list[PageResult]) -> None:
+    """Preserve list nesting across OCR block and physical-page boundaries."""
+    for page in pages:
+        retained: list[Block] = []
+        for block in page.blocks:
+            previous = retained[-1] if retained else None
+            if previous and _can_nest_adjacent_blocks(previous, block):
+                parent = previous.metadata["list"]
+                child = block.metadata["list"]
+                _attach_child_node(parent, child)
+                previous.markdown = render_list(parent)
+                previous.source_pages = sorted(set([*previous.source_pages, *block.source_pages]))
+                previous.provenance.extend(block.provenance)
+                previous.metadata["stitched_list_blocks"] = (
+                    int(previous.metadata.get("stitched_list_blocks", 0)) + 1
+                )
+                if previous.bbox and block.bbox:
+                    previous.bbox = (
+                        min(previous.bbox[0], block.bbox[0]),
+                        min(previous.bbox[1], block.bbox[1]),
+                        max(previous.bbox[2], block.bbox[2]),
+                        max(previous.bbox[3], block.bbox[3]),
+                    )
+                continue
+            retained.append(block)
+        page.blocks = retained
+
+    for previous, current in zip(pages, pages[1:]):
+        if current.number != previous.number + 1 or not previous.blocks or not current.blocks:
+            continue
+        left, right = previous.blocks[-1], current.blocks[0]
+        left_node = left.metadata.get("list") if left.kind == "list" else None
+        right_node = right.metadata.get("list") if right.kind == "list" else None
+        if not isinstance(left_node, dict) or not isinstance(right_node, dict):
+            continue
+        depth = _continued_list_depth(left_node, right_node)
+        if depth is None:
+            continue
+        indent = depth * 4
+        right.metadata["render_indent"] = indent
+        right.metadata["continues_from_page"] = previous.number
+        right_node["nesting_level"] = depth
+        _set_item_levels(right_node, depth)
+        matching = _node_at_open_depth(left_node, depth)
+        if matching is not None:
+            matching["continues_on_page"] = current.number
+            right_node["continues_from_page"] = previous.number
+
+
+def _can_nest_adjacent_blocks(parent: Block, child: Block) -> bool:
+    parent_node = parent.metadata.get("list") if parent.kind == "list" else None
+    child_node = child.metadata.get("list") if child.kind == "list" else None
+    if not isinstance(parent_node, dict) or not isinstance(child_node, dict):
+        return False
+    if not parent.bbox or not child.bbox:
+        return False
+    horizontal = child.bbox[0] - parent.bbox[0]
+    vertical = child.bbox[1] - parent.bbox[3]
+    if not 12 <= horizontal <= 96 or not -12 <= vertical <= 96:
+        return False
+    return _can_be_child_style(parent_node, child_node)
+
+
+def _can_be_child_style(parent: dict[str, Any], child: dict[str, Any]) -> bool:
+    ranks = {"decimal": 0, "alpha": 1, "roman": 2, "bullet": 3}
+    parent_rank = ranks.get(parent.get("marker_style"))
+    child_rank = ranks.get(child.get("marker_style"))
+    return parent_rank is not None and child_rank is not None and child_rank > parent_rank
+
+
+def _attach_child_node(parent: dict[str, Any], child: dict[str, Any]) -> None:
+    item = _last_item(parent)
+    if item is None:
+        return
+    depth = int(parent.get("nesting_level", 0)) + 1
+    child["nesting_level"] = depth
+    _set_item_levels(child, depth)
+    children = item.setdefault("children", [])
+    if children and _nodes_continue(children[-1], child):
+        children[-1]["items"].extend(child.get("items", []))
+        _finish_node(children[-1])
+    else:
+        children.append(child)
+
+
+def _continued_list_depth(left: dict[str, Any], right: dict[str, Any]) -> int | None:
+    for depth, candidate in reversed(_open_list_stack(left)):
+        if _nodes_continue(candidate, right):
+            return depth
+    return None
+
+
+def _open_list_stack(node: dict[str, Any], depth: int = 0) -> list[tuple[int, dict[str, Any]]]:
+    stack = [(depth, node)]
+    item = _last_item(node)
+    children = item.get("children", []) if item else []
+    if children:
+        stack.extend(_open_list_stack(children[-1], depth + 1))
+    return stack
+
+
+def _node_at_open_depth(node: dict[str, Any], depth: int) -> dict[str, Any] | None:
+    return next((candidate for level, candidate in _open_list_stack(node) if level == depth), None)
+
+
+def _nodes_continue(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if (left.get("marker_style"), left.get("marker_case")) != (
+        right.get("marker_style"), right.get("marker_case")
+    ):
+        return False
+    left_item, right_items = _last_item(left), right.get("items", [])
+    if left_item is None or not right_items:
+        return False
+    if left.get("marker_style") == "bullet":
+        return True
+    left_ordinal = left_item.get("source_ordinal")
+    right_ordinal = right_items[0].get("source_ordinal")
+    return isinstance(left_ordinal, int) and right_ordinal == left_ordinal + 1
+
+
+def _set_item_levels(node: dict[str, Any], depth: int) -> None:
+    for item in node.get("items", []):
+        item["nesting_level"] = depth
+        for child in item.get("children", []):
+            child["nesting_level"] = depth + 1
+            _set_item_levels(child, depth + 1)
 
 
 def _link_lists_across_pages(pages: list[PageResult]) -> None:

@@ -23,6 +23,7 @@ FRONT_MATTER_BOUNDARY = re.compile(
     re.IGNORECASE,
 )
 MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+RAW_GROUNDING_LINE = re.compile(r"(?m)^.*<\|/?(?:ref|det)\|>.*(?:\n|$)")
 SMALL_TITLE_WORDS = {
     "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into",
     "nor", "of", "on", "or", "over", "per", "the", "to", "up", "via", "with",
@@ -44,7 +45,7 @@ def page_markdown(
     suppress_title: str | None = None,
     heading_delta: int = 0,
 ) -> str:
-    body = page.visual_markdown.strip()
+    body = page.visual_markdown.strip("\n")
     if suppress_title:
         body = _remove_duplicate_heading(body, suppress_title)
     if heading_delta:
@@ -52,7 +53,8 @@ def page_markdown(
     body = normalize_heading_case(body)
     if chapter:
         body = body.replace("](assets/", "](../assets/")
-    return f"<!-- page: {page.number} -->\n\n{body}\n"
+    comment_indent = " " * _page_list_continuation_indent(page)
+    return f"{comment_indent}<!-- page: {page.number} -->\n\n{body}\n"
 
 
 def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
@@ -102,7 +104,7 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
         title = title_case_heading(boundary["title"].strip())
         pieces.append(f"{'#' * min(6, max(1, boundary.get('level', 1)))} {title}")
     for block in blocks:
-        content = block.markdown.strip()
+        content = _strip_grounding_artifacts(block.markdown).strip()
         if not content:
             continue
         if block.kind in TITLE_KINDS:
@@ -113,12 +115,31 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
             elif not HEADING.match(content):
                 content = f"{'#' * min(6, current_level + 1)} {content}"
         content = normalize_heading_case(content)
+        render_indent = int(block.metadata.get("render_indent", 0))
+        if render_indent:
+            prefix = " " * render_indent
+            content = "\n".join(
+                f"{prefix}{line}" if line else ""
+                for line in content.splitlines()
+            )
         pieces.append(content)
-    fallback = page.visual_markdown.strip()
-    rendered = "\n\n".join(pieces).strip()
+    fallback = _strip_grounding_artifacts(page.visual_markdown).strip()
+    rendered = "\n\n".join(pieces).strip("\n")
     if rendered:
         return rendered
+    if "visual_unsupported_ungrounded_text" in page.warnings:
+        return ""
     return normalize_heading_case(fallback)
+
+
+def _page_list_continuation_indent(page: PageResult) -> int:
+    for block in page.blocks:
+        if not block.markdown.strip():
+            continue
+        if block.kind != "list":
+            return 0
+        return int(block.metadata.get("render_indent", 0))
+    return 0
 
 def normalize_heading_case(markdown: str) -> str:
     """Title-case Markdown headings without touching link destinations."""
@@ -409,7 +430,7 @@ def markdown_anchors(markdown: str) -> set[str]:
     anchors = set(re.findall(r'<a\s+id=["\']([^"\']+)["\']\s*></a>', markdown))
     counts: dict[str, int] = {}
     for _, heading in HEADING.findall(markdown):
-        base = slugify(re.sub(r"[*_`]", "", heading))
+        base = _heading_anchor(heading)
         count = counts.get(base, 0)
         anchors.add(base if count == 0 else f"{base}-{count}")
         counts[base] = count + 1
@@ -428,8 +449,16 @@ def _page_targets(
         match = HEADING.search(page.visual_markdown)
         if match and page.number in targets:
             filename, existing = targets[page.number]
-            targets[page.number] = (filename, existing or slugify(match.group(2)))
+            targets[page.number] = (filename, existing or _heading_anchor(match.group(2)))
     return targets
+
+
+def _heading_anchor(heading: str) -> str:
+    return slugify(re.sub(r"[*_`]", "", heading))
+
+
+def _strip_grounding_artifacts(markdown: str) -> str:
+    return RAW_GROUNDING_LINE.sub("", markdown)
 
 
 def _rewrite_page_links(markdown: str, targets: dict[int, tuple[str, str | None]], current_file: str) -> str:
