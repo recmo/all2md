@@ -123,7 +123,7 @@ def test_native_stream_flags_malformed_grounding_and_coordinates():
     assert "visual_implausible_coordinates" in observation.warnings
 
 
-def test_gundam_reconciliation_is_local_and_never_replaces_tables():
+def test_clean_gundam_replaces_a_table_from_a_truncated_primary():
     primary = parse_native_observation(
         "<|det|>text [10,10,500,100]<|/det|>A short sentnce."
         "<|det|>table [10,200,900,900]<|/det|><table><tr><td>A</td></tr></table>",
@@ -139,7 +139,7 @@ def test_gundam_reconciliation_is_local_and_never_replaces_tables():
     )
     blocks, provenance, warnings = reconcile_observations(primary, [recovery])
     assert blocks[0].markdown == "A short sentence with recovered detail."
-    assert "DIFFERENT" not in blocks[1].markdown
+    assert "DIFFERENT" in blocks[1].markdown
     assert provenance[0]["recovery_observation"] == recovery.id
     assert "visual_truncated" in warnings
 
@@ -207,7 +207,7 @@ def test_targeted_detail_uses_embedded_evidence_for_confident_base_error():
     assert "visual_targeted_ocr_unresolved" not in warnings
 
 
-def test_clean_gundam_replacement_does_not_filter_content_by_language_pattern():
+def test_recovery_keeps_ungrounded_content_until_document_evidence_filtering():
     primary = parse_native_observation(
         "<|det|>title [100,100,200,120]<|/det|>Department"
         + "".join(
@@ -233,6 +233,29 @@ def test_clean_gundam_replacement_does_not_filter_content_by_language_pattern():
 def test_split_multi_page_output_requires_one_segment_per_image():
     assert split_multi_page_output("<PAGE>\nOne\n<PAGE>\nTwo", 2) == ["One", "Two"]
     assert split_multi_page_output("<PAGE>\nMerged", 2) == ["Merged"]
+    assert split_multi_page_output("<PAGE>\nOne A\n<PAGE>\nOne B\n<PAGE>\nTwo", 2) == [
+        "One A", "One B", "Two"
+    ]
+
+
+def test_oversegmented_multi_page_output_is_merged_monotonically(tmp_path: Path):
+    image = tmp_path / "page.png"
+    Image.new("RGB", (10, 10), "white").save(image)
+    group = [
+        SourcePage(1, image, embedded=EmbeddedEvidence(text="Alpha first continuation")),
+        SourcePage(2, image, embedded=EmbeddedEvidence(text="Beta second")),
+    ]
+    recognized = [
+        ("Alpha first", {"mode": "multi_base"}),
+        ("continuation", {"mode": "multi_base"}),
+        ("Beta second", {"mode": "multi_base"}),
+    ]
+
+    aligned = _align_multi_results(group, recognized)
+
+    assert [item[0] for item in aligned] == ["Alpha first\ncontinuation", "Beta second"]
+    assert aligned[0][1]["merged_output_segments"] == 2
+    assert aligned[1][1]["merged_output_segments"] == 1
 
 
 def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path: Path):
@@ -529,6 +552,20 @@ def test_blank_pages_are_not_grouped_with_content(tmp_path: Path):
     assert [[page.number for page in group] for group in _ocr_groups(pages, [], multi_page=True)] == [[1], [3]]
 
 
+def test_multi_page_ocr_windows_are_bounded_for_atomic_progress(tmp_path: Path):
+    image = tmp_path / "page.png"
+    Image.new("RGB", (10, 10), "white").save(image)
+    pages = [SourcePage(number, image) for number in range(1, 21)]
+
+    groups = _ocr_groups(pages, [], multi_page=True)
+
+    assert [[page.number for page in group] for group in groups] == [
+        list(range(1, 9)),
+        list(range(9, 17)),
+        list(range(17, 21)),
+    ]
+
+
 def test_document_normalization_drops_running_matter_without_inventing_semantics():
     page = PageResult(
         number=25,
@@ -558,6 +595,85 @@ def test_document_normalization_drops_running_matter_without_inventing_semantics
         ("paragraph", "1.28. Definition. A ring is a set with two binary operations."),
         ("heading", "1.31. Theorem. Every finite integral domain is a field."),
     ]
+
+
+def test_document_normalization_drops_repeated_ungrounded_running_headers():
+    pages = [
+        PageResult(
+            number=number,
+            image="page.png",
+            visual_markdown="",
+            blocks=[
+                Block("paragraph", "Exercises", metadata={"native_ungrounded": True}),
+                Block("paragraph", str(70 + number), metadata={"native_ungrounded": True}),
+                Block("paragraph", f"Exercise content for page {number}."),
+            ],
+            embedded=EmbeddedEvidence(),
+            comparison=Comparison(),
+        )
+        for number in (1, 2)
+    ]
+
+    _normalize_document_blocks(pages)
+
+    assert [[block.markdown for block in page.blocks] for page in pages] == [
+        ["Exercise content for page 1."],
+        ["Exercise content for page 2."],
+    ]
+
+
+def test_document_normalization_drops_unsupported_ungrounded_preamble():
+    page = PageResult(
+        number=26,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", "2014年1月1日", metadata={"native_ungrounded": True}),
+            Block("heading", "Chapter 3", bbox=(100, 100, 900, 150)),
+        ],
+        embedded=EmbeddedEvidence(text="Chapter 3"),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert [block.markdown for block in page.blocks] == ["Chapter 3"]
+    assert "visual_unsupported_ungrounded_text" in page.warnings
+
+
+def test_document_normalization_keeps_embedded_supported_ungrounded_content():
+    continuation = "3. The hiring manager conducts three reference interviews."
+    page = PageResult(
+        number=27,
+        image="page.png",
+        visual_markdown="",
+        blocks=[
+            Block("paragraph", continuation, metadata={"native_ungrounded": True}),
+            Block("paragraph", "Here's a sample script:", bbox=(100, 200, 900, 230)),
+        ],
+        embedded=EmbeddedEvidence(text=f"{continuation}\n\nHere's a sample script:"),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert page.blocks[0].markdown == continuation
+    assert page.blocks[0].metadata["embedded_token_support"] == 1.0
+
+
+def test_document_normalization_keeps_ungrounded_only_result_as_best_available_ocr():
+    page = PageResult(
+        number=28,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("paragraph", "Only OCR result", metadata={"native_ungrounded": True})],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert [block.markdown for block in page.blocks] == ["Only OCR result"]
 
 
 def test_document_normalization_cleans_prose_without_rewriting_math():

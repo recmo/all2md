@@ -98,8 +98,8 @@ def test_complex_table_records_html_fallback_reason():
         '<table><tr><td colspan="2">Spanning header</td></tr><tr><td>A</td><td>B</td></tr></table>',
     )
     normalize_table_blocks([block])
-    assert block.markdown.startswith("<table")
-    assert block.metadata["html_fallback_reason"] == "column_span"
+    assert block.markdown.startswith("| Spanning header |")
+    assert block.metadata["render_format"] == "gfm"
 
 
 def test_formatter_is_gfm_idempotent_and_preserves_evidence_syntax():

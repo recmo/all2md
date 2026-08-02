@@ -366,7 +366,7 @@ def confidence_summary(logprobs: list[float]) -> dict[str, float | int] | None:
 
 def split_multi_page_output(raw: str, expected_pages: int) -> list[str]:
     pages = [part.strip() for part in re.split(r"\s*<PAGE>\s*", raw) if part.strip()]
-    if not pages or len(pages) > expected_pages:
+    if not pages:
         raise RuntimeError(
             f"multi-page OCR returned {len(pages)} page segment(s) for {expected_pages} input page(s)"
         )

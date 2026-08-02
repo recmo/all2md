@@ -126,6 +126,9 @@ def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int, page_sp
             source_assets: list[dict[str, object]] = []
             for image in page.get_images(full=True):
                 xref = image[0]
+                rects = [rect for rect in page.get_image_rects(xref) if not _is_page_backing_image(rect, page.rect)]
+                if not rects:
+                    continue
                 if xref in extracted_xrefs:
                     asset_id = extracted_xrefs[xref]
                 else:
@@ -141,7 +144,7 @@ def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int, page_sp
                     )
                     asset_id = asset.id
                     extracted_xrefs[xref] = asset_id
-                for rect in page.get_image_rects(xref):
+                for rect in rects:
                     bbox = [
                         rect.x0 * 1000 / page.rect.width,
                         rect.y0 * 1000 / page.rect.height,
@@ -168,6 +171,15 @@ def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int, page_sp
             )
             result.pages.append(SourcePage(page_number, image_path, embedded, source_assets))
     return result
+
+
+def _is_page_backing_image(rect, page_rect) -> bool:
+    """A scan covering the page is OCR input, not a document figure."""
+    if page_rect.width <= 0 or page_rect.height <= 0:
+        return False
+    width_ratio = rect.width / page_rect.width
+    height_ratio = rect.height / page_rect.height
+    return width_ratio >= 0.90 and height_ratio >= 0.90
 
 
 def _open_djvu(source: Path, work: Path, *, dpi: int, page_spec: str | None) -> SourceDocument:

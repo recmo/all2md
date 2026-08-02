@@ -31,6 +31,7 @@ from .markdown import (
 from .model import Block, OcrObservation, PageResult
 from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, confidence_summary, split_multi_page_output
+from .quality import adjacent_overlap, output_quality_warnings
 from .util import atomic_json, sha256_file, slugify
 from .util import atomic_text
 from .verify import verify_bundle
@@ -70,14 +71,14 @@ def convert(
         "multi_page": multi_page,
         "quality": quality,
         "code": _code_fingerprint(
-            "adapters.py", "assets.py", "compare.py", "model.py", "native.py", "ocr.py", "pipeline.py"
+            "adapters.py", "assets.py", "compare.py", "model.py", "native.py", "ocr.py", "pipeline.py", "quality.py"
         ),
     }
     assembly_fingerprint = {
         "split_mode": split_mode,
         "chapter_map_sha256": sha256_file(chapter_map) if chapter_map else None,
         "code": _code_fingerprint(
-            "chapters.py", "formatting.py", "lists.py", "markdown.py", "model.py", "pipeline.py", "verify.py"
+            "chapters.py", "formatting.py", "lists.py", "markdown.py", "model.py", "pipeline.py", "quality.py", "verify.py"
         ),
     }
     previous = _read_json(bundle / "metadata.json")
@@ -88,6 +89,8 @@ def convert(
     (bundle / "raw").mkdir(exist_ok=True)
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
+    if not can_resume and (bundle / "assets").exists():
+        shutil.rmtree(bundle / "assets")
     assets = AssetStore(bundle / "assets", load_existing=can_resume)
     fingerprint = {"ocr": ocr_fingerprint, "assembly": assembly_fingerprint}
     started = time.time()
@@ -193,7 +196,15 @@ def convert(
         if result.generation.get("multi_page_recovery"):
             retained_warnings.append("multi_page_recovered_corrupt_segment")
         result.comparison = compare_text(result.visual_markdown, result.embedded.text)
-        result.warnings = sorted(set([*result.comparison.warnings, *retained_warnings]))
+        result.warnings = sorted(
+            set(
+                [
+                    *result.comparison.warnings,
+                    *retained_warnings,
+                    *output_quality_warnings(result.visual_markdown),
+                ]
+            )
+        )
         result.visual_markdown, unresolved = _sanitize_page_links(result.visual_markdown, available_pages)
         if unresolved:
             result.warnings.append("unresolved_internal_link")
@@ -201,6 +212,21 @@ def convert(
         result.visual.setdefault("canonical", {})["blocks"] = [asdict(block) for block in result.blocks]
         result.visual["canonical"]["markdown"] = result.visual_markdown
         atomic_json(bundle / "pages" / f"page-{result.number:04d}.json", result.to_dict())
+    overlap_pages: set[int] = set()
+    for previous_page, current_page in zip(page_results, page_results[1:]):
+        if current_page.number == previous_page.number + 1 and adjacent_overlap(
+            previous_page.visual_markdown, current_page.visual_markdown
+        ):
+            previous_page.warnings = sorted(
+                set([*previous_page.warnings, "visual_adjacent_page_overlap"])
+            )
+            current_page.warnings = sorted(
+                set([*current_page.warnings, "visual_adjacent_page_overlap"])
+            )
+            overlap_pages.update((previous_page.number, current_page.number))
+    for result in page_results:
+        if result.number in overlap_pages:
+            atomic_json(bundle / "pages" / f"page-{result.number:04d}.json", result.to_dict())
     chapters = chapters_from_map(chapter_map, [page.number for page in page_results]) if chapter_map else detect_chapters(document, page_results)
     combined_size = sum(len(page.visual_markdown.encode("utf-8")) for page in page_results)
     if split_mode == "single":
@@ -463,7 +489,9 @@ def _collect_page_candidates(
 ):
     critical = {
         "visual_empty_output",
+        "visual_implausible_output_length",
         "visual_malformed_grounding",
+        "visual_malformed_math",
         "visual_implausible_coordinates",
         "visual_text_repetition",
         "visual_truncated",
@@ -524,6 +552,48 @@ def _collect_page_candidates(
         candidates.append(candidate)
     except Exception:
         warnings.append("visual_auxiliary_ocr_failed")
+
+    # A structurally invalid multi-page segment needs an independent page-level
+    # Base candidate as well as the cropped Gundam view. This is deliberately a
+    # different visual contract, not another deterministic sample of the same
+    # prompt.
+    recognize_pages = getattr(backend, "recognize_pages", None)
+    detail_failed = not candidates or bool(
+        set(candidates[0].warnings)
+        & {
+            "visual_empty_output",
+            "visual_implausible_output_length",
+            "visual_malformed_grounding",
+            "visual_malformed_math",
+            "visual_malformed_table",
+            "visual_text_repetition",
+            "visual_truncated",
+        }
+    )
+    if structural_problem and detail_failed and callable(recognize_pages):
+        try:
+            value = recognize_pages([source_page.image_path])
+            if _is_invocation(value):
+                raw, generation = value
+                raw = split_multi_page_output(raw, 1)[0]
+            else:
+                raw, generation = list(value)[0]
+            generation = {
+                **dict(generation),
+                "mode": "single_page_base",
+                "target_reason": "structural_recovery",
+                "source_pages": [source_page.number],
+            }
+            candidate = parse_native_observation(
+                raw,
+                mode="single_page_base",
+                source_pages=[source_page.number],
+                generation=generation,
+            )
+            _store_raw_observation(bundle, candidate)
+            candidates.append(candidate)
+        except Exception:
+            warnings.append("visual_single_page_base_failed")
     return candidates, sorted(set(warnings))
 
 
@@ -572,7 +642,7 @@ def _is_invocation(value) -> bool:
     )
 
 
-def _ocr_groups(pages, outline: list[dict], *, multi_page: bool, maximum: int = 24):
+def _ocr_groups(pages, outline: list[dict], *, multi_page: bool, maximum: int = 8):
     if not multi_page:
         return [[page] for page in pages]
     by_number = {page.number: page for page in pages}
@@ -613,7 +683,7 @@ def _align_multi_results(group, recognized):
             (raw, {**dict(generation), "source_pages": [page.number]})
             for page, (raw, generation) in zip(group, recognized)
         ]
-    if not recognized or len(recognized) > len(group):
+    if not recognized:
         raise RuntimeError(
             f"cannot align {len(recognized)} OCR segment(s) to {len(group)} physical page(s)"
         )
@@ -637,6 +707,43 @@ def _align_multi_results(group, recognized):
     ]
     embedded = [normalize(page.embedded.text) for page in group]
     segment_count, page_count = len(recognized), len(group)
+    if segment_count > page_count:
+        scores: dict[tuple[int, int], tuple[float, list[tuple[int, int]]]] = {(0, 0): (0.0, [])}
+        expected_span = segment_count / page_count
+        for page_index in range(page_count):
+            for segment_start in range(segment_count):
+                state = scores.get((page_index, segment_start))
+                if state is None:
+                    continue
+                remaining_pages = page_count - page_index - 1
+                for segment_end in range(segment_start + 1, segment_count - remaining_pages + 1):
+                    candidate_text = " ".join(segment_texts[segment_start:segment_end])
+                    evidence = embedded[page_index]
+                    similarity = (
+                        SequenceMatcher(None, candidate_text, evidence, autojunk=False).ratio()
+                        if evidence
+                        else 0.0
+                    )
+                    span_penalty = 0.01 * abs((segment_end - segment_start) - expected_span)
+                    candidate = state[0] + similarity - span_penalty
+                    key = (page_index + 1, segment_end)
+                    if key not in scores or candidate > scores[key][0]:
+                        scores[key] = (candidate, [*state[1], (segment_start, segment_end)])
+        alignment = scores.get((page_count, segment_count))
+        if alignment is None:
+            raise RuntimeError("over-segmented multi-page OCR could not be aligned monotonically")
+        output = []
+        for page, (start, end) in zip(group, alignment[1]):
+            raw = "\n".join(item[0] for item in recognized[start:end])
+            generation = dict(recognized[start][1])
+            generation.update({
+                "source_pages": [page.number],
+                "merged_output_segments": end - start,
+                "group_size": len(group),
+            })
+            output.append((raw, generation))
+        return output
+
     scores: dict[tuple[int, int], tuple[float, list[tuple[int, int]]]] = {(0, 0): (0.0, [])}
     for segment_index in range(segment_count):
         for page_start in range(page_count):
@@ -743,31 +850,47 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
     from .compare import normalize
 
     repeated = Counter()
+    repeated_top = Counter()
     for page in pages:
-        for block in page.blocks:
+        for index, block in enumerate(page.blocks):
             if not block.markdown.strip() or not block.bbox:
+                if index < 2:
+                    key = normalize(block.markdown)
+                    if key and len(key) <= 120:
+                        repeated_top[key] += 1
                 continue
             if block.kind in {"header", "footer"} or block.bbox[1] <= 80 or block.bbox[3] >= 940:
                 key = normalize(block.markdown)
                 if key:
                     repeated[key] += 1
-    boilerplate = {key for key, count in repeated.items() if count >= 3}
+    boilerplate = {key for key, count in repeated.items() if count >= 2}
+    ungrounded_boilerplate = {key for key, count in repeated_top.items() if count >= 2}
     for page in pages:
         for block in page.blocks:
             if not block.source_pages:
                 block.source_pages = [page.number]
-        page.blocks = [
-            block
-            for block in page.blocks
-            if block.kind not in {"page_number", "header", "footer"}
-            and not (
-                block.bbox
-                and normalize(block.markdown) in boilerplate
-                and (block.bbox[1] <= 80 or block.bbox[3] >= 940)
+        retained = []
+        for index, block in enumerate(page.blocks):
+            normalized = normalize(block.markdown)
+            running_matter = bool(
+                block.kind in {"page_number", "header", "footer"}
+                or (
+                    block.bbox
+                    and normalized in boilerplate
+                    and (block.bbox[1] <= 80 or block.bbox[3] >= 940)
+                )
+                or (
+                    index < 2
+                    and not block.bbox
+                    and (normalized in ungrounded_boilerplate or bool(re.fullmatch(r"[ivxlcdm]+|\d+", normalized, re.I)))
+                )
             )
-        ]
+            if not running_matter:
+                retained.append(block)
+        page.blocks = retained
 
     normalize_lists(pages)
+    _trim_adjacent_duplicate_blocks(pages)
 
     for previous, current in zip(pages, pages[1:]):
         if current.number != previous.number + 1 or not previous.blocks or not current.blocks:
@@ -813,6 +936,52 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
             retained.append(block)
             index += 1
         page.blocks = retained
+
+
+def _trim_adjacent_duplicate_blocks(pages: list[PageResult]) -> None:
+    """Keep duplicated OCR content on the physical page supported by evidence."""
+    from difflib import SequenceMatcher
+    from .compare import normalize
+
+    for previous, current in zip(pages, pages[1:]):
+        if current.number != previous.number + 1 or not previous.blocks or not current.blocks:
+            continue
+        left, right = previous.blocks[-1], current.blocks[0]
+        left_text, right_text = left.markdown.strip(), right.markdown.strip()
+        left_norm, right_norm = normalize(left_text), normalize(right_text)
+        if min(len(left_norm), len(right_norm)) < 120:
+            continue
+        exact = left_text.rfind(right_text)
+        if exact >= 0 and exact >= len(left_text) * 0.25:
+            left.markdown = left_text[:exact].rstrip()
+            left.metadata["trimmed_adjacent_page_overlap"] = current.number
+            previous.warnings.append("visual_adjacent_page_overlap_repaired")
+            continue
+        longest = SequenceMatcher(None, left_text, right_text, autojunk=False).find_longest_match()
+        if (
+            longest.size >= 0.75 * min(len(left_text), len(right_text))
+            and longest.a + longest.size >= len(left_text) - 80
+            and longest.b <= 80
+        ):
+            left.markdown = left_text[: longest.a].rstrip()
+            left.metadata["trimmed_adjacent_page_overlap"] = current.number
+            previous.warnings.append("visual_adjacent_page_overlap_repaired")
+            continue
+        similarity = SequenceMatcher(None, left_norm, right_norm, autojunk=False).ratio()
+        if similarity < 0.92:
+            continue
+        left_support = SequenceMatcher(
+            None, left_norm, normalize(previous.embedded.text), autojunk=False
+        ).ratio()
+        right_support = SequenceMatcher(
+            None, right_norm, normalize(current.embedded.text), autojunk=False
+        ).ratio()
+        if right_support > left_support + 0.05:
+            previous.blocks.pop()
+            previous.warnings.append("visual_adjacent_page_overlap_repaired")
+        elif left_support > right_support + 0.05:
+            current.blocks.pop(0)
+            current.warnings.append("visual_adjacent_page_overlap_repaired")
 
 
 def _clean_prose(value: str) -> str:
@@ -921,9 +1090,7 @@ def _apply_links(markdown: str, links) -> str:
         label = " ".join(link.text.split())
         if not label or not link.target or f"]({link.target})" in markdown:
             continue
-        import re
-        pattern = re.compile(re.escape(label), re.IGNORECASE)
-        markdown, count = pattern.subn(lambda match: f"[{match.group(0)}]({link.target})", markdown, count=1)
+        markdown, _ = _replace_plain_text_once(markdown, label, link.target)
     return markdown
 
 
@@ -934,12 +1101,11 @@ def _apply_links_to_blocks(blocks: list[Block], links) -> None:
             continue
         if any(f"]({link.target})" in block.markdown for block in blocks):
             continue
-        pattern = re.compile(re.escape(label), re.IGNORECASE)
         candidates = [
             block
             for block in blocks
             if block.kind not in {"table", "figure", "embedded_figure"}
-            and pattern.search(block.markdown)
+            and _link_label_pattern(label).search(block.markdown)
         ]
         if link.bbox:
             candidates.sort(
@@ -947,17 +1113,43 @@ def _apply_links_to_blocks(blocks: list[Block], links) -> None:
                 reverse=True,
             )
         for block in candidates:
-            updated, count = pattern.subn(
-                lambda match: f"[{match.group(0)}]({link.target})",
-                block.markdown,
-                count=1,
-            )
+            updated, count = _replace_plain_text_once(block.markdown, label, link.target)
             if count:
                 block.markdown = updated
                 block.metadata.setdefault("links", []).append(
                     {"target": link.target, "source": "embedded_link_geometry"}
                 )
                 break
+
+
+_PROTECTED_MARKDOWN = re.compile(
+    r"```.*?```|~~~.*?~~~|`[^`\n]*`|!\[[^\]]*\]\([^)]*\)|"
+    r"\[[^\]]*\]\([^)]*\)|<[^>]*>|\\\(.*?\\\)|\\\[.*?\\\]|\$\$.*?\$\$",
+    re.DOTALL,
+)
+
+
+def _replace_plain_text_once(markdown: str, label: str, target: str) -> tuple[str, int]:
+    """Link one visible occurrence without entering existing Markdown constructs."""
+    pattern = _link_label_pattern(label)
+    cursor = 0
+    for protected in _PROTECTED_MARKDOWN.finditer(markdown):
+        match = pattern.search(markdown, cursor, protected.start())
+        if match:
+            replacement = f"[{match.group(0)}]({target})"
+            return markdown[: match.start()] + replacement + markdown[match.end() :], 1
+        cursor = protected.end()
+    match = pattern.search(markdown, cursor)
+    if not match:
+        return markdown, 0
+    replacement = f"[{match.group(0)}]({target})"
+    return markdown[: match.start()] + replacement + markdown[match.end() :], 1
+
+
+def _link_label_pattern(label: str) -> re.Pattern[str]:
+    prefix = r"(?<!\w)" if label[:1].isalnum() else ""
+    suffix = r"(?!\w)" if label[-1:].isalnum() else ""
+    return re.compile(prefix + re.escape(label) + suffix, re.IGNORECASE)
 
 
 def _bbox_coverage(subject, container) -> float:

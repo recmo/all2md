@@ -249,8 +249,6 @@ def table_fallback_reason(source: str) -> str | None:
     if table.find("table") is not None:
         return "nested_table"
     for cell in table.find_all(["th", "td"]):
-        if int(cell.get("colspan", 1)) > 1:
-            return "column_span"
         if cell.find(["p", "ul", "ol", "pre", "blockquote", "br"]):
             return "multiline_or_nested_cell"
     return None
@@ -276,7 +274,21 @@ def merge_html_tables(
         return None
     if not repeated_header and _row_width(first_rows[0]) != _row_width(next_rows[0]):
         return None
-    for row in next_rows[1 if repeated_header else 0 :]:
+    incoming = next_rows[1 if repeated_header else 0 :]
+    existing_signatures = [_row_signature(row) for row in first_rows[1:]]
+    incoming_signatures = [_row_signature(row) for row in incoming]
+    common_prefix = 0
+    for left, right in zip(existing_signatures, incoming_signatures):
+        if not left or left != right:
+            break
+        common_prefix += 1
+    if common_prefix >= 3:
+        return None
+    overlap = 0
+    for size in range(1, min(20, len(existing_signatures), len(incoming_signatures)) + 1):
+        if existing_signatures[-size:] == incoming_signatures[:size]:
+            overlap = size
+    for row in incoming[overlap:]:
         first_table.append(row.extract())
     return str(first_table)
 
@@ -309,10 +321,13 @@ def _table_to_markdown(source: str) -> str:
             values.extend([value, *([""] * (max(1, int(cell.get("colspan", 1))) - 1))])
         return values
 
-    header = [value for value in cells(source_rows[0]) if value]
-    if not header:
-        return ""
+    all_rows = [cells(row) for row in source_rows]
+    header_nodes = source_rows[0].find_all(["th", "td"], recursive=False)
+    header_has_span = any(int(cell.get("colspan", 1)) > 1 for cell in header_nodes)
+    header = all_rows[0] if header_has_span else [value for value in all_rows[0] if value]
     width = len(header)
+    if not any(header):
+        return ""
     rows: list[list[str]] = []
     current_group = ""
     group_rows_remaining = 0

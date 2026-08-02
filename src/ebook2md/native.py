@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from .compare import compare_text, normalize
 from .lists import annotate_native_list_block
 from .model import Block, OcrObservation
+from .quality import output_quality_warnings
 
 PAGE_TOKEN = re.compile(r"\s*<PAGE>\s*")
 DET_TOKEN = re.compile(r"<\|det\|>(.*?)<\|/det\|>", re.DOTALL)
@@ -272,6 +273,12 @@ def validate_observation(observation: OcrObservation) -> list[str]:
             warnings.append("visual_page_transition_mismatch")
     if _malformed_table(raw):
         warnings.append("visual_malformed_table")
+    warnings.extend(
+        output_quality_warnings(
+            _observation_text(observation),
+            page_count=len(observation.source_pages),
+        )
+    )
     return sorted(set(warnings))
 
 
@@ -285,10 +292,7 @@ def reconcile_observations(
     provenance: list[dict[str, Any]] = []
     warnings: list[str] = list(primary.warnings)
     canonical = [_copy_block(block) for block in primary.blocks]
-    primary_bad = bool(
-        set(primary.warnings)
-        & {"visual_empty_output", "visual_malformed_grounding", "visual_text_repetition", "visual_truncated"}
-    )
+    primary_bad = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
     page_detail = [
         recovery
         for recovery in recoveries
@@ -635,24 +639,25 @@ def _structural_penalty(value: str) -> float:
 
 
 def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObservation) -> bool:
-    severe = bool(
-        set(primary.warnings)
-        & {
-            "visual_empty_output",
-            "visual_malformed_grounding",
-            "visual_text_repetition",
-            "visual_truncated",
-        }
-    )
-    if not severe or set(recovery.warnings) & {"visual_empty_output", "visual_text_repetition", "visual_truncated"}:
-        return False
-    # Existing multi-page tables are structural authority and are never replaced.
-    if any(block.kind == "table" for block in primary.blocks):
+    severe = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
+    if not severe or set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS:
         return False
     primary_tokens = set(normalize(_observation_text(primary)).casefold().split())
     recovery_tokens = set(normalize(_observation_text(recovery)).casefold().split())
     overlap = len(primary_tokens & recovery_tokens) / max(1, min(len(primary_tokens), len(recovery_tokens)))
     return not primary.blocks or overlap >= 0.35
+
+
+_SEVERE_OBSERVATION_WARNINGS = {
+    "visual_empty_output",
+    "visual_implausible_output_length",
+    "visual_malformed_grounding",
+    "visual_malformed_math",
+    "visual_malformed_table",
+    "visual_page_transition_mismatch",
+    "visual_text_repetition",
+    "visual_truncated",
+}
 
 
 def observation_dict(observation: OcrObservation, *, raw_path: str) -> dict[str, Any]:
