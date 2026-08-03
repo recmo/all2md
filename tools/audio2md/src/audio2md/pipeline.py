@@ -8,7 +8,6 @@ import time
 from .media import probe, resolve_input
 from .model import TranscriptState
 from .moss import (
-    COVERAGE_SLACK_SECONDS,
     MAX_GENERATION_TOKENS,
     MAX_RECOVERY_ATTEMPTS,
     MIN_RECOVERY_PROGRESS_SECONDS,
@@ -130,7 +129,6 @@ def transcribe(
             "silence_noise_db": SILENCE_NOISE_DB,
             "silence_min_seconds": SILENCE_MIN_SECONDS,
             "max_generation_tokens": MAX_GENERATION_TOKENS,
-            "coverage_slack_seconds": COVERAGE_SLACK_SECONDS,
             "recovery_overlap_seconds": RECOVERY_OVERLAP_SECONDS,
             "recovery_token_threshold": RECOVERY_TOKEN_THRESHOLD,
             "minimum_recovery_progress_seconds": MIN_RECOVERY_PROGRESS_SECONDS,

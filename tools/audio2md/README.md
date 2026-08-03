@@ -49,18 +49,18 @@ describe the same premature ending on long audio in
 they corroborate the behavior but do not establish its exact cause.
 
 `audio2md` therefore does not trust the end token by itself. Any pass producing
-14,000 or more tokens is considered suspect even when its last timestamp is
-within 30 seconds of the submitted window's end. A pass whose timestamp is
-farther from the end is independently suspect at any token count. Processing
-then resumes 30 seconds before the last complete timestamp and merges the
-overlap at its midpoint. The recovery pass is accepted only when it both covers
-the end and stays below the 14,000-token risk threshold. Recovery repeats only
-while timestamp coverage moves forward by at least five seconds, and is capped
-at eight recovery passes per planned window. Missing timestamps, stalled
-coverage or exhaustion of that cap stop processing with an error instead of
-producing an apparently complete but truncated transcript. The raw artifact
-records each pass, its requested range, last complete timestamp, remaining gap,
-token-risk status, parse status and token counts.
+14,000 or more tokens is considered incomplete and triggers recovery; lower
+token counts are accepted regardless of the gap between the final speech
+timestamp and the submitted window's end, so trailing silence does not look
+like missing transcription. Processing resumes 30 seconds before the last
+complete timestamp and merges the overlap at its midpoint. Recovery repeats
+only while timestamp coverage moves forward by at least five seconds, and is
+capped at eight recovery passes per planned window. Invalid timestamps, stalled
+recovery or exhaustion of that cap stop processing with an error instead of
+producing an apparently complete but truncated transcript. Every generated
+segment must fit within the exact submitted audio span. The raw artifact records
+each pass, its requested range, last complete timestamp, remaining diagnostic
+gap, token-risk status, recovery decision, parse status and token counts.
 
 ReDimNet2 reconciles speakers between parts using cosine similarity. The match threshold is `0.65`,
 with a required `0.08` margin over the second-best profile and one-to-one

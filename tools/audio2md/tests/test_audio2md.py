@@ -81,12 +81,30 @@ silence_end: 21 | silence_duration: 1
 
 def test_parse_moss_native_speakers_and_microphone_identity():
     raw = [{"start": 1, "end": 2, "speaker_id": "S03", "text": "[S03] Hello"}]
-    participants = parse_segments(raw, window=2, offset=10, role="participants")
-    microphone = parse_segments(raw, window=2, offset=10, role="microphone")
+    participants = parse_segments(
+        raw, window=2, offset=10, duration=10, role="participants"
+    )
+    microphone = parse_segments(
+        raw, window=2, offset=10, duration=10, role="microphone"
+    )
     assert participants == [Segment(11, 12, "Hello", "W02:S03", "participants")]
     assert microphone[0].speaker == "Remco"
     with pytest.raises(ValueError, match="missing MOSS speaker id"):
-        parse_segments([{"start": 1, "end": 2, "text": "Hello"}], window=1, offset=0, role="mixed")
+        parse_segments(
+            [{"start": 1, "end": 2, "text": "Hello"}],
+            window=1,
+            offset=0,
+            duration=10,
+            role="mixed",
+        )
+    with pytest.raises(ValueError, match="outside the submitted"):
+        parse_segments(
+            [{"start": 1, "end": 11, "speaker_id": "S01", "text": "Hello"}],
+            window=1,
+            offset=0,
+            duration=10,
+            role="mixed",
+        )
 
 
 def test_parse_moss_transcript_preserves_numeric_brackets_in_text():
@@ -174,7 +192,7 @@ def test_trim_and_deduplicate_chunk_boundary():
     assert len(deduplicate_boundaries(selected)) == 2
 
 
-def test_transcribe_recovers_when_timestamp_coverage_ends_early(
+def test_transcribe_recovers_when_token_count_is_suspect(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -185,8 +203,8 @@ def test_transcribe_recovers_when_timestamp_coverage_ends_early(
         SimpleNamespace(
             text="[0][S01]First pass[100]",
             prompt_tokens=10,
-            generation_tokens=100,
-            total_tokens=110,
+            generation_tokens=RECOVERY_TOKEN_THRESHOLD,
+            total_tokens=RECOVERY_TOKEN_THRESHOLD + 10,
         ),
         SimpleNamespace(
             text="[0][S01]Overlap verification[40][41][S01]Rest[230]",
@@ -218,13 +236,44 @@ def test_transcribe_recovers_when_timestamp_coverage_ends_early(
     ]
     assert len(raw["windows"]) == 2
     assert raw["windows"][0]["coverage_end"] == 100
-    assert raw["windows"][0]["coverage_complete"] is False
+    assert raw["windows"][0]["requires_recovery"] is True
     assert raw["windows"][1]["source_start"] == 70
     assert raw["windows"][1]["attempt"] == 2
-    assert raw["windows"][1]["coverage_complete"] is True
+    assert raw["windows"][1]["requires_recovery"] is False
     assert ffmpeg_calls[1][ffmpeg_calls[1].index("-ss") + 1] == "70.0"
     assert ffmpeg_calls[1][ffmpeg_calls[1].index("-t") + 1] == "230.0"
     assert raw["actual_overlap_seconds"] == 30
+
+
+def test_transcribe_accepts_trailing_silence_when_token_count_is_safe(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    calls = []
+    engine = SimpleNamespace(generate=lambda *args, **kwargs: (
+        calls.append(True)
+        or SimpleNamespace(text="[0][S01]Last speech[250]", generation_tokens=100)
+    ))
+    monkeypatch.setattr(
+        moss.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+
+    segments, raw, _ = transcribe_track(
+        source,
+        engine=engine,
+        prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        role="microphone",
+        duration=300,
+    )
+
+    assert calls == [True]
+    assert [(item.start, item.end) for item in segments] == [(0, 250)]
+    assert raw["windows"][0]["coverage_gap_seconds"] == 50
+    assert raw["windows"][0]["requires_recovery"] is False
 
 
 def test_transcribe_fails_when_recovery_makes_no_coverage_progress(
@@ -234,8 +283,14 @@ def test_transcribe_fails_when_recovery_makes_no_coverage_progress(
     source = tmp_path / "meeting.wav"
     source.touch()
     results = iter([
-        SimpleNamespace(text="[0][S01]First pass[100]", generation_tokens=100),
-        SimpleNamespace(text="[0][S01]Same endpoint[30]", generation_tokens=100),
+        SimpleNamespace(
+            text="[0][S01]First pass[100]",
+            generation_tokens=RECOVERY_TOKEN_THRESHOLD,
+        ),
+        SimpleNamespace(
+            text="[0][S01]Same endpoint[30]",
+            generation_tokens=RECOVERY_TOKEN_THRESHOLD,
+        ),
     ])
     engine = SimpleNamespace(generate=lambda *args, **kwargs: next(results))
     monkeypatch.setattr(
@@ -284,11 +339,37 @@ def test_transcribe_verifies_high_token_output_even_when_timestamp_is_near_end(
 
     assert raw["windows"][0]["coverage_gap_seconds"] == 10
     assert raw["windows"][0]["token_count_suspect"] is True
-    assert raw["windows"][0]["coverage_complete"] is False
+    assert raw["windows"][0]["requires_recovery"] is True
     assert raw["windows"][1]["source_start"] == 260
     assert raw["windows"][1]["token_count_suspect"] is False
-    assert raw["windows"][1]["coverage_complete"] is True
+    assert raw["windows"][1]["requires_recovery"] is False
     assert segments[-1].end == 300
+
+
+def test_transcribe_rejects_timestamp_outside_submitted_span(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    engine = SimpleNamespace(generate=lambda *args, **kwargs: SimpleNamespace(
+        text="[0][S01]Bad timestamp[999]",
+        generation_tokens=100,
+    ))
+    monkeypatch.setattr(
+        moss.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="outside the submitted 300.00s audio span"):
+        transcribe_track(
+            source,
+            engine=engine,
+            prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+            role="microphone",
+            duration=300,
+        )
 
 
 def test_render_and_relabel_without_retranscription(tmp_path: Path):

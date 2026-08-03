@@ -22,7 +22,6 @@ SILENCE_MIN_SECONDS = 0.5
 MAX_GENERATION_TOKENS = 16_384
 RECOVERY_TOKEN_THRESHOLD = 14_000
 MAX_HOTWORDS = 40
-COVERAGE_SLACK_SECONDS = 30.0
 RECOVERY_OVERLAP_SECONDS = 30.0
 MIN_RECOVERY_PROGRESS_SECONDS = 5.0
 MAX_RECOVERY_ATTEMPTS = 8
@@ -201,18 +200,32 @@ def generation_diagnostics(result: Any) -> dict[str, Any]:
     }
 
 
-def parse_segments(items: list[dict[str, Any]], *, window: int, offset: float, role: str) -> list[Segment]:
+def parse_segments(
+    items: list[dict[str, Any]],
+    *,
+    window: int,
+    offset: float,
+    duration: float,
+    role: str,
+) -> list[Segment]:
     segments = []
     for item in items or []:
         speaker_id = str(item.get("speaker_id", ""))
         if re.fullmatch(r"S\d+", speaker_id) is None:
             raise ValueError(f"invalid or missing MOSS speaker id: {speaker_id!r}")
+        relative_start = float(item["start"])
+        relative_end = float(item["end"])
+        if relative_start < 0 or relative_end < relative_start or relative_end > duration:
+            raise ValueError(
+                f"MOSS segment [{relative_start}, {relative_end}] falls outside "
+                f"the submitted {duration:.2f}s audio span"
+            )
         local_speaker = f"W{window:02d}:S{int(speaker_id[1:]):02d}"
         text = str(item.get("text", "")).removeprefix(f"[{speaker_id}]").strip()
         if text:
             segments.append(Segment(
-                start=offset + float(item["start"]),
-                end=offset + float(item["end"]),
+                start=offset + relative_start,
+                end=offset + relative_end,
                 text=text,
                 speaker="Remco" if role == "microphone" else local_speaker,
                 source_role=role,
@@ -266,22 +279,17 @@ def transcribe_track(
                     diagnostics["parsed"],
                     window=inference_index,
                     offset=start,
+                    duration=planned_end - start,
                     role=role,
                 )
-                coverage_end = min(
-                    max((segment.end for segment in segments), default=start),
-                    planned_end,
-                )
+                coverage_end = max((segment.end for segment in segments), default=start)
                 coverage_gap = max(0.0, planned_end - coverage_end)
                 generation_tokens = diagnostics["generation_tokens"]
                 token_count_suspect = (
                     generation_tokens is not None
                     and int(generation_tokens) >= RECOVERY_TOKEN_THRESHOLD
                 )
-                coverage_complete = (
-                    coverage_gap <= COVERAGE_SLACK_SECONDS
-                    and not token_count_suspect
-                )
+                requires_recovery = token_count_suspect
                 if diagnostics["possibly_truncated"]:
                     warnings.append(
                         f"MOSS {role} inference {inference_index} reached the "
@@ -299,7 +307,7 @@ def transcribe_track(
                     )
                 by_window.append(segments)
                 effective_windows.append(
-                    (start, planned_end if coverage_complete else coverage_end)
+                    (start, coverage_end if requires_recovery else planned_end)
                 )
                 evidence = {}
                 embedding_diagnostics = []
@@ -325,8 +333,8 @@ def transcribe_track(
                     "source_end": planned_end,
                     "coverage_end": coverage_end,
                     "coverage_gap_seconds": coverage_gap,
-                    "coverage_complete": coverage_complete,
                     "token_count_suspect": token_count_suspect,
+                    "requires_recovery": requires_recovery,
                     "text": diagnostics["text"],
                     "prompt_tokens": getattr(result, "prompt_tokens", None),
                     "generation_tokens": generation_tokens,
@@ -336,7 +344,12 @@ def transcribe_track(
                     "segments": [asdict(segment) for segment in segments],
                     "embedding_samples": embedding_diagnostics,
                 })
-                if coverage_complete:
+                if diagnostics["parse_status"] == "invalid":
+                    raise RuntimeError(
+                        f"MOSS {role} inference {inference_index} returned non-empty "
+                        "output with no valid transcript segments"
+                    )
+                if not requires_recovery:
                     if attempt > 1:
                         warnings.append(
                             f"MOSS {role} planned window {planned_index} required "
@@ -358,9 +371,9 @@ def transcribe_track(
                     )
                 if attempt > MAX_RECOVERY_ATTEMPTS:
                     raise RuntimeError(
-                        f"MOSS {role} planned window {planned_index} remained "
-                        f"unverified with a {coverage_gap:.2f}s timestamp gap after "
-                        f"{MAX_RECOVERY_ATTEMPTS} recovery passes"
+                        f"MOSS {role} planned window {planned_index} remained token-"
+                        f"suspect after {MAX_RECOVERY_ATTEMPTS} recovery passes "
+                        f"({generation_tokens} tokens in the latest pass)"
                     )
                 previous_coverage_end = coverage_end
                 start = max(planned_start, coverage_end - RECOVERY_OVERLAP_SECONDS)
