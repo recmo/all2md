@@ -2,15 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+from types import SimpleNamespace
 
 import pytest
 
+import audio2md.pipeline as pipeline
 from audio2md.media import resolve_input
 from audio2md.model import AudioSource, EmbeddingSample, Segment, SpeakerProfile, TranscriptState
 from audio2md.moss import (
     MOSS_MODEL,
     MOSS_REVISION,
+    MAX_GENERATION_TOKENS,
     deduplicate_boundaries,
+    generation_diagnostics,
+    parse_moss_transcript,
     parse_silence_centers,
     parse_segments,
     plan_windows,
@@ -73,6 +78,41 @@ def test_parse_moss_native_speakers_and_microphone_identity():
     microphone = parse_segments(raw, window=2, offset=10, role="microphone")
     assert participants == [Segment(11, 12, "Hello", "W02:S03", "participants")]
     assert microphone[0].speaker == "Remco"
+    with pytest.raises(ValueError, match="missing MOSS speaker id"):
+        parse_segments([{"start": 1, "end": 2, "text": "Hello"}], window=1, offset=0, role="mixed")
+
+
+def test_parse_moss_transcript_preserves_numeric_brackets_in_text():
+    raw = "[0.0][S01]Version [123] is here[3.0][3.1][S02]Next[4.0]"
+    assert parse_moss_transcript(raw) == [
+        {"start": 0.0, "end": 3.0, "speaker_id": "S01", "text": "Version [123] is here"},
+        {"start": 3.1, "end": 4.0, "speaker_id": "S02", "text": "Next"},
+    ]
+
+
+def test_parse_moss_transcript_does_not_invent_fallback_segment():
+    assert parse_moss_transcript("plain unstructured model output") == []
+    assert parse_moss_transcript("[0][S01]incomplete[1]trailing text") == []
+    assert MAX_GENERATION_TOKENS == 16_384
+
+
+def test_generation_diagnostics_marks_only_a_hard_ceiling_hit():
+    valid = "[0.0][S01]Hello[1.0]"
+    below = generation_diagnostics(SimpleNamespace(
+        text=valid,
+        generation_tokens=MAX_GENERATION_TOKENS - 1,
+    ))
+    at_limit = generation_diagnostics(SimpleNamespace(
+        text=valid,
+        generation_tokens=MAX_GENERATION_TOKENS,
+    ))
+    invalid = generation_diagnostics(SimpleNamespace(
+        text="plain unstructured model output",
+        generation_tokens=12,
+    ))
+    assert below["possibly_truncated"] is False
+    assert at_limit["possibly_truncated"] is True
+    assert invalid["parse_status"] == "invalid"
 
 
 def test_trim_and_deduplicate_chunk_boundary():
@@ -113,6 +153,59 @@ def test_transcribe_refuses_to_overwrite_before_loading_model(tmp_path: Path):
     (tmp_path / "meeting.audio2md.json").write_text("existing")
     with pytest.raises(FileExistsError, match="--force"):
         transcribe(media)
+
+
+def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeypatch):
+    requested = tmp_path / "capture.json"
+    microphone = tmp_path / "microphone.flac"
+    participants = tmp_path / "participants.flac"
+    microphone.touch()
+    participants.touch()
+    resolved = SimpleNamespace(
+        requested=requested,
+        state_path=tmp_path / "capture.audio2md.json",
+        markdown_path=tmp_path / "capture.md",
+        capture_manifest=requested,
+        meeting_id="meeting",
+        title="Meeting",
+        started_at=None,
+        sources=(
+            (microphone, "microphone", None),
+            (participants, "participants", None),
+        ),
+    )
+    engine = object()
+    load_calls = []
+    seen_engines = []
+
+    monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
+    monkeypatch.setattr(
+        pipeline,
+        "probe",
+        lambda path, *, expected_sha256, role: AudioSource(
+            str(path), role, "a" * 64, 10.0, "flac"
+        ),
+    )
+    monkeypatch.setattr(pipeline, "get_redimnet2_embedder", object)
+    monkeypatch.setattr(
+        pipeline,
+        "load_moss_engine",
+        lambda: load_calls.append(True) or engine,
+    )
+
+    def fake_transcribe_track(path, *, engine, speaker_profiles, **kwargs):
+        seen_engines.append(engine)
+        return [], {"windows": [{}], "actual_overlap_seconds": 0.0, "warnings": []}, speaker_profiles
+
+    monkeypatch.setattr(pipeline, "transcribe_track", fake_transcribe_track)
+    monkeypatch.setattr(pipeline, "write_json", lambda *args: None)
+    monkeypatch.setattr(pipeline, "write_state", lambda *args: None)
+    monkeypatch.setattr(pipeline, "write_text", lambda *args: None)
+
+    pipeline.transcribe(requested)
+
+    assert load_calls == [True]
+    assert seen_engines == [engine, engine]
 
 
 def test_state_round_trip_with_embeddings_and_backward_compatible_loading(tmp_path: Path):

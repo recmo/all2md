@@ -31,7 +31,10 @@ boundary to a detected silence within one minute, and adds two seconds of audio
 overlap. The silence and window parameters are source constants, not CLI
 options. If no nearby silence exists, processing stops; there is no alternate
 windowing method. Prompt, generation and total token counts are retained in the
-raw MOSS artifact for diagnosis.
+raw MOSS artifact for diagnosis. Generation is capped at 16,384 tokens because
+the model emits its end token around that trained limit even when a larger
+runtime limit is supplied. The exact generated text, parse status and any hard
+ceiling hit are retained as well.
 
 ReDimNet2 reconciles speakers between parts using cosine similarity. The match threshold is `0.65`,
 with a required `0.08` margin over the second-best profile and one-to-one

@@ -16,6 +16,7 @@ from .moss import (
     SILENCE_SEARCH_SECONDS,
     TARGET_PART_SECONDS,
     WINDOW_OVERLAP_SECONDS,
+    load_moss_engine,
     transcribe_track,
 )
 from .redimnet2 import (
@@ -50,12 +51,18 @@ def transcribe(
     segments = []
     raw_tracks = []
     speaker_profiles = {}
-    embedder = get_redimnet2_embedder()
+    sources = []
     for path, role, expected_checksum in resolved.sources:
         source = probe(path, expected_sha256=expected_checksum, role=role)
         audio.append(source)
+        sources.append((path, role, source))
+
+    embedder = get_redimnet2_embedder()
+    engine = load_moss_engine()
+    for path, role, source in sources:
         track_segments, raw, speaker_profiles = transcribe_track(
             path,
+            engine=engine,
             role=role,
             duration=source.duration_seconds,
             embedder=None if role == "microphone" else embedder,
@@ -81,6 +88,11 @@ def transcribe(
             ),
             "unmatched speakers receive new anonymous labels and may be relabeled later",
         ]
+    )
+    warnings.extend(
+        warning
+        for track in raw_tracks
+        for warning in track.get("warnings", [])
     )
     state = TranscriptState(
         schema_version=2,

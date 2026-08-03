@@ -19,9 +19,13 @@ WINDOW_OVERLAP_SECONDS = 2.0
 SILENCE_SEARCH_SECONDS = 60.0
 SILENCE_NOISE_DB = -35
 SILENCE_MIN_SECONDS = 0.5
-MAX_GENERATION_TOKENS = 65_536
+MAX_GENERATION_TOKENS = 16_384
 SILENCE_START_RE = re.compile(r"silence_start: (?P<value>\d+(?:\.\d+)?)")
 SILENCE_END_RE = re.compile(r"silence_end: (?P<value>\d+(?:\.\d+)?)")
+TRANSCRIPT_START_RE = re.compile(
+    r"\[(?P<start>\d+(?:\.\d+)?)\]\s*\[(?P<speaker>S\d+)\]"
+)
+TIMESTAMP_RE = re.compile(r"\[(?P<value>\d+(?:\.\d+)?)\]")
 
 
 def plan_windows(
@@ -89,12 +93,66 @@ def parse_silence_centers(log: str) -> list[float]:
     return centers
 
 
+def parse_moss_transcript(text: str) -> list[dict[str, Any]]:
+    """Parse canonical MOSS output without treating numeric text as an end time."""
+    starts = list(TRANSCRIPT_START_RE.finditer(text))
+    segments = []
+    for index, match in enumerate(starts):
+        boundary = starts[index + 1].start() if index + 1 < len(starts) else len(text)
+        end_matches = list(TIMESTAMP_RE.finditer(text, match.end(), boundary))
+        if not end_matches:
+            continue
+        end_match = end_matches[-1]
+        if text[end_match.end():boundary].strip():
+            continue
+        start = float(match.group("start"))
+        end = float(end_match.group("value"))
+        segment_text = text[match.end():end_match.start()].strip()
+        if end < start or not segment_text:
+            continue
+        segments.append({
+            "start": start,
+            "end": end,
+            "speaker_id": match.group("speaker"),
+            "text": segment_text,
+        })
+    return segments
+
+
+def load_moss_engine() -> Any:
+    try:
+        from mlx_audio.stt import load
+    except ImportError as error:
+        raise RuntimeError(
+            "MOSS runtime is unavailable; run audio2md through its locked environment"
+        ) from error
+    return load(MOSS_MODEL, revision=MOSS_REVISION)
+
+
+def generation_diagnostics(result: Any) -> dict[str, Any]:
+    raw_text = str(getattr(result, "text", ""))
+    parsed = parse_moss_transcript(raw_text)
+    generation_tokens = getattr(result, "generation_tokens", None)
+    possibly_truncated = (
+        generation_tokens is not None
+        and int(generation_tokens) >= MAX_GENERATION_TOKENS
+    )
+    return {
+        "text": raw_text,
+        "parsed": parsed,
+        "generation_tokens": generation_tokens,
+        "possibly_truncated": possibly_truncated,
+        "parse_status": "ok" if parsed else ("empty" if not raw_text.strip() else "invalid"),
+    }
+
+
 def parse_segments(items: list[dict[str, Any]], *, window: int, offset: float, role: str) -> list[Segment]:
     segments = []
     for item in items or []:
-        speaker_id = str(item.get("speaker_id", "S01"))
-        digits = "".join(character for character in speaker_id if character.isdigit())
-        local_speaker = f"W{window:02d}:S{int(digits or '1'):02d}"
+        speaker_id = str(item.get("speaker_id", ""))
+        if re.fullmatch(r"S\d+", speaker_id) is None:
+            raise ValueError(f"invalid or missing MOSS speaker id: {speaker_id!r}")
+        local_speaker = f"W{window:02d}:S{int(speaker_id[1:]):02d}"
         text = str(item.get("text", "")).removeprefix(f"[{speaker_id}]").strip()
         if text:
             segments.append(Segment(
@@ -110,22 +168,18 @@ def parse_segments(items: list[dict[str, Any]], *, window: int, offset: float, r
 def transcribe_track(
     path: Path,
     *,
+    engine: Any,
     role: str,
     duration: float,
     embedder: Any | None = None,
     speaker_profiles: dict[str, SpeakerProfile] | None = None,
 ) -> tuple[list[Segment], dict[str, Any], dict[str, SpeakerProfile]]:
-    try:
-        from mlx_audio.stt import load
-    except ImportError as error:
-        raise RuntimeError("MOSS runtime is unavailable; run audio2md through its locked environment") from error
-
     silence_centers = detect_silence_centers(path) if duration > TARGET_PART_SECONDS else []
     windows = plan_windows(duration, silence_centers=silence_centers)
-    engine = load(MOSS_MODEL, revision=MOSS_REVISION)
     raw_windows: list[dict[str, Any]] = []
     by_window: list[list[Segment]] = []
     evidence_by_window = []
+    warnings = []
     with tempfile.TemporaryDirectory(prefix="audio2md-moss-") as temporary:
         directory = Path(temporary)
         for index, (start, end) in enumerate(windows, 1):
@@ -139,12 +193,23 @@ def transcribe_track(
                 check=True,
             )
             result = engine.generate(str(chunk), max_tokens=MAX_GENERATION_TOKENS)
+            diagnostics = generation_diagnostics(result)
             segments = parse_segments(
-                getattr(result, "segments", []) or [],
+                diagnostics["parsed"],
                 window=index,
                 offset=start,
                 role=role,
             )
+            if diagnostics["possibly_truncated"]:
+                warnings.append(
+                    f"MOSS {role} window {index} reached the "
+                    f"{MAX_GENERATION_TOKENS}-token generation ceiling"
+                )
+            if diagnostics["parse_status"] == "invalid":
+                warnings.append(
+                    f"MOSS {role} window {index} returned non-empty output with "
+                    "no valid transcript segments"
+                )
             by_window.append(segments)
             evidence = {}
             embedding_diagnostics = []
@@ -163,9 +228,12 @@ def transcribe_track(
                 "index": index,
                 "source_start": start,
                 "source_end": end,
+                "text": diagnostics["text"],
                 "prompt_tokens": getattr(result, "prompt_tokens", None),
-                "generation_tokens": getattr(result, "generation_tokens", None),
+                "generation_tokens": diagnostics["generation_tokens"],
                 "total_tokens": getattr(result, "total_tokens", None),
+                "possibly_truncated": diagnostics["possibly_truncated"],
+                "parse_status": diagnostics["parse_status"],
                 "segments": [asdict(segment) for segment in segments],
                 "embedding_samples": embedding_diagnostics,
             })
@@ -187,6 +255,7 @@ def transcribe_track(
         "windows": raw_windows,
         "speaker_mapping": mapping,
         "speaker_reconciliation": decisions,
+        "warnings": warnings,
         "window_strategy": "equal-silence-aligned",
         "silence_boundaries": boundaries_from_windows(windows),
         "actual_overlap_seconds": max(
