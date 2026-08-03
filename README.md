@@ -20,13 +20,16 @@ stable artifact schemas and top-level build orchestration.
 ```sh
 nix run github:recmo/all2md#ebook2md -- --help
 nix run github:recmo/all2md#audio2md -- --help
+nix build github:recmo/all2md#meeting-capture
 nix develop .#ebook2md
 nix develop .#audio2md
 nix flake check
 ```
 
-Meeting Capture is developed from
-`apps/meeting-capture/MeetingCapture.xcodeproj`.
+Meeting Capture is packaged as `packages.aarch64-darwin.meeting-capture` and is
+developed from `apps/meeting-capture/MeetingCapture.xcodeproj`. The Nix package
+uses the locally installed Xcode and installs `MeetingCapture.app` under its
+`Applications` output.
 
 `audio2md` intentionally has one processing path: pinned MOSS transcription
 and diarization plus pinned ReDimNet2 speaker reconciliation, with raw model
