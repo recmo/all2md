@@ -4,33 +4,89 @@ from dataclasses import asdict
 from difflib import SequenceMatcher
 from pathlib import Path
 import math
+import re
 import subprocess
 import tempfile
 from typing import Any
 
-from .model import Segment
+from .model import Segment, SpeakerProfile
+from .redimnet2 import extract_window_evidence, reconcile_speakers
 
 MOSS_MODEL = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
 MOSS_REVISION = "e8681d68e7042738ffca8ac8212bc8fcb1131ab8"
-DEFAULT_WINDOW_SECONDS = 300.0
-DEFAULT_OVERLAP_SECONDS = 5.0
+TARGET_PART_SECONDS = 30 * 60.0
+WINDOW_OVERLAP_SECONDS = 2.0
+SILENCE_SEARCH_SECONDS = 60.0
+SILENCE_NOISE_DB = -35
+SILENCE_MIN_SECONDS = 0.5
 MAX_GENERATION_TOKENS = 65_536
+SILENCE_START_RE = re.compile(r"silence_start: (?P<value>\d+(?:\.\d+)?)")
+SILENCE_END_RE = re.compile(r"silence_end: (?P<value>\d+(?:\.\d+)?)")
 
 
-def plan_windows(duration: float, *, window_seconds: float, overlap_seconds: float) -> list[tuple[float, float]]:
-    if window_seconds <= 0:
-        raise ValueError("window seconds must be positive")
-    if overlap_seconds < 0 or overlap_seconds >= window_seconds:
-        raise ValueError("overlap seconds must be non-negative and shorter than the window")
-    windows = []
-    start = 0.0
-    while start < duration:
-        end = min(duration, start + window_seconds)
-        windows.append((start, end))
-        if end >= duration:
-            break
-        start = end - overlap_seconds
-    return windows
+def plan_windows(
+    duration: float,
+    *,
+    silence_centers: list[float],
+) -> list[tuple[float, float]]:
+    if duration <= 0:
+        return []
+    part_count = math.ceil(duration / TARGET_PART_SECONDS)
+    if part_count == 1:
+        return [(0.0, duration)]
+
+    ideal_part_seconds = duration / part_count
+    boundaries = []
+    for index in range(1, part_count):
+        ideal = index * ideal_part_seconds
+        nearby = [
+            center
+            for center in silence_centers
+            if abs(center - ideal) <= SILENCE_SEARCH_SECONDS
+        ]
+        if not nearby:
+            raise RuntimeError(
+                f"no silence found within {SILENCE_SEARCH_SECONDS:.0f}s of "
+                f"the ideal {ideal:.2f}s part boundary"
+            )
+        boundaries.append(min(nearby, key=lambda center: abs(center - ideal)))
+
+    edges = [0.0, *boundaries, duration]
+    half_overlap = WINDOW_OVERLAP_SECONDS / 2
+    return [
+        (
+            max(0.0, start - (half_overlap if index else 0.0)),
+            min(duration, end + (half_overlap if index < part_count - 1 else 0.0)),
+        )
+        for index, (start, end) in enumerate(zip(edges, edges[1:]))
+    ]
+
+
+def detect_silence_centers(path: Path) -> list[float]:
+    result = subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-v", "info", "-i", str(path),
+            "-map", "0:a:0", "-af",
+            f"silencedetect=noise={SILENCE_NOISE_DB}dB:d={SILENCE_MIN_SECONDS}",
+            "-f", "null", "-",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return parse_silence_centers(result.stderr)
+
+
+def parse_silence_centers(log: str) -> list[float]:
+    centers = []
+    start = None
+    for line in log.splitlines():
+        if match := SILENCE_START_RE.search(line):
+            start = float(match.group("value"))
+        elif start is not None and (match := SILENCE_END_RE.search(line)):
+            centers.append((start + float(match.group("value"))) / 2)
+            start = None
+    return centers
 
 
 def parse_segments(items: list[dict[str, Any]], *, window: int, offset: float, role: str) -> list[Segment]:
@@ -56,18 +112,20 @@ def transcribe_track(
     *,
     role: str,
     duration: float,
-    window_seconds: float = DEFAULT_WINDOW_SECONDS,
-    overlap_seconds: float = DEFAULT_OVERLAP_SECONDS,
-) -> tuple[list[Segment], dict[str, Any]]:
+    embedder: Any | None = None,
+    speaker_profiles: dict[str, SpeakerProfile] | None = None,
+) -> tuple[list[Segment], dict[str, Any], dict[str, SpeakerProfile]]:
     try:
         from mlx_audio.stt import load
     except ImportError as error:
         raise RuntimeError("MOSS runtime is unavailable; run audio2md through its locked environment") from error
 
-    windows = plan_windows(duration, window_seconds=window_seconds, overlap_seconds=overlap_seconds)
+    silence_centers = detect_silence_centers(path) if duration > TARGET_PART_SECONDS else []
+    windows = plan_windows(duration, silence_centers=silence_centers)
     engine = load(MOSS_MODEL, revision=MOSS_REVISION)
     raw_windows: list[dict[str, Any]] = []
     by_window: list[list[Segment]] = []
+    evidence_by_window = []
     with tempfile.TemporaryDirectory(prefix="audio2md-moss-") as temporary:
         directory = Path(temporary)
         for index, (start, end) in enumerate(windows, 1):
@@ -88,15 +146,36 @@ def transcribe_track(
                 role=role,
             )
             by_window.append(segments)
+            evidence = {}
+            embedding_diagnostics = []
+            if role != "microphone":
+                if embedder is None:
+                    raise RuntimeError("ReDimNet2 embedder is required for non-microphone tracks")
+                evidence, embedding_diagnostics = extract_window_evidence(
+                    path,
+                    segments,
+                    window=index,
+                    source_track=role,
+                    embedder=embedder,
+                )
+            evidence_by_window.append(evidence)
             raw_windows.append({
                 "index": index,
                 "source_start": start,
                 "source_end": end,
+                "prompt_tokens": getattr(result, "prompt_tokens", None),
                 "generation_tokens": getattr(result, "generation_tokens", None),
+                "total_tokens": getattr(result, "total_tokens", None),
                 "segments": [asdict(segment) for segment in segments],
+                "embedding_samples": embedding_diagnostics,
             })
 
-    mapping, joins = reconcile_speakers(by_window, windows, role=role)
+    mapping, decisions, profiles = reconcile_speakers(
+        by_window,
+        evidence_by_window,
+        role=role,
+        profiles=speaker_profiles,
+    )
     for segments in by_window:
         for segment in segments:
             segment.speaker = mapping.get(segment.speaker, segment.speaker)
@@ -107,80 +186,24 @@ def transcribe_track(
         "audio": str(path),
         "windows": raw_windows,
         "speaker_mapping": mapping,
-        "overlap_joins": joins,
-    }
+        "speaker_reconciliation": decisions,
+        "window_strategy": "equal-silence-aligned",
+        "silence_boundaries": boundaries_from_windows(windows),
+        "actual_overlap_seconds": max(
+            (
+                max(0.0, windows[index - 1][1] - windows[index][0])
+                for index in range(1, len(windows))
+            ),
+            default=0.0,
+        ),
+    }, profiles
 
 
-def reconcile_speakers(
-    by_window: list[list[Segment]],
-    windows: list[tuple[float, float]],
-    *,
-    role: str,
-) -> tuple[dict[str, str], list[dict[str, Any]]]:
-    if role == "microphone":
-        return {
-            segment.speaker: "Remco"
-            for segments in by_window
-            for segment in segments
-        }, []
-
-    mapping: dict[str, str] = {}
-    joins: list[dict[str, Any]] = []
-    next_speaker = 1
-    for window_index, segments in enumerate(by_window):
-        local_speakers = sorted({segment.speaker for segment in segments})
-        candidates: list[tuple[float, str, str]] = []
-        if window_index:
-            overlap_start = windows[window_index][0]
-            overlap_end = windows[window_index - 1][1]
-            previous = [
-                segment for segment in by_window[window_index - 1]
-                if segment.end > overlap_start and segment.start < overlap_end
-            ]
-            current = [
-                segment for segment in segments
-                if segment.end > overlap_start and segment.start < overlap_end
-            ]
-            for local in local_speakers:
-                for global_speaker in sorted({mapping[item.speaker] for item in previous if item.speaker in mapping}):
-                    score = overlap_match_score(
-                        [item for item in current if item.speaker == local],
-                        [item for item in previous if mapping.get(item.speaker) == global_speaker],
-                    )
-                    if score >= 0.5:
-                        candidates.append((score, local, global_speaker))
-
-        assigned_local: set[str] = set()
-        assigned_global: set[str] = set()
-        for score, local, global_speaker in sorted(candidates, reverse=True):
-            if local in assigned_local or global_speaker in assigned_global:
-                continue
-            mapping[local] = global_speaker
-            assigned_local.add(local)
-            assigned_global.add(global_speaker)
-            joins.append({
-                "window": window_index + 1,
-                "local_speaker": local,
-                "speaker": global_speaker,
-                "overlap_score": score,
-            })
-        for local in local_speakers:
-            if local not in mapping:
-                mapping[local] = f"Speaker {next_speaker}"
-                next_speaker += 1
-    return mapping, joins
-
-
-def overlap_match_score(left: list[Segment], right: list[Segment]) -> float:
-    score = 0.0
-    for first in left:
-        for second in right:
-            overlap = max(0.0, min(first.end, second.end) - max(first.start, second.start))
-            if not overlap:
-                continue
-            similarity = SequenceMatcher(None, first.text.lower(), second.text.lower()).ratio()
-            score += overlap * similarity
-    return score
+def boundaries_from_windows(windows: list[tuple[float, float]]) -> list[float]:
+    return [
+        (windows[index - 1][1] + windows[index][0]) / 2
+        for index in range(1, len(windows))
+    ]
 
 
 def trim_overlaps(by_window: list[list[Segment]], windows: list[tuple[float, float]]) -> list[Segment]:

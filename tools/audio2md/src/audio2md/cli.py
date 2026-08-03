@@ -6,22 +6,19 @@ from pathlib import Path
 
 from . import __version__
 from .benchmark import summarize
-from .moss import DEFAULT_OVERLAP_SECONDS, DEFAULT_WINDOW_SECONDS
 from .pipeline import relabel, render, transcribe
 
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         prog="audio2md",
-        description="Transcribe local meeting audio to Markdown with MOSS",
+        description="Transcribe local meeting audio with MOSS and reconcile speakers with ReDimNet2",
     )
     root.add_argument("--version", action="version", version=__version__)
     commands = root.add_subparsers(dest="command", required=True)
 
     command = commands.add_parser("transcribe", help="transcribe a capture manifest or media file")
     command.add_argument("input", type=Path)
-    command.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
-    command.add_argument("--overlap-seconds", type=float, default=DEFAULT_OVERLAP_SECONDS)
     command.add_argument("--force", action="store_true", help="replace derived artifacts; canonical audio is never changed")
 
     command = commands.add_parser("relabel", help="apply speaker names without retranscribing")
@@ -42,8 +39,6 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "transcribe":
             state = transcribe(
                 arguments.input,
-                window_seconds=arguments.window_seconds,
-                overlap_seconds=arguments.overlap_seconds,
                 force=arguments.force,
             )
             print(json.dumps({
