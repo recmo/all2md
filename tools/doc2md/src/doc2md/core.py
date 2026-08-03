@@ -88,11 +88,21 @@ class Provider(Protocol):
     def documents(self) -> list[Document]: ...
 
 
+@dataclass(frozen=True)
+class _PlannedDocument:
+    document: Document
+    relative: Path
+    rendered: str
+    before: str | None
+    asset_paths: tuple[Path, ...]
+
+
 class Repository:
     def __init__(self, path: Path, *, output_root: Path = DEFAULT_OUTPUT_ROOT):
         self.path = path
         self.output_root = _validate_output_root(output_root)
         self.manifest_path = self.output_root / ".doc2md" / "manifest.json"
+        self._validate_generated_path(self.manifest_path)
         self.manifest = self._load_manifest()
 
     def known_revisions(self, source: str) -> dict[str, str]:
@@ -108,7 +118,11 @@ class Repository:
         allow_bulk_delete: bool = False,
     ) -> dict[str, int]:
         previous = self.manifest.setdefault("sources", {}).setdefault(source, {})
+        if not isinstance(previous, dict):
+            raise Doc2mdError(f"invalid manifest entries for {source}")
         current: dict[str, dict[str, Any]] = {}
+        planned: list[_PlannedDocument] = []
+        desired_paths: dict[str, str] = {}
         counts = {"created": 0, "updated": 0, "unchanged": 0, "deleted": 0}
         sync_time = now_iso()
 
@@ -117,11 +131,17 @@ class Repository:
                 raise Doc2mdError(
                     f"document {document.source_id} belongs to {document.source}, not {source}"
                 )
+            if document.source_id in current:
+                raise Doc2mdError(f"provider returned duplicate document ID: {document.source_id}")
             relative = document.relative_path(self.output_root)
             self._validate_generated_path(relative)
             target = self.path / relative
             old_entry = previous.get(document.source_id)
+            if old_entry is not None and not isinstance(old_entry, dict):
+                raise Doc2mdError(f"invalid manifest entry for {source} document {document.source_id}")
             old_relative = Path(old_entry["path"]) if old_entry and old_entry.get("path") else None
+            if old_relative:
+                self._validate_generated_path(old_relative)
             ingested_at = (
                 old_entry.get("ingested_at", sync_time)
                 if old_entry and old_entry.get("revision") == document.revision
@@ -129,29 +149,26 @@ class Repository:
             )
             rendered = document.render(ingested_at=ingested_at)
 
-            if old_relative and old_relative != relative:
-                self._remove(old_relative)
-
             asset_paths: list[str] = []
             for asset in document.assets:
                 self._validate_generated_path(asset.relative_path)
-                asset_target = self.path / asset.relative_path
-                asset_target.parent.mkdir(parents=True, exist_ok=True)
-                if not asset_target.exists() or asset_target.read_bytes() != asset.content:
-                    asset_target.write_bytes(asset.content)
                 asset_paths.append(asset.relative_path.as_posix())
-
-            old_asset_paths = set(old_entry.get("assets", [])) if old_entry else set()
-            for stale_path in old_asset_paths - set(asset_paths):
-                self._remove(Path(stale_path))
+                self._register_desired_path(
+                    desired_paths,
+                    asset.relative_path,
+                    f"asset for {document.source_id}",
+                )
 
             before = target.read_text() if target.exists() else None
             if before == rendered:
                 counts["unchanged"] += 1
             else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(rendered)
                 counts["created" if before is None else "updated"] += 1
+            self._register_desired_path(
+                desired_paths,
+                relative,
+                f"document {document.source_id}",
+            )
 
             current[document.source_id] = {
                 "path": relative.as_posix(),
@@ -160,10 +177,22 @@ class Repository:
                 "ingested_at": ingested_at,
                 "assets": sorted(asset_paths),
             }
+            planned.append(
+                _PlannedDocument(
+                    document=document,
+                    relative=relative,
+                    rendered=rendered,
+                    before=before,
+                    asset_paths=tuple(asset.relative_path for asset in document.assets),
+                )
+            )
 
         if not complete:
             for source_id, entry in previous.items():
                 current.setdefault(source_id, entry)
+                if source_id not in {plan.document.source_id for plan in planned}:
+                    self._register_manifest_paths(desired_paths, source_id, entry)
+            removed: list[str] = []
         else:
             removed = sorted(set(previous) - set(current))
             if _is_bulk_delete(len(previous), len(removed)) and not allow_bulk_delete:
@@ -171,12 +200,40 @@ class Repository:
                     f"refusing to delete {len(removed)} of {len(previous)} {source} documents; "
                     "rerun with --allow-bulk-delete after checking provider access"
                 )
-            for source_id in removed:
-                entry = previous[source_id]
-                for relative in [entry.get("path"), *entry.get("assets", [])]:
-                    if relative:
-                        self._remove(Path(relative))
-                counts["deleted"] += 1
+
+        paths_to_remove: set[Path] = set()
+        for plan in planned:
+            old_entry = previous.get(plan.document.source_id, {})
+            old_paths = [old_entry.get("path"), *old_entry.get("assets", [])]
+            for value in old_paths:
+                if value and value not in desired_paths:
+                    relative = Path(value)
+                    self._validate_generated_path(relative)
+                    paths_to_remove.add(relative)
+        for source_id in removed:
+            entry = previous[source_id]
+            if not isinstance(entry, dict):
+                raise Doc2mdError(f"invalid manifest entry for {source} document {source_id}")
+            for value in [entry.get("path"), *entry.get("assets", [])]:
+                if value and value not in desired_paths:
+                    relative = Path(value)
+                    self._validate_generated_path(relative)
+                    paths_to_remove.add(relative)
+            counts["deleted"] += 1
+
+        self._validate_generated_path(self.manifest_path)
+
+        # All destructive checks above complete before the first write. New files are
+        # replaced atomically, and stale files are removed only after every write succeeds.
+        for plan in planned:
+            for asset, relative in zip(plan.document.assets, plan.asset_paths, strict=True):
+                target = self.path / relative
+                if not target.exists() or target.read_bytes() != asset.content:
+                    self._atomic_write(target, asset.content)
+            if plan.before != plan.rendered:
+                self._atomic_write(self.path / plan.relative, plan.rendered.encode())
+        for relative in sorted(paths_to_remove, key=lambda path: path.as_posix()):
+            self._remove(relative)
 
         self.manifest["version"] = 1
         self.manifest["updated_at"] = sync_time
@@ -195,8 +252,7 @@ class Repository:
 
     def _write_manifest(self) -> None:
         path = self.path / self.manifest_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.manifest, indent=2, sort_keys=True) + "\n")
+        self._atomic_write(path, (json.dumps(self.manifest, indent=2, sort_keys=True) + "\n").encode())
 
     def _remove(self, relative: Path) -> None:
         self._validate_generated_path(relative)
@@ -214,6 +270,59 @@ class Repository:
             or pure.parts[: len(root.parts)] != root.parts
         ):
             raise Doc2mdError(f"unsafe generated path: {path}")
+        base = self.path.resolve()
+        candidate = self.path
+        for part in path.parts:
+            candidate /= part
+            if candidate.is_symlink():
+                raise Doc2mdError(f"unsafe generated path contains symlink: {path}")
+        try:
+            candidate.resolve(strict=False).relative_to(base)
+        except ValueError as exc:
+            raise Doc2mdError(f"unsafe generated path escapes output directory: {path}") from exc
+
+    def _register_desired_path(
+        self,
+        desired: dict[str, str],
+        path: Path,
+        owner: str,
+    ) -> None:
+        key = path.as_posix()
+        existing = desired.get(key)
+        if existing is not None:
+            raise Doc2mdError(f"generated path collision at {path}: {existing} and {owner}")
+        desired[key] = owner
+
+    def _register_manifest_paths(
+        self,
+        desired: dict[str, str],
+        source_id: str,
+        entry: Any,
+    ) -> None:
+        if not isinstance(entry, dict):
+            raise Doc2mdError(f"invalid manifest entry for document {source_id}")
+        for value in [entry.get("path"), *entry.get("assets", [])]:
+            if not value:
+                continue
+            relative = Path(value)
+            self._validate_generated_path(relative)
+            self._register_desired_path(desired, relative, f"preserved document {source_id}")
+
+    def _atomic_write(self, target: Path, content: bytes) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._validate_generated_path(target.relative_to(self.path))
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+        temporary_path = Path(temporary)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary_path, 0o644)
+            os.replace(temporary_path, target)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
 
 
 class GitCheckout:

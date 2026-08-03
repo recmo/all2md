@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -10,6 +11,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlparse
 
 from .core import DEFAULT_OUTPUT_ROOT, Doc2mdError, GitCheckout, Provider, Repository
 from .google_drive import GoogleDriveClient
@@ -92,11 +94,23 @@ def run_doctor(args: argparse.Namespace) -> dict[str, Any]:
     elif isinstance(git, dict):
         if git.get("auth_header") and not git.get("remote"):
             issues.append("git.remote is required when git.auth_header is configured")
-        if git.get("auth_header"):
-            try:
+        try:
+            if "remote" in git:
+                _nonempty_string(git.get("remote"), "git.remote")
+            if "branch" in git:
+                _nonempty_string(git.get("branch"), "git.branch")
+            if "author_name" in git:
+                _nonempty_string(git.get("author_name"), "git.author_name")
+            if "author_email" in git:
+                _nonempty_string(git.get("author_email"), "git.author_email")
+            if git.get("auth_header"):
                 _secret(git.get("auth_header"), "git.auth_header")
-            except Doc2mdError as exc:
-                issues.append(str(exc))
+                remote = _nonempty_string(git.get("remote"), "git.remote")
+                parsed = urlparse(remote)
+                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                    raise Doc2mdError("git.auth_header requires an HTTP or HTTPS remote")
+        except Doc2mdError as exc:
+            issues.append(str(exc))
     if args.directory is not None and not args.directory.is_dir():
         issues.append(f"output directory does not exist: {args.directory}")
     if args.directory is None and (not isinstance(git, dict) or not git.get("remote")):
@@ -105,32 +119,36 @@ def run_doctor(args: argparse.Namespace) -> dict[str, Any]:
     notion = config.get("notion", {})
     if not isinstance(notion, dict):
         issues.append("notion must be an object")
-    elif notion.get("enabled", False):
+    else:
         try:
-            _secret(notion.get("token"), "notion.token")
+            notion_enabled = _enabled(notion, "notion")
+            _base_url(notion.get("base_url"), "notion.base_url", "https://api.notion.com/v1")
             _path_prefix(notion.get("path_prefix", []), "notion.path_prefix")
+            if notion_enabled:
+                _secret(notion.get("token"), "notion.token")
         except Doc2mdError as exc:
             issues.append(str(exc))
 
     google = config.get("google_docs", {})
     if not isinstance(google, dict):
         issues.append("google_docs must be an object")
-    elif google.get("enabled", False):
+    else:
         try:
-            _secret(google.get("bearer"), "google_docs.bearer")
+            google_enabled = _enabled(google, "google_docs")
+            _base_url(
+                google.get("base_url"),
+                "google_docs.base_url",
+                "https://www.googleapis.com/drive/v3",
+            )
             _path_prefix(google.get("path_prefix", []), "google_docs.path_prefix")
+            if google_enabled:
+                _secret(google.get("bearer"), "google_docs.bearer")
+                _root_ids(google.get("root_ids"))
         except Doc2mdError as exc:
             issues.append(str(exc))
-        roots = google.get("root_ids")
-        if (
-            not isinstance(roots, list)
-            or not roots
-            or not all(isinstance(root, str) and root for root in roots)
-        ):
-            issues.append("google_docs.root_ids must be a non-empty list of strings")
 
     if not any(
-        isinstance(config.get(key), dict) and config[key].get("enabled", False)
+        isinstance(config.get(key), dict) and config[key].get("enabled") is True
         for key in ("notion", "google_docs")
     ):
         issues.append("at least one provider must be enabled")
@@ -158,29 +176,31 @@ def run_status(args: argparse.Namespace) -> dict[str, Any]:
 def _provider(source: str, config: dict[str, Any], output_root: Path) -> Provider | None:
     if source == "notion":
         notion = _object(config.get("notion", {}), "notion")
-        if not notion.get("enabled", False):
+        if not _enabled(notion, "notion"):
             return None
         return NotionClient(
             _secret(notion.get("token"), "notion.token"),
-            base_url=str(notion.get("base_url", "https://api.notion.com/v1")),
+            base_url=_base_url(
+                notion.get("base_url"),
+                "notion.base_url",
+                "https://api.notion.com/v1",
+            ),
             output_root=output_root,
             path_prefix=_path_prefix(notion.get("path_prefix", []), "notion.path_prefix"),
         )
     if source == "google-docs":
         google = _object(config.get("google_docs", {}), "google_docs")
-        if not google.get("enabled", False):
+        if not _enabled(google, "google_docs"):
             return None
-        roots = google.get("root_ids")
-        if (
-            not isinstance(roots, list)
-            or not roots
-            or not all(isinstance(root, str) and root for root in roots)
-        ):
-            raise Doc2mdError("google_docs.root_ids must be a non-empty list of strings")
+        roots = _root_ids(google.get("root_ids"))
         return GoogleDriveClient(
             _secret(google.get("bearer"), "google_docs.bearer"),
             roots,
-            base_url=str(google.get("base_url", "https://www.googleapis.com/drive/v3")),
+            base_url=_base_url(
+                google.get("base_url"),
+                "google_docs.base_url",
+                "https://www.googleapis.com/drive/v3",
+            ),
             path_prefix=_path_prefix(google.get("path_prefix", []), "google_docs.path_prefix"),
         )
     raise Doc2mdError(f"unsupported source: {source}")
@@ -212,11 +232,14 @@ def _destination_context(
     if not isinstance(remote, str) or not remote:
         raise Doc2mdError("provide --directory or configure git.remote")
     checkout = GitCheckout(
-        remote,
-        str(git.get("branch", "main")),
+        _nonempty_string(remote, "git.remote"),
+        _nonempty_string(git.get("branch", "main"), "git.branch"),
         auth_header=_optional_secret(git.get("auth_header"), "git.auth_header"),
-        author_name=str(git.get("author_name", "doc2md")),
-        author_email=str(git.get("author_email", "doc2md@localhost")),
+        author_name=_nonempty_string(git.get("author_name", "doc2md"), "git.author_name"),
+        author_email=_nonempty_string(
+            git.get("author_email", "doc2md@localhost"),
+            "git.author_email",
+        ),
         output_root=output_root,
     )
     with checkout as path:
@@ -253,6 +276,39 @@ def _path_prefix(value: Any, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _enabled(config: dict[str, Any], field: str) -> bool:
+    value = config.get("enabled", False)
+    if not isinstance(value, bool):
+        raise Doc2mdError(f"{field}.enabled must be a boolean")
+    return value
+
+
+def _base_url(value: Any, field: str, default: str) -> str:
+    resolved = default if value is None else _nonempty_string(value, field)
+    parsed = urlparse(resolved)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise Doc2mdError(f"{field} must be an HTTP or HTTPS URL")
+    if parsed.username or parsed.password:
+        raise Doc2mdError(f"{field} must not contain credentials")
+    return resolved.rstrip("/")
+
+
+def _root_ids(value: Any) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(root, str) and root.strip() for root in value)
+    ):
+        raise Doc2mdError("google_docs.root_ids must be a non-empty list of strings")
+    return value
+
+
+def _nonempty_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise Doc2mdError(f"{field} must be a non-empty string")
+    return value
+
+
 def _secret(value: Any, field: str) -> str:
     resolved = _optional_secret(value, field)
     if not resolved:
@@ -267,6 +323,8 @@ def _optional_secret(value: Any, field: str) -> str:
         return value
     if isinstance(value, dict) and set(value) == {"env"} and isinstance(value["env"], str):
         name = value["env"]
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise Doc2mdError(f"{field} env must be a valid environment variable name")
         resolved = os.environ.get(name, "")
         if not resolved:
             raise Doc2mdError(f"environment variable {name} for {field} is not set")

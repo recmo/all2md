@@ -107,9 +107,10 @@ class GoogleDriveClient:
         return item
 
     def _list_children(self, folder_id: str) -> list[dict[str, Any]]:
-        fields = f"nextPageToken,files({FILE_FIELDS})"
+        fields = f"nextPageToken,incompleteSearch,files({FILE_FIELDS})"
         files: list[dict[str, Any]] = []
         page_token: str | None = None
+        seen_tokens: set[str] = set()
         while True:
             params = {
                 "q": f"'{folder_id}' in parents and trashed = false",
@@ -131,10 +132,27 @@ class GoogleDriveClient:
                     f"Google Drive list returned HTTP {response.status_code} for folder {folder_id}"
                 )
             payload = response.json()
-            files.extend(payload.get("files", []))
+            if not isinstance(payload, dict):
+                raise Doc2mdError(f"Google Drive list returned an invalid response for folder {folder_id}")
+            if payload.get("incompleteSearch"):
+                raise Doc2mdError(f"Google Drive search was incomplete for folder {folder_id}")
+            page_files = payload.get("files", [])
+            if not isinstance(page_files, list) or not all(isinstance(item, dict) for item in page_files):
+                raise Doc2mdError(f"Google Drive list returned invalid files for folder {folder_id}")
+            files.extend(page_files)
             page_token = payload.get("nextPageToken")
             if not page_token:
-                return files
+                return sorted(
+                    files,
+                    key=lambda item: (
+                        str(item.get("name", "")).casefold(),
+                        str(item.get("name", "")),
+                        str(item.get("id", "")),
+                    ),
+                )
+            if not isinstance(page_token, str) or page_token in seen_tokens:
+                raise Doc2mdError(f"Google Drive returned an invalid page token for folder {folder_id}")
+            seen_tokens.add(page_token)
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.bearer}", "Accept": "application/json"}

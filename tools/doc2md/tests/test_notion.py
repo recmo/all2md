@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from doc2md.core import ProviderError
+from doc2md.core import Doc2mdError, ProviderError
 from doc2md.notion import NOTION_VERSION, NotionClient, _page_path, _rewrite_page_links
 
 
@@ -95,6 +95,37 @@ def test_truncated_notion_page_appends_retrievable_subtrees() -> None:
     documents = NotionClient("placeholder", session=TruncatedSession("")).documents()
 
     assert documents[0].body.endswith("\nRecovered")
+
+
+def test_nested_truncated_subtrees_are_recovered_recursively() -> None:
+    class NestedTruncatedSession(Session):
+        def get(self, url, **kwargs):
+            self.calls.append(("GET", url, kwargs))
+            if url.endswith("/page-123/markdown"):
+                return Response(
+                    {"markdown": "Root", "truncated": True, "unknown_block_ids": ["block-1"]}
+                )
+            if url.endswith("/block-1/markdown"):
+                return Response(
+                    {"markdown": "Child", "truncated": True, "unknown_block_ids": ["block-2"]}
+                )
+            return Response({"markdown": "Grandchild", "truncated": False, "unknown_block_ids": []})
+
+    session = NestedTruncatedSession("")
+    documents = NotionClient("placeholder", session=session).documents()
+
+    assert documents[0].body == "Root\nChild\nGrandchild"
+    subtree_calls = [call for call in session.calls if call[0] == "GET"]
+    assert all(call[2]["params"] == {"include_transcript": "true"} for call in subtree_calls)
+
+
+def test_truncation_without_recoverable_ids_aborts_sync() -> None:
+    class InvalidTruncationSession(Session):
+        def get(self, url, **kwargs):
+            return Response({"markdown": "Partial", "truncated": True, "unknown_block_ids": []})
+
+    with pytest.raises(Doc2mdError, match="truncated without recoverable block IDs"):
+        NotionClient("placeholder", session=InvalidTruncationSession("")).documents()
 
 
 def test_transient_subtree_failure_aborts_sync() -> None:

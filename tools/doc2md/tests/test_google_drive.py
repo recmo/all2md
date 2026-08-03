@@ -194,3 +194,69 @@ def test_google_drive_export_failure_aborts_enumeration() -> None:
 
     with pytest.raises(Doc2mdError, match="HTTP 503"):
         GoogleDriveClient("test-token", ["root"], session=FailingExportSession()).documents()
+
+
+def test_google_drive_incomplete_search_aborts_enumeration() -> None:
+    class IncompleteSession:
+        def get(self, url, **kwargs):
+            return Response({"files": [], "incompleteSearch": True})
+
+    with pytest.raises(Doc2mdError, match="search was incomplete"):
+        GoogleDriveClient("test-token", ["root"], session=IncompleteSession()).documents()
+
+
+def test_duplicate_folder_shortcuts_choose_a_deterministic_path() -> None:
+    class DuplicateShortcutSession:
+        def __init__(self, reverse: bool):
+            self.reverse = reverse
+            self.root_listed = False
+
+        def get(self, url, **kwargs):
+            if url.endswith("/files") and not self.root_listed:
+                self.root_listed = True
+                shortcuts = [
+                    {
+                        "id": "shortcut-z",
+                        "name": "Zulu",
+                        "mimeType": SHORTCUT_MIME,
+                        "shortcutDetails": {
+                            "targetId": "shared-folder",
+                            "targetMimeType": FOLDER_MIME,
+                        },
+                    },
+                    {
+                        "id": "shortcut-a",
+                        "name": "Alpha",
+                        "mimeType": SHORTCUT_MIME,
+                        "shortcutDetails": {
+                            "targetId": "shared-folder",
+                            "targetMimeType": FOLDER_MIME,
+                        },
+                    },
+                ]
+                return Response({"files": list(reversed(shortcuts)) if self.reverse else shortcuts})
+            if url.endswith("/files"):
+                return Response(
+                    {
+                        "files": [
+                            {
+                                "id": "doc-1",
+                                "name": "Document",
+                                "mimeType": DOC_MIME,
+                                "modifiedTime": "2026-01-01T00:00:00Z",
+                            }
+                        ]
+                    }
+                )
+            return Response(text="# Exported")
+
+    paths = []
+    for reverse in (False, True):
+        document = GoogleDriveClient(
+            "test-token",
+            ["root"],
+            session=DuplicateShortcutSession(reverse),
+        ).documents()[0]
+        paths.append(document.path_parts)
+
+    assert paths == [("Alpha",), ("Alpha",)]

@@ -116,3 +116,29 @@ def test_doctor_requires_a_local_or_git_destination(tmp_path: Path) -> None:
     result = run_doctor(argparse.Namespace(config=path, directory=None))
 
     assert "provide --directory or configure git.remote" in result["issues"]
+
+
+def test_doctor_rejects_non_boolean_enabled_and_invalid_base_url(tmp_path: Path) -> None:
+    enabled_path = write_config(
+        tmp_path / "enabled.json",
+        {"notion": {"enabled": "false", "token": "token"}},
+    )
+    url_path = write_config(
+        tmp_path / "url.json",
+        {"notion": {"enabled": True, "token": "token", "base_url": []}},
+    )
+
+    enabled = run_doctor(argparse.Namespace(config=enabled_path, directory=tmp_path))
+    url = run_doctor(argparse.Namespace(config=url_path, directory=tmp_path))
+
+    assert "notion.enabled must be a boolean" in enabled["issues"]
+    assert "notion.base_url must be a non-empty string" in url["issues"]
+
+
+def test_sync_rejects_malformed_provider_configuration() -> None:
+    with pytest.raises(Doc2mdError, match="enabled must be a boolean"):
+        _provider(
+            "notion",
+            {"notion": {"enabled": "false", "token": "token"}},
+            Path("sources"),
+        )

@@ -157,6 +157,21 @@
         type = "app";
         program = "${mkDoc2md system}/bin/doc2md";
       };
+      mkDocIndependenceCheck =
+        system:
+        let
+          systemPkgs = nixpkgs.legacyPackages.${system};
+        in
+        systemPkgs.runCommand "doc2md-independence-check"
+          {
+            nativeBuildInputs = [ (systemPkgs.python3.withPackages (ps: [ ps.pytest ])) ];
+          }
+          ''
+            export PYTHONPATH=${docProject}/src
+            export DOC2MD_REPOSITORY_ROOT=${./.}
+            pytest -q -p no:cacheprovider ${docProject}/tests/test_independence.py
+            touch "$out"
+          '';
       mkDocShell =
         system:
         let
@@ -207,6 +222,7 @@
       checks =
         forDocSystems (system: {
           doc2md = mkDoc2md system;
+          doc2md-independence = mkDocIndependenceCheck system;
         })
         // {
           ${darwinSystem} = {
@@ -266,6 +282,7 @@
                   touch "$out"
                 '';
             doc2md = mkDoc2md darwinSystem;
+            doc2md-independence = mkDocIndependenceCheck darwinSystem;
           };
         };
 

@@ -5,6 +5,7 @@ import html
 import mimetypes
 import posixpath
 import re
+from collections import deque
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
@@ -69,17 +70,7 @@ class NotionClient:
         fetched: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
         for page in pages:
             page_id = page["id"]
-            markdown = self._get(f"/pages/{page_id}/markdown", params={"include_transcript": "true"})
-            body = markdown.get("markdown", "")
-            if markdown.get("truncated"):
-                for block_id in markdown.get("unknown_block_ids", []):
-                    try:
-                        subtree = self._get(f"/pages/{block_id}/markdown")
-                    except ProviderError as exc:
-                        if exc.status_code == 404 and exc.code == "object_not_found":
-                            continue
-                        raise
-                    body += "\n" + subtree.get("markdown", "")
+            body, markdown = self._markdown_tree(page_id)
             fetched.append((page, body, markdown))
 
         documents: list[Document] = []
@@ -112,6 +103,34 @@ class NotionClient:
                 )
             )
         return documents
+
+    def _markdown_tree(self, page_id: str) -> tuple[str, dict[str, Any]]:
+        root = self._get(
+            f"/pages/{page_id}/markdown",
+            params={"include_transcript": "true"},
+        )
+        body = str(root.get("markdown", ""))
+        pending: deque[str] = deque(_unknown_block_ids(root, page_id))
+        seen = {_normalize_id(page_id)}
+
+        while pending:
+            block_id = pending.popleft()
+            normalized = _normalize_id(block_id)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            try:
+                subtree = self._get(
+                    f"/pages/{block_id}/markdown",
+                    params={"include_transcript": "true"},
+                )
+            except ProviderError as exc:
+                if exc.status_code == 404 and exc.code == "object_not_found":
+                    continue
+                raise
+            body += "\n" + str(subtree.get("markdown", ""))
+            pending.extend(_unknown_block_ids(subtree, block_id))
+        return body, root
 
     def _mirror_assets(self, body: str, page_id: str, page_path: Path) -> tuple[str, tuple[Asset, ...]]:
         assets: dict[Path, Asset] = {}
@@ -290,6 +309,15 @@ def _page_id_from_url(url: str) -> str:
 
 def _normalize_id(value: str) -> str:
     return re.sub(r"[^0-9a-fA-F]", "", value).lower()
+
+
+def _unknown_block_ids(payload: dict[str, Any], page_id: str) -> list[str]:
+    values = payload.get("unknown_block_ids", [])
+    if not isinstance(values, list) or not all(isinstance(value, str) and value for value in values):
+        raise Doc2mdError(f"Notion markdown returned invalid unknown_block_ids for {page_id}")
+    if payload.get("truncated") and not values:
+        raise Doc2mdError(f"Notion markdown was truncated without recoverable block IDs for {page_id}")
+    return values
 
 
 def _asset_path(page_id: str, url: str, *, output_root: Path = Path("sources")) -> Path:

@@ -54,6 +54,31 @@ def test_bulk_delete_is_refused_without_explicit_override(tmp_path: Path) -> Non
     assert len(list((tmp_path / "sources/notion").rglob("*.md"))) == 12
 
 
+def test_bulk_delete_refusal_happens_before_moves_or_writes(tmp_path: Path) -> None:
+    Repository(tmp_path).apply("notion", [document(str(index)) for index in range(12)])
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    changed = Document(
+        **{
+            **document("0", body="changed").__dict__,
+            "path_parts": ("workspace", "moved"),
+        }
+    )
+
+    with pytest.raises(Doc2mdError, match="refusing to delete"):
+        Repository(tmp_path).apply("notion", [changed])
+
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
 def test_complete_deletion_of_small_source_is_refused(tmp_path: Path) -> None:
     Repository(tmp_path).apply("notion", [document("abc")])
 
@@ -100,6 +125,18 @@ def test_asset_outside_output_root_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(Doc2mdError, match="unsafe generated path"):
         Repository(tmp_path).apply("notion", [item])
+
+
+def test_symlink_inside_output_root_cannot_escape_destination(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "sources/notion").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(Doc2mdError, match="symlink"):
+        Repository(tmp_path).apply("notion", [document("abc")])
+
+    assert list(outside.iterdir()) == []
 
 
 def test_incomplete_sync_keeps_unseen_documents(tmp_path: Path) -> None:
