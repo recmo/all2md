@@ -20,6 +20,11 @@ def parser() -> argparse.ArgumentParser:
     command = commands.add_parser("transcribe", help="transcribe a capture manifest or media file")
     command.add_argument("input", type=Path)
     command.add_argument("--force", action="store_true", help="replace derived artifacts; canonical audio is never changed")
+    command.add_argument(
+        "--hotwords",
+        metavar="TERM,...",
+        help="comma-separated names and domain terms to bias MOSS transcription (maximum 40)",
+    )
 
     command = commands.add_parser("relabel", help="apply speaker names without retranscribing")
     command.add_argument("input", type=Path)
@@ -40,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
             state = transcribe(
                 arguments.input,
                 force=arguments.force,
+                hotwords=(arguments.hotwords.split(",") if arguments.hotwords is not None else None),
             )
             print(json.dumps({
                 "segments": len(state.segments),
