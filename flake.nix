@@ -9,6 +9,7 @@
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
       ebookProject = ./tools/ebook2md;
+      audioProject = ./tools/audio2md;
       testPython = pkgs.python3.withPackages (
         ps: with ps; [
           beautifulsoup4
@@ -36,16 +37,35 @@
           exec uv run --frozen --extra ocr --project ${ebookProject} ebook2md "$@"
         '';
       };
+      audio2md = pkgs.writeShellApplication {
+        name = "audio2md";
+        runtimeInputs = [
+          pkgs.ffmpeg
+          pkgs.uv
+        ];
+        text = ''
+          cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/audio2md"
+          mkdir -p "$cache_root"
+          export UV_PROJECT_ENVIRONMENT="$cache_root/venv"
+          exec uv run --frozen --project ${audioProject} audio2md "$@"
+        '';
+      };
     in
     {
       packages.${system} = {
         default = ebook2md;
-        inherit ebook2md;
+        inherit audio2md ebook2md;
       };
 
-      apps.${system}.default = {
-        type = "app";
-        program = "${ebook2md}/bin/ebook2md";
+      apps.${system} = {
+        default = {
+          type = "app";
+          program = "${ebook2md}/bin/ebook2md";
+        };
+        audio2md = {
+          type = "app";
+          program = "${audio2md}/bin/audio2md";
+        };
       };
 
       checks.${system} = {
@@ -62,6 +82,24 @@
           pytest -q ${ebookProject}/tests
           touch "$out"
         '';
+        audio2md-source =
+          pkgs.runCommand "audio2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; }
+            ''
+              export PYTHONPYCACHEPREFIX="$out/pycache"
+              python -m compileall -q ${audioProject}/src
+              touch "$out/passed"
+            '';
+        audio2md-tests =
+          pkgs.runCommand "audio2md-tests"
+            {
+              nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.pytest ])) ];
+            }
+            ''
+              export PYTHONPATH=${audioProject}/src
+              export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+              pytest -q ${audioProject}/tests
+              touch "$out"
+            '';
         meeting-capture-schema =
           pkgs.runCommand "meeting-capture-schema-check" { nativeBuildInputs = [ testPython ]; }
             ''
@@ -87,6 +125,17 @@
           packages = [ pkgs.xcodegen ];
           shellHook = ''
             echo "Run: cd apps/meeting-capture && xcodegen generate"
+          '';
+        };
+
+        audio2md = pkgs.mkShell {
+          packages = [
+            pkgs.ffmpeg
+            pkgs.python3
+            pkgs.uv
+          ];
+          shellHook = ''
+            echo "Run: uv sync --project tools/audio2md --extra dev"
           '';
         };
 
