@@ -1,0 +1,82 @@
+@preconcurrency import AVFoundation
+@preconcurrency import ScreenCaptureKit
+import CoreMedia
+import Foundation
+
+final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    private var stream: SCStream?
+    private var writer: AVAssetWriter?
+    private var writerInput: AVAssetWriterInput?
+    private var sessionStarted = false
+    private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
+    var onLevel: (@Sendable (Float) -> Void)?
+
+    func start(processID: pid_t, to url: URL) async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard let application = content.applications.first(where: { $0.processID == processID }) else {
+            throw CaptureError.triggeringApplicationUnavailable
+        }
+        guard let display = content.displays.first else { throw CaptureError.noDisplay }
+
+        let filter = SCContentFilter(display: display, including: [application], exceptingWindows: [])
+        let configuration = SCStreamConfiguration()
+        configuration.width = 2
+        configuration.height = 2
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        configuration.showsCursor = false
+        configuration.capturesAudio = true
+        configuration.excludesCurrentProcessAudio = true
+        configuration.sampleRate = 48_000
+        configuration.channelCount = 2
+
+        let writer = try AVAssetWriter(outputURL: url, fileType: .caf)
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ])
+        input.expectsMediaDataInRealTime = true
+        guard writer.canAdd(input) else { throw CaptureError.writerFailure("cannot add PCM input") }
+        writer.add(input)
+        guard writer.startWriting() else {
+            throw CaptureError.writerFailure(writer.error?.localizedDescription ?? "could not start")
+        }
+        self.writer = writer
+        writerInput = input
+
+        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
+        self.stream = stream
+        try await stream.startCapture()
+    }
+
+    func stop() async throws {
+        if let stream { try await stream.stopCapture() }
+        stream = nil
+        writerInput?.markAsFinished()
+        if let writer {
+            await writer.finishWriting()
+            if writer.status == .failed {
+                throw CaptureError.writerFailure(writer.error?.localizedDescription ?? "finalization failed")
+            }
+        }
+        writer = nil
+        writerInput = nil
+        sessionStarted = false
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio, sampleBuffer.isValid, let writer, let writerInput else { return }
+        if !sessionStarted {
+            writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
+            sessionStarted = true
+        }
+        if writerInput.isReadyForMoreMediaData { writerInput.append(sampleBuffer) }
+        onLevel?(CMSampleBufferGetNumSamples(sampleBuffer) > 0 ? 0.35 : 0)
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: any Error) {}
+}

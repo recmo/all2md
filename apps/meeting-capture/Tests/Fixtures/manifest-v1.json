@@ -1,0 +1,31 @@
+{
+  "audio": [
+    {
+      "channels": 1,
+      "durationSeconds": 60,
+      "file": "2026-08-02-leadership-weekly-microphone.flac",
+      "format": "flac",
+      "role": "microphone",
+      "sampleRate": 48000,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "endedAt": "2026-08-02T10:01:00Z",
+  "interruptions": [],
+  "meetingID": "e83c18c0-cf42-4ac1-b493-00f3c144fb1e",
+  "metadataEvents": [],
+  "platform": "Zoom",
+  "schemaVersion": 1,
+  "slug": "leadership-weekly",
+  "startedAt": "2026-08-02T10:00:00Z",
+  "status": "incomplete",
+  "timeZone": "Europe/Warsaw",
+  "title": "Leadership Weekly",
+  "trigger": {
+    "applicationName": "zoom.us",
+    "bundleID": "us.zoom.xos",
+    "method": "audioProcess",
+    "processID": 42
+  },
+  "warnings": []
+}

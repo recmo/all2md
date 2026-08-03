@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/recmo/all2md/schemas/meeting-capture-v1.schema.json",
+  "title": "Meeting Capture manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "meetingID", "slug", "startedAt", "endedAt", "timeZone", "trigger", "audio", "interruptions", "metadataEvents", "warnings", "status"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "meetingID": { "type": "string", "format": "uuid" },
+    "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "title": { "type": ["string", "null"] },
+    "platform": { "type": ["string", "null"] },
+    "calendarEventID": { "type": ["string", "null"] },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "endedAt": { "type": "string", "format": "date-time" },
+    "timeZone": { "type": "string" },
+    "trigger": { "$ref": "#/$defs/trigger" },
+    "audio": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/audioTrack" } },
+    "interruptions": { "type": "array", "items": { "$ref": "#/$defs/timeRange" } },
+    "metadataEvents": { "type": "array", "items": { "$ref": "#/$defs/metadataEvent" } },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "status": { "enum": ["complete", "incomplete", "failed"] }
+  },
+  "$defs": {
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method"],
+      "properties": {
+        "method": { "enum": ["audioProcess", "deviceRunning", "manual"] },
+        "processID": { "type": ["integer", "null"], "minimum": 0 },
+        "bundleID": { "type": ["string", "null"] },
+        "applicationName": { "type": ["string", "null"] }
+      }
+    },
+    "audioTrack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "file", "format", "sampleRate", "channels", "durationSeconds", "sha256"],
+      "properties": {
+        "role": { "enum": ["microphone", "participants"] },
+        "file": { "type": "string" },
+        "format": { "const": "flac" },
+        "sampleRate": { "type": "number", "exclusiveMinimum": 0 },
+        "channels": { "type": "integer", "minimum": 1 },
+        "durationSeconds": { "type": "number", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "timeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startedAt", "endedAt", "reason"],
+      "properties": {
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string" }
+      }
+    },
+    "metadataEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "kind", "value"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "kind": { "enum": ["windowTitle", "participant", "activeSpeaker", "platform", "note"] },
+        "value": { "type": "string" },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}
