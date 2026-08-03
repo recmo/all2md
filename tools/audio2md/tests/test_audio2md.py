@@ -140,6 +140,29 @@ def test_cli_accepts_comma_separated_hotwords():
     assert arguments.hotwords == "Remco, Piotr,F2Z"
 
 
+@pytest.mark.parametrize(
+    "text, expected_texts",
+    [
+        (
+            "[0][S01]Complete[1][2][S02]incomplete",
+            ["Complete"],
+        ),
+        (
+            "[0][S01]Complete[1][2][S02]malformed tail[3][S03]Later[4]",
+            ["Complete", "Later"],
+        ),
+    ],
+)
+def test_generation_diagnostics_marks_partially_parsed_output(text, expected_texts):
+    diagnostics = generation_diagnostics(SimpleNamespace(
+        text=text,
+        generation_tokens=20,
+    ))
+    assert [segment["text"] for segment in diagnostics["parsed"]] == expected_texts
+    assert diagnostics["possibly_truncated"] is False
+    assert diagnostics["parse_status"] == "partial"
+
+
 def test_trim_and_deduplicate_chunk_boundary():
     windows = [(0, 300), (295, 595)]
     first = [Segment(292, 299.8, "specifically look into 32 bit limbs", "Speaker 1", "mixed")]

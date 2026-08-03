@@ -132,22 +132,25 @@ def parse_silence_centers(log: str) -> list[float]:
     return centers
 
 
-def parse_moss_transcript(text: str) -> list[dict[str, Any]]:
-    """Parse canonical MOSS output without treating numeric text as an end time."""
+def _parse_moss_transcript(text: str) -> tuple[list[dict[str, Any]], int]:
     starts = list(TRANSCRIPT_START_RE.finditer(text))
     segments = []
+    rejected = 0
     for index, match in enumerate(starts):
         boundary = starts[index + 1].start() if index + 1 < len(starts) else len(text)
         end_matches = list(TIMESTAMP_RE.finditer(text, match.end(), boundary))
         if not end_matches:
+            rejected += 1
             continue
         end_match = end_matches[-1]
         if text[end_match.end():boundary].strip():
+            rejected += 1
             continue
         start = float(match.group("start"))
         end = float(end_match.group("value"))
         segment_text = text[match.end():end_match.start()].strip()
         if end < start or not segment_text:
+            rejected += 1
             continue
         segments.append({
             "start": start,
@@ -155,7 +158,12 @@ def parse_moss_transcript(text: str) -> list[dict[str, Any]]:
             "speaker_id": match.group("speaker"),
             "text": segment_text,
         })
-    return segments
+    return segments, rejected
+
+
+def parse_moss_transcript(text: str) -> list[dict[str, Any]]:
+    """Parse canonical MOSS output without treating numeric text as an end time."""
+    return _parse_moss_transcript(text)[0]
 
 
 def load_moss_engine() -> Any:
@@ -170,18 +178,26 @@ def load_moss_engine() -> Any:
 
 def generation_diagnostics(result: Any) -> dict[str, Any]:
     raw_text = str(getattr(result, "text", ""))
-    parsed = parse_moss_transcript(raw_text)
+    parsed, rejected = _parse_moss_transcript(raw_text)
     generation_tokens = getattr(result, "generation_tokens", None)
     possibly_truncated = (
         generation_tokens is not None
         and int(generation_tokens) >= MAX_GENERATION_TOKENS
     )
+    if not raw_text.strip():
+        parse_status = "empty"
+    elif not parsed:
+        parse_status = "invalid"
+    elif rejected:
+        parse_status = "partial"
+    else:
+        parse_status = "ok"
     return {
         "text": raw_text,
         "parsed": parsed,
         "generation_tokens": generation_tokens,
         "possibly_truncated": possibly_truncated,
-        "parse_status": "ok" if parsed else ("empty" if not raw_text.strip() else "invalid"),
+        "parse_status": parse_status,
     }
 
 
@@ -275,6 +291,11 @@ def transcribe_track(
                     warnings.append(
                         f"MOSS {role} inference {inference_index} returned non-empty "
                         "output with no valid transcript segments"
+                    )
+                if diagnostics["parse_status"] == "partial":
+                    warnings.append(
+                        f"MOSS {role} inference {inference_index} returned partially "
+                        "malformed output; some transcript segments were discarded"
                     )
                 by_window.append(segments)
                 effective_windows.append(
