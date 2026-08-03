@@ -17,6 +17,16 @@ xcodegen generate
 xcodebuild -project MeetingCapture.xcodeproj -scheme MeetingCapture build
 ```
 
+To build the installable app through Nix:
+
+```sh
+nix build .#meeting-capture
+open result/Applications/MeetingCapture.app
+```
+
+The Nix derivation uses the locally installed Xcode and ad-hoc signs the result
+with the capture entitlement.
+
 The first launch requests Microphone and Screen & System Audio Recording
 permissions. Accessibility is optional and only enriches metadata.
 

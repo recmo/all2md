@@ -51,11 +51,12 @@
           exec uv run --frozen --project ${audioProject} audio2md "$@"
         '';
       };
+      meeting-capture = pkgs.callPackage ./apps/meeting-capture/package.nix { };
     in
     {
       packages.${system} = {
         default = ebook2md;
-        inherit audio2md ebook2md;
+        inherit audio2md ebook2md meeting-capture;
       };
 
       apps.${system} = {
