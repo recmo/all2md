@@ -14,8 +14,8 @@ from .verify import verify_bundle
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="ebook2md", description="Convert ebooks and documents to auditable Markdown")
-    root.add_argument("--version", action="version", version="ebook2md 0.2.0")
+    root = argparse.ArgumentParser(prog="pages2md", description="Convert ebooks and documents to auditable Markdown")
+    root.add_argument("--version", action="version", version="pages2md 0.2.0")
     commands = root.add_subparsers(dest="command", required=True)
 
     convert_parser = commands.add_parser("convert", help="convert one or more inputs")
@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> None:
             if not result.ok:
                 raise SystemExit(1)
     except (FileNotFoundError, RuntimeError, ValueError) as error:
-        print(f"ebook2md: {error}", file=sys.stderr)
+        print(f"pages2md: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 
 

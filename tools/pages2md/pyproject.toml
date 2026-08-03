@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ebook2md"
+name = "pages2md"
 version = "0.2.0"
 description = "Local-first ebook and document conversion to auditable Markdown"
 readme = "README.md"
@@ -29,10 +29,10 @@ dev = [
 ]
 
 [project.scripts]
-ebook2md = "ebook2md.cli:main"
+pages2md = "pages2md.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ebook2md"]
+packages = ["src/pages2md"]
 
 [tool.hatch.metadata]
 allow-direct-references = true

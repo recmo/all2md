@@ -170,7 +170,7 @@ def load_moss_engine() -> Any:
         from mlx_audio.stt import load
     except ImportError as error:
         raise RuntimeError(
-            "MOSS runtime is unavailable; run audio2md through its locked environment"
+            "MOSS runtime is unavailable; run speech2md through its locked environment"
         ) from error
     return load(MOSS_MODEL, revision=MOSS_REVISION)
 
@@ -250,7 +250,7 @@ def transcribe_track(
     effective_windows: list[tuple[float, float]] = []
     evidence_by_window = []
     warnings = []
-    with tempfile.TemporaryDirectory(prefix="audio2md-moss-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="speech2md-moss-") as temporary:
         directory = Path(temporary)
         inference_index = 0
         for planned_index, (planned_start, planned_end) in enumerate(planned_windows, 1):

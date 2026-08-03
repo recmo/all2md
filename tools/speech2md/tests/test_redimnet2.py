@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from audio2md.model import EmbeddingSample, Segment
-from audio2md.redimnet2 import (
+from speech2md.model import EmbeddingSample, Segment
+from speech2md.redimnet2 import (
     REDIMNET2_DIMENSION,
     extract_window_evidence,
     normalize_embedding,

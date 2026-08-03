@@ -1,6 +1,6 @@
-# audio2md
+# speech2md
 
-`audio2md` turns local meeting recordings into speaker-attributed Markdown.
+`speech2md` turns local meeting recordings into speaker-attributed Markdown.
 It uses MOSS for transcription and window-local diarization:
 [`OpenMOSS-Team/MOSS-Transcribe-Diarize`](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize),
 pinned to revision `e8681d68e7042738ffca8ac8212bc8fcb1131ab8`. It uses
@@ -13,14 +13,14 @@ checkpoint with SHA-256
 The CLI exposes only this MOSS + ReDimNet2 pipeline.
 
 ```sh
-uv sync --project tools/audio2md --extra dev
-uv run --project tools/audio2md pytest tools/audio2md/tests
-uv run --project tools/audio2md audio2md transcribe meeting.mp4
-uv run --project tools/audio2md audio2md transcribe meeting.mp4 \
+uv sync --project tools/speech2md --extra dev
+uv run --project tools/speech2md pytest tools/speech2md/tests
+uv run --project tools/speech2md speech2md transcribe meeting.mp4
+uv run --project tools/speech2md speech2md transcribe meeting.mp4 \
   --hotwords 'Alice, Bob, ProveKit, F2Z, ReDimNet2'
-uv run --project tools/audio2md audio2md relabel meeting.mp4 'Speaker 1=Alice'
-uv run --project tools/audio2md audio2md render meeting.mp4
-uv run --project tools/audio2md audio2md benchmark ~/Documents/Meetings
+uv run --project tools/speech2md speech2md relabel meeting.mp4 'Speaker 1=Alice'
+uv run --project tools/speech2md speech2md render meeting.mp4
+uv run --project tools/speech2md speech2md benchmark ~/Documents/Meetings
 ```
 
 The input may be an ordinary audio/video file or a Meeting Capture v1 manifest.
@@ -34,7 +34,7 @@ targeted, comma-separated list of names, acronyms and unusual domain terms with
 at 40 entries. The exact prompt and normalized list are retained in both the
 processing provenance and raw MOSS artifact.
 
-Long recordings use one deliberately fixed policy. `audio2md` chooses the
+Long recordings use one deliberately fixed policy. `speech2md` chooses the
 minimum number of roughly equal parts targeting 30 minutes, moves each ideal
 boundary to a detected silence within one minute, and adds two seconds of audio
 overlap. The silence and window parameters are source constants, not CLI
@@ -48,7 +48,7 @@ describe the same premature ending on long audio in
 [issue #34](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/34);
 they corroborate the behavior but do not establish its exact cause.
 
-`audio2md` therefore does not trust the end token by itself. Any pass producing
+`speech2md` therefore does not trust the end token by itself. Any pass producing
 14,000 or more tokens is considered incomplete and triggers recovery; lower
 token counts are accepted regardless of the gap between the final speech
 timestamp and the submitted window's end, so trailing silence does not look
@@ -71,16 +71,19 @@ Audio overlap remains only for transcript boundary trimming and deduplication.
 The raw per-window MOSS output and reconciliation decisions are retained in
 `*.moss.json` for audit and future reprocessing.
 
-The generated `*.audio2md.json` is the editable processing state. Markdown is a
+The generated `*.speech2md.json` is the editable processing state. Markdown is a
 disposable rendering of it, and `relabel` changes speaker names without
 retranscribing. The state retains multiple 192-dimensional vectors per speaker,
 including their source track, window and absolute timestamps. They are
 meeting-local evidence only: cross-meeting enrollment, identity matching and
 automatic names are future work. Vectors are not written to Markdown.
+States created under the earlier `*.audio2md.json` or transitional
+`*.voice2md.json` names remain readable and editable; new transcriptions use
+`*.speech2md.json`.
 
 The ReDimNet2 model and checkpoint load lazily on the first usable participant
 sample and are reused for the run. The first run requires network access to
-populate the PyTorch model cache (`$XDG_CACHE_HOME/audio2md/torch` through the
+populate the PyTorch model cache (`$XDG_CACHE_HOME/speech2md/torch` through the
 Nix wrapper). A load, checksum or inference failure stops processing clearly;
 canonical audio remains unchanged. Existing derived artifacts require
 `--force` to replace.

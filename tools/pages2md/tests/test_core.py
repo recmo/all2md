@@ -9,15 +9,15 @@ from pathlib import Path
 import fitz
 from PIL import Image
 
-from ebook2md.chapters import chapters_from_map
-from ebook2md.chapters import detect_chapters
-from ebook2md.compare import compare_text
-from ebook2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
-from ebook2md.native import parse_native_observation, reconcile_observations
-from ebook2md.adapters import _link_target
-from ebook2md.pipeline import _align_multi_results, _apply_links_to_blocks, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, convert
-from ebook2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
-from ebook2md.verify import verify_bundle
+from pages2md.chapters import chapters_from_map
+from pages2md.chapters import detect_chapters
+from pages2md.compare import compare_text
+from pages2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
+from pages2md.native import parse_native_observation, reconcile_observations
+from pages2md.adapters import _link_target
+from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, convert
+from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
+from pages2md.verify import verify_bundle
 
 
 class FixtureOcr:

@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from ebook2md.formatting import format_and_lint, format_markdown
-from ebook2md.markdown import html_tables_to_markdown, local_links, markdown_anchors, merge_html_tables, normalize_heading_case, normalize_table_blocks, strict_page_markdown, title_case_heading, write_markdown
-from ebook2md.model import Block, Chapter, Comparison, EmbeddedEvidence, PageResult
+from pages2md.formatting import format_and_lint, format_markdown
+from pages2md.markdown import html_tables_to_markdown, local_links, markdown_anchors, merge_html_tables, normalize_heading_case, normalize_table_blocks, strict_page_markdown, title_case_heading, write_markdown
+from pages2md.model import Block, Chapter, Comparison, EmbeddedEvidence, PageResult
 
 
 def page(number: int) -> PageResult:
@@ -314,7 +314,7 @@ def test_uncertain_block_does_not_annotate_markdown():
     )
     markdown = strict_page_markdown(result, [])
     assert "The value is" in markdown
-    assert "ebook2md-review" not in markdown
+    assert "pages2md-review" not in markdown
 
 
 def test_unresolved_targeted_span_does_not_annotate_markdown():
@@ -338,7 +338,7 @@ def test_unresolved_targeted_span_does_not_annotate_markdown():
     )
     markdown = strict_page_markdown(result, [])
     assert markdown == r"The value is \( na \equiv nh \)."
-    assert "ebook2md-review" not in markdown
+    assert "pages2md-review" not in markdown
 
 
 def test_cover_style_front_matter_suppresses_display_titles():

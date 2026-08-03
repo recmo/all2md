@@ -69,7 +69,7 @@ class MlxUnlimitedOcr:
         try:
             from mlx_vlm import load
         except ImportError as error:
-            raise RuntimeError("MLX OCR dependencies are missing; install ebook2md[ocr]") from error
+            raise RuntimeError("MLX OCR dependencies are missing; install pages2md[ocr]") from error
         self._model, self._processor = load(MODEL_ID, revision=MODEL_REVISION)
         self._configure_precision()
 
@@ -90,7 +90,7 @@ class MlxUnlimitedOcr:
 
         processor = self._processor
         original = getattr(processor, "process_one", None)
-        if not callable(original) or getattr(processor, "_ebook2md_fp32_images", False):
+        if not callable(original) or getattr(processor, "_pages2md_fp32_images", False):
             return
 
         def process_one(*args, **kwargs):
@@ -100,7 +100,7 @@ class MlxUnlimitedOcr:
             return value
 
         processor.process_one = process_one
-        processor._ebook2md_fp32_images = True
+        processor._pages2md_fp32_images = True
 
     def recognize(self, image: Path) -> tuple[str, dict[str, object]]:
         return self._recognize(

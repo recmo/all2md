@@ -1,9 +1,9 @@
-# ebook2md
+# pages2md
 
-`ebook2md` is the document-conversion tool in the
+`pages2md` is the document-conversion tool in the
 [`all2md`](https://github.com/recmo/all2md) monorepo.
 
-`ebook2md` converts papers, books, scans, and image archives into portable,
+`pages2md` converts papers, books, scans, and image archives into portable,
 auditable Markdown bundles on Apple Silicon. Unlimited-OCR provides the visual
 interpretation; embedded PDF and DjVu text is retained only as comparison
 evidence and never silently replaces the visual result.
@@ -18,19 +18,19 @@ own readings.
 ## Install
 
 The Nix app creates a locked `uv` environment in
-`$XDG_CACHE_HOME/ebook2md/venv` on first use:
+`$XDG_CACHE_HOME/pages2md/venv` on first use:
 
 ```sh
-nix run github:recmo/all2md#ebook2md -- --help
-nix run github:recmo/all2md#ebook2md -- models fetch
+nix run github:recmo/all2md#pages2md -- --help
+nix run github:recmo/all2md#pages2md -- models fetch
 ```
 
 For development:
 
 ```sh
-nix develop .#ebook2md
-uv sync --project tools/ebook2md --extra dev --extra ocr
-uv run --project tools/ebook2md pytest
+nix develop .#pages2md
+uv sync --project tools/pages2md --extra dev --extra ocr
+uv run --project tools/pages2md pytest
 ```
 
 The OCR dependency is pinned to MLX-VLM revision
@@ -41,10 +41,10 @@ The OCR dependency is pinned to MLX-VLM revision
 ## Convert
 
 ```sh
-ebook2md convert paper.pdf --output result
-ebook2md convert book.djvu --output result --split auto
-ebook2md convert scans/ --output result --pages 1-20
-ebook2md verify result/book
+pages2md convert paper.pdf --output result
+pages2md convert book.djvu --output result --split auto
+pages2md convert scans/ --output result --pages 1-20
+pages2md verify result/book
 ```
 
 For a large document, `--split auto` creates chapter files only when reliable
@@ -82,7 +82,7 @@ Each fixed-layout page record keeps `visual.multi_page`, `visual.gundam`,
 `embedded`, `comparison`, canonical normalized blocks, and recovery provenance
 separately. Markdown is rendered only from canonical blocks. A pinned
 `mdformat`/GFM pass and PyMarkdown lint/fix pass run after rendering, followed
-by a second byte-idempotent formatting pass and `ebook2md verify` checks.
+by a second byte-idempotent formatting pass and `pages2md verify` checks.
 
 ## Supported inputs
 

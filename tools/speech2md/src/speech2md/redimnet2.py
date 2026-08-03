@@ -310,7 +310,7 @@ class ReDimNet2Embedder:
         try:
             import numpy as np
         except ImportError as error:
-            raise RuntimeError("NumPy is unavailable in the audio2md environment") from error
+            raise RuntimeError("NumPy is unavailable in the speech2md environment") from error
         waveform = np.frombuffer(process.stdout, dtype="<f4").copy()
         if len(waveform) < int(MIN_SAMPLE_SECONDS * REDIMNET2_SAMPLE_RATE):
             raise RuntimeError("decoded speech interval is shorter than two seconds")
@@ -325,7 +325,7 @@ class ReDimNet2Embedder:
             import torch
         except ImportError as error:
             raise RuntimeError(
-                "ReDimNet2 runtime is unavailable; run audio2md through its locked environment"
+                "ReDimNet2 runtime is unavailable; run speech2md through its locked environment"
             ) from error
         try:
             _ensure_verified_checkpoint(torch)
@@ -365,7 +365,7 @@ def _ensure_verified_checkpoint(torch: Any) -> Path:
         return checkpoint
 
     temporary = checkpoint.with_suffix(checkpoint.suffix + ".part")
-    request = Request(REDIMNET2_CHECKPOINT_URL, headers={"User-Agent": "audio2md"})
+    request = Request(REDIMNET2_CHECKPOINT_URL, headers={"User-Agent": "speech2md"})
     try:
         with urlopen(request) as response, temporary.open("wb") as output:
             while chunk := response.read(1024 * 1024):

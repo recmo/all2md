@@ -6,13 +6,13 @@ import json
 import fitz
 import pytest
 
-from ebook2md.formatting import format_and_lint, format_markdown
-from ebook2md.lists import normalize_lists, parse_marker, validate_list_node
-from ebook2md.markdown import page_markdown, strict_page_markdown
-from ebook2md.model import Block, Comparison, EmbeddedEvidence, PageResult
-from ebook2md.native import parse_native_observation
-from ebook2md.pipeline import _normalize_document_blocks, convert
-from ebook2md.verify import verify_bundle
+from pages2md.formatting import format_and_lint, format_markdown
+from pages2md.lists import normalize_lists, parse_marker, validate_list_node
+from pages2md.markdown import page_markdown, strict_page_markdown
+from pages2md.model import Block, Comparison, EmbeddedEvidence, PageResult
+from pages2md.native import parse_native_observation
+from pages2md.pipeline import _normalize_document_blocks, convert
+from pages2md.verify import verify_bundle
 
 
 def page(number: int, blocks: list[Block]) -> PageResult:

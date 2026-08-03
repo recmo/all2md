@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 import time
 
-from .media import probe, resolve_input
+from .media import LEGACY_STATE_SUFFIXES, STATE_SUFFIX, probe, resolve_input
 from .model import TranscriptState
 from .moss import (
     MAX_GENERATION_TOKENS,
@@ -48,7 +48,7 @@ def transcribe(
     prompt = build_transcription_prompt(hotwords)
     resolved = resolve_input(requested)
     raw_path = resolved.state_path.with_name(
-        resolved.state_path.name.removesuffix(".audio2md.json") + ".moss.json"
+        resolved.state_path.name.removesuffix(STATE_SUFFIX) + ".moss.json"
     )
     outputs = [resolved.state_path, resolved.markdown_path, raw_path]
     existing = [path for path in outputs if path.exists()]
@@ -150,7 +150,7 @@ def transcribe(
         derived_artifacts=[str(raw_path)],
     )
     write_json({
-        "schema_version": "audio2md-moss-raw-v2",
+        "schema_version": "speech2md-moss-raw-v2",
         "model": MOSS_MODEL,
         "model_revision": MOSS_REVISION,
         "transcription_prompt": prompt,
@@ -181,13 +181,23 @@ def write_text(value: str, path: Path) -> None:
 
 def state_for(requested: Path) -> tuple[TranscriptState, Path, Path]:
     requested = requested.expanduser().resolve()
-    if requested.name.endswith(".audio2md.json"):
-        markdown = requested.with_name(requested.name.removesuffix(".audio2md.json") + ".md")
-        return TranscriptState.from_dict(json.loads(requested.read_text())), requested, markdown
+    for suffix in (STATE_SUFFIX, *LEGACY_STATE_SUFFIXES):
+        if requested.name.endswith(suffix):
+            markdown = requested.with_name(requested.name.removesuffix(suffix) + ".md")
+            return TranscriptState.from_dict(json.loads(requested.read_text())), requested, markdown
     resolved = resolve_input(requested)
+    state_path = resolved.state_path
+    if not state_path.exists():
+        for legacy_suffix in reversed(LEGACY_STATE_SUFFIXES):
+            legacy_path = state_path.with_name(
+                state_path.name.removesuffix(STATE_SUFFIX) + legacy_suffix
+            )
+            if legacy_path.exists():
+                state_path = legacy_path
+                break
     return (
-        TranscriptState.from_dict(json.loads(resolved.state_path.read_text())),
-        resolved.state_path,
+        TranscriptState.from_dict(json.loads(state_path.read_text())),
+        state_path,
         resolved.markdown_path,
     )
 

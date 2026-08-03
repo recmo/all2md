@@ -11,7 +11,7 @@ from .pipeline import relabel, render, transcribe
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
-        prog="audio2md",
+        prog="speech2md",
         description="Transcribe local meeting audio with MOSS and reconcile speakers with ReDimNet2",
     )
     root.add_argument("--version", action="version", version=__version__)

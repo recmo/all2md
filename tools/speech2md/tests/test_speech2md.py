@@ -6,12 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 
-import audio2md.moss as moss
-import audio2md.pipeline as pipeline
-from audio2md.cli import parser
-from audio2md.media import resolve_input
-from audio2md.model import AudioSource, EmbeddingSample, Segment, SpeakerProfile, TranscriptState
-from audio2md.moss import (
+import speech2md.moss as moss
+import speech2md.pipeline as pipeline
+from speech2md.benchmark import summarize
+from speech2md.cli import parser
+from speech2md.media import resolve_input
+from speech2md.model import AudioSource, EmbeddingSample, Segment, SpeakerProfile, TranscriptState
+from speech2md.moss import (
     ENGLISH_TRANSCRIPTION_PROMPT,
     MAX_HOTWORDS,
     MOSS_MODEL,
@@ -28,8 +29,8 @@ from audio2md.moss import (
     transcribe_track,
     trim_overlaps,
 )
-from audio2md.pipeline import relabel, transcribe, write_state
-from audio2md.render import coalesce_segments, render_markdown, timestamp
+from speech2md.pipeline import relabel, transcribe, write_state
+from speech2md.render import coalesce_segments, render_markdown, timestamp
 
 
 def test_resolve_media_input(tmp_path: Path):
@@ -37,7 +38,7 @@ def test_resolve_media_input(tmp_path: Path):
     source.touch()
     resolved = resolve_input(source)
     assert resolved.sources == ((source, "mixed", None),)
-    assert resolved.state_path.name == "meeting.audio2md.json"
+    assert resolved.state_path.name == "meeting.speech2md.json"
     assert resolved.markdown_path.name == "meeting.md"
 
 
@@ -54,7 +55,7 @@ def test_resolve_capture_manifest(tmp_path: Path):
     resolved = resolve_input(manifest)
     assert resolved.meeting_id == "id"
     assert resolved.sources[0][1] == "microphone"
-    assert resolved.state_path.name == "2026-08-02-meeting.audio2md.json"
+    assert resolved.state_path.name == "2026-08-02-meeting.speech2md.json"
     assert resolved.markdown_path.name == "2026-08-02-meeting.md"
 
 
@@ -376,11 +377,38 @@ def test_render_and_relabel_without_retranscription(tmp_path: Path):
     media = tmp_path / "meeting.mp4"
     media.touch()
     state = fixture_state(media)
-    write_state(state, tmp_path / "meeting.audio2md.json")
+    write_state(state, tmp_path / "meeting.speech2md.json")
     assert "**[00:00:01] Speaker 1:** Hello" in render_markdown(state)
     relabeled = relabel(media, ["Speaker 1=Alice"])
     assert relabeled.speakers == {"Speaker 1": "Alice"}
     assert "Alice" in (tmp_path / "meeting.md").read_text()
+
+
+@pytest.mark.parametrize("suffix", [".audio2md.json", ".voice2md.json"])
+def test_relabel_reads_legacy_state(tmp_path: Path, suffix: str):
+    media = tmp_path / "meeting.mp4"
+    media.touch()
+    legacy_state = tmp_path / f"meeting{suffix}"
+    write_state(fixture_state(media), legacy_state)
+
+    relabeled = relabel(media, ["Speaker 1=Alice"])
+
+    assert relabeled.speakers == {"Speaker 1": "Alice"}
+    assert json.loads(legacy_state.read_text())["speakers"] == {"Speaker 1": "Alice"}
+    assert not (tmp_path / "meeting.speech2md.json").exists()
+
+
+def test_benchmark_reads_legacy_state_without_double_counting(tmp_path: Path):
+    media = tmp_path / "meeting.mp4"
+    state = fixture_state(media)
+    write_state(state, tmp_path / "meeting.audio2md.json")
+    assert summarize(tmp_path)["recordings"] == 1
+
+    write_state(state, tmp_path / "meeting.voice2md.json")
+    assert summarize(tmp_path)["recordings"] == 1
+
+    write_state(state, tmp_path / "meeting.speech2md.json")
+    assert summarize(tmp_path)["recordings"] == 1
 
 
 def test_render_coalesces_only_same_speaker():
@@ -396,7 +424,7 @@ def test_render_coalesces_only_same_speaker():
 def test_transcribe_refuses_to_overwrite_before_loading_model(tmp_path: Path):
     media = tmp_path / "meeting.mp4"
     media.touch()
-    (tmp_path / "meeting.audio2md.json").write_text("existing")
+    (tmp_path / "meeting.speech2md.json").write_text("existing")
     with pytest.raises(FileExistsError, match="--force"):
         transcribe(media)
 
@@ -409,7 +437,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     participants.touch()
     resolved = SimpleNamespace(
         requested=requested,
-        state_path=tmp_path / "capture.audio2md.json",
+        state_path=tmp_path / "capture.speech2md.json",
         markdown_path=tmp_path / "capture.md",
         capture_manifest=requested,
         meeting_id="meeting",

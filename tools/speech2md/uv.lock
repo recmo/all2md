@@ -29,7 +29,7 @@ wheels = [
 ]
 
 [[package]]
-name = "audio2md"
+name = "speech2md"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

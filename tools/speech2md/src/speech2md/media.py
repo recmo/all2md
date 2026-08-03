@@ -8,6 +8,8 @@ from pathlib import Path
 from .model import AudioSource, ResolvedInput
 
 MEDIA_SUFFIXES = {".aac", ".caf", ".flac", ".m4a", ".mp3", ".mp4", ".ogg", ".wav", ".webm"}
+STATE_SUFFIX = ".speech2md.json"
+LEGACY_STATE_SUFFIXES = (".audio2md.json", ".voice2md.json")
 
 
 def sha256(path: Path) -> str:
@@ -56,7 +58,7 @@ def resolve_input(requested: Path) -> ResolvedInput:
         stem = requested.with_suffix("")
         return ResolvedInput(
             requested=requested,
-            state_path=stem.with_suffix(".audio2md.json"),
+            state_path=stem.with_suffix(STATE_SUFFIX),
             markdown_path=stem.with_suffix(".md"),
             capture_manifest=None,
             meeting_id=None,
@@ -80,7 +82,7 @@ def resolve_input(requested: Path) -> ResolvedInput:
     base = requested.name.removesuffix("-capture.json")
     return ResolvedInput(
         requested=requested,
-        state_path=requested.parent / f"{base}.audio2md.json",
+        state_path=requested.parent / f"{base}{STATE_SUFFIX}",
         markdown_path=requested.parent / f"{base}.md",
         capture_manifest=requested,
         meeting_id=value["meetingID"],

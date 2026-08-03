@@ -6,7 +6,7 @@ the local microphone and that process's output as separate lossless tracks.
 
 Records are written to `~/Documents/Meetings/YYYY/MM/`. FLAC audio is the
 canonical source; a versioned JSON manifest carries capture provenance for the
-future `audio2md` processor.
+future `speech2md` processor.
 
 ## Development
 

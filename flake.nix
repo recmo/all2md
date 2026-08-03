@@ -8,8 +8,8 @@
     let
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
-      ebookProject = ./tools/ebook2md;
-      audioProject = ./tools/audio2md;
+      pagesProject = ./tools/pages2md;
+      speechProject = ./tools/speech2md;
       testPython = pkgs.python3.withPackages (
         ps: with ps; [
           beautifulsoup4
@@ -23,83 +23,83 @@
           jsonschema
         ]
       );
-      ebook2md = pkgs.writeShellApplication {
-        name = "ebook2md";
+      pages2md = pkgs.writeShellApplication {
+        name = "pages2md";
         runtimeInputs = [
           pkgs.djvulibre
           pkgs.poppler-utils
           pkgs.uv
         ];
         text = ''
-          cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/ebook2md"
+          cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/pages2md"
           mkdir -p "$cache_root"
           export UV_PROJECT_ENVIRONMENT="$cache_root/venv"
-          exec uv run --frozen --extra ocr --project ${ebookProject} ebook2md "$@"
+          exec uv run --frozen --extra ocr --project ${pagesProject} pages2md "$@"
         '';
       };
-      audio2md = pkgs.writeShellApplication {
-        name = "audio2md";
+      speech2md = pkgs.writeShellApplication {
+        name = "speech2md";
         runtimeInputs = [
           pkgs.ffmpeg
           pkgs.uv
         ];
         text = ''
-          cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/audio2md"
+          cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/speech2md"
           mkdir -p "$cache_root/torch"
           export TORCH_HOME="$cache_root/torch"
           export UV_PROJECT_ENVIRONMENT="$cache_root/venv"
-          exec uv run --frozen --project ${audioProject} audio2md "$@"
+          exec uv run --frozen --project ${speechProject} speech2md "$@"
         '';
       };
       meeting-capture = pkgs.callPackage ./apps/meeting-capture/package.nix { };
     in
     {
       packages.${system} = {
-        default = ebook2md;
-        inherit audio2md ebook2md meeting-capture;
+        default = pages2md;
+        inherit meeting-capture pages2md speech2md;
       };
 
       apps.${system} = {
         default = {
           type = "app";
-          program = "${ebook2md}/bin/ebook2md";
+          program = "${pages2md}/bin/pages2md";
         };
-        audio2md = {
+        speech2md = {
           type = "app";
-          program = "${audio2md}/bin/audio2md";
+          program = "${speech2md}/bin/speech2md";
         };
       };
 
       checks.${system} = {
-        ebook2md-source =
-          pkgs.runCommand "ebook2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; }
+        pages2md-source =
+          pkgs.runCommand "pages2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; }
             ''
               export PYTHONPYCACHEPREFIX="$out/pycache"
-              python -m compileall -q ${ebookProject}/src
+              python -m compileall -q ${pagesProject}/src
               touch "$out/passed"
             '';
-        ebook2md-tests = pkgs.runCommand "ebook2md-tests" { nativeBuildInputs = [ testPython ]; } ''
-          export PYTHONPATH=${ebookProject}/src
+        pages2md-tests = pkgs.runCommand "pages2md-tests" { nativeBuildInputs = [ testPython ]; } ''
+          export PYTHONPATH=${pagesProject}/src
           export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-          pytest -q ${ebookProject}/tests
+          pytest -q ${pagesProject}/tests
           touch "$out"
         '';
-        audio2md-source =
-          pkgs.runCommand "audio2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; }
+        speech2md-source =
+          pkgs.runCommand "speech2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; }
             ''
               export PYTHONPYCACHEPREFIX="$out/pycache"
-              python -m compileall -q ${audioProject}/src
+              python -m compileall -q ${speechProject}/src
               touch "$out/passed"
             '';
-        audio2md-tests =
-          pkgs.runCommand "audio2md-tests"
+        speech2md-tests =
+          pkgs.runCommand "speech2md-tests"
             {
               nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.pytest ])) ];
             }
             ''
-              export PYTHONPATH=${audioProject}/src
+              export PYTHONPATH=${speechProject}/src
               export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-              pytest -q ${audioProject}/tests
+              pytest -q ${speechProject}/tests
               touch "$out"
             '';
         meeting-capture-schema =
@@ -111,7 +111,7 @@
       };
 
       devShells.${system} = rec {
-        ebook2md = pkgs.mkShell {
+        pages2md = pkgs.mkShell {
           packages = [
             pkgs.djvulibre
             pkgs.poppler-utils
@@ -119,7 +119,7 @@
             pkgs.uv
           ];
           shellHook = ''
-            echo "Run: uv sync --project tools/ebook2md --extra dev --extra ocr"
+            echo "Run: uv sync --project tools/pages2md --extra dev --extra ocr"
           '';
         };
 
@@ -130,18 +130,18 @@
           '';
         };
 
-        audio2md = pkgs.mkShell {
+        speech2md = pkgs.mkShell {
           packages = [
             pkgs.ffmpeg
             pkgs.python3
             pkgs.uv
           ];
           shellHook = ''
-            echo "Run: uv sync --project tools/audio2md --extra dev"
+            echo "Run: uv sync --project tools/speech2md --extra dev"
           '';
         };
 
-        default = ebook2md;
+        default = pages2md;
       };
 
       formatter.${system} = pkgs.nixfmt;

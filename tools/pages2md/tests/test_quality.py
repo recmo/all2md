@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import fitz
 
-from ebook2md.adapters import _is_page_backing_image
-from ebook2md.model import Block, Link
-from ebook2md.pipeline import _apply_links_to_blocks
-from ebook2md.quality import (
+from pages2md.adapters import _is_page_backing_image
+from pages2md.model import Block, Link
+from pages2md.pipeline import _apply_links_to_blocks
+from pages2md.quality import (
     adjacent_overlap,
     math_syntax_errors,
     output_quality_warnings,
