@@ -9,7 +9,8 @@ Local-first tools that turn source material into auditable Markdown.
 - [`Meeting Capture`](apps/meeting-capture/README.md) records local microphone
   and meeting-participant audio into canonical, lossless meeting records.
 - [`audio2md`](tools/audio2md/README.md) uses MOSS locally to transcribe and
-  diarize recordings into speaker-attributed Markdown.
+  diarize recordings, with ReDimNet2 voice embeddings for stable speaker
+  labels across processing windows.
 
 Each project owns its runtime and dependencies. The repository shares only
 stable artifact schemas and top-level build orchestration.
@@ -28,5 +29,5 @@ Meeting Capture is developed from
 `apps/meeting-capture/MeetingCapture.xcodeproj`.
 
 `audio2md` intentionally has one processing path: pinned MOSS transcription
-and native diarization, with raw model output retained beside the rendered
-Markdown.
+and diarization plus pinned ReDimNet2 speaker reconciliation, with raw model
+output retained beside the rendered Markdown.

@@ -5,12 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "audio2md"
 version = "0.1.0"
-description = "Local MOSS meeting transcription and diarization to Markdown"
+description = "Local MOSS transcription with ReDimNet2 speaker reconciliation to Markdown"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "MIT"
 dependencies = [
   "mlx-audio[stt]==0.4.6",
+  "numpy>=2,<3",
+  "scipy>=1.15,<2",
+  "torch==2.11.0",
+  "torchaudio==2.11.0",
 ]
 
 [project.optional-dependencies]

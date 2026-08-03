@@ -6,14 +6,14 @@ import json
 import pytest
 
 from audio2md.media import resolve_input
-from audio2md.model import AudioSource, Segment, TranscriptState
+from audio2md.model import AudioSource, EmbeddingSample, Segment, SpeakerProfile, TranscriptState
 from audio2md.moss import (
     MOSS_MODEL,
     MOSS_REVISION,
     deduplicate_boundaries,
+    parse_silence_centers,
     parse_segments,
     plan_windows,
-    reconcile_speakers,
     trim_overlaps,
 )
 from audio2md.pipeline import relabel, transcribe, write_state
@@ -47,13 +47,24 @@ def test_resolve_capture_manifest(tmp_path: Path):
 
 
 def test_window_plan_covers_long_recording():
-    assert plan_windows(612, window_seconds=300, overlap_seconds=5) == [
-        (0, 300),
-        (295, 595),
-        (590, 612),
+    assert plan_windows(1200, silence_centers=[]) == [(0, 1200)]
+    assert plan_windows(4582, silence_centers=[1520, 3060]) == [
+        (0, 1521),
+        (1519, 3061),
+        (3059, 4582),
     ]
-    with pytest.raises(ValueError):
-        plan_windows(10, window_seconds=5, overlap_seconds=5)
+    with pytest.raises(RuntimeError, match="no silence found"):
+        plan_windows(4582, silence_centers=[])
+
+
+def test_parse_silence_centers():
+    log = """
+silence_start: 10.5
+silence_end: 12.5 | silence_duration: 2
+silence_start: 20
+silence_end: 21 | silence_duration: 1
+"""
+    assert parse_silence_centers(log) == [11.5, 20.5]
 
 
 def test_parse_moss_native_speakers_and_microphone_identity():
@@ -62,22 +73,6 @@ def test_parse_moss_native_speakers_and_microphone_identity():
     microphone = parse_segments(raw, window=2, offset=10, role="microphone")
     assert participants == [Segment(11, 12, "Hello", "W02:S03", "participants")]
     assert microphone[0].speaker == "Remco"
-
-
-def test_overlap_reconciliation_maps_only_observed_speaker():
-    windows = [(0, 300), (295, 595)]
-    first = [
-        Segment(296, 299, "same sentence", "W01:S01", "participants"),
-        Segment(200, 205, "earlier speaker", "W01:S02", "participants"),
-    ]
-    second = [
-        Segment(296.1, 299.1, "same sentence", "W02:S03", "participants"),
-        Segment(310, 315, "new speaker", "W02:S04", "participants"),
-    ]
-    mapping, joins = reconcile_speakers([first, second], windows, role="participants")
-    assert mapping["W02:S03"] == mapping["W01:S01"]
-    assert mapping["W02:S04"] not in {mapping["W01:S01"], mapping["W01:S02"]}
-    assert joins[0]["local_speaker"] == "W02:S03"
 
 
 def test_trim_and_deduplicate_chunk_boundary():
@@ -118,6 +113,37 @@ def test_transcribe_refuses_to_overwrite_before_loading_model(tmp_path: Path):
     (tmp_path / "meeting.audio2md.json").write_text("existing")
     with pytest.raises(FileExistsError, match="--force"):
         transcribe(media)
+
+
+def test_state_round_trip_with_embeddings_and_backward_compatible_loading(tmp_path: Path):
+    state = fixture_state(tmp_path / "meeting.mp4")
+    sample = EmbeddingSample(
+        vector=[1.0] + [0.0] * 191,
+        source_track="participants",
+        start=1,
+        end=4,
+        duration_seconds=3,
+        window=1,
+        quality={"overlap_free": True},
+    )
+    state.schema_version = 2
+    state.speaker_profiles = {
+        "Speaker 1": SpeakerProfile(
+            speaker="Speaker 1",
+            model="ReDimNet2",
+            model_revision="revision",
+            checkpoint_sha256="b" * 64,
+            embedding_dimension=192,
+            samples=[sample],
+        )
+    }
+    restored = TranscriptState.from_dict(state.to_dict())
+    assert restored.speaker_profiles["Speaker 1"].samples[0] == sample
+
+    old_value = state.to_dict()
+    old_value["schema_version"] = 1
+    old_value.pop("speaker_profiles")
+    assert TranscriptState.from_dict(old_value).speaker_profiles == {}
 
 
 def fixture_state(media: Path) -> TranscriptState:

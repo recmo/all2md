@@ -45,7 +45,8 @@
         ];
         text = ''
           cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/audio2md"
-          mkdir -p "$cache_root"
+          mkdir -p "$cache_root/torch"
+          export TORCH_HOME="$cache_root/torch"
           export UV_PROJECT_ENVIRONMENT="$cache_root/venv"
           exec uv run --frozen --project ${audioProject} audio2md "$@"
         '';

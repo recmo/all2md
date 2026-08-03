@@ -8,11 +8,25 @@ import time
 from .media import probe, resolve_input
 from .model import TranscriptState
 from .moss import (
-    DEFAULT_OVERLAP_SECONDS,
-    DEFAULT_WINDOW_SECONDS,
+    MAX_GENERATION_TOKENS,
     MOSS_MODEL,
     MOSS_REVISION,
+    SILENCE_MIN_SECONDS,
+    SILENCE_NOISE_DB,
+    SILENCE_SEARCH_SECONDS,
+    TARGET_PART_SECONDS,
+    WINDOW_OVERLAP_SECONDS,
     transcribe_track,
+)
+from .redimnet2 import (
+    DEFAULT_SIMILARITY_MARGIN,
+    DEFAULT_SIMILARITY_THRESHOLD,
+    REDIMNET2_CHECKPOINT_SHA256,
+    REDIMNET2_DIMENSION,
+    REDIMNET2_MODEL,
+    REDIMNET2_REVISION,
+    get_redimnet2_embedder,
+    profile_diagnostics,
 )
 from .render import render_markdown
 
@@ -20,8 +34,6 @@ from .render import render_markdown
 def transcribe(
     requested: Path,
     *,
-    window_seconds: float = DEFAULT_WINDOW_SECONDS,
-    overlap_seconds: float = DEFAULT_OVERLAP_SECONDS,
     force: bool = False,
 ) -> TranscriptState:
     resolved = resolve_input(requested)
@@ -37,25 +49,41 @@ def transcribe(
     audio = []
     segments = []
     raw_tracks = []
+    speaker_profiles = {}
+    embedder = get_redimnet2_embedder()
     for path, role, expected_checksum in resolved.sources:
         source = probe(path, expected_sha256=expected_checksum, role=role)
         audio.append(source)
-        track_segments, raw = transcribe_track(
+        track_segments, raw, speaker_profiles = transcribe_track(
             path,
             role=role,
             duration=source.duration_seconds,
-            window_seconds=window_seconds,
-            overlap_seconds=overlap_seconds,
+            embedder=None if role == "microphone" else embedder,
+            speaker_profiles=speaker_profiles,
         )
         segments.extend(track_segments)
         raw_tracks.append(raw)
 
-    warnings = [
-        "speaker labels are MOSS-native and joined across windows only from matching overlap speech",
-        "unmatched speakers receive new anonymous labels and may be relabeled later",
-    ]
+    window_count = sum(len(track["windows"]) for track in raw_tracks)
+    actual_overlap = max((track["actual_overlap_seconds"] for track in raw_tracks), default=0.0)
+    warnings = (
+        [
+            "MOSS processed the recording in one pass and provides meeting-global anonymous speaker labels",
+            "ReDimNet2 vectors are retained as meeting-local evidence but were not needed to stitch MOSS windows",
+        ]
+        if window_count == len(raw_tracks)
+        else [
+            "MOSS provides window-local diarization; speaker continuity across windows uses ReDimNet2 voice embeddings",
+            (
+                "audio overlap is used only for transcript boundary trimming and deduplication"
+                if actual_overlap
+                else "automatic equal MOSS parts are non-overlapping; transcript boundaries are not duplicated"
+            ),
+            "unmatched speakers receive new anonymous labels and may be relabeled later",
+        ]
+    )
     state = TranscriptState(
-        schema_version=1,
+        schema_version=2,
         source=str(resolved.requested),
         capture_manifest=str(resolved.capture_manifest) if resolved.capture_manifest else None,
         meeting_id=resolved.meeting_id,
@@ -69,19 +97,36 @@ def transcribe(
         speakers={},
         segments=sorted(segments, key=lambda item: (item.start, item.end, item.source_role)),
         warnings=warnings,
+        speaker_profiles=speaker_profiles,
         provenance={
-            "window_seconds": window_seconds,
-            "overlap_seconds": overlap_seconds,
-            "max_generation_tokens": 65_536,
-            "speaker_join": "MOSS overlap evidence only",
+            "window_strategy": "equal-silence-aligned",
+            "target_part_seconds": TARGET_PART_SECONDS,
+            "actual_overlap_seconds": actual_overlap,
+            "window_overlap_seconds": WINDOW_OVERLAP_SECONDS,
+            "silence_search_seconds": SILENCE_SEARCH_SECONDS,
+            "silence_noise_db": SILENCE_NOISE_DB,
+            "silence_min_seconds": SILENCE_MIN_SECONDS,
+            "max_generation_tokens": MAX_GENERATION_TOKENS,
+            "speaker_reconciliation": {
+                "method": "ReDimNet2 cosine similarity",
+                "model": REDIMNET2_MODEL,
+                "model_revision": REDIMNET2_REVISION,
+                "checkpoint_sha256": REDIMNET2_CHECKPOINT_SHA256,
+                "embedding_dimension": REDIMNET2_DIMENSION,
+                "similarity_threshold": DEFAULT_SIMILARITY_THRESHOLD,
+                "similarity_margin": DEFAULT_SIMILARITY_MARGIN,
+                "assignment": "one-to-one within each MOSS window",
+                "text_used_for_identity": False,
+            },
         },
         derived_artifacts=[str(raw_path)],
     )
     write_json({
-        "schema_version": "audio2md-moss-raw-v1",
+        "schema_version": "audio2md-moss-raw-v2",
         "model": MOSS_MODEL,
         "model_revision": MOSS_REVISION,
         "tracks": raw_tracks,
+        "speaker_profiles": profile_diagnostics(speaker_profiles),
     }, raw_path)
     write_state(state, resolved.state_path)
     write_text(render_markdown(state), resolved.markdown_path)

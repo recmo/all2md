@@ -24,6 +24,27 @@ class Segment:
 
 
 @dataclass
+class EmbeddingSample:
+    vector: list[float]
+    source_track: str
+    start: float
+    end: float
+    duration_seconds: float
+    window: int
+    quality: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SpeakerProfile:
+    speaker: str
+    model: str
+    model_revision: str
+    checkpoint_sha256: str
+    embedding_dimension: int
+    samples: list[EmbeddingSample] = field(default_factory=list)
+
+
+@dataclass
 class TranscriptState:
     schema_version: int
     source: str
@@ -39,6 +60,7 @@ class TranscriptState:
     speakers: dict[str, str]
     segments: list[Segment]
     warnings: list[str]
+    speaker_profiles: dict[str, SpeakerProfile] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
     derived_artifacts: list[str] = field(default_factory=list)
 
@@ -62,6 +84,17 @@ class TranscriptState:
             speakers=dict(value.get("speakers", {})),
             segments=[Segment(**item) for item in value["segments"]],
             warnings=list(value.get("warnings", [])),
+            speaker_profiles={
+                speaker: SpeakerProfile(
+                    speaker=item.get("speaker", speaker),
+                    model=item["model"],
+                    model_revision=item["model_revision"],
+                    checkpoint_sha256=item["checkpoint_sha256"],
+                    embedding_dimension=item["embedding_dimension"],
+                    samples=[EmbeddingSample(**sample) for sample in item.get("samples", [])],
+                )
+                for speaker, item in value.get("speaker_profiles", {}).items()
+            },
             provenance=dict(value.get("provenance", {})),
             derived_artifacts=list(value.get("derived_artifacts", [])),
         )
