@@ -12,6 +12,10 @@ checkpoint with SHA-256
 
 The CLI exposes only this MOSS + ReDimNet2 pipeline.
 
+The Nix package includes its locked Python dependency environment in the
+immutable Nix store. It does not create a virtual environment or install
+packages at runtime; only model weights and checkpoints populate user caches.
+
 ```sh
 uv sync --project tools/speech2md --extra dev
 uv run --project tools/speech2md pytest tools/speech2md/tests

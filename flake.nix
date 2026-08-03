@@ -1,15 +1,79 @@
 {
   description = "Local-first tools that turn source material into auditable Markdown";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.uv2nix.follows = "uv2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      pyproject-nix,
+      uv2nix,
+      pyproject-build-systems,
+    }:
     let
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
       pagesProject = ./tools/pages2md;
       speechProject = ./tools/speech2md;
+      mkPythonEnvironment =
+        {
+          name,
+          project,
+          extras ? [ ],
+        }:
+        let
+          workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = project; };
+          overlay = workspace.mkPyprojectOverlay { sourcePreference = "wheel"; };
+          buildSystemOverrides = final: prev: {
+            mlx-vlm = prev.mlx-vlm.overrideAttrs (old: {
+              nativeBuildInputs =
+                (old.nativeBuildInputs or [ ])
+                ++ final.resolveBuildSystem {
+                  setuptools = [ ];
+                };
+            });
+          };
+          pythonSet =
+            (pkgs.callPackage pyproject-nix.build.packages { python = pkgs.python313; }).overrideScope
+              (
+                nixpkgs.lib.composeManyExtensions [
+                  pyproject-build-systems.overlays.wheel
+                  overlay
+                  buildSystemOverrides
+                ]
+              );
+        in
+        pythonSet.mkVirtualEnv "${name}-env" { ${name} = extras; };
+      pagesEnvironment = mkPythonEnvironment {
+        name = "pages2md";
+        project = pagesProject;
+        extras = [ "ocr" ];
+      };
+      speechEnvironment = mkPythonEnvironment {
+        name = "speech2md";
+        project = speechProject;
+      };
       testPython = pkgs.python3.withPackages (
         ps: with ps; [
           beautifulsoup4
@@ -28,27 +92,21 @@
         runtimeInputs = [
           pkgs.djvulibre
           pkgs.poppler-utils
-          pkgs.uv
         ];
         text = ''
-          cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/pages2md"
-          mkdir -p "$cache_root"
-          export UV_PROJECT_ENVIRONMENT="$cache_root/venv"
-          exec uv run --frozen --extra ocr --project ${pagesProject} pages2md "$@"
+          exec ${pagesEnvironment}/bin/pages2md "$@"
         '';
       };
       speech2md = pkgs.writeShellApplication {
         name = "speech2md";
         runtimeInputs = [
           pkgs.ffmpeg
-          pkgs.uv
         ];
         text = ''
           cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/speech2md"
           mkdir -p "$cache_root/torch"
           export TORCH_HOME="$cache_root/torch"
-          export UV_PROJECT_ENVIRONMENT="$cache_root/venv"
-          exec uv run --frozen --project ${speechProject} speech2md "$@"
+          exec ${speechEnvironment}/bin/speech2md "$@"
         '';
       };
       meeting-capture = pkgs.callPackage ./apps/meeting-capture/package.nix { };
@@ -100,6 +158,24 @@
               export PYTHONPATH=${speechProject}/src
               export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
               pytest -q ${speechProject}/tests
+              touch "$out"
+            '';
+        packaged-clis =
+          pkgs.runCommand "packaged-clis"
+            {
+              nativeBuildInputs = [
+                pages2md
+                speech2md
+              ];
+            }
+            ''
+              export HOME="$TMPDIR/home"
+              export XDG_CACHE_HOME="$TMPDIR/cache"
+              mkdir -p "$HOME" "$XDG_CACHE_HOME"
+              pages2md --help > /dev/null
+              speech2md --help > /dev/null
+              test ! -e "$XDG_CACHE_HOME/pages2md/venv"
+              test ! -e "$XDG_CACHE_HOME/speech2md/venv"
               touch "$out"
             '';
         meeting-capture-schema =
