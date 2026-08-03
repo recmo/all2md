@@ -17,8 +17,9 @@ own readings.
 
 ## Install
 
-The Nix app creates a locked `uv` environment in
-`$XDG_CACHE_HOME/pages2md/venv` on first use:
+The Nix app includes its locked Python dependency environment in the immutable
+Nix store. It does not create a virtual environment or install packages at
+runtime. Model weights remain explicit, on-demand downloads:
 
 ```sh
 nix run github:recmo/all2md#pages2md -- --help

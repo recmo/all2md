@@ -15,6 +15,10 @@ Local-first tools that turn source material into auditable Markdown.
 Each project owns its runtime and dependencies. The repository shares only
 stable artifact schemas and top-level build orchestration.
 
+The Nix packages include their locked Python dependency environments in the
+immutable store. Running an installed CLI never creates a virtual environment;
+only model weights and checkpoints are populated in user caches on demand.
+
 ## Commands
 
 ```sh
