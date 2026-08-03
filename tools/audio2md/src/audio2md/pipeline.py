@@ -8,15 +8,22 @@ import time
 from .media import probe, resolve_input
 from .model import TranscriptState
 from .moss import (
+    COVERAGE_SLACK_SECONDS,
     MAX_GENERATION_TOKENS,
+    MAX_RECOVERY_ATTEMPTS,
+    MIN_RECOVERY_PROGRESS_SECONDS,
     MOSS_MODEL,
     MOSS_REVISION,
+    RECOVERY_OVERLAP_SECONDS,
+    RECOVERY_TOKEN_THRESHOLD,
     SILENCE_MIN_SECONDS,
     SILENCE_NOISE_DB,
     SILENCE_SEARCH_SECONDS,
     TARGET_PART_SECONDS,
     WINDOW_OVERLAP_SECONDS,
+    build_transcription_prompt,
     load_moss_engine,
+    normalize_hotwords,
     transcribe_track,
 )
 from .redimnet2 import (
@@ -36,7 +43,10 @@ def transcribe(
     requested: Path,
     *,
     force: bool = False,
+    hotwords: list[str] | None = None,
 ) -> TranscriptState:
+    hotwords = normalize_hotwords(hotwords)
+    prompt = build_transcription_prompt(hotwords)
     resolved = resolve_input(requested)
     raw_path = resolved.state_path.with_name(
         resolved.state_path.name.removesuffix(".audio2md.json") + ".moss.json"
@@ -63,6 +73,7 @@ def transcribe(
         track_segments, raw, speaker_profiles = transcribe_track(
             path,
             engine=engine,
+            prompt=prompt,
             role=role,
             duration=source.duration_seconds,
             embedder=None if role == "microphone" else embedder,
@@ -119,6 +130,13 @@ def transcribe(
             "silence_noise_db": SILENCE_NOISE_DB,
             "silence_min_seconds": SILENCE_MIN_SECONDS,
             "max_generation_tokens": MAX_GENERATION_TOKENS,
+            "coverage_slack_seconds": COVERAGE_SLACK_SECONDS,
+            "recovery_overlap_seconds": RECOVERY_OVERLAP_SECONDS,
+            "recovery_token_threshold": RECOVERY_TOKEN_THRESHOLD,
+            "minimum_recovery_progress_seconds": MIN_RECOVERY_PROGRESS_SECONDS,
+            "max_recovery_attempts": MAX_RECOVERY_ATTEMPTS,
+            "transcription_prompt": prompt,
+            "hotwords": hotwords,
             "speaker_reconciliation": {
                 "method": "ReDimNet2 cosine similarity",
                 "model": REDIMNET2_MODEL,
@@ -137,6 +155,8 @@ def transcribe(
         "schema_version": "audio2md-moss-raw-v2",
         "model": MOSS_MODEL,
         "model_revision": MOSS_REVISION,
+        "transcription_prompt": prompt,
+        "hotwords": hotwords,
         "tracks": raw_tracks,
         "speaker_profiles": profile_diagnostics(speaker_profiles),
     }, raw_path)

@@ -6,19 +6,26 @@ from types import SimpleNamespace
 
 import pytest
 
+import audio2md.moss as moss
 import audio2md.pipeline as pipeline
+from audio2md.cli import parser
 from audio2md.media import resolve_input
 from audio2md.model import AudioSource, EmbeddingSample, Segment, SpeakerProfile, TranscriptState
 from audio2md.moss import (
+    ENGLISH_TRANSCRIPTION_PROMPT,
+    MAX_HOTWORDS,
     MOSS_MODEL,
     MOSS_REVISION,
     MAX_GENERATION_TOKENS,
+    RECOVERY_TOKEN_THRESHOLD,
+    build_transcription_prompt,
     deduplicate_boundaries,
     generation_diagnostics,
     parse_moss_transcript,
     parse_silence_centers,
     parse_segments,
     plan_windows,
+    transcribe_track,
     trim_overlaps,
 )
 from audio2md.pipeline import relabel, transcribe, write_state
@@ -115,6 +122,24 @@ def test_generation_diagnostics_marks_only_a_hard_ceiling_hit():
     assert invalid["parse_status"] == "invalid"
 
 
+def test_build_transcription_prompt_uses_english_and_targeted_hotwords():
+    assert build_transcription_prompt() == ENGLISH_TRANSCRIPTION_PROMPT
+    assert build_transcription_prompt([" Remco ", "F2Z", "remco"]) == (
+        f"{ENGLISH_TRANSCRIPTION_PROMPT} Hotwords: Remco, F2Z"
+    )
+    with pytest.raises(ValueError, match="single-line"):
+        build_transcription_prompt(["bad\nword"])
+    with pytest.raises(ValueError, match=f"at most {MAX_HOTWORDS}"):
+        build_transcription_prompt([f"term-{index}" for index in range(MAX_HOTWORDS + 1)])
+
+
+def test_cli_accepts_comma_separated_hotwords():
+    arguments = parser().parse_args([
+        "transcribe", "meeting.mp4", "--hotwords", "Remco, Piotr,F2Z",
+    ])
+    assert arguments.hotwords == "Remco, Piotr,F2Z"
+
+
 def test_trim_and_deduplicate_chunk_boundary():
     windows = [(0, 300), (295, 595)]
     first = [Segment(292, 299.8, "specifically look into 32 bit limbs", "Speaker 1", "mixed")]
@@ -124,6 +149,123 @@ def test_trim_and_deduplicate_chunk_boundary():
     ]
     selected = trim_overlaps([first, second], windows)
     assert len(deduplicate_boundaries(selected)) == 2
+
+
+def test_transcribe_recovers_when_timestamp_coverage_ends_early(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    ffmpeg_calls = []
+    results = iter([
+        SimpleNamespace(
+            text="[0][S01]First pass[100]",
+            prompt_tokens=10,
+            generation_tokens=100,
+            total_tokens=110,
+        ),
+        SimpleNamespace(
+            text="[0][S01]Overlap verification[40][41][S01]Rest[230]",
+            prompt_tokens=10,
+            generation_tokens=200,
+            total_tokens=210,
+        ),
+    ])
+    engine = SimpleNamespace(generate=lambda *args, **kwargs: next(results))
+
+    monkeypatch.setattr(
+        moss.subprocess,
+        "run",
+        lambda command, **kwargs: ffmpeg_calls.append(command) or SimpleNamespace(),
+    )
+
+    segments, raw, _ = transcribe_track(
+        source,
+        engine=engine,
+        prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        role="microphone",
+        duration=300,
+    )
+
+    assert [(item.start, item.end) for item in segments] == [
+        (0, 100),
+        (70, 110),
+        (111, 300),
+    ]
+    assert len(raw["windows"]) == 2
+    assert raw["windows"][0]["coverage_end"] == 100
+    assert raw["windows"][0]["coverage_complete"] is False
+    assert raw["windows"][1]["source_start"] == 70
+    assert raw["windows"][1]["attempt"] == 2
+    assert raw["windows"][1]["coverage_complete"] is True
+    assert ffmpeg_calls[1][ffmpeg_calls[1].index("-ss") + 1] == "70.0"
+    assert ffmpeg_calls[1][ffmpeg_calls[1].index("-t") + 1] == "230.0"
+    assert raw["actual_overlap_seconds"] == 30
+
+
+def test_transcribe_fails_when_recovery_makes_no_coverage_progress(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    results = iter([
+        SimpleNamespace(text="[0][S01]First pass[100]", generation_tokens=100),
+        SimpleNamespace(text="[0][S01]Same endpoint[30]", generation_tokens=100),
+    ])
+    engine = SimpleNamespace(generate=lambda *args, **kwargs: next(results))
+    monkeypatch.setattr(
+        moss.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+
+    with pytest.raises(RuntimeError, match="no meaningful coverage progress"):
+        transcribe_track(
+            source,
+            engine=engine,
+            prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+            role="microphone",
+            duration=300,
+        )
+
+
+def test_transcribe_verifies_high_token_output_even_when_timestamp_is_near_end(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    results = iter([
+        SimpleNamespace(
+            text="[0][S01]Long pass[290]",
+            generation_tokens=RECOVERY_TOKEN_THRESHOLD,
+        ),
+        SimpleNamespace(text="[0][S01]Verified tail[40]", generation_tokens=100),
+    ])
+    engine = SimpleNamespace(generate=lambda *args, **kwargs: next(results))
+    monkeypatch.setattr(
+        moss.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+
+    segments, raw, _ = transcribe_track(
+        source,
+        engine=engine,
+        prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        role="microphone",
+        duration=300,
+    )
+
+    assert raw["windows"][0]["coverage_gap_seconds"] == 10
+    assert raw["windows"][0]["token_count_suspect"] is True
+    assert raw["windows"][0]["coverage_complete"] is False
+    assert raw["windows"][1]["source_start"] == 260
+    assert raw["windows"][1]["token_count_suspect"] is False
+    assert raw["windows"][1]["coverage_complete"] is True
+    assert segments[-1].end == 300
 
 
 def test_render_and_relabel_without_retranscription(tmp_path: Path):
@@ -177,6 +319,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     engine = object()
     load_calls = []
     seen_engines = []
+    seen_prompts = []
 
     monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
     monkeypatch.setattr(
@@ -193,8 +336,9 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         lambda: load_calls.append(True) or engine,
     )
 
-    def fake_transcribe_track(path, *, engine, speaker_profiles, **kwargs):
+    def fake_transcribe_track(path, *, engine, prompt, speaker_profiles, **kwargs):
         seen_engines.append(engine)
+        seen_prompts.append(prompt)
         return [], {"windows": [{}], "actual_overlap_seconds": 0.0, "warnings": []}, speaker_profiles
 
     monkeypatch.setattr(pipeline, "transcribe_track", fake_transcribe_track)
@@ -202,10 +346,14 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     monkeypatch.setattr(pipeline, "write_state", lambda *args: None)
     monkeypatch.setattr(pipeline, "write_text", lambda *args: None)
 
-    pipeline.transcribe(requested)
+    pipeline.transcribe(requested, hotwords=["ProveKit", "F2Z"])
 
     assert load_calls == [True]
     assert seen_engines == [engine, engine]
+    assert seen_prompts == [
+        f"{ENGLISH_TRANSCRIPTION_PROMPT} Hotwords: ProveKit, F2Z",
+        f"{ENGLISH_TRANSCRIPTION_PROMPT} Hotwords: ProveKit, F2Z",
+    ]
 
 
 def test_state_round_trip_with_embeddings_and_backward_compatible_loading(tmp_path: Path):
