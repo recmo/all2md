@@ -105,6 +105,11 @@ button { border: 0; background: transparent; cursor: pointer; }
 .checkbox { display: flex; align-items: flex-start; gap: 9px; padding: 11px; background: var(--subtle); border-radius: 6px; font-size: 12px; }
 .checkbox input { accent-color: var(--accent); }
 .hint-note { color: var(--secondary); font-size: 10px; line-height: 1.45; margin-top: 14px; }
+.metadata-editor { padding-top: 18px; border-top: 1px solid var(--line); }
+.metadata-editor label { display: block; margin-top: 10px; color: var(--secondary); font-size: 10px; }
+.metadata-editor label .field { margin-top: 5px; color: var(--ink); }
+.mono-field { font-family: Geist Mono, ui-monospace, monospace; font-size: 10px; }
+.metadata-save { width: 100%; margin-top: 12px; }
 .empty { color: var(--muted); font-size: 12px; padding: 20px 0; }
 .recording-empty { max-width: 420px; margin: 70px auto; text-align: center; }
 .recording-empty strong, .recording-empty span { display: block; }

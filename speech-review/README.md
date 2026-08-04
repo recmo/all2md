@@ -37,8 +37,12 @@ and voiceprints; it always asks for confirmation first.
 In addition to `hotwords` and `speakers`, the editor stores:
 
 ```yaml
+title: ProveKit weekly check-in
+started_at: '2026-08-04T09:00:00+02:00'
+ended_at: '2026-08-04T10:00:00+02:00'
+calendar_event: https://calendar.google.com/example
 attendees:
-  - identity: Michał
+  - Michał
 edits:
   - track: participants
     start: 1122
@@ -49,4 +53,6 @@ edits:
 
 Attendees do not need speaker ranges. Localized edits are applied during
 explicit regeneration only when their time range, optional track, and original
-text identify exactly one occurrence.
+text identify exactly one occurrence. A current transcript is marked `stale`
+whenever the adjacent hint hash differs from the `hints_sha256` rendered into
+its frontmatter.

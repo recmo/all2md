@@ -68,7 +68,11 @@ def test_hint_writes_are_atomic_and_revision_checked(tmp_path: Path):
     path = tmp_path / "meeting.hint.yaml"
     document = {
         "hotwords": ["F2Z"],
-        "attendees": [{"identity": "Michał"}],
+        "title": "ProveKit weekly check-in",
+        "started_at": "2026-08-04T09:00:00+02:00",
+        "ended_at": "2026-08-04T10:00:00+02:00",
+        "calendar_event": "https://calendar.google.com/example",
+        "attendees": ["Michał"],
         "speakers": [{
             "identity": "Alice",
             "ranges": [{"track": "participants", "start": 5, "end": 12}],
@@ -87,6 +91,21 @@ def test_hint_writes_are_atomic_and_revision_checked(tmp_path: Path):
     assert loaded_revision == revision
     with pytest.raises(RuntimeError, match="changed on disk"):
         write_hint_document(path, document, None)
+
+
+def test_current_transcript_becomes_stale_when_hints_change(tmp_path: Path):
+    path = transcript(tmp_path / "meeting.md", identity="Alice")
+    item = TranscriptFile(tmp_path, path)
+    assert item.status == "ready"
+
+    write_hint_document(
+        item.hint_path,
+        {"hotwords": ["F2Z"], "attendees": [], "speakers": [], "edits": []},
+        None,
+    )
+
+    assert item.status == "stale"
+    assert item.stale_reason == "hints"
 
 
 def test_voiceprint_candidates_are_ranked_across_folder(tmp_path: Path):

@@ -73,8 +73,8 @@ async function selectTranscript(id) {
   seedAttendees()
   state.duration = state.transcript.turns.at(-1)?.end || 0
   $('#meeting-title').textContent = state.transcript.title
-  $('#meeting-meta').textContent = state.transcript.status === 'ready' ? `${state.transcript.name} · ${state.transcript.turns.length} turns` : `${state.transcript.name} · ${state.transcript.status}`
-  setSaveState(state.transcript.status === 'ready' ? (state.transcript.hintRevision ? 'Hints loaded' : 'No hint file') : 'Needs processing')
+  $('#meeting-meta').textContent = state.transcript.editable ? `${state.transcript.name} · ${state.transcript.turns.length} turns · ${state.transcript.status}` : `${state.transcript.name} · ${state.transcript.status}`
+  setSaveState(state.transcript.status === 'stale' && state.transcript.staleReason === 'hints' ? 'Hints changed · regenerate' : state.transcript.editable ? (state.transcript.hintRevision ? 'Hints loaded' : 'No hint file') : 'Needs processing')
   renderSummaries(); renderTranscript(); renderInspector(); await loadAudio(); drawWaveform()
 }
 
@@ -82,12 +82,12 @@ function seedAttendees() {
   const hints = state.transcript.hints
   const existing = new Set((hints.attendees || []).map(item => typeof item === 'string' ? item : item.identity).filter(Boolean))
   for (const item of state.transcript.frontmatter.attendees || []) if (item?.identity) existing.add(item.identity)
-  hints.attendees = [...existing].map(identity => ({identity}))
+  hints.attendees = [...existing]
   hints.hotwords ||= []; hints.speakers ||= []; hints.edits ||= []
 }
 
 function renderTranscript() {
-  if (state.transcript.status !== 'ready') {
+  if (!state.transcript.editable) {
     $('#transcript').innerHTML = `<div class="empty recording-empty"><strong>${state.transcript.status === 'stale' ? 'Stale transcript' : 'No transcript yet'}</strong><span>${state.transcript.status === 'stale' ? 'This Markdown was produced by an unsupported speech2md schema.' : 'This recording has not been processed by speech2md.'}</span><button class="primary regenerate-inline">${state.transcript.status === 'stale' ? 'Regenerate transcript' : 'Generate transcript'}</button></div>`
     $('.regenerate-inline').onclick = event => requestQueue(state.transcript.id, state.transcript.status, event.currentTarget, event)
     return
@@ -137,9 +137,10 @@ function assignedIdentity(turn) {
 const overlaps = (left, right) => Math.min(left.end, right.end) > Math.max(left.start, right.start)
 
 async function renderInspector() {
-  if (state.transcript.status !== 'ready') {
-    $('#inspector').innerHTML = `<div class="eyebrow">${state.transcript.status.toUpperCase()} RECORDING</div><h2>${escapeHtml(state.transcript.title)}</h2><div class="subhead">${escapeHtml(state.transcript.audio.map(item => item.name).join(', ') || 'No audio source found')}</div><div class="notice">↻ <span>${state.transcript.status === 'stale' ? 'The existing Markdown is left untouched until you explicitly regenerate it with the current speech2md.' : 'Generate current Markdown and voiceprints from this recording.'}</span></div><button class="primary regenerate-inspector">${state.transcript.status === 'stale' ? 'Regenerate with speech2md' : 'Generate with speech2md'}</button>`
+  if (!state.transcript.editable) {
+    $('#inspector').innerHTML = `<div class="eyebrow">${state.transcript.status.toUpperCase()} RECORDING</div><h2>${escapeHtml(state.transcript.title)}</h2><div class="subhead">${escapeHtml(state.transcript.audio.map(item => item.name).join(', ') || 'No audio source found')}</div><div class="notice">↻ <span>${state.transcript.status === 'stale' ? 'The existing Markdown is left untouched until you explicitly regenerate it with the current speech2md.' : 'Generate current Markdown and voiceprints from this recording.'}</span></div>${metadataEditorHtml()}<button class="primary regenerate-inspector">${state.transcript.status === 'stale' ? 'Regenerate with speech2md' : 'Generate with speech2md'}</button>`
     $('.regenerate-inspector').onclick = event => requestQueue(state.transcript.id, state.transcript.status, event.currentTarget, event)
+    bindMetadataEditor()
     return
   }
   if (!state.selected) return
@@ -153,10 +154,12 @@ async function renderInspector() {
     <div class="section"><label class="section-label">SPEAKER IDENTITY</label><input id="identity" class="field" value="${escapeHtml(identity)}" placeholder="Name or identity URI"></div>
     <div class="section"><span class="section-label">VOICEPRINT MATCHES</span><div id="candidates"><div class="empty">Comparing voiceprints…</div></div></div>
     <button id="assign" class="primary">Assign identity</button>
-    <div class="section"><span class="section-label">ATTENDEES</span><div id="attendees"></div><div class="add-row"><input id="new-attendee" class="field" placeholder="Add attendee"><button id="add-attendee">+</button></div></div>`
+    <div class="section"><span class="section-label">ATTENDEES</span><div id="attendees"></div><div class="add-row"><input id="new-attendee" class="field" placeholder="Add attendee"><button id="add-attendee">+</button></div></div>
+    ${metadataEditorHtml()}`
   $('#assign').onclick = () => assignIdentity($('#identity').value.trim())
   $('#add-attendee').onclick = addAttendee
   renderAttendees()
+  bindMetadataEditor()
   try {
     const candidates = await api(`/api/transcripts/${state.transcript.id}/candidates/${encodeURIComponent(turn.speaker)}`)
     if (state.selected !== turn || state.correction) return
@@ -180,9 +183,43 @@ function renderAttendees() {
   })
 }
 
+function metadataValues() {
+  const hints = state.transcript.hints, frontmatter = state.transcript.frontmatter || {}
+  return {
+    title: hints.title || state.transcript.title || '',
+    started_at: hints.started_at || frontmatter.started_at || '',
+    ended_at: hints.ended_at || frontmatter.ended_at || '',
+    calendar_event: hints.calendar_event || frontmatter.calendar_event || '',
+  }
+}
+
+function metadataEditorHtml() {
+  const metadata = metadataValues()
+  return `<div class="section metadata-editor"><span class="section-label">MEETING METADATA</span>
+    <label>Title<input id="metadata-title" class="field" value="${escapeHtml(metadata.title)}" placeholder="Meeting title"></label>
+    <label>Recording started<input id="metadata-started" class="field mono-field" value="${escapeHtml(metadata.started_at)}" placeholder="2026-08-04T09:00:00+02:00"></label>
+    <label>Recording ended<input id="metadata-ended" class="field mono-field" value="${escapeHtml(metadata.ended_at)}" placeholder="2026-08-04T10:00:00+02:00"></label>
+    <label>Calendar event link<input id="metadata-event" class="field mono-field" value="${escapeHtml(metadata.calendar_event)}" placeholder="https://…"></label>
+    <button id="save-metadata" class="secondary metadata-save">Save metadata hints</button>
+  </div>`
+}
+
+function bindMetadataEditor() {
+  const button = $('#save-metadata'); if (!button) return
+  button.onclick = async () => {
+    const metadata = {}
+    for (const [key, selector] of Object.entries({title:'#metadata-title', started_at:'#metadata-started', ended_at:'#metadata-ended', calendar_event:'#metadata-event'})) {
+      const value = $(selector).value.trim(); if (value) metadata[key] = value
+    }
+    for (const key of ['title','started_at','ended_at','calendar_event']) state.transcript.hints[key] = metadata[key] || null
+    if (metadata.title) { state.transcript.title = metadata.title; $('#meeting-title').textContent = metadata.title }
+    markDirty(); await saveHints()
+  }
+}
+
 async function addAttendee() {
   const input = $('#new-attendee'); const identity = input.value.trim(); if (!identity) return
-  if (!state.transcript.hints.attendees.some(item => (typeof item === 'string' ? item : item.identity) === identity)) state.transcript.hints.attendees.push({identity})
+  if (!state.transcript.hints.attendees.some(item => (typeof item === 'string' ? item : item.identity) === identity)) state.transcript.hints.attendees.push(identity)
   input.value = ''; markDirty(); renderAttendees(); await saveHints()
 }
 
@@ -194,7 +231,7 @@ async function assignIdentity(identity) {
   let speaker = state.transcript.hints.speakers.find(item => item.identity === identity)
   if (!speaker) { speaker = {identity, ranges: []}; state.transcript.hints.speakers.push(speaker) }
   speaker.ranges.push({...(state.transcript.audio.length > 1 ? {track} : {}), start: turn.start, end: turn.end})
-  if (!state.transcript.hints.attendees.some(item => (typeof item === 'string' ? item : item.identity) === identity)) state.transcript.hints.attendees.push({identity})
+  if (!state.transcript.hints.attendees.some(item => (typeof item === 'string' ? item : item.identity) === identity)) state.transcript.hints.attendees.push(identity)
   markDirty(); await saveHints(); renderInspector(); renderTranscript(); drawWaveform()
 }
 const sameTrack = (left, right) => !left || !right || left === right
@@ -226,7 +263,12 @@ async function saveHints() {
   try {
     setSaveState('Saving…')
     const result = await api(`/api/transcripts/${state.transcript.id}/hints`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({revision:state.transcript.hintRevision, hints:state.transcript.hints})})
-    state.transcript.hintRevision = result.revision; state.dirty = false; setSaveState('Saved to hints', 'saved'); toast('Hint file saved')
+    state.transcript.hintRevision = result.revision; state.dirty = false
+    state.summaries = await api('/api/transcripts')
+    const summary = state.summaries.find(item => item.id === state.transcript.id)
+    if (summary) state.transcript.status = summary.status
+    $('#meeting-meta').textContent = state.transcript.editable ? `${state.transcript.name} · ${state.transcript.turns.length} turns · ${state.transcript.status}` : `${state.transcript.name} · ${state.transcript.status}`
+    setSaveState(state.transcript.status === 'stale' ? 'Saved · regenerate' : 'Saved to hints', 'saved'); renderSummaries(); toast('Hint file saved')
   } catch (error) { setSaveState('Save failed', 'dirty'); toast(error.message) }
 }
 

@@ -12,6 +12,7 @@ from .transcripts import (
     audio_sources,
     candidate_identities,
     discover,
+    load_hint_document,
     parse_markdown,
     resolve_identifier,
     transcript_payload,
@@ -66,13 +67,17 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if path == "/api/transcripts":
             summaries = []
             for transcript in discover(self.server.review_root):
-                parsed = parse_markdown(transcript.markdown) if transcript.status == "ready" else None
+                try:
+                    parsed = parse_markdown(transcript.markdown)
+                except (FileNotFoundError, ValueError):
+                    parsed = None
+                hints, _ = load_hint_document(transcript.hint_path)
                 summaries.append({
                     "id": transcript.identifier,
                     "name": str(transcript.relative),
-                    "title": parsed["title"] if parsed else transcript.markdown.stem,
+                    "title": hints.get("title") or (parsed["title"] if parsed else transcript.markdown.stem),
                     "status": transcript.status,
-                    "startedAt": parsed["frontmatter"].get("started_at") if parsed else None,
+                    "startedAt": hints.get("started_at") or (parsed["frontmatter"].get("started_at") if parsed else None),
                     "turnCount": len(parsed["turns"]) if parsed else 0,
                 })
             self._json(summaries)

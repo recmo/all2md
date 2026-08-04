@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import base64
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -42,10 +43,24 @@ class TranscriptFile:
         if not self.markdown.exists():
             return "unprocessed"
         try:
-            parse_markdown(self.markdown)
+            parsed = parse_markdown(self.markdown)
         except ValueError:
             return "stale"
+        _, hint_revision = load_hint_document(self.hint_path)
+        rendered_revision = parsed["frontmatter"].get("hints_sha256")
+        if rendered_revision != hint_revision and (rendered_revision is not None or hint_revision is not None):
+            return "stale"
         return "ready"
+
+    @property
+    def stale_reason(self) -> str | None:
+        if self.status != "stale":
+            return None
+        try:
+            parse_markdown(self.markdown)
+        except ValueError:
+            return "schema"
+        return "hints"
 
 
 def discover(root: Path) -> list[TranscriptFile]:
@@ -161,18 +176,30 @@ def audio_sources(transcript: TranscriptFile) -> list[dict[str, Any]]:
 
 def load_hint_document(path: Path) -> tuple[dict[str, Any], str | None]:
     if not path.exists():
-        return {"hotwords": [], "attendees": [], "speakers": [], "edits": []}, None
+        return {
+            "title": None,
+            "started_at": None,
+            "ended_at": None,
+            "calendar_event": None,
+            "hotwords": [],
+            "attendees": [],
+            "speakers": [],
+            "edits": [],
+        }, None
     raw = path.read_bytes()
     value = yaml.safe_load(raw) or {}
     if not isinstance(value, dict):
         raise ValueError("hint sidecar must be a mapping")
     document = {
+        "title": value.get("title"),
+        "started_at": value.get("started_at"),
+        "ended_at": value.get("ended_at"),
+        "calendar_event": value.get("calendar_event"),
         "hotwords": value.get("hotwords", []),
         "attendees": value.get("attendees", []),
         "speakers": value.get("speakers", []),
         "edits": value.get("edits", []),
     }
-    import hashlib
     return document, hashlib.sha256(raw).hexdigest()
 
 
@@ -183,31 +210,43 @@ def write_hint_document(path: Path, document: dict[str, Any], revision: str | No
         raise RuntimeError("hint sidecar changed on disk")
     cleaned = {
         key: document.get(key, [])
-        for key in ("hotwords", "attendees", "speakers", "edits")
+        for key in (
+            "title", "started_at", "ended_at", "calendar_event",
+            "hotwords", "attendees", "speakers", "edits",
+        )
         if document.get(key)
     }
     raw = yaml.safe_dump(cleaned, allow_unicode=True, sort_keys=False).encode()
     temporary = path.with_suffix(path.suffix + ".part")
     temporary.write_bytes(raw)
     temporary.replace(path)
-    import hashlib
     return hashlib.sha256(raw).hexdigest()
 
 
 def validate_hint_document(document: dict[str, Any]) -> None:
-    if set(document) - {"hotwords", "attendees", "speakers", "edits"}:
+    allowed = {
+        "title", "started_at", "ended_at", "calendar_event",
+        "hotwords", "attendees", "speakers", "edits",
+    }
+    if set(document) - allowed:
         raise ValueError("hint document has unknown fields")
     hotwords = document.get("hotwords", [])
     if not isinstance(hotwords, list) or not all(_line(item) for item in hotwords):
         raise ValueError("hotwords must be a list of non-empty single-line strings")
+    for key in ("title", "started_at", "ended_at", "calendar_event"):
+        value = document.get(key)
+        if value is not None and not _line(value):
+            raise ValueError(f"{key} must be a non-empty single-line string")
+    if document.get("calendar_event") and not document["calendar_event"].startswith(("https://", "http://")):
+        raise ValueError("calendar_event must be an http(s) URL")
     attendees = document.get("attendees", [])
     if not isinstance(attendees, list):
         raise ValueError("attendees must be a list")
     attendee_names = []
     for attendee in attendees:
-        if not isinstance(attendee, dict) or set(attendee) != {"identity"} or not _line(attendee["identity"]):
-            raise ValueError("each attendee must contain only a non-empty identity")
-        attendee_names.append(attendee["identity"].strip())
+        if not _line(attendee):
+            raise ValueError("each attendee must be a non-empty single-line string")
+        attendee_names.append(attendee.strip())
     if len(attendee_names) != len(set(attendee_names)):
         raise ValueError("attendee identities must be unique")
     speakers = document.get("speakers", [])
@@ -248,29 +287,37 @@ def _line(value: Any) -> bool:
 
 
 def transcript_payload(transcript: TranscriptFile) -> dict[str, Any]:
-    if transcript.status != "ready":
+    status = transcript.status
+    hints, revision = load_hint_document(transcript.hint_path)
+    try:
+        parsed = parse_markdown(transcript.markdown)
+    except (FileNotFoundError, ValueError):
+        parsed = None
+    if parsed is None:
         return {
             "id": transcript.identifier,
             "name": str(transcript.relative),
-            "title": transcript.markdown.stem,
-            "status": transcript.status,
+            "title": hints.get("title") or transcript.markdown.stem,
+            "status": status,
+            "staleReason": transcript.stale_reason,
+            "editable": False,
             "frontmatter": {},
             "turns": [],
-            "hints": {"hotwords": [], "attendees": [], "speakers": [], "edits": []},
-            "hintRevision": None,
+            "hints": hints,
+            "hintRevision": revision,
             "audio": [
                 {"index": index, "role": source["role"], "name": source["name"]}
                 for index, source in enumerate(audio_sources(transcript))
             ],
         }
-    parsed = parse_markdown(transcript.markdown)
-    hints, revision = load_hint_document(transcript.hint_path)
     sources = audio_sources(transcript)
     return {
         "id": transcript.identifier,
         "name": str(transcript.relative),
         "title": parsed["title"],
-        "status": "ready",
+        "status": status,
+        "staleReason": transcript.stale_reason,
+        "editable": True,
         "frontmatter": parsed["frontmatter"],
         "turns": parsed["turns"],
         "hints": hints,

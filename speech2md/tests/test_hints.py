@@ -32,8 +32,12 @@ def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Pa
         "  - ' ProveKit '\n"
         "  - F2Z\n"
         "  - provekit\n"
+        "title: ProveKit weekly check-in\n"
+        "started_at: '2026-08-04T09:00:00+02:00'\n"
+        "ended_at: '2026-08-04T10:00:00+02:00'\n"
+        "calendar_event: https://calendar.google.com/example\n"
         "attendees:\n"
-        "  - identity: Michał\n"
+        "  - Michał\n"
         "speakers:\n"
         "  - identity: gbrain://people/alice\n"
         "    ranges:\n"
@@ -54,6 +58,10 @@ def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Pa
         SpeakerHint("gbrain://people/alice", 12.5, 18.0, "participants"),
     )
     assert hints.attendees == ("Michał",)
+    assert hints.title == "ProveKit weekly check-in"
+    assert hints.started_at == "2026-08-04T09:00:00+02:00"
+    assert hints.ended_at == "2026-08-04T10:00:00+02:00"
+    assert hints.calendar_event == "https://calendar.google.com/example"
     assert hints.edits == (
         TranscriptEdit(12.5, 18.0, "F two Z", "F2Z", "participants"),
     )
@@ -90,8 +98,9 @@ def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch
         ("hotwords: [F2Z, 3]\n", "only strings"),
         ("hotwords: ['']\n", "must not be empty"),
         ("speakers: {}\n", "must be a list"),
-        ("attendees: [Alice]\n", "must be a mapping"),
+        ("attendees: [{identity: Alice}]\n", "must be a non-empty string"),
         ("edits: {}\n", "must be a list"),
+        ("calendar_event: calendar-id\n", "must be an http"),
         (
             "edits:\n  - {start: 1, end: 2, before: old}\n",
             "after must be a non-empty string",

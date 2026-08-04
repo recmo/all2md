@@ -118,10 +118,10 @@ def transcribe(
         if identity in attendee_identities:
             attendee_identities.remove(identity)
     state = TranscriptState(
-        title=resolved.title,
-        started_at=resolved.started_at,
-        ended_at=getattr(resolved, "ended_at", None),
-        calendar_event=getattr(resolved, "calendar_event", None),
+        title=hints.title or resolved.title,
+        started_at=hints.started_at or resolved.started_at,
+        ended_at=hints.ended_at or getattr(resolved, "ended_at", None),
+        calendar_event=hints.calendar_event or getattr(resolved, "calendar_event", None),
         source_sha256=source_hash,
         processing_seconds=time.monotonic() - started,
         segments=sorted(segments, key=lambda item: (item.start, item.end, item.source_role)),

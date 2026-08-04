@@ -17,6 +17,10 @@ class SpeechHints:
     speakers: tuple[SpeakerHint, ...] = ()
     attendees: tuple[str, ...] = ()
     edits: tuple[TranscriptEdit, ...] = ()
+    title: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    calendar_event: str | None = None
     sha256: str | None = None
 
 
@@ -37,7 +41,17 @@ def load_hints(path: Path) -> SpeechHints:
     if value is None:
         value = {}
     mapping = _mapping(value, "hint sidecar")
-    _only(mapping, {"attendees", "edits", "hotwords", "speakers"}, "hint sidecar")
+    _only(
+        mapping,
+        {"attendees", "calendar_event", "edits", "ended_at", "hotwords", "speakers", "started_at", "title"},
+        "hint sidecar",
+    )
+    title = _optional_single_line(mapping.get("title"), "hint title")
+    started_at = _optional_single_line(mapping.get("started_at"), "hint started_at")
+    ended_at = _optional_single_line(mapping.get("ended_at"), "hint ended_at")
+    calendar_event = _optional_single_line(mapping.get("calendar_event"), "hint calendar_event")
+    if calendar_event and not calendar_event.startswith(("https://", "http://")):
+        raise ValueError("hint calendar_event must be an http(s) URL")
 
     raw_hotwords = mapping.get("hotwords", [])
     if not isinstance(raw_hotwords, list):
@@ -51,9 +65,7 @@ def load_hints(path: Path) -> SpeechHints:
         raise ValueError("hint attendees must be a list")
     attendees: list[str] = []
     for attendee_index, raw_attendee in enumerate(raw_attendees, 1):
-        attendee = _mapping(raw_attendee, f"hint attendee {attendee_index}")
-        _only(attendee, {"identity"}, f"hint attendee {attendee_index}")
-        identity = _single_line(attendee.get("identity"), f"hint attendee {attendee_index} identity")
+        identity = _single_line(raw_attendee, f"hint attendee {attendee_index}")
         if identity in attendees:
             raise ValueError(f"duplicate hint attendee identity: {identity}")
         attendees.append(identity)
@@ -108,6 +120,10 @@ def load_hints(path: Path) -> SpeechHints:
         speakers=tuple(speakers),
         attendees=tuple(attendees),
         edits=tuple(edits),
+        title=title,
+        started_at=started_at,
+        ended_at=ended_at,
+        calendar_event=calendar_event,
         sha256=hashlib.sha256(raw).hexdigest(),
     )
 
@@ -168,7 +184,17 @@ def validate_hints(hints: SpeechHints, sources: list[AudioSource]) -> SpeechHint
                 f"hint edit at {edit.start:g}-{edit.end:g}s exceeds "
                 f"{source.role} duration {source.duration_seconds:g}s"
             )
-    return SpeechHints(hints.hotwords, tuple(validated), hints.attendees, hints.edits, hints.sha256)
+    return SpeechHints(
+        hotwords=hints.hotwords,
+        speakers=tuple(validated),
+        attendees=hints.attendees,
+        edits=hints.edits,
+        title=hints.title,
+        started_at=hints.started_at,
+        ended_at=hints.ended_at,
+        calendar_event=hints.calendar_event,
+        sha256=hints.sha256,
+    )
 
 
 def apply_edits(segments: list[Segment], edits: tuple[TranscriptEdit, ...]) -> None:
@@ -220,3 +246,9 @@ def _single_line(value, label: str) -> str:
     if "\n" in value or "\r" in value:
         raise ValueError(f"{label} must be a single-line string")
     return value
+
+
+def _optional_single_line(value, label: str) -> str | None:
+    if value is None:
+        return None
+    return _single_line(value, label)
