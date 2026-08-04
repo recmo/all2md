@@ -45,7 +45,7 @@ function renderSummaries() {
     card.onclick = event => { if (!event.target.closest('.queue-action')) selectTranscript(card.dataset.id) }
     card.onkeydown = event => { if (event.key === 'Enter') selectTranscript(card.dataset.id) }
   })
-  document.querySelectorAll('.queue-action').forEach(button => button.onclick = event => queueRecording(button.dataset.id, button.dataset.status, event))
+  document.querySelectorAll('.queue-action').forEach(button => button.onclick = event => requestQueue(button.dataset.id, button.dataset.status, event.currentTarget, event))
 }
 
 function updateTranscriptCount() {
@@ -89,7 +89,7 @@ function seedAttendees() {
 function renderTranscript() {
   if (state.transcript.status !== 'ready') {
     $('#transcript').innerHTML = `<div class="empty recording-empty"><strong>${state.transcript.status === 'stale' ? 'Stale transcript' : 'No transcript yet'}</strong><span>${state.transcript.status === 'stale' ? 'This Markdown was produced by an unsupported speech2md schema.' : 'This recording has not been processed by speech2md.'}</span><button class="primary regenerate-inline">${state.transcript.status === 'stale' ? 'Regenerate transcript' : 'Generate transcript'}</button></div>`
-    $('.regenerate-inline').onclick = () => queueRecording(state.transcript.id, state.transcript.status)
+    $('.regenerate-inline').onclick = event => requestQueue(state.transcript.id, state.transcript.status, event.currentTarget, event)
     return
   }
   $('#transcript').innerHTML = state.transcript.turns.map(turn => {
@@ -139,7 +139,7 @@ const overlaps = (left, right) => Math.min(left.end, right.end) > Math.max(left.
 async function renderInspector() {
   if (state.transcript.status !== 'ready') {
     $('#inspector').innerHTML = `<div class="eyebrow">${state.transcript.status.toUpperCase()} RECORDING</div><h2>${escapeHtml(state.transcript.title)}</h2><div class="subhead">${escapeHtml(state.transcript.audio.map(item => item.name).join(', ') || 'No audio source found')}</div><div class="notice">↻ <span>${state.transcript.status === 'stale' ? 'The existing Markdown is left untouched until you explicitly regenerate it with the current speech2md.' : 'Generate current Markdown and voiceprints from this recording.'}</span></div><button class="primary regenerate-inspector">${state.transcript.status === 'stale' ? 'Regenerate with speech2md' : 'Generate with speech2md'}</button>`
-    $('.regenerate-inspector').onclick = () => queueRecording(state.transcript.id, state.transcript.status)
+    $('.regenerate-inspector').onclick = event => requestQueue(state.transcript.id, state.transcript.status, event.currentTarget, event)
     return
   }
   if (!state.selected) return
@@ -322,13 +322,38 @@ function waveformClick(event) {
   seekTo(time); selectTurn(turn.index, false)
 }
 
-async function queueRecording(transcriptId, status, event) {
+function requestQueue(transcriptId, status, anchor, event) {
   event?.stopPropagation()
-  if (status !== 'unprocessed' && !window.confirm('Replace the existing derived transcript and voiceprints with current speech2md output?')) return
+  if (status === 'unprocessed') return enqueueRecording(transcriptId)
+  showQueuePopover(anchor, transcriptId)
+}
+
+async function enqueueRecording(transcriptId) {
   try {
     await api(`/api/transcripts/${transcriptId}/regenerate`, {method:'POST'})
     toast('Recording added to queue'); await refreshJobs()
   } catch (error) { toast(error.message) }
+}
+
+function showQueuePopover(anchor, transcriptId) {
+  const popover = $('#action-popover')
+  popover.hidden = false
+  popover.dataset.anchorId = transcriptId
+  const anchorBounds = anchor.getBoundingClientRect(), width = 292
+  let left = Math.max(12, Math.min(innerWidth - width - 12, anchorBounds.right - width))
+  let top = anchorBounds.bottom + 8
+  const height = popover.getBoundingClientRect().height
+  if (top + height > innerHeight - 12) top = Math.max(12, anchorBounds.top - height - 8)
+  popover.style.left = `${left}px`; popover.style.top = `${top}px`
+  $('#popover-confirm').onclick = async () => { closeQueuePopover(); await enqueueRecording(transcriptId) }
+  $('#popover-cancel').onclick = closeQueuePopover
+  $('#popover-confirm').focus()
+}
+
+function closeQueuePopover() {
+  const popover = $('#action-popover')
+  popover.hidden = true
+  delete popover.dataset.anchorId
 }
 
 $('#search').oninput = renderSummaries
@@ -337,9 +362,14 @@ $('#waveform').onclick = waveformClick
 $('#zoom').oninput = event => { state.zoom = zoomLevels[Number(event.target.value)]; $('#zoom-label').textContent = state.zoom === 1 ? 'FIT' : `${state.zoom}×`; drawWaveform() }
 $('#zoom-in').onclick = () => { $('#zoom').value = Math.min(4, Number($('#zoom').value) + 1); $('#zoom').dispatchEvent(new Event('input')) }
 $('#zoom-out').onclick = () => { $('#zoom').value = Math.max(0, Number($('#zoom').value) - 1); $('#zoom').dispatchEvent(new Event('input')) }
-$('#regenerate').onclick = () => state.transcript && queueRecording(state.transcript.id, state.transcript.status)
+$('#regenerate').onclick = event => state.transcript && requestQueue(state.transcript.id, state.transcript.status, event.currentTarget, event)
 window.onresize = drawWaveform
 window.onkeydown = event => { if (event.code === 'Space' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) { event.preventDefault(); state.audio[0]?.paused ? play() : pause() } }
+document.addEventListener('keydown', event => { if (event.key === 'Escape') closeQueuePopover() })
+document.addEventListener('click', event => {
+  const popover = $('#action-popover')
+  if (!popover.hidden && !popover.contains(event.target) && !event.target.closest('.queue-action, #regenerate, .regenerate-inline, .regenerate-inspector')) closeQueuePopover()
+})
 window.onbeforeunload = event => { if (state.dirty) event.preventDefault() }
 
 loadSummaries().then(() => setInterval(refreshJobs, 1000)).catch(error => { $('#transcript').innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>` })
