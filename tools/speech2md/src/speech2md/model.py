@@ -42,6 +42,15 @@ class SpeakerProfile:
     checkpoint_sha256: str
     embedding_dimension: int
     samples: list[EmbeddingSample] = field(default_factory=list)
+    identity: str = ""
+
+
+@dataclass(frozen=True)
+class SpeakerHint:
+    identity: str
+    start: float
+    end: float
+    track: str | None = None
 
 
 @dataclass
@@ -54,6 +63,7 @@ class TranscriptState:
     ended_at: str | None = None
     calendar_event: str | None = None
     attendees: list[dict[str, str]] = field(default_factory=list)
+    hints_sha256: str | None = None
 
 
 @dataclass(frozen=True)

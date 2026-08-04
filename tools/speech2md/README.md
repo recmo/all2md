@@ -20,10 +20,6 @@ packages at runtime; only model weights and checkpoints populate user caches.
 uv sync --project tools/speech2md --extra dev
 uv run --project tools/speech2md pytest tools/speech2md/tests
 uv run --project tools/speech2md speech2md meeting.mp4
-uv run --project tools/speech2md speech2md meeting.mp4 \
-  --hotwords 'Alice, Bob, ProveKit, F2Z, ReDimNet2'
-uv run --project tools/speech2md speech2md relabel meeting.md \
-  'speaker-1=gbrain://people/alice'
 ```
 
 The input may be an ordinary audio/video file or a Meeting Capture v1 manifest.
@@ -31,11 +27,29 @@ Manifest checksums are verified before inference. Canonical audio is never
 changed.
 
 MOSS always receives the canonical English timestamp-and-speaker prompt.
-Optional hotwords are appended using the documented `Hotwords:` form. Supply a
-targeted, comma-separated list of names, acronyms and unusual domain terms with
-`--hotwords`; duplicates are removed case-insensitively and the list is capped
-at 40 entries. Prompts and raw generations exist only in the temporary
-processing workspace.
+Optional hotwords and manually identified speaker ranges come from an adjacent
+hint file. For `meeting.mp4`, `speech2md` reads `meeting.hint.yaml` when it
+exists:
+
+```yaml
+hotwords:
+  - ProveKit
+  - F2Z
+  - ReDimNet2
+speakers:
+  - identity: gbrain://people/alice
+    ranges:
+      - track: mixed
+        start: 754.0
+        end: 762.0
+```
+
+The two sections are independently optional. Unknown fields, invalid tracks,
+out-of-bounds ranges, and ranges that ambiguously cover multiple diarized
+speakers stop processing. A track may be omitted for single-track media and is
+required for multi-track captures. Hotwords are trimmed, deduplicated
+case-insensitively, and capped at 40. The hint file is never rewritten.
+Prompts and raw generations exist only in the temporary processing workspace.
 
 Long recordings use one deliberately fixed policy. `speech2md` chooses the
 minimum number of roughly equal parts targeting 30 minutes, moves each ideal
@@ -83,18 +97,19 @@ meeting.md
 meeting.voiceprints.npz
 ```
 
-Markdown is the editable source of truth. Its flat YAML front matter contains
-the source hash, speech2md source commit, authoritative meeting start/end times
-when supplied by Meeting Capture, an optional calendar-event link, and the
-attendee list. Speaking attendees have stable `speaker-N` handles; attendees
-without transcript turns omit `handle`. Identity values are initially empty and
-may later contain GBrain links. `relabel` edits only those identity values and
-does not retranscribe or rewrite speaker handles in the body.
+Markdown is the readable derived output. Its flat YAML front matter contains
+the source hash, speech2md source commit, optional hint-file hash, authoritative
+meeting start/end times when supplied by Meeting Capture, an optional
+calendar-event link, and the attendee list. Speaking attendees have stable
+`speaker-N` handles; attendees without transcript turns omit `handle`. Identity
+values are empty unless a manual range anchors that voice to an identity.
+ReDimNet2 propagates anchored identities conservatively within the recording.
 
 ```yaml
 ---
 source_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 speech2md_version: 0123456789abcdef0123456789abcdef01234567
+hints_sha256: abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 started_at: 2026-08-04T10:00:00+02:00
 ended_at: 2026-08-04T11:00:00+02:00
 calendar_event: https://calendar.google.com/example
@@ -117,8 +132,8 @@ permissions. A recording without usable voice evidence gets stable empty shapes
 
 Raw MOSS generations, recovery records, reconciliation decisions, and individual
 embedding samples are intermediates and are not published. Failed runs publish
-nothing. `relabel` accepts generated Markdown and changes attendee identity
-values only.
+nothing. Markdown is never edited in place to change speaker identities; update
+the hint file and derive it again with `--force`.
 
 The ReDimNet2 model and checkpoint load lazily on the first usable participant
 sample and are reused for the run. The first run requires network access to

@@ -10,9 +10,9 @@ import numpy as np
 
 import speech2md.moss as moss
 import speech2md.pipeline as pipeline
-from speech2md.cli import parser, relabel_parser
+from speech2md.cli import parser
 from speech2md.media import resolve_input
-from speech2md.model import AudioSource, EmbeddingSample, Segment, SpeakerProfile, TranscriptState
+from speech2md.model import AudioSource, EmbeddingSample, Segment, SpeakerHint, SpeakerProfile, TranscriptState
 from speech2md.moss import (
     ENGLISH_TRANSCRIPTION_PROMPT,
     MAX_HOTWORDS,
@@ -26,10 +26,11 @@ from speech2md.moss import (
     parse_silence_centers,
     parse_segments,
     plan_windows,
+    resolve_speaker_anchors,
     transcribe_track,
     trim_overlaps,
 )
-from speech2md.pipeline import relabel, transcribe
+from speech2md.pipeline import transcribe
 from speech2md.render import coalesce_segments, render_markdown, timestamp
 
 
@@ -81,7 +82,7 @@ silence_end: 21 | silence_duration: 1
     assert parse_silence_centers(log) == [11.5, 20.5]
 
 
-def test_parse_moss_native_speakers_and_microphone_identity():
+def test_parse_moss_uses_local_speakers_for_every_track():
     raw = [{"start": 1, "end": 2, "speaker_id": "S03", "text": "[S03] Hello"}]
     participants = parse_segments(
         raw, window=2, offset=10, duration=10, role="participants"
@@ -90,7 +91,7 @@ def test_parse_moss_native_speakers_and_microphone_identity():
         raw, window=2, offset=10, duration=10, role="microphone"
     )
     assert participants == [Segment(11, 12, "Hello", "W02:S03", "participants")]
-    assert microphone[0].speaker == "Remco"
+    assert microphone[0].speaker == "W02:S03"
     with pytest.raises(ValueError, match="missing MOSS speaker id"):
         parse_segments(
             [{"start": 1, "end": 2, "text": "Hello"}],
@@ -153,15 +154,14 @@ def test_build_transcription_prompt_uses_english_and_targeted_hotwords():
         build_transcription_prompt([f"term-{index}" for index in range(MAX_HOTWORDS + 1)])
 
 
-def test_cli_accepts_comma_separated_hotwords():
-    arguments = parser().parse_args([
-        "meeting.mp4", "--hotwords", "Remco, Piotr,F2Z",
-    ])
-    assert arguments.hotwords == "Remco, Piotr,F2Z"
-    relabel_arguments = relabel_parser().parse_args([
-        "meeting.md", "speaker-1=gbrain://people/alice",
-    ])
-    assert relabel_arguments.mappings == ["speaker-1=gbrain://people/alice"]
+def test_cli_has_only_input_force_and_version():
+    arguments = parser().parse_args(["meeting.mp4", "--force"])
+    assert arguments.input == Path("meeting.mp4")
+    assert arguments.force is True
+    with pytest.raises(SystemExit):
+        parser().parse_args(["meeting.mp4", "--hotwords", "F2Z"])
+    with pytest.raises(SystemExit):
+        parser().parse_args(["relabel", "meeting.md", "speaker-1=Alice"])
 
 
 @pytest.mark.parametrize(
@@ -196,6 +196,43 @@ def test_trim_and_deduplicate_chunk_boundary():
     ]
     selected = trim_overlaps([first, second], windows)
     assert len(deduplicate_boundaries(selected)) == 2
+
+
+def test_speaker_hint_range_resolves_exactly_one_local_speaker():
+    segments = [
+        Segment(10, 20, "Alice", "W01:S01", "participants"),
+        Segment(20, 30, "Bob", "W01:S02", "participants"),
+    ]
+    assert resolve_speaker_anchors(
+        segments,
+        (SpeakerHint("gbrain://people/alice", 12, 18, "participants"),),
+        role="participants",
+    ) == {"W01:S01": "gbrain://people/alice"}
+    with pytest.raises(ValueError, match="multiple diarized speakers"):
+        resolve_speaker_anchors(
+            segments,
+            (SpeakerHint("gbrain://people/alice", 18, 22, "participants"),),
+            role="participants",
+        )
+    with pytest.raises(ValueError, match="does not overlap speech"):
+        resolve_speaker_anchors(
+            segments,
+            (SpeakerHint("gbrain://people/alice", 31, 32, "participants"),),
+            role="participants",
+        )
+
+
+def test_speaker_hints_reject_contradictory_identities_for_one_local_speaker():
+    segments = [Segment(10, 30, "speech", "W01:S01", "mixed")]
+    with pytest.raises(ValueError, match="anchored to both"):
+        resolve_speaker_anchors(
+            segments,
+            (
+                SpeakerHint("gbrain://people/alice", 12, 14, "mixed"),
+                SpeakerHint("gbrain://people/bob", 20, 22, "mixed"),
+            ),
+            role="mixed",
+        )
 
 
 def test_streaming_generation_reports_output_timestamps():
@@ -407,28 +444,16 @@ def test_transcribe_rejects_timestamp_outside_submitted_span(
         )
 
 
-def test_render_and_relabel_without_retranscription(tmp_path: Path):
-    media = tmp_path / "meeting.mp4"
-    media.touch()
-    state = fixture_state(media)
-    (tmp_path / "meeting.md").write_text(render_markdown(state))
-    assert "**[00:00:01] speaker-1:** Hello" in render_markdown(state)
-    relabeled = relabel(tmp_path / "meeting.md", ["speaker-1=gbrain://people/alice"])
-    assert relabeled == {"speaker-1": "gbrain://people/alice"}
-    metadata = yaml.safe_load((tmp_path / "meeting.md").read_text().split("---", 2)[1])
-    assert metadata["attendees"] == [{
-        "handle": "speaker-1",
-        "identity": "gbrain://people/alice",
-    }]
-    assert "**[00:00:01] speaker-1:** Hello" in (tmp_path / "meeting.md").read_text()
-
-
 def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path: Path):
     state = fixture_state(tmp_path / "meeting.mp4")
     state.started_at = "2026-08-04T10:00:00+02:00"
     state.ended_at = "2026-08-04T11:00:00+02:00"
     state.calendar_event = "https://calendar.google.com/event?id=example"
-    state.attendees = [{"identity": ""}]
+    state.hints_sha256 = "b" * 64
+    state.attendees = [
+        {"handle": "speaker-1", "identity": "gbrain://people/alice"},
+        {"identity": ""},
+    ]
 
     rendered = render_markdown(state)
     opening, raw_frontmatter, body = rendered.split("---", 2)
@@ -438,11 +463,12 @@ def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path
     assert metadata == {
         "source_sha256": "a" * 64,
         "speech2md_version": pipeline.__version__,
+        "hints_sha256": "b" * 64,
         "started_at": "2026-08-04T10:00:00+02:00",
         "ended_at": "2026-08-04T11:00:00+02:00",
         "calendar_event": "https://calendar.google.com/event?id=example",
         "attendees": [
-            {"handle": "speaker-1", "identity": ""},
+            {"handle": "speaker-1", "identity": "gbrain://people/alice"},
             {"identity": ""},
         ],
     }
@@ -476,6 +502,17 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     microphone.touch()
     participants.touch()
     requested.touch()
+    (tmp_path / "capture.hint.yaml").write_text(
+        "hotwords:\n"
+        "  - ProveKit\n"
+        "  - F2Z\n"
+        "speakers:\n"
+        "  - identity: gbrain://people/alice\n"
+        "    ranges:\n"
+        "      - track: participants\n"
+        "        start: 1\n"
+        "        end: 2\n"
+    )
     resolved = SimpleNamespace(
         requested=requested,
         markdown_path=tmp_path / "capture.md",
@@ -545,9 +582,9 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         seen_prompts.append(prompt)
         kwargs["progress_callback"](1, 1, 1, kwargs["duration"])
         if path == microphone:
-            segments = [Segment(0, 3, "Mine", "Remco", "microphone")]
-            speaker_profiles["Remco"] = SpeakerProfile(
-                speaker="Remco",
+            segments = [Segment(0, 3, "Mine", "Local Mic", "microphone")]
+            speaker_profiles["Local Mic"] = SpeakerProfile(
+                speaker="Local Mic",
                 model="ReDimNet2",
                 model_revision="revision",
                 checkpoint_sha256="b" * 64,
@@ -563,11 +600,12 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
                 checkpoint_sha256="b" * 64,
                 embedding_dimension=192,
                 samples=[sample],
+                identity=kwargs["speaker_hints"][0].identity,
             )
         return segments, {"windows": [{}], "actual_overlap_seconds": 0.0, "warnings": []}, speaker_profiles
 
     monkeypatch.setattr(pipeline, "transcribe_track", fake_transcribe_track)
-    pipeline.transcribe(requested, hotwords=["ProveKit", "F2Z"])
+    pipeline.transcribe(requested)
 
     assert load_calls == [True]
     assert seen_engines == [engine, engine]
@@ -580,6 +618,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert progress_bars[0].completed == 20.0
     assert "participants window 1/1" in progress_bars[0].postfixes
     assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "capture.hint.yaml",
         "capture.json",
         "capture.md",
         "capture.voiceprints.npz",
@@ -591,12 +630,13 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     )
     assert len(metadata["speech2md_version"]) == 40
+    assert len(metadata["hints_sha256"]) == 64
     assert "started_at" not in metadata
     assert "ended_at" not in metadata
     assert "calendar_event" not in metadata
     assert metadata["attendees"] == [
         {"handle": "speaker-1", "identity": ""},
-        {"handle": "speaker-2", "identity": ""},
+        {"handle": "speaker-2", "identity": "gbrain://people/alice"},
     ]
     with np.load(tmp_path / "capture.voiceprints.npz", allow_pickle=False) as voiceprints:
         assert voiceprints.files == ["handles", "embeddings"]

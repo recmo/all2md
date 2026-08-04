@@ -48,6 +48,7 @@ def render_markdown(state: TranscriptState) -> str:
     frontmatter = {
         "source_sha256": source_hash,
         "speech2md_version": __version__,
+        **({"hints_sha256": state.hints_sha256} if state.hints_sha256 else {}),
         **({"started_at": state.started_at} if state.started_at else {}),
         **({"ended_at": state.ended_at} if state.ended_at else {}),
         **({"calendar_event": state.calendar_event} if state.calendar_event else {}),
