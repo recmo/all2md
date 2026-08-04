@@ -8,6 +8,7 @@ from pathlib import Path
 
 import fitz
 from PIL import Image
+import pytest
 
 from pages2md.chapters import chapters_from_map
 from pages2md.chapters import detect_chapters
@@ -318,6 +319,35 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
     assert calls[0]["cropping"] is False and calls[0]["image_size"] == 1024
     assert calls[1]["cropping"] is True and calls[1]["image_size"] == 640
     assert calls[2]["cropping"] is True and calls[2]["image_size"] == 1024
+
+
+def test_mlx_backend_suppresses_model_load_stdout(monkeypatch, capsys):
+    def load(*args, **kwargs):
+        print("Add pad token = ['<pad>']")
+        print("Added chat tokens")
+        return object(), object()
+
+    monkeypatch.setitem(sys.modules, "mlx_vlm", SimpleNamespace(load=load))
+    backend = MlxUnlimitedOcr()
+    monkeypatch.setattr(backend, "_configure_precision", lambda: None)
+
+    backend._load()
+
+    assert capsys.readouterr().out == ""
+
+
+def test_mlx_backend_preserves_model_load_errors(monkeypatch, capsys):
+    def load(*args, **kwargs):
+        print("Added grounding-related tokens")
+        raise RuntimeError("model load failed")
+
+    monkeypatch.setitem(sys.modules, "mlx_vlm", SimpleNamespace(load=load))
+    backend = MlxUnlimitedOcr()
+
+    with pytest.raises(RuntimeError, match="model load failed"):
+        backend._load()
+
+    assert capsys.readouterr().out == ""
 
 
 def test_mlx_backend_enforces_component_precision():

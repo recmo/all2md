@@ -7,6 +7,7 @@ import math
 import re
 import subprocess
 import tempfile
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from .model import Segment, SpeakerProfile
@@ -200,6 +201,55 @@ def generation_diagnostics(result: Any) -> dict[str, Any]:
     }
 
 
+def _generate_with_timestamp_progress(
+    engine: Any,
+    audio: str,
+    *,
+    prompt: str,
+    timestamp_callback: Callable[[float], None] | None = None,
+) -> Any:
+    generated = engine.generate(
+        audio,
+        max_tokens=MAX_GENERATION_TOKENS,
+        prompt=prompt,
+        stream=True,
+    )
+    try:
+        stream = iter(generated)
+    except TypeError:
+        # Test doubles and older runtimes may still return a completed result.
+        return generated
+
+    text_parts = []
+    timestamp_tail = ""
+    generation_tokens = 0
+    for update in stream:
+        text = str(getattr(update, "text", ""))
+        text_parts.append(text)
+        previous_tail_length = len(timestamp_tail)
+        timestamp_text = timestamp_tail + text
+        new_timestamps = [
+            match
+            for match in TIMESTAMP_RE.finditer(timestamp_text)
+            if match.end() > previous_tail_length
+        ]
+        timestamp_tail = timestamp_text[-64:]
+        generation_tokens = max(
+            generation_tokens,
+            int(getattr(update, "generation_tokens", 0) or 0),
+        )
+        if timestamp_callback is not None:
+            for match in new_timestamps:
+                timestamp_callback(float(match.group("value")))
+
+    return SimpleNamespace(
+        text="".join(text_parts).strip(),
+        prompt_tokens=None,
+        generation_tokens=generation_tokens,
+        total_tokens=None,
+    )
+
+
 def parse_segments(
     items: list[dict[str, Any]],
     *,
@@ -251,7 +301,7 @@ def transcribe_track(
     effective_windows: list[tuple[float, float]] = []
     evidence_by_window = []
     warnings = []
-    completed_through = 0.0
+    reported_through = 0.0
     with tempfile.TemporaryDirectory(prefix="speech2md-moss-") as temporary:
         directory = Path(temporary)
         inference_index = 0
@@ -278,10 +328,25 @@ def transcribe_track(
                     ],
                     check=True,
                 )
-                result = engine.generate(
+
+                def report_timestamp(relative_seconds: float) -> None:
+                    nonlocal reported_through
+                    position = min(planned_end, start + relative_seconds)
+                    newly_reported = max(0.0, position - reported_through)
+                    if newly_reported and progress_callback is not None:
+                        reported_through = position
+                        progress_callback(
+                            planned_index,
+                            len(planned_windows),
+                            attempt,
+                            newly_reported,
+                        )
+
+                result = _generate_with_timestamp_progress(
+                    engine,
                     str(chunk),
-                    max_tokens=MAX_GENERATION_TOKENS,
                     prompt=prompt,
+                    timestamp_callback=report_timestamp,
                 )
                 diagnostics = generation_diagnostics(result)
                 segments = parse_segments(
@@ -364,8 +429,8 @@ def transcribe_track(
                             f"MOSS {role} planned window {planned_index} required "
                             f"{attempt - 1} overlapping recovery pass(es)"
                         )
-                    newly_completed = max(0.0, planned_end - completed_through)
-                    completed_through = max(completed_through, planned_end)
+                    newly_completed = max(0.0, planned_end - reported_through)
+                    reported_through = max(reported_through, planned_end)
                     if progress_callback is not None:
                         progress_callback(
                             planned_index,

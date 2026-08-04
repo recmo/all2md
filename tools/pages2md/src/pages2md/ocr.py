@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+from io import StringIO
 import math
 import re
 from pathlib import Path
@@ -70,7 +72,11 @@ class MlxUnlimitedOcr:
             from mlx_vlm import load
         except ImportError as error:
             raise RuntimeError("MLX OCR dependencies are missing; install pages2md[ocr]") from error
-        self._model, self._processor = load(MODEL_ID, revision=MODEL_REVISION)
+        # DeepSeek OCR's processor prints tokenizer-registration details during
+        # initialization. Leave stderr untouched so downloads and diagnostics
+        # remain visible while suppressing that unconditional stdout noise.
+        with redirect_stdout(StringIO()):
+            self._model, self._processor = load(MODEL_ID, revision=MODEL_REVISION)
         self._configure_precision()
 
     def _configure_precision(self) -> None:
