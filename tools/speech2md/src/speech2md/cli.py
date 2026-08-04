@@ -26,14 +26,14 @@ def parser() -> argparse.ArgumentParser:
         help="comma-separated names and domain terms to bias MOSS transcription (maximum 40)",
     )
 
-    command = commands.add_parser("relabel", help="apply speaker names without retranscribing")
+    command = commands.add_parser("relabel", help="assign attendee identities without retranscribing")
     command.add_argument("input", type=Path)
     command.add_argument("mappings", nargs="+", metavar="SPEAKER=NAME")
 
-    command = commands.add_parser("render", help="render Markdown from saved processing state")
+    command = commands.add_parser("render", help="migrate a legacy processing state to Markdown")
     command.add_argument("input", type=Path)
 
-    command = commands.add_parser("benchmark", help="summarize processed recordings")
+    command = commands.add_parser("benchmark", help="summarize legacy processing states")
     command.add_argument("directory", type=Path)
     return root
 
@@ -52,8 +52,8 @@ def main(argv: list[str] | None = None) -> int:
                 "processing_seconds": state.processing_seconds,
             }))
         elif arguments.command == "relabel":
-            state = relabel(arguments.input, arguments.mappings)
-            print(json.dumps(state.speakers, sort_keys=True))
+            identities = relabel(arguments.input, arguments.mappings)
+            print(json.dumps(identities, sort_keys=True))
         elif arguments.command == "render":
             print(render(arguments.input))
         elif arguments.command == "benchmark":

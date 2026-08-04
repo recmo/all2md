@@ -18,7 +18,7 @@ from .adapters import open_document
 from .assets import AssetStore
 from .chapters import chapters_from_map, detect_chapters
 from .compare import compare_text
-from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, SCHEMA_VERSION
+from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, SCHEMA_VERSION, commit_version
 from .formatting import format_and_lint
 from .lists import normalize_lists
 from .markdown import (
@@ -39,7 +39,26 @@ from .verify import verify_bundle
 
 FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
 FORMULA_KINDS = {"formula", "equation", "display_formula"}
+
+
 def convert(
+    source: Path,
+    output: Path,
+    **options: Any,
+) -> Path:
+    """Convert a document in a private workspace and publish only final artifacts."""
+    source = source.resolve()
+    slug = slugify(source.stem if source.is_file() else source.name, "document")
+    source_hash = _source_hash(source)
+    version = commit_version()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", version):
+        raise RuntimeError("pages2md source commit is unavailable")
+    with tempfile.TemporaryDirectory(prefix="pages2md-") as temporary:
+        workspace = _convert_workspace(source, Path(temporary), **options)
+        return _publish_output(workspace, output.resolve(), slug, source_hash, version)
+
+
+def _convert_workspace(
     source: Path,
     output: Path,
     *,
@@ -334,11 +353,101 @@ def convert(
     _write_log(bundle, metadata)
     shutil.rmtree(work, ignore_errors=True)
     if failed:
-        raise RuntimeError(f"{len(failed)} page(s) failed; successful pages are resumable in {bundle}")
+        raise RuntimeError(f"{len(failed)} page(s) failed")
     verification = verify_bundle(bundle)
     if not verification.ok:
         raise RuntimeError(f"bundle verification failed: {'; '.join(verification.errors)}")
     return bundle
+
+
+def _publish_output(
+    workspace: Path,
+    output: Path,
+    slug: str,
+    source_hash: str,
+    version: str,
+) -> Path:
+    metadata = _read_json(workspace / "metadata.json") or {}
+    markdown_files = list(metadata.get("markdown_files", ["book.md"]))
+    split = bool(metadata.get("split") or any(path.startswith("chapters/") for path in markdown_files))
+    contents = {
+        path: _public_markdown(
+            (workspace / path).read_text(encoding="utf-8"),
+            source_hash,
+            version,
+            split=split,
+            index=path == "book.md",
+        )
+        for path in markdown_files
+    }
+    figures = _referenced_figures(contents.values())
+    output.mkdir(parents=True, exist_ok=True)
+    file_target = output / f"{slug}.md"
+    directory_target = output / slug
+
+    if not split and not figures:
+        if directory_target.exists():
+            shutil.rmtree(directory_target)
+        atomic_text(file_target, contents["book.md"])
+        return file_target
+
+    if file_target.exists():
+        file_target.unlink()
+    with tempfile.TemporaryDirectory(prefix=f"pages2md-{slug}-") as temporary:
+        staged = Path(temporary) / slug
+        staged.mkdir()
+        if split:
+            atomic_text(staged / "index.md", contents["book.md"])
+            for path, content in contents.items():
+                if path == "book.md":
+                    continue
+                atomic_text(staged / Path(path).name, content)
+        else:
+            atomic_text(staged / f"{slug}.md", contents["book.md"])
+        for relative in figures:
+            source = workspace / "assets" / "figures" / relative
+            if not source.is_file():
+                raise RuntimeError(f"referenced figure is missing: {relative}")
+            destination = staged / "figures" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        if directory_target.exists():
+            shutil.rmtree(directory_target)
+        shutil.copytree(staged, directory_target)
+    return directory_target
+
+
+def _public_markdown(
+    markdown: str,
+    source_hash: str,
+    version: str,
+    *,
+    split: bool,
+    index: bool,
+) -> str:
+    if split and index:
+        markdown = re.sub(r"\]\(chapters/([^/)]+)", r"](\1", markdown)
+    markdown = markdown.replace("../assets/figures/", "figures/")
+    markdown = markdown.replace("assets/figures/", "figures/")
+    front_matter = (
+        "---\n"
+        f"source_sha256: {source_hash}\n"
+        f"pages2md_version: {version}\n"
+        "---\n\n"
+    )
+    return front_matter + markdown.lstrip()
+
+
+def _referenced_figures(markdowns) -> set[str]:
+    figures: set[str] = set()
+    for markdown in markdowns:
+        for target in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", markdown):
+            clean = target.partition("#")[0].partition("?")[0]
+            if clean.startswith("figures/"):
+                relative = clean.removeprefix("figures/")
+                if relative and ".." not in Path(relative).parts:
+                    figures.add(relative)
+    return figures
 
 
 def _page_result(

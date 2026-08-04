@@ -60,6 +60,10 @@ class TranscriptState:
     speakers: dict[str, str]
     segments: list[Segment]
     warnings: list[str]
+    ended_at: str | None = None
+    calendar_event: str | None = None
+    source_sha256: str | None = None
+    attendees: list[dict[str, str]] = field(default_factory=list)
     speaker_profiles: dict[str, SpeakerProfile] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
     derived_artifacts: list[str] = field(default_factory=list)
@@ -84,6 +88,10 @@ class TranscriptState:
             speakers=dict(value.get("speakers", {})),
             segments=[Segment(**item) for item in value["segments"]],
             warnings=list(value.get("warnings", [])),
+            ended_at=value.get("ended_at"),
+            calendar_event=value.get("calendar_event"),
+            source_sha256=value.get("source_sha256"),
+            attendees=[dict(item) for item in value.get("attendees", [])],
             speaker_profiles={
                 speaker: SpeakerProfile(
                     speaker=item.get("speaker", speaker),
@@ -109,4 +117,6 @@ class ResolvedInput:
     meeting_id: str | None
     title: str | None
     started_at: str | None
+    ended_at: str | None
+    calendar_event: str | None
     sources: tuple[tuple[Path, str, str | None], ...]

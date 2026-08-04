@@ -36,6 +36,13 @@
       pkgs = nixpkgs.legacyPackages.${system};
       pagesProject = ./tools/pages2md;
       speechProject = ./tools/speech2md;
+      pagesVersion =
+        if self ? rev then
+          self.rev
+        else if self ? dirtyRev then
+          builtins.substring 0 40 self.dirtyRev
+        else
+          "unknown";
       mkPythonEnvironment =
         {
           name,
@@ -106,6 +113,7 @@
           pkgs.poppler-utils
         ];
         text = ''
+          export PAGES2MD_VERSION=${pagesVersion}
           exec ${pagesEnvironment}/bin/pages2md "$@"
         '';
       };
@@ -118,6 +126,7 @@
           cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/speech2md"
           mkdir -p "$cache_root/torch"
           export TORCH_HOME="$cache_root/torch"
+          export SPEECH2MD_VERSION=${pagesVersion}
           exec ${speechEnvironment}/bin/speech2md "$@"
         '';
       };
@@ -142,20 +151,34 @@
 
       checks.${system} = {
         pages2md-source =
-          pkgs.runCommand "pages2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; }
+          pkgs.runCommand "pages2md-source-check"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+              PAGES2MD_VERSION = pagesVersion;
+            }
             ''
               export PYTHONPYCACHEPREFIX="$out/pycache"
               python -m compileall -q ${pagesProject}/src
               touch "$out/passed"
             '';
-        pages2md-tests = pkgs.runCommand "pages2md-tests" { nativeBuildInputs = [ testPython ]; } ''
-          export PYTHONPATH=${pagesProject}/src
-          export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-          pytest -q ${pagesProject}/tests
-          touch "$out"
-        '';
+        pages2md-tests =
+          pkgs.runCommand "pages2md-tests"
+            {
+              nativeBuildInputs = [ testPython ];
+              PAGES2MD_VERSION = pagesVersion;
+            }
+            ''
+              export PYTHONPATH=${pagesProject}/src
+              export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+              pytest -q ${pagesProject}/tests
+              touch "$out"
+            '';
         speech2md-source =
-          pkgs.runCommand "speech2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; }
+          pkgs.runCommand "speech2md-source-check"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+              SPEECH2MD_VERSION = pagesVersion;
+            }
             ''
               export PYTHONPYCACHEPREFIX="$out/pycache"
               python -m compileall -q ${speechProject}/src
@@ -164,7 +187,15 @@
         speech2md-tests =
           pkgs.runCommand "speech2md-tests"
             {
-              nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.pytest ps.pyyaml ps.tqdm ])) ];
+              nativeBuildInputs = [
+                (pkgs.python3.withPackages (ps: [
+                  ps.numpy
+                  ps.pytest
+                  ps.pyyaml
+                  ps.tqdm
+                ]))
+              ];
+              SPEECH2MD_VERSION = pagesVersion;
             }
             ''
               export PYTHONPATH=${speechProject}/src
@@ -186,8 +217,10 @@
               export XDG_CACHE_HOME="$TMPDIR/cache"
               mkdir -p "$HOME" "$XDG_CACHE_HOME"
               pages2md --help > /dev/null
+              pages2md --version | grep -Eq '^pages2md [0-9a-f]{40,64}$'
               ${pagesEnvironment}/bin/python -c 'from mlx_vlm import load'
               speech2md --help > /dev/null
+              speech2md --version | grep -Eq '^[0-9a-f]{40,64}$'
               for extension in \
                 ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
                 ${speechEnvironment}/lib/python*/site-packages/mlx/core*.so; do

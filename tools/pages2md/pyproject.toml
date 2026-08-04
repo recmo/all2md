@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "pages2md"
 version = "0.2.0"
-description = "Local-first ebook and document conversion to auditable Markdown"
+description = "Local-first ebook and document conversion to clean Markdown"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

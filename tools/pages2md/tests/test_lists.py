@@ -474,7 +474,7 @@ def test_marker_parser_rejects_embedded_or_word_like_markers():
     assert parse_marker("(a) A condition") is not None
 
 
-def test_list_bundle_verification_and_interrupted_resume_are_stable(tmp_path):
+def test_list_output_is_stable_without_publishing_intermediates(tmp_path):
     class ListOcr:
         identity = {"engine": "fixture-list", "model": "fixture", "revision": "1"}
 
@@ -499,16 +499,12 @@ def test_list_bundle_verification_and_interrupted_resume_are_stable(tmp_path):
     backend = ListOcr()
 
     bundle = convert(source, tmp_path / "out", backend=backend, split_mode="single", quality="fast")
-    first = (bundle / "book.md").read_bytes()
-    page_json = json.loads((bundle / "pages/page-0001.json").read_text())
-    metadata = json.loads((bundle / "metadata.json").read_text())
-    metadata["failed_pages"] = [{"page": 2, "error": "simulated interruption"}]
-    (bundle / "metadata.json").write_text(json.dumps(metadata))
+    first = bundle.read_bytes()
 
-    resumed = convert(source, tmp_path / "out", backend=backend, split_mode="single", quality="fast")
+    repeated = convert(source, tmp_path / "out", backend=backend, split_mode="single", quality="fast")
 
-    assert backend.calls == 1
-    assert (resumed / "book.md").read_bytes() == first
-    assert page_json["blocks"][0]["metadata"]["list"]["items"][0]["source_marker"] == "•"
+    assert backend.calls == 2
+    assert repeated.read_bytes() == first
     assert "•" not in first.decode()
-    assert verify_bundle(resumed).ok
+    assert list((tmp_path / "out").iterdir()) == [bundle]
+    assert verify_bundle(repeated).ok

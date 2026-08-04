@@ -385,17 +385,17 @@ def transcribe_track(
                 )
                 evidence = {}
                 embedding_diagnostics = []
-                if role != "microphone":
-                    if embedder is None:
-                        raise RuntimeError(
-                            "ReDimNet2 embedder is required for non-microphone tracks"
-                        )
+                if embedder is not None:
                     evidence, embedding_diagnostics = extract_window_evidence(
                         path,
                         segments,
                         window=inference_index,
                         source_track=role,
                         embedder=embedder,
+                    )
+                elif role != "microphone":
+                    raise RuntimeError(
+                        "ReDimNet2 embedder is required for non-microphone tracks"
                     )
                 evidence_by_window.append(evidence)
                 raw_windows.append({

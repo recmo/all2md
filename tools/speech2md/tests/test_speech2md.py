@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+import numpy as np
 
 import speech2md.moss as moss
 import speech2md.pipeline as pipeline
@@ -51,12 +52,16 @@ def test_resolve_capture_manifest(tmp_path: Path):
         "schemaVersion": 1,
         "meetingID": "id",
         "startedAt": "now",
+        "endedAt": "later",
+        "calendarEventID": "https://calendar.google.com/event?id=example",
         "status": "complete",
         "audio": [{"file": "meeting-microphone.flac", "role": "microphone", "sha256": "a" * 64}],
     }))
     resolved = resolve_input(manifest)
     assert resolved.meeting_id == "id"
     assert resolved.sources[0][1] == "microphone"
+    assert resolved.ended_at == "later"
+    assert resolved.calendar_event == "https://calendar.google.com/event?id=example"
     assert resolved.state_path.name == "2026-08-02-meeting.speech2md.json"
     assert resolved.markdown_path.name == "2026-08-02-meeting.md"
 
@@ -408,17 +413,24 @@ def test_render_and_relabel_without_retranscription(tmp_path: Path):
     media = tmp_path / "meeting.mp4"
     media.touch()
     state = fixture_state(media)
-    write_state(state, tmp_path / "meeting.speech2md.json")
-    assert "**[00:00:01] Speaker 1:** Hello" in render_markdown(state)
-    relabeled = relabel(media, ["Speaker 1=Alice"])
-    assert relabeled.speakers == {"Speaker 1": "Alice"}
-    assert "Alice" in (tmp_path / "meeting.md").read_text()
+    (tmp_path / "meeting.md").write_text(render_markdown(state))
+    assert "**[00:00:01] speaker-1:** Hello" in render_markdown(state)
+    relabeled = relabel(media, ["speaker-1=gbrain://people/alice"])
+    assert relabeled == {"speaker-1": "gbrain://people/alice"}
+    metadata = yaml.safe_load((tmp_path / "meeting.md").read_text().split("---", 2)[1])
+    assert metadata["attendees"] == [{
+        "handle": "speaker-1",
+        "identity": "gbrain://people/alice",
+    }]
+    assert "**[00:00:01] speaker-1:** Hello" in (tmp_path / "meeting.md").read_text()
 
 
-def test_render_moves_mechanical_details_to_frontmatter(tmp_path: Path):
+def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path: Path):
     state = fixture_state(tmp_path / "meeting.mp4")
-    state.warnings = ["manual review recommended"]
-    state.derived_artifacts = ["meeting.moss.json"]
+    state.started_at = "2026-08-04T10:00:00+02:00"
+    state.ended_at = "2026-08-04T11:00:00+02:00"
+    state.calendar_event = "https://calendar.google.com/event?id=example"
+    state.attendees = [{"identity": ""}]
 
     rendered = render_markdown(state)
     opening, raw_frontmatter, body = rendered.split("---", 2)
@@ -426,28 +438,15 @@ def test_render_moves_mechanical_details_to_frontmatter(tmp_path: Path):
 
     assert opening == ""
     assert metadata == {
-        "title": "Test",
-        "speech2md": {
-            "schema_version": 1,
-            "source": str(tmp_path / "meeting.mp4"),
-            "capture_manifest": None,
-            "meeting_id": None,
-            "started_at": None,
-            "created_at": "now",
-            "model": {"id": MOSS_MODEL, "revision": MOSS_REVISION},
-            "audio": [{
-                "path": str(tmp_path / "meeting.mp4"),
-                "role": "mixed",
-                "sha256": "a" * 64,
-                "duration_seconds": 3,
-                "format": "aac",
-            }],
-            "processing": {
-                "duration_seconds": 1,
-                "warnings": ["manual review recommended"],
-            },
-            "derived_artifacts": ["meeting.moss.json"],
-        },
+        "source_sha256": "a" * 64,
+        "speech2md_version": pipeline.__version__,
+        "started_at": "2026-08-04T10:00:00+02:00",
+        "ended_at": "2026-08-04T11:00:00+02:00",
+        "calendar_event": "https://calendar.google.com/event?id=example",
+        "attendees": [
+            {"handle": "speaker-1", "identity": ""},
+            {"identity": ""},
+        ],
     }
     assert body.startswith("\n\n# Test\n\n## Transcript\n")
     assert "## Capture" not in body
@@ -461,10 +460,12 @@ def test_relabel_reads_legacy_state(tmp_path: Path, suffix: str):
     legacy_state = tmp_path / f"meeting{suffix}"
     write_state(fixture_state(media), legacy_state)
 
-    relabeled = relabel(media, ["Speaker 1=Alice"])
+    relabeled = relabel(media, ["speaker-1=Alice"])
 
-    assert relabeled.speakers == {"Speaker 1": "Alice"}
-    assert json.loads(legacy_state.read_text())["speakers"] == {"Speaker 1": "Alice"}
+    assert relabeled == {"speaker-1": "Alice"}
+    assert json.loads(legacy_state.read_text())["speakers"] == {}
+    metadata = yaml.safe_load((tmp_path / "meeting.md").read_text().split("---", 2)[1])
+    assert metadata["attendees"] == [{"handle": "speaker-1", "identity": "Alice"}]
     assert not (tmp_path / "meeting.speech2md.json").exists()
 
 
@@ -505,6 +506,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     participants = tmp_path / "participants.flac"
     microphone.touch()
     participants.touch()
+    requested.touch()
     resolved = SimpleNamespace(
         requested=requested,
         state_path=tmp_path / "capture.speech2md.json",
@@ -513,6 +515,8 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         meeting_id="meeting",
         title="Meeting",
         started_at=None,
+        ended_at=None,
+        calendar_event=None,
         sources=(
             (microphone, "microphone", None),
             (participants, "participants", None),
@@ -559,17 +563,42 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         lambda: load_calls.append(True) or engine,
     )
 
+    sample = EmbeddingSample(
+        vector=[1.0] + [0.0] * 191,
+        source_track="participants",
+        start=0,
+        end=3,
+        duration_seconds=3,
+        window=1,
+    )
+
     def fake_transcribe_track(path, *, engine, prompt, speaker_profiles, **kwargs):
         seen_engines.append(engine)
         seen_prompts.append(prompt)
         kwargs["progress_callback"](1, 1, 1, kwargs["duration"])
-        return [], {"windows": [{}], "actual_overlap_seconds": 0.0, "warnings": []}, speaker_profiles
+        if path == microphone:
+            segments = [Segment(0, 3, "Mine", "Remco", "microphone")]
+            speaker_profiles["Remco"] = SpeakerProfile(
+                speaker="Remco",
+                model="ReDimNet2",
+                model_revision="revision",
+                checkpoint_sha256="b" * 64,
+                embedding_dimension=192,
+                samples=[sample],
+            )
+        else:
+            segments = [Segment(0, 3, "Hello", "Speaker 1", "participants")]
+            speaker_profiles["Speaker 1"] = SpeakerProfile(
+                speaker="Speaker 1",
+                model="ReDimNet2",
+                model_revision="revision",
+                checkpoint_sha256="b" * 64,
+                embedding_dimension=192,
+                samples=[sample],
+            )
+        return segments, {"windows": [{}], "actual_overlap_seconds": 0.0, "warnings": []}, speaker_profiles
 
     monkeypatch.setattr(pipeline, "transcribe_track", fake_transcribe_track)
-    monkeypatch.setattr(pipeline, "write_json", lambda *args: None)
-    monkeypatch.setattr(pipeline, "write_state", lambda *args: None)
-    monkeypatch.setattr(pipeline, "write_text", lambda *args: None)
-
     pipeline.transcribe(requested, hotwords=["ProveKit", "F2Z"])
 
     assert load_calls == [True]
@@ -582,6 +611,30 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert progress_bars[0].total == 20.0
     assert progress_bars[0].completed == 20.0
     assert "participants window 1/1" in progress_bars[0].postfixes
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "capture.json",
+        "capture.md",
+        "capture.voiceprints.npz",
+        "microphone.flac",
+        "participants.flac",
+    ]
+    metadata = yaml.safe_load((tmp_path / "capture.md").read_text().split("---", 2)[1])
+    assert metadata["source_sha256"] == (
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    )
+    assert len(metadata["speech2md_version"]) == 40
+    assert "started_at" not in metadata
+    assert "ended_at" not in metadata
+    assert "calendar_event" not in metadata
+    assert metadata["attendees"] == [
+        {"handle": "speaker-1", "identity": ""},
+        {"handle": "speaker-2", "identity": ""},
+    ]
+    with np.load(tmp_path / "capture.voiceprints.npz", allow_pickle=False) as voiceprints:
+        assert voiceprints.files == ["handles", "embeddings"]
+        assert voiceprints["handles"].tolist() == ["speaker-1", "speaker-2"]
+        assert voiceprints["embeddings"].shape == (2, 192)
+    assert (tmp_path / "capture.voiceprints.npz").stat().st_mode & 0o777 == 0o600
 
 
 def test_state_round_trip_with_embeddings_and_backward_compatible_loading(tmp_path: Path):

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .adapters import detect_kind
-from .constants import DEFAULT_DPI, MODEL_ID, MODEL_REVISION
+from .constants import DEFAULT_DPI, MODEL_ID, MODEL_REVISION, commit_version
 from .ocr import MlxUnlimitedOcr, SidecarOcr
 from .pipeline import convert
 from .util import sha256_file
@@ -14,8 +14,8 @@ from .verify import verify_bundle
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="pages2md", description="Convert ebooks and documents to auditable Markdown")
-    root.add_argument("--version", action="version", version="pages2md 0.2.0")
+    root = argparse.ArgumentParser(prog="pages2md", description="Convert ebooks and documents to clean Markdown")
+    root.add_argument("--version", action="version", version=f"pages2md {commit_version()}")
     commands = root.add_subparsers(dest="command", required=True)
 
     convert_parser = commands.add_parser("convert", help="convert one or more inputs")
@@ -51,7 +51,7 @@ def parser() -> argparse.ArgumentParser:
     model_commands = model_parser.add_subparsers(dest="model_command", required=True)
     model_commands.add_parser("fetch", help="download pinned model weights")
 
-    verify_parser = commands.add_parser("verify", help="verify an output bundle")
+    verify_parser = commands.add_parser("verify", help="verify final Markdown output")
     verify_parser.add_argument("bundle", type=Path)
     verify_parser.add_argument("--json", action="store_true")
     return root
