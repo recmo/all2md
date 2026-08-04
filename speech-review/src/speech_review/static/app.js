@@ -94,9 +94,13 @@ function renderTranscript() {
   }
   $('#transcript').innerHTML = state.transcript.turns.map(turn => {
     const color = speakerColor(turn.speaker)
+    const assignment = speakerAssignment(turn)
+    const proposal = assignment.changed
+      ? `<span class="proposed-speaker" title="Proposed speaker reassignment">→ ${escapeHtml(assignment.proposed)}</span>`
+      : ''
     return `<article class="turn ${state.selected?.index === turn.index ? 'selected' : ''}" data-index="${turn.index}" style="--speaker-color:${color}">
       <span class="turn-time">${clock(turn.start)}</span><span class="speaker-dot"></span>
-      <div class="turn-body"><div class="turn-speaker">${escapeHtml(turn.speaker)}</div><div class="turn-text">${escapeHtml(turn.text)}</div></div>
+      <div class="turn-body"><div class="turn-speaker"><span>${escapeHtml(assignment.current)}</span>${proposal}</div><div class="turn-text">${escapeHtml(turn.text)}</div></div>
     </article>`
   }).join('')
   document.querySelectorAll('.turn').forEach(element => {
@@ -128,11 +132,26 @@ function captureCorrection(element) {
   renderTranscript(); renderInspector()
 }
 
-function assignedIdentity(turn) {
+function proposedIdentity(turn) {
   for (const speaker of state.transcript.hints.speakers) {
     if ((speaker.ranges || []).some(range => overlaps(turn, range))) return speaker.identity
   }
+  return ''
+}
+
+function renderedIdentity(turn) {
   return (state.transcript.frontmatter.attendees || []).find(item => item.handle === turn.speaker)?.identity || ''
+}
+
+function speakerAssignment(turn) {
+  const rendered = renderedIdentity(turn)
+  const proposed = proposedIdentity(turn)
+  const current = rendered || turn.speaker
+  return {current, proposed, changed: Boolean(proposed && proposed !== current)}
+}
+
+function assignedIdentity(turn) {
+  return proposedIdentity(turn) || renderedIdentity(turn)
 }
 const overlaps = (left, right) => Math.min(left.end, right.end) > Math.max(left.start, right.start)
 
@@ -147,9 +166,11 @@ async function renderInspector() {
   if (state.correction) return renderCorrectionInspector()
   const turn = state.selected
   const identity = assignedIdentity(turn)
+  const assignment = speakerAssignment(turn)
   const track = turn.track || state.transcript.audio[0]?.role || 'inferred after audio loads'
   $('#inspector').innerHTML = `
     <div class="eyebrow">SPEAKER TURN</div><h2>${clock(turn.start)} · ${escapeHtml(turn.speaker)}</h2><div class="subhead">${escapeHtml(track)} track</div>
+    ${assignment.changed ? `<div class="assignment-notice"><span>${escapeHtml(assignment.current)}</span><strong>→ ${escapeHtml(assignment.proposed)}</strong><small>proposed after regeneration</small></div>` : ''}
     <div class="notice">◌ <span>Turn end is inferred from the next turn. Track is chosen by the strongest audio activity in this interval.</span></div>
     <div class="section"><label class="section-label">SPEAKER IDENTITY</label><input id="identity" class="field" value="${escapeHtml(identity)}" placeholder="Name or identity URI"></div>
     <div class="section"><span class="section-label">VOICEPRINT MATCHES</span><div id="candidates"><div class="empty">Comparing voiceprints…</div></div></div>
