@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import math
 from pathlib import Path
 
 import yaml
 
-from .media import sha256
 from .model import AudioSource, ResolvedInput, SpeakerHint
 from .moss import normalize_hotwords
 
@@ -27,8 +27,9 @@ def load_hints(path: Path) -> SpeechHints:
         return SpeechHints()
     if not path.is_file():
         raise ValueError(f"hint sidecar is not a file: {path}")
+    raw = path.read_bytes()
     try:
-        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        value = yaml.safe_load(raw.decode("utf-8"))
     except yaml.YAMLError as error:
         raise ValueError(f"invalid hint YAML: {error}") from error
     if value is None:
@@ -75,7 +76,7 @@ def load_hints(path: Path) -> SpeechHints:
             if track is not None and (not isinstance(track, str) or not track.strip()):
                 raise ValueError(f"{label} track must be a non-empty string")
             speakers.append(SpeakerHint(identity, start, end, track.strip() if track else None))
-    return SpeechHints(hotwords, tuple(speakers), sha256(path))
+    return SpeechHints(hotwords, tuple(speakers), hashlib.sha256(raw).hexdigest())
 
 
 def validate_hints(hints: SpeechHints, sources: list[AudioSource]) -> SpeechHints:

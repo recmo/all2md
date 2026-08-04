@@ -48,6 +48,28 @@ def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Pa
     assert hints.sha256 == hashlib.sha256(raw.encode()).hexdigest()
 
 
+def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch):
+    path = tmp_path / "meeting.hint.yaml"
+    raw = b"hotwords: [ProveKit]\n"
+    path.write_bytes(raw)
+    original_read_bytes = Path.read_bytes
+    reads = 0
+
+    def read_bytes_once(self: Path) -> bytes:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise AssertionError("hint sidecar was read more than once")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes_once)
+    hints = load_hints(path)
+
+    assert reads == 1
+    assert hints.hotwords == ("ProveKit",)
+    assert hints.sha256 == hashlib.sha256(raw).hexdigest()
+
+
 @pytest.mark.parametrize(
     "raw, message",
     [
