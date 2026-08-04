@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
+import yaml
+
 from .model import Segment, TranscriptState
 
 
@@ -12,15 +16,37 @@ def timestamp(seconds: float) -> str:
 
 def render_markdown(state: TranscriptState) -> str:
     title = state.title or "Meeting transcript"
+    frontmatter = {
+        "title": title,
+        "speech2md": {
+            "schema_version": state.schema_version,
+            "source": state.source,
+            "capture_manifest": state.capture_manifest,
+            "meeting_id": state.meeting_id,
+            "started_at": state.started_at,
+            "created_at": state.created_at,
+            "model": {
+                "id": state.model,
+                "revision": state.model_revision,
+            },
+            "audio": [asdict(source) for source in state.audio],
+            "processing": {
+                "duration_seconds": state.processing_seconds,
+                "warnings": state.warnings,
+            },
+            "derived_artifacts": state.derived_artifacts,
+        },
+    }
     lines = [
+        "---",
+        yaml.safe_dump(
+            frontmatter,
+            allow_unicode=True,
+            sort_keys=False,
+        ).rstrip(),
+        "---",
+        "",
         f"# {title}",
-        "",
-        "## Capture",
-        "",
-        f"- Source: `{state.source}`",
-        f"- Started: {state.started_at or 'unknown'}",
-        f"- Model: `{state.model}@{state.model_revision}`",
-        f"- Audio SHA-256: `{state.audio[0].sha256}`",
         "",
         "## Transcript",
         "",
@@ -31,8 +57,6 @@ def render_markdown(state: TranscriptState) -> str:
             f"**[{timestamp(segment.start)}] {speaker}:** {segment.text.strip()}",
             "",
         ])
-    if state.warnings:
-        lines.extend(["## Processing notes", "", *[f"- {warning}" for warning in state.warnings], ""])
     return "\n".join(lines).rstrip() + "\n"
 
 

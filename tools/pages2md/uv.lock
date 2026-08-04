@@ -306,6 +306,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pymarkdownlnt" },
     { name = "pymupdf" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -328,6 +329,7 @@ requires-dist = [
     { name = "pymarkdownlnt", specifier = "==0.9.38" },
     { name = "pymupdf", specifier = ">=1.26.0,<2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0,<10" },
+    { name = "tqdm", specifier = ">=4.67.0,<5" },
 ]
 provides-extras = ["ocr", "dev"]
 

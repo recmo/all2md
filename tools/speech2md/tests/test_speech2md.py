@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import speech2md.moss as moss
 import speech2md.pipeline as pipeline
@@ -215,6 +216,7 @@ def test_transcribe_recovers_when_token_count_is_suspect(
         ),
     ])
     engine = SimpleNamespace(generate=lambda *args, **kwargs: next(results))
+    progress = []
 
     monkeypatch.setattr(
         moss.subprocess,
@@ -228,6 +230,7 @@ def test_transcribe_recovers_when_token_count_is_suspect(
         prompt=ENGLISH_TRANSCRIPTION_PROMPT,
         role="microphone",
         duration=300,
+        progress_callback=lambda *event: progress.append(event),
     )
 
     assert [(item.start, item.end) for item in segments] == [
@@ -244,6 +247,11 @@ def test_transcribe_recovers_when_token_count_is_suspect(
     assert ffmpeg_calls[1][ffmpeg_calls[1].index("-ss") + 1] == "70.0"
     assert ffmpeg_calls[1][ffmpeg_calls[1].index("-t") + 1] == "230.0"
     assert raw["actual_overlap_seconds"] == 30
+    assert progress == [
+        (1, 1, 1, 0.0),
+        (1, 1, 2, 0.0),
+        (1, 1, 2, 300.0),
+    ]
 
 
 def test_transcribe_accepts_trailing_silence_when_token_count_is_safe(
@@ -384,6 +392,45 @@ def test_render_and_relabel_without_retranscription(tmp_path: Path):
     assert "Alice" in (tmp_path / "meeting.md").read_text()
 
 
+def test_render_moves_mechanical_details_to_frontmatter(tmp_path: Path):
+    state = fixture_state(tmp_path / "meeting.mp4")
+    state.warnings = ["manual review recommended"]
+    state.derived_artifacts = ["meeting.moss.json"]
+
+    rendered = render_markdown(state)
+    opening, raw_frontmatter, body = rendered.split("---", 2)
+    metadata = yaml.safe_load(raw_frontmatter)
+
+    assert opening == ""
+    assert metadata == {
+        "title": "Test",
+        "speech2md": {
+            "schema_version": 1,
+            "source": str(tmp_path / "meeting.mp4"),
+            "capture_manifest": None,
+            "meeting_id": None,
+            "started_at": None,
+            "created_at": "now",
+            "model": {"id": MOSS_MODEL, "revision": MOSS_REVISION},
+            "audio": [{
+                "path": str(tmp_path / "meeting.mp4"),
+                "role": "mixed",
+                "sha256": "a" * 64,
+                "duration_seconds": 3,
+                "format": "aac",
+            }],
+            "processing": {
+                "duration_seconds": 1,
+                "warnings": ["manual review recommended"],
+            },
+            "derived_artifacts": ["meeting.moss.json"],
+        },
+    }
+    assert body.startswith("\n\n# Test\n\n## Transcript\n")
+    assert "## Capture" not in body
+    assert "## Processing notes" not in body
+
+
 @pytest.mark.parametrize("suffix", [".audio2md.json", ".voice2md.json"])
 def test_relabel_reads_legacy_state(tmp_path: Path, suffix: str):
     media = tmp_path / "meeting.mp4"
@@ -452,6 +499,26 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     load_calls = []
     seen_engines = []
     seen_prompts = []
+    progress_bars = []
+
+    class RecordingProgress:
+        def __init__(self, **kwargs):
+            self.total = kwargs["total"]
+            self.completed = 0.0
+            self.postfixes = []
+            progress_bars.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def set_postfix_str(self, value):
+            self.postfixes.append(value)
+
+        def update(self, amount):
+            self.completed += amount
 
     monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
     monkeypatch.setattr(
@@ -462,6 +529,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         ),
     )
     monkeypatch.setattr(pipeline, "get_redimnet2_embedder", object)
+    monkeypatch.setattr(pipeline, "tqdm", RecordingProgress)
     monkeypatch.setattr(
         pipeline,
         "load_moss_engine",
@@ -471,6 +539,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     def fake_transcribe_track(path, *, engine, prompt, speaker_profiles, **kwargs):
         seen_engines.append(engine)
         seen_prompts.append(prompt)
+        kwargs["progress_callback"](1, 1, 1, kwargs["duration"])
         return [], {"windows": [{}], "actual_overlap_seconds": 0.0, "warnings": []}, speaker_profiles
 
     monkeypatch.setattr(pipeline, "transcribe_track", fake_transcribe_track)
@@ -486,6 +555,10 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         f"{ENGLISH_TRANSCRIPTION_PROMPT} Hotwords: ProveKit, F2Z",
         f"{ENGLISH_TRANSCRIPTION_PROMPT} Hotwords: ProveKit, F2Z",
     ]
+    assert len(progress_bars) == 1
+    assert progress_bars[0].total == 20.0
+    assert progress_bars[0].completed == 20.0
+    assert "participants window 1/1" in progress_bars[0].postfixes
 
 
 def test_state_round_trip_with_embeddings_and_backward_compatible_loading(tmp_path: Path):
