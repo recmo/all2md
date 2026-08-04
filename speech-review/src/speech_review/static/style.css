@@ -81,6 +81,10 @@ button { border: 0; background: transparent; cursor: pointer; }
 .turn-speaker { display: flex; align-items: center; gap: 7px; color: var(--speaker-color); font: 600 10px Geist Mono, monospace; margin-bottom: 4px; }
 .proposed-speaker { padding: 2px 5px; border-radius: 3px; color: var(--accent); background: #e8f0ff; font-size: 9px; }
 .turn-text { font-size: 13px; line-height: 1.52; user-select: text; }
+.proposed-wording { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px; margin-top: 7px; color: var(--secondary); font-size: 12px; line-height: 1.45; }
+.proposed-wording > span { padding-top: 2px; color: var(--accent); font: 600 8px Geist Mono, monospace; letter-spacing: .5px; }
+.proposed-wording del, .wording-notice del { margin-right: 3px; color: #b45309; background: #fff3df; text-decoration-thickness: 1px; }
+.proposed-wording ins, .wording-notice ins { padding: 1px 3px; color: var(--green); background: #e8f5ef; text-decoration: none; border-radius: 2px; }
 .inspector { border-left: 1px solid var(--line); padding: 24px 22px 40px; overflow-y: auto; }
 .eyebrow { color: var(--accent); font: 600 10px Geist Mono, monospace; letter-spacing: 1.1px; }
 .inspector h2 { margin: 5px 0 2px; font: 500 25px Newsreader, ui-serif, Georgia, serif; }
@@ -94,6 +98,9 @@ button { border: 0; background: transparent; cursor: pointer; }
 .assignment-notice span { color: var(--secondary); }
 .assignment-notice strong { color: var(--accent); }
 .assignment-notice small { grid-column: 1 / -1; color: var(--muted); font-size: 9px; }
+.wording-notice { margin-top: 10px; padding: 10px 11px; border-radius: 6px; background: var(--subtle); font-size: 12px; line-height: 1.45; }
+.wording-notice > span { display: block; margin-bottom: 5px; color: var(--accent); font: 600 9px Geist Mono, monospace; letter-spacing: .6px; }
+.wording-notice small { display: block; margin-top: 5px; color: var(--muted); font: 9px Geist Mono, monospace; }
 .candidate { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; text-align: left; padding: 9px 2px; border-bottom: 1px solid var(--line); }
 .candidate strong { font-size: 13px; }
 .candidate .score { color: var(--accent); font: 600 11px Geist Mono, monospace; }

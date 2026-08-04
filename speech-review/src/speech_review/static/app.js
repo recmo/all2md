@@ -98,9 +98,10 @@ function renderTranscript() {
     const proposal = assignment.changed
       ? `<span class="proposed-speaker" title="Proposed speaker reassignment">→ ${escapeHtml(assignment.proposed)}</span>`
       : ''
+    const wording = proposedWording(turn)
     return `<article class="turn ${state.selected?.index === turn.index ? 'selected' : ''}" data-index="${turn.index}" style="--speaker-color:${color}">
       <span class="turn-time">${clock(turn.start)}</span><span class="speaker-dot"></span>
-      <div class="turn-body"><div class="turn-speaker"><span>${escapeHtml(assignment.current)}</span>${proposal}</div><div class="turn-text">${escapeHtml(turn.text)}</div></div>
+      <div class="turn-body"><div class="turn-speaker"><span>${escapeHtml(assignment.current)}</span>${proposal}</div><div class="turn-text">${escapeHtml(turn.text)}</div>${wording ? `<div class="proposed-wording"><span>PROPOSED</span><div>${wording}</div></div>` : ''}</div>
     </article>`
   }).join('')
   document.querySelectorAll('.turn').forEach(element => {
@@ -155,6 +156,32 @@ function assignedIdentity(turn) {
 }
 const overlaps = (left, right) => Math.min(left.end, right.end) > Math.max(left.start, right.start)
 
+function editMatchesTurn(edit, turn) {
+  return (!edit.track || edit.track === turn.track) && overlaps(edit, turn) && turn.text.includes(edit.before)
+}
+
+function proposedWording(turn) {
+  const replacements = []
+  for (const edit of state.transcript.hints.edits) {
+    const occurrences = state.transcript.turns.reduce((count, candidate) => {
+      if (!editMatchesTurn(edit, candidate)) return count
+      return count + candidate.text.split(edit.before).length - 1
+    }, 0)
+    if (occurrences !== 1 || !editMatchesTurn(edit, turn)) continue
+    replacements.push({start: turn.text.indexOf(edit.before), before: edit.before, after: edit.after})
+  }
+  replacements.sort((left, right) => left.start - right.start)
+  let cursor = 0, applied = 0, html = ''
+  for (const replacement of replacements) {
+    if (replacement.start < cursor) continue
+    html += escapeHtml(turn.text.slice(cursor, replacement.start))
+    html += `<del>${escapeHtml(replacement.before)}</del><ins>${escapeHtml(replacement.after)}</ins>`
+    cursor = replacement.start + replacement.before.length
+    applied += 1
+  }
+  return applied ? html + escapeHtml(turn.text.slice(cursor)) : ''
+}
+
 async function renderInspector() {
   if (!state.transcript.editable) {
     $('#inspector').innerHTML = `<div class="eyebrow">${state.transcript.status.toUpperCase()} RECORDING</div><h2>${escapeHtml(state.transcript.title)}</h2><div class="subhead">${escapeHtml(state.transcript.audio.map(item => item.name).join(', ') || 'No audio source found')}</div><div class="notice">↻ <span>${state.transcript.status === 'stale' ? 'The existing Markdown is left untouched until you explicitly regenerate it with the current speech2md.' : 'Generate current Markdown and voiceprints from this recording.'}</span></div>${metadataEditorHtml()}<button class="primary regenerate-inspector">${state.transcript.status === 'stale' ? 'Regenerate with speech2md' : 'Generate with speech2md'}</button>`
@@ -167,10 +194,12 @@ async function renderInspector() {
   const turn = state.selected
   const identity = assignedIdentity(turn)
   const assignment = speakerAssignment(turn)
+  const wording = proposedWording(turn)
   const track = turn.track || state.transcript.audio[0]?.role || 'inferred after audio loads'
   $('#inspector').innerHTML = `
     <div class="eyebrow">SPEAKER TURN</div><h2>${clock(turn.start)} · ${escapeHtml(turn.speaker)}</h2><div class="subhead">${escapeHtml(track)} track</div>
     ${assignment.changed ? `<div class="assignment-notice"><span>${escapeHtml(assignment.current)}</span><strong>→ ${escapeHtml(assignment.proposed)}</strong><small>proposed after regeneration</small></div>` : ''}
+    ${wording ? `<div class="wording-notice"><span>PROPOSED WORDING</span><div>${wording}</div><small>applied after regeneration</small></div>` : ''}
     <div class="notice">◌ <span>Turn end is inferred from the next turn. Track is chosen by the strongest audio activity in this interval.</span></div>
     <div class="section"><label class="section-label">SPEAKER IDENTITY</label><input id="identity" class="field" value="${escapeHtml(identity)}" placeholder="Name or identity URI"></div>
     <div class="section"><span class="section-label">VOICEPRINT MATCHES</span><div id="candidates"><div class="empty">Comparing voiceprints…</div></div></div>
@@ -274,7 +303,7 @@ function renderCorrectionInspector() {
     if (state.transcript.audio.length > 1 && turn.track) edit.track = turn.track
     state.transcript.hints.edits.push(edit)
     if ($('#add-hotword').checked && !state.transcript.hints.hotwords.some(value => value.toLowerCase() === after.toLowerCase())) state.transcript.hints.hotwords.push(after)
-    markDirty(); await saveHints(); state.correction = null; renderInspector()
+    markDirty(); await saveHints(); state.correction = null; renderTranscript(); renderInspector()
   }
   $('#cancel-correction').onclick = () => { state.correction = null; renderInspector() }
 }
