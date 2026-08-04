@@ -12,9 +12,11 @@ license = "MIT"
 dependencies = [
   "mlx-audio[stt]==0.4.6",
   "numpy>=2,<3",
+  "pyyaml>=6,<7",
   "scipy>=1.15,<2",
   "torch==2.11.0",
   "torchaudio==2.11.0",
+  "tqdm>=4.67,<5",
 ]
 
 [project.optional-dependencies]

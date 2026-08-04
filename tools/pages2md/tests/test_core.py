@@ -566,6 +566,45 @@ def test_multi_page_ocr_windows_are_bounded_for_atomic_progress(tmp_path: Path):
     ]
 
 
+def test_conversion_progress_counts_completed_pages(tmp_path: Path, monkeypatch):
+    progress_bars = []
+
+    class RecordingProgress:
+        def __init__(self, **kwargs):
+            self.total = kwargs["total"]
+            self.completed = 0
+            self.postfixes = []
+            progress_bars.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def set_postfix_str(self, value, **kwargs):
+            self.postfixes.append(value)
+
+        def update(self, amount=1):
+            self.completed += amount
+
+    monkeypatch.setattr("pages2md.pipeline.tqdm", RecordingProgress)
+    pdf = tmp_path / "progress.pdf"
+    document = fitz.open()
+    for number in range(1, 4):
+        page = document.new_page(width=612, height=792)
+        page.insert_text((72, 72), f"Page {number} content.")
+    document.save(pdf)
+    document.close()
+
+    convert(pdf, tmp_path / "out", backend=FixtureOcr(), split_mode="single", quality="fast")
+
+    assert len(progress_bars) == 1
+    assert progress_bars[0].total == 3
+    assert progress_bars[0].completed == 3
+    assert "processing 1-3" in progress_bars[0].postfixes
+
+
 def test_document_normalization_drops_running_matter_without_inventing_semantics():
     page = PageResult(
         number=25,

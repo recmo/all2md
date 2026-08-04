@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import json
 import time
+from tqdm.auto import tqdm
 
 from .media import LEGACY_STATE_SUFFIXES, STATE_SUFFIX, probe, resolve_input
 from .model import TranscriptState
@@ -66,20 +67,47 @@ def transcribe(
         audio.append(source)
         sources.append((path, role, source))
 
-    embedder = get_redimnet2_embedder()
-    engine = load_moss_engine()
-    for path, role, source in sources:
-        track_segments, raw, speaker_profiles = transcribe_track(
-            path,
-            engine=engine,
-            prompt=prompt,
-            role=role,
-            duration=source.duration_seconds,
-            embedder=None if role == "microphone" else embedder,
-            speaker_profiles=speaker_profiles,
-        )
-        segments.extend(track_segments)
-        raw_tracks.append(raw)
+    with tqdm(
+        total=sum(source.duration_seconds for _, _, source in sources),
+        desc=resolved.requested.name,
+        unit="audio-sec",
+        dynamic_ncols=True,
+        smoothing=0.1,
+        disable=None,
+    ) as progress:
+        progress.set_postfix_str("loading speaker model")
+        embedder = get_redimnet2_embedder()
+        progress.set_postfix_str("loading transcription model")
+        engine = load_moss_engine()
+        for path, role, source in sources:
+
+            def report_progress(
+                window: int,
+                window_count: int,
+                attempt: int,
+                completed_seconds: float,
+                *,
+                track_role: str = role,
+            ) -> None:
+                status = f"{track_role} window {window}/{window_count}"
+                if attempt > 1:
+                    status += f" recovery {attempt - 1}"
+                progress.set_postfix_str(status)
+                if completed_seconds:
+                    progress.update(completed_seconds)
+
+            track_segments, raw, speaker_profiles = transcribe_track(
+                path,
+                engine=engine,
+                prompt=prompt,
+                role=role,
+                duration=source.duration_seconds,
+                embedder=None if role == "microphone" else embedder,
+                speaker_profiles=speaker_profiles,
+                progress_callback=report_progress,
+            )
+            segments.extend(track_segments)
+            raw_tracks.append(raw)
 
     window_count = sum(len(track["windows"]) for track in raw_tracks)
     actual_overlap = max((track["actual_overlap_seconds"] for track in raw_tracks), default=0.0)

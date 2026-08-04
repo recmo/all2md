@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image
+from tqdm.auto import tqdm
 
 from .adapters import open_document
 from .assets import AssetStore
@@ -114,69 +115,88 @@ def convert(
     page_results: list[PageResult] = []
     failed: list[dict[str, Any]] = []
     ocr_pages = []
-    for page in document.pages:
-        blank, ink_fraction = _is_visually_blank(page.image_path)
-        if not blank:
-            ocr_pages.append(page)
-            continue
-        result = _blank_page_result(page, ink_fraction)
-        atomic_json(bundle / "pages" / f"page-{page.number:04d}.json", result.to_dict())
-        page_results.append(result)
+    with tqdm(
+        total=len(document.pages),
+        desc=source.name,
+        unit="page",
+        dynamic_ncols=True,
+        smoothing=0.1,
+        disable=None,
+    ) as progress:
+        progress.set_postfix_str("checking pages", refresh=False)
+        for page in document.pages:
+            blank, ink_fraction = _is_visually_blank(page.image_path)
+            if not blank:
+                ocr_pages.append(page)
+                continue
+            result = _blank_page_result(page, ink_fraction)
+            atomic_json(bundle / "pages" / f"page-{page.number:04d}.json", result.to_dict())
+            page_results.append(result)
+            progress.update()
 
-    for group in _ocr_groups(ocr_pages, document.outline, multi_page=multi_page):
-        page_paths = [bundle / "pages" / f"page-{page.number:04d}.json" for page in group]
-        if can_resume and all(path.exists() for path in page_paths):
-            page_results.extend(_page_from_dict(_read_json(path)) for path in page_paths)
-            continue
-        try:
-            group_observation, recognized = _recognize_primary(group, backend, bundle)
-        except Exception as error:
-            failed.extend({"page": page.number, "error": str(error)} for page in group)
-            continue
-        aligned = _align_multi_results(group, recognized)
-        for source_page, (raw, generation), page_path in zip(group, aligned, page_paths):
+        for group in _ocr_groups(ocr_pages, document.outline, multi_page=multi_page):
+            page_paths = [bundle / "pages" / f"page-{page.number:04d}.json" for page in group]
+            page_range = str(group[0].number)
+            if len(group) > 1:
+                page_range += f"-{group[-1].number}"
+            progress.set_postfix_str(f"processing {page_range}")
+            if can_resume and all(path.exists() for path in page_paths):
+                page_results.extend(_page_from_dict(_read_json(path)) for path in page_paths)
+                progress.update(len(group))
+                continue
             try:
-                generation = dict(generation)
-                if len(group) > 1:
-                    generation["group_pages"] = [page.number for page in group]
-                primary = parse_native_observation(
-                    raw,
-                    mode="multi_base",
-                    source_pages=list(generation.get("source_pages", [source_page.number])),
-                    generation=generation,
-                )
-                # Canonical spans originate from the immutable group invocation;
-                # page segmentation is a deterministic parser view of that raw file.
-                primary.id = group_observation.id
-                candidates, candidate_warnings = _collect_page_candidates(
-                    source_page,
-                    primary,
-                    group_observation,
-                    backend,
-                    bundle,
-                    quality=quality,
-                )
-                blocks, recovery, validation_warnings = reconcile_observations(
-                    primary,
-                    candidates,
-                    embedded_text=source_page.embedded.text,
-                )
-                validation_warnings.extend(candidate_warnings)
-                result = _page_result(
-                    source_page,
-                    primary,
-                    group_observation,
-                    candidates,
-                    blocks,
-                    recovery,
-                    validation_warnings,
-                    assets,
-                    document.outline,
-                )
-                atomic_json(page_path, result.to_dict())
-                page_results.append(result)
+                group_observation, recognized = _recognize_primary(group, backend, bundle)
             except Exception as error:
-                failed.append({"page": source_page.number, "error": str(error)})
+                failed.extend({"page": page.number, "error": str(error)} for page in group)
+                progress.update(len(group))
+                continue
+            aligned = _align_multi_results(group, recognized)
+            for source_page, (raw, generation), page_path in zip(group, aligned, page_paths):
+                progress.set_postfix_str(f"processing {source_page.number}")
+                try:
+                    generation = dict(generation)
+                    if len(group) > 1:
+                        generation["group_pages"] = [page.number for page in group]
+                    primary = parse_native_observation(
+                        raw,
+                        mode="multi_base",
+                        source_pages=list(generation.get("source_pages", [source_page.number])),
+                        generation=generation,
+                    )
+                    # Canonical spans originate from the immutable group invocation;
+                    # page segmentation is a deterministic parser view of that raw file.
+                    primary.id = group_observation.id
+                    candidates, candidate_warnings = _collect_page_candidates(
+                        source_page,
+                        primary,
+                        group_observation,
+                        backend,
+                        bundle,
+                        quality=quality,
+                    )
+                    blocks, recovery, validation_warnings = reconcile_observations(
+                        primary,
+                        candidates,
+                        embedded_text=source_page.embedded.text,
+                    )
+                    validation_warnings.extend(candidate_warnings)
+                    result = _page_result(
+                        source_page,
+                        primary,
+                        group_observation,
+                        candidates,
+                        blocks,
+                        recovery,
+                        validation_warnings,
+                        assets,
+                        document.outline,
+                    )
+                    atomic_json(page_path, result.to_dict())
+                    page_results.append(result)
+                except Exception as error:
+                    failed.append({"page": source_page.number, "error": str(error)})
+                finally:
+                    progress.update()
 
     page_results.sort(key=lambda item: item.number)
     _normalize_document_blocks(page_results)

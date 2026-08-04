@@ -96,6 +96,7 @@
           pymupdf
           pytest
           jsonschema
+          tqdm
         ]
       );
       pages2md = pkgs.writeShellApplication {
@@ -163,7 +164,7 @@
         speech2md-tests =
           pkgs.runCommand "speech2md-tests"
             {
-              nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.pytest ])) ];
+              nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.pytest ps.pyyaml ps.tqdm ])) ];
             }
             ''
               export PYTHONPATH=${speechProject}/src

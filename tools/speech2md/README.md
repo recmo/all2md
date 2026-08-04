@@ -77,7 +77,9 @@ The raw per-window MOSS output and reconciliation decisions are retained in
 
 The generated `*.speech2md.json` is the editable processing state. Markdown is a
 disposable rendering of it, and `relabel` changes speaker names without
-retranscribing. The state retains multiple 192-dimensional vectors per speaker,
+retranscribing. Mechanical capture and processing details are retained in YAML
+frontmatter so the visible document body contains only the title and transcript.
+The state retains multiple 192-dimensional vectors per speaker,
 including their source track, window and absolute timestamps. They are
 meeting-local evidence only: cross-meeting enrollment, identity matching and
 automatic names are future work. Vectors are not written to Markdown.

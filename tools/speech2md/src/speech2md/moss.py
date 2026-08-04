@@ -7,7 +7,7 @@ import math
 import re
 import subprocess
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 from .model import Segment, SpeakerProfile
 from .redimnet2 import extract_window_evidence, reconcile_speakers
@@ -242,6 +242,7 @@ def transcribe_track(
     duration: float,
     embedder: Any | None = None,
     speaker_profiles: dict[str, SpeakerProfile] | None = None,
+    progress_callback: Callable[[int, int, int, float], None] | None = None,
 ) -> tuple[list[Segment], dict[str, Any], dict[str, SpeakerProfile]]:
     silence_centers = detect_silence_centers(path) if duration > TARGET_PART_SECONDS else []
     planned_windows = plan_windows(duration, silence_centers=silence_centers)
@@ -250,6 +251,7 @@ def transcribe_track(
     effective_windows: list[tuple[float, float]] = []
     evidence_by_window = []
     warnings = []
+    completed_through = 0.0
     with tempfile.TemporaryDirectory(prefix="speech2md-moss-") as temporary:
         directory = Path(temporary)
         inference_index = 0
@@ -259,6 +261,13 @@ def transcribe_track(
             previous_coverage_end: float | None = None
             while True:
                 inference_index += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        planned_index,
+                        len(planned_windows),
+                        attempt,
+                        0.0,
+                    )
                 chunk = directory / f"window-{inference_index:03d}.wav"
                 subprocess.run(
                     [
@@ -354,6 +363,15 @@ def transcribe_track(
                         warnings.append(
                             f"MOSS {role} planned window {planned_index} required "
                             f"{attempt - 1} overlapping recovery pass(es)"
+                        )
+                    newly_completed = max(0.0, planned_end - completed_through)
+                    completed_through = max(completed_through, planned_end)
+                    if progress_callback is not None:
+                        progress_callback(
+                            planned_index,
+                            len(planned_windows),
+                            attempt,
+                            newly_completed,
                         )
                     break
                 if not segments:

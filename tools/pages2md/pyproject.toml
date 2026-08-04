@@ -18,6 +18,7 @@ dependencies = [
   "pillow>=11.0.0,<13",
   "pymarkdownlnt==0.9.38",
   "pymupdf>=1.26.0,<2",
+  "tqdm>=4.67.0,<5",
 ]
 
 [project.optional-dependencies]
