@@ -23,6 +23,7 @@ from speech2md.moss import (
     build_transcription_prompt,
     deduplicate_boundaries,
     generation_diagnostics,
+    _generate_with_timestamp_progress,
     parse_moss_transcript,
     parse_silence_centers,
     parse_segments,
@@ -192,6 +193,28 @@ def test_trim_and_deduplicate_chunk_boundary():
     ]
     selected = trim_overlaps([first, second], windows)
     assert len(deduplicate_boundaries(selected)) == 2
+
+
+def test_streaming_generation_reports_output_timestamps():
+    updates = [
+        SimpleNamespace(text="[0][S01]Hello", generation_tokens=3),
+        SimpleNamespace(text=" there[12.5]", generation_tokens=5),
+        SimpleNamespace(text="[13][S02]Next[20]", generation_tokens=9),
+        SimpleNamespace(text="", generation_tokens=9),
+    ]
+    engine = SimpleNamespace(generate=lambda *args, **kwargs: iter(updates))
+    timestamps = []
+
+    result = _generate_with_timestamp_progress(
+        engine,
+        "window.wav",
+        prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        timestamp_callback=timestamps.append,
+    )
+
+    assert result.text == "[0][S01]Hello there[12.5][13][S02]Next[20]"
+    assert result.generation_tokens == 9
+    assert timestamps == [0.0, 12.5, 13.0, 20.0]
 
 
 def test_transcribe_recovers_when_token_count_is_suspect(
