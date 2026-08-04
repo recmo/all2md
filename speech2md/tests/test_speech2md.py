@@ -252,6 +252,36 @@ def test_speaker_hints_reject_contradictory_identities_for_one_local_speaker():
         )
 
 
+def test_transcribe_publishes_generation_cache_before_speaker_hint_reconciliation(
+    tmp_path: Path,
+):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    published = []
+
+    with pytest.raises(ValueError, match="multiple diarized speakers"):
+        transcribe_track(
+            source,
+            engine=None,
+            prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+            role="mixed",
+            duration=10,
+            cached_generations=[{
+                "text": "[0][S01]Alice[5][5][S02]Bob[10]",
+                "generation_tokens": 10,
+            }],
+            speaker_hints=(SpeakerHint("Alice", 4, 6, "mixed"),),
+            generation_cache_callback=published.append,
+        )
+
+    assert published == [[{
+        "text": "[0][S01]Alice[5][5][S02]Bob[10]",
+        "prompt_tokens": None,
+        "generation_tokens": 10,
+        "total_tokens": None,
+    }]]
+
+
 def test_streaming_generation_reports_output_timestamps():
     updates = [
         SimpleNamespace(text="[0][S01]Hello", generation_tokens=3),

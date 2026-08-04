@@ -417,7 +417,8 @@ function waveformClick(event) {
 function requestQueue(transcriptId, status, anchor, event) {
   event?.stopPropagation()
   if (status === 'unprocessed') return enqueueRecording(transcriptId)
-  showQueuePopover(anchor, transcriptId)
+  const job = [...state.jobs].reverse().find(item => item.transcriptId === transcriptId)
+  showQueuePopover(anchor, transcriptId, job)
 }
 
 async function enqueueRecording(transcriptId) {
@@ -427,10 +428,16 @@ async function enqueueRecording(transcriptId) {
   } catch (error) { toast(error.message) }
 }
 
-function showQueuePopover(anchor, transcriptId) {
+function showQueuePopover(anchor, transcriptId, job) {
   const popover = $('#action-popover')
   popover.hidden = false
   popover.dataset.anchorId = transcriptId
+  const failed = job?.status === 'failed'
+  $('#action-popover-title').textContent = failed ? 'Retry failed transcript?' : 'Replace derived transcript?'
+  popover.querySelector('p').textContent = failed
+    ? (job.error || 'speech2md failed without an error message')
+    : 'The current Markdown and voiceprints will be replaced. Audio and hints remain unchanged.'
+  $('#popover-confirm').textContent = failed ? 'Retry' : 'Replace transcript'
   const anchorBounds = anchor.getBoundingClientRect(), width = 292
   let left = Math.max(12, Math.min(innerWidth - width - 12, anchorBounds.right - width))
   let top = anchorBounds.bottom + 8

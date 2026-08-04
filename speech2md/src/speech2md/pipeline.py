@@ -64,7 +64,7 @@ def transcribe(
     cached_tracks = load_cache(moss_path, metadata)
     if require_moss_cache and any(source_key(source) not in cached_tracks for _, _, source in sources):
         raise MossCacheMiss("current MOSS cache is unavailable")
-    generated_tracks: dict[str, list[dict]] = {}
+    generated_tracks: dict[str, list[dict]] = dict(cached_tracks)
     cache_complete = True
     hinted_tracks = {hint.track for hint in hints.speakers}
     if hinted_tracks:
@@ -111,6 +111,15 @@ def transcribe(
 
             key = source_key(source)
             cached_generations = cached_tracks.get(key)
+
+            def persist_generation_cache(
+                generations: list[dict],
+                *,
+                track_key: str = key,
+            ) -> None:
+                generated_tracks[track_key] = generations
+                write_cache(moss_path, metadata, generated_tracks)
+
             if cached_generations is None and engine is None:
                 progress.set_postfix_str("loading transcription model")
                 emit_progress("loading transcription model", completed_seconds=processed_seconds, total_seconds=total_seconds)
@@ -128,6 +137,8 @@ def transcribe(
                 "speaker_hints": hints.speakers,
                 "progress_callback": report_progress,
             }
+            if cached_generations is None:
+                arguments["generation_cache_callback"] = persist_generation_cache
             try:
                 track_segments, moss_details, speaker_profiles = transcribe_track(
                     path, cached_generations=cached_generations, **arguments
@@ -138,6 +149,7 @@ def transcribe(
                 progress.set_postfix_str("discarding invalid MOSS cache")
                 engine = engine or load_moss_engine()
                 arguments["engine"] = engine
+                arguments["generation_cache_callback"] = persist_generation_cache
                 track_segments, moss_details, speaker_profiles = transcribe_track(
                     path, cached_generations=None, **arguments
                 )

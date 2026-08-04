@@ -294,6 +294,7 @@ def transcribe_track(
     speaker_profiles: dict[str, SpeakerProfile] | None = None,
     speaker_hints: tuple[SpeakerHint, ...] = (),
     cached_generations: list[dict[str, Any]] | None = None,
+    generation_cache_callback: Callable[[list[dict[str, Any]]], None] | None = None,
     progress_callback: Callable[[int, int, int, float], None] | None = None,
 ) -> tuple[list[Segment], dict[str, Any], dict[str, SpeakerProfile]]:
     silence_centers = detect_silence_centers(path) if duration > TARGET_PART_SECONDS else []
@@ -402,17 +403,6 @@ def transcribe_track(
                 effective_windows.append(
                     (start, coverage_end if requires_recovery else planned_end)
                 )
-                evidence = {}
-                embedding_diagnostics = []
-                if embedder is not None:
-                    evidence, embedding_diagnostics = extract_window_evidence(
-                        path,
-                        segments,
-                        window=inference_index,
-                        source_track=role,
-                        embedder=embedder,
-                    )
-                evidence_by_window.append(evidence)
                 raw_windows.append({
                     "index": inference_index,
                     "planned_window": planned_index,
@@ -431,7 +421,7 @@ def transcribe_track(
                     "possibly_truncated": diagnostics["possibly_truncated"],
                     "parse_status": diagnostics["parse_status"],
                     "segments": [asdict(segment) for segment in segments],
-                    "embedding_samples": embedding_diagnostics,
+                    "embedding_samples": [],
                 })
                 if diagnostics["parse_status"] == "invalid":
                     raise RuntimeError(
@@ -484,6 +474,22 @@ def transcribe_track(
             pass
         else:
             raise ValueError("MOSS cache has unused generations")
+
+    if generation_cache_callback is not None:
+        generation_cache_callback(list(generation_cache))
+
+    for index, segments in enumerate(by_window, 1):
+        evidence = {}
+        if embedder is not None:
+            evidence, embedding_diagnostics = extract_window_evidence(
+                path,
+                segments,
+                window=index,
+                source_track=role,
+                embedder=embedder,
+            )
+            raw_windows[index - 1]["embedding_samples"] = embedding_diagnostics
+        evidence_by_window.append(evidence)
 
     selected_for_hints = trim_overlaps(by_window, effective_windows)
     anchors = resolve_speaker_anchors(selected_for_hints, speaker_hints, role=role)
