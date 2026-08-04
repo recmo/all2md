@@ -34,8 +34,8 @@
     let
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
-      pagesProject = ./tools/pages2md;
-      speechProject = ./tools/speech2md;
+      pagesProject = ./pages2md;
+      speechProject = ./speech2md;
       pagesVersion =
         if self ? rev then
           self.rev
@@ -102,7 +102,6 @@
           pillow
           pymupdf
           pytest
-          jsonschema
           tqdm
         ]
       );
@@ -130,7 +129,7 @@
           exec ${speechEnvironment}/bin/speech2md "$@"
         '';
       };
-      meeting-capture = pkgs.callPackage ./apps/meeting-capture/package.nix { };
+      meeting-capture = pkgs.callPackage ./meeting-capture/package.nix { };
     in
     {
       packages.${system} = {
@@ -231,12 +230,6 @@
               test ! -e "$XDG_CACHE_HOME/speech2md/venv"
               touch "$out"
             '';
-        meeting-capture-schema =
-          pkgs.runCommand "meeting-capture-schema-check" { nativeBuildInputs = [ testPython ]; }
-            ''
-              python -c 'import json, jsonschema; schema=json.load(open("${./schemas/meeting-capture-v1.schema.json}")); fixture=json.load(open("${./apps/meeting-capture/Tests/Fixtures/manifest-v1.json}")); jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(fixture)'
-              touch "$out"
-            '';
       };
 
       devShells.${system} = rec {
@@ -248,14 +241,14 @@
             pkgs.uv
           ];
           shellHook = ''
-            echo "Run: uv sync --project tools/pages2md --extra dev --extra ocr"
+            echo "Run: uv sync --project pages2md --extra dev --extra ocr"
           '';
         };
 
         meeting-capture = pkgs.mkShell {
           packages = [ pkgs.xcodegen ];
           shellHook = ''
-            echo "Run: cd apps/meeting-capture && xcodegen generate"
+            echo "Run: cd meeting-capture && xcodegen generate"
           '';
         };
 
@@ -266,7 +259,7 @@
             pkgs.uv
           ];
           shellHook = ''
-            echo "Run: uv sync --project tools/speech2md --extra dev"
+            echo "Run: uv sync --project speech2md --extra dev"
           '';
         };
 

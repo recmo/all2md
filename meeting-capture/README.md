@@ -12,7 +12,7 @@ future `speech2md` processor.
 
 ```sh
 nix develop .#meeting-capture
-cd apps/meeting-capture
+cd meeting-capture
 xcodegen generate
 xcodebuild -project MeetingCapture.xcodeproj -scheme MeetingCapture build
 ```

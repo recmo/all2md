@@ -28,8 +28,8 @@ For development:
 
 ```sh
 nix develop .#pages2md
-uv sync --project tools/pages2md --extra dev --extra ocr
-uv run --project tools/pages2md pytest
+uv sync --project pages2md --extra dev --extra ocr
+uv run --project pages2md pytest
 ```
 
 The OCR dependency is pinned to MLX-VLM revision

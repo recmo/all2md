@@ -4,16 +4,16 @@ Local-first tools that turn source material into auditable Markdown.
 
 ## Projects
 
-- [`pages2md`](tools/pages2md/README.md) converts books, papers, scans, and
+- [`pages2md`](pages2md/README.md) converts books, papers, scans, and
   image archives into portable Markdown bundles with retained OCR evidence.
-- [`Meeting Capture`](apps/meeting-capture/README.md) records local microphone
+- [`Meeting Capture`](meeting-capture/README.md) records local microphone
   and meeting-participant audio into canonical, lossless meeting records.
-- [`speech2md`](tools/speech2md/README.md) uses MOSS locally to transcribe and
+- [`speech2md`](speech2md/README.md) uses MOSS locally to transcribe and
   diarize recordings, with ReDimNet2 voice embeddings for stable speaker
   labels across processing windows.
 
 Each project owns its runtime and dependencies. The repository shares only
-stable artifact schemas and top-level build orchestration.
+top-level build orchestration.
 
 The Nix packages include their locked Python dependency environments in the
 immutable store. Running an installed CLI never creates a virtual environment;
@@ -31,7 +31,7 @@ nix flake check
 ```
 
 Meeting Capture is packaged as `packages.aarch64-darwin.meeting-capture` and is
-developed from `apps/meeting-capture/MeetingCapture.xcodeproj`. The Nix package
+developed from `meeting-capture/MeetingCapture.xcodeproj`. The Nix package
 uses the locally installed Xcode and installs `MeetingCapture.app` under its
 `Applications` output.
 

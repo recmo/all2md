@@ -17,9 +17,9 @@ immutable Nix store. It does not create a virtual environment or install
 packages at runtime; only model weights and checkpoints populate user caches.
 
 ```sh
-uv sync --project tools/speech2md --extra dev
-uv run --project tools/speech2md pytest tools/speech2md/tests
-uv run --project tools/speech2md speech2md meeting.mp4
+uv sync --project speech2md --extra dev
+uv run --project speech2md pytest speech2md/tests
+uv run --project speech2md speech2md meeting.mp4
 ```
 
 The input may be an ordinary audio/video file or a Meeting Capture v1 manifest.
