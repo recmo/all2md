@@ -46,6 +46,17 @@
           workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = project; };
           overlay = workspace.mkPyprojectOverlay { sourcePreference = "wheel"; };
           buildSystemOverrides = final: prev: {
+            mlx = prev.mlx.overrideAttrs (old: {
+              nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.darwin.cctools ];
+              postFixup = (old.postFixup or "") + ''
+                for extension in "$out"/lib/python*/site-packages/mlx/core*.so; do
+                  install_name_tool \
+                    -rpath @loader_path/lib \
+                    ${final."mlx-metal"}/lib/python${pkgs.python313.pythonVersion}/site-packages/mlx/lib \
+                    "$extension"
+                done
+              '';
+            });
             mlx-vlm = prev.mlx-vlm.overrideAttrs (old: {
               nativeBuildInputs =
                 (old.nativeBuildInputs or [ ])
@@ -165,6 +176,7 @@
             {
               nativeBuildInputs = [
                 pages2md
+                pkgs.darwin.cctools
                 speech2md
               ];
             }
@@ -174,6 +186,12 @@
               mkdir -p "$HOME" "$XDG_CACHE_HOME"
               pages2md --help > /dev/null
               speech2md --help > /dev/null
+              for extension in \
+                ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
+                ${speechEnvironment}/lib/python*/site-packages/mlx/core*.so; do
+                otool -l "$extension" \
+                  | grep -Eq 'path /nix/store/[a-z0-9]+-mlx-metal-[^/]+/lib/python[^/]+/site-packages/mlx/lib '
+              done
               test ! -e "$XDG_CACHE_HOME/pages2md/venv"
               test ! -e "$XDG_CACHE_HOME/speech2md/venv"
               touch "$out"
