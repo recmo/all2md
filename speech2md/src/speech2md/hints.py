@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from .model import AudioSource, ResolvedInput, SpeakerHint
+from .model import AudioSource, ResolvedInput, Segment, SpeakerHint, TranscriptEdit
 from .moss import normalize_hotwords
 
 
@@ -15,6 +15,8 @@ from .moss import normalize_hotwords
 class SpeechHints:
     hotwords: tuple[str, ...] = ()
     speakers: tuple[SpeakerHint, ...] = ()
+    attendees: tuple[str, ...] = ()
+    edits: tuple[TranscriptEdit, ...] = ()
     sha256: str | None = None
 
 
@@ -35,7 +37,7 @@ def load_hints(path: Path) -> SpeechHints:
     if value is None:
         value = {}
     mapping = _mapping(value, "hint sidecar")
-    _only(mapping, {"hotwords", "speakers"}, "hint sidecar")
+    _only(mapping, {"attendees", "edits", "hotwords", "speakers"}, "hint sidecar")
 
     raw_hotwords = mapping.get("hotwords", [])
     if not isinstance(raw_hotwords, list):
@@ -43,6 +45,18 @@ def load_hints(path: Path) -> SpeechHints:
     if not all(isinstance(item, str) for item in raw_hotwords):
         raise ValueError("hint hotwords must contain only strings")
     hotwords = tuple(normalize_hotwords(raw_hotwords))
+
+    raw_attendees = mapping.get("attendees", [])
+    if not isinstance(raw_attendees, list):
+        raise ValueError("hint attendees must be a list")
+    attendees: list[str] = []
+    for attendee_index, raw_attendee in enumerate(raw_attendees, 1):
+        attendee = _mapping(raw_attendee, f"hint attendee {attendee_index}")
+        _only(attendee, {"identity"}, f"hint attendee {attendee_index}")
+        identity = _single_line(attendee.get("identity"), f"hint attendee {attendee_index} identity")
+        if identity in attendees:
+            raise ValueError(f"duplicate hint attendee identity: {identity}")
+        attendees.append(identity)
 
     raw_speakers = mapping.get("speakers", [])
     if not isinstance(raw_speakers, list):
@@ -52,12 +66,7 @@ def load_hints(path: Path) -> SpeechHints:
     for speaker_index, raw_speaker in enumerate(raw_speakers, 1):
         speaker = _mapping(raw_speaker, f"hint speaker {speaker_index}")
         _only(speaker, {"identity", "ranges"}, f"hint speaker {speaker_index}")
-        identity = speaker.get("identity")
-        if not isinstance(identity, str) or not identity.strip():
-            raise ValueError(f"hint speaker {speaker_index} identity must be a non-empty string")
-        identity = identity.strip()
-        if "\n" in identity or "\r" in identity:
-            raise ValueError(f"hint speaker {speaker_index} identity must be a single-line string")
+        identity = _single_line(speaker.get("identity"), f"hint speaker {speaker_index} identity")
         if identity in identities:
             raise ValueError(f"duplicate hint speaker identity: {identity}")
         identities.add(identity)
@@ -76,12 +85,34 @@ def load_hints(path: Path) -> SpeechHints:
             if track is not None and (not isinstance(track, str) or not track.strip()):
                 raise ValueError(f"{label} track must be a non-empty string")
             speakers.append(SpeakerHint(identity, start, end, track.strip() if track else None))
-    return SpeechHints(hotwords, tuple(speakers), hashlib.sha256(raw).hexdigest())
+    raw_edits = mapping.get("edits", [])
+    if not isinstance(raw_edits, list):
+        raise ValueError("hint edits must be a list")
+    edits: list[TranscriptEdit] = []
+    for edit_index, raw_edit in enumerate(raw_edits, 1):
+        label = f"hint edit {edit_index}"
+        edit = _mapping(raw_edit, label)
+        _only(edit, {"track", "start", "end", "before", "after"}, label)
+        start = _number(edit.get("start"), f"{label} start")
+        end = _number(edit.get("end"), f"{label} end")
+        if start < 0 or end <= start:
+            raise ValueError(f"{label} must have 0 <= start < end")
+        before = _single_line(edit.get("before"), f"{label} before")
+        after = _single_line(edit.get("after"), f"{label} after")
+        track = edit.get("track")
+        if track is not None:
+            track = _single_line(track, f"{label} track")
+        edits.append(TranscriptEdit(start, end, before, after, track))
+    return SpeechHints(
+        hotwords=hotwords,
+        speakers=tuple(speakers),
+        attendees=tuple(attendees),
+        edits=tuple(edits),
+        sha256=hashlib.sha256(raw).hexdigest(),
+    )
 
 
 def validate_hints(hints: SpeechHints, sources: list[AudioSource]) -> SpeechHints:
-    if not hints.speakers:
-        return hints
     by_role: dict[str, list[AudioSource]] = {}
     for source in sources:
         by_role.setdefault(source.role, []).append(source)
@@ -120,7 +151,43 @@ def validate_hints(hints: SpeechHints, sources: list[AudioSource]) -> SpeechHint
                     f"conflicting hint ranges for {left.identity} and {right.identity} "
                     f"on {left.track}"
                 )
-    return SpeechHints(hints.hotwords, tuple(validated), hints.sha256)
+    for edit in hints.edits:
+        if edit.track is None:
+            if len(sources) != 1:
+                raise ValueError(f"hint edit at {edit.start:g}-{edit.end:g}s requires a track")
+            source = sources[0]
+        else:
+            matches = by_role.get(edit.track, [])
+            if not matches:
+                raise ValueError(f"unknown hint track: {edit.track}")
+            if len(matches) != 1:
+                raise ValueError(f"ambiguous hint track: {edit.track}")
+            source = matches[0]
+        if edit.end > source.duration_seconds:
+            raise ValueError(
+                f"hint edit at {edit.start:g}-{edit.end:g}s exceeds "
+                f"{source.role} duration {source.duration_seconds:g}s"
+            )
+    return SpeechHints(hints.hotwords, tuple(validated), hints.attendees, hints.edits, hints.sha256)
+
+
+def apply_edits(segments: list[Segment], edits: tuple[TranscriptEdit, ...]) -> None:
+    for edit in edits:
+        matches: list[Segment] = []
+        for segment in segments:
+            if edit.track is not None and segment.source_role != edit.track:
+                continue
+            if min(segment.end, edit.end) <= max(segment.start, edit.start):
+                continue
+            if edit.before in segment.text:
+                matches.append(segment)
+        occurrences = sum(segment.text.count(edit.before) for segment in matches)
+        if occurrences != 1:
+            raise ValueError(
+                f"hint edit at {edit.start:g}-{edit.end:g}s matched {occurrences} occurrences"
+            )
+        segment = matches[0]
+        segment.text = segment.text.replace(edit.before, edit.after, 1)
 
 
 def _mapping(value, label: str) -> dict:
@@ -144,3 +211,12 @@ def _number(value, label: str) -> float:
     if not math.isfinite(number):
         raise ValueError(f"{label} must be finite")
     return number
+
+
+def _single_line(value, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty string")
+    value = value.strip()
+    if "\n" in value or "\r" in value:
+        raise ValueError(f"{label} must be a single-line string")
+    return value

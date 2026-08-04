@@ -53,6 +53,15 @@ class SpeakerHint:
     track: str | None = None
 
 
+@dataclass(frozen=True)
+class TranscriptEdit:
+    start: float
+    end: float
+    before: str
+    after: str
+    track: str | None = None
+
+
 @dataclass
 class TranscriptState:
     title: str | None

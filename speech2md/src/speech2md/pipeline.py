@@ -8,7 +8,7 @@ import time
 from tqdm.auto import tqdm
 
 from . import __version__
-from .hints import hint_path, load_hints, validate_hints
+from .hints import apply_edits, hint_path, load_hints, validate_hints
 from .media import probe, resolve_input, sha256
 from .model import TranscriptState
 from .moss import (
@@ -20,7 +20,7 @@ from .redimnet2 import (
     get_redimnet2_embedder,
     write_voiceprints,
 )
-from .render import render_markdown
+from .render import coalesce_segments, render_markdown
 
 
 def transcribe(
@@ -94,6 +94,12 @@ def transcribe(
             )
             segments.extend(track_segments)
     speaker_profiles, identities = _canonicalize_speakers(segments, speaker_profiles)
+    segments = coalesce_segments(segments)
+    apply_edits(segments, hints.edits)
+    attendee_identities = list(hints.attendees)
+    for identity in identities.values():
+        if identity in attendee_identities:
+            attendee_identities.remove(identity)
     state = TranscriptState(
         title=resolved.title,
         started_at=resolved.started_at,
@@ -105,7 +111,7 @@ def transcribe(
         attendees=[
             {"handle": handle, "identity": identity}
             for handle, identity in identities.items()
-        ],
+        ] + [{"identity": identity} for identity in attendee_identities],
         hints_sha256=hints.sha256,
     )
     with tempfile.TemporaryDirectory(

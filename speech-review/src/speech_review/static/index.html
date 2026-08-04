@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Speech Review</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><span class="brand-mark">S</span><span>Speech Review</span></div>
+    <div class="meeting-title"><strong id="meeting-title">Choose a transcript</strong><span id="meeting-meta">Hint-only transcript editor</span></div>
+    <div class="header-actions"><span id="save-state" class="save-state">No changes</span><button id="regenerate" class="secondary" title="Run speech2md explicitly outside the editor">Regenerate ↗</button></div>
+  </header>
+  <main class="workspace">
+    <aside class="browser-panel">
+      <div class="panel-heading"><span>TRANSCRIPTS</span><span id="transcript-count">0</span></div>
+      <label class="search"><span>⌕</span><input id="search" placeholder="Search folder"></label>
+      <div id="transcript-list" class="transcript-list"></div>
+    </aside>
+    <section class="review-panel">
+      <div class="playback-panel">
+        <div class="transport">
+          <div class="transport-left">
+            <button id="play" class="play" aria-label="Play">▶</button>
+            <span id="current-time" class="mono">00:00:00</span><span id="duration" class="duration">/ 00:00:00</span>
+          </div>
+          <div class="zoom"><button id="zoom-out" aria-label="Zoom out">−</button><input id="zoom" type="range" min="0" max="4" step="1" value="0"><button id="zoom-in" aria-label="Zoom in">+</button><span id="zoom-label" class="mono">FIT</span></div>
+        </div>
+        <canvas id="waveform" aria-label="Audio waveform"></canvas>
+        <div id="timeline" class="timeline"></div>
+      </div>
+      <div class="transcript-heading"><h1>Transcript</h1><span>Select text to correct · Space to play/pause</span></div>
+      <div id="transcript" class="transcript"><div class="empty">Select a transcript from the folder.</div></div>
+    </section>
+    <aside id="inspector" class="inspector"><div class="empty">Select a speaker turn or some text.</div></aside>
+  </main>
+  <div id="toast" class="toast" role="status"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

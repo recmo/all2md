@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from speech2md.hints import SpeechHints, load_hints, validate_hints
-from speech2md.model import AudioSource, SpeakerHint
+from speech2md.hints import SpeechHints, apply_edits, load_hints, validate_hints
+from speech2md.model import AudioSource, Segment, SpeakerHint, TranscriptEdit
 
 
 def source(role: str = "mixed", duration: float = 900) -> AudioSource:
@@ -32,18 +32,30 @@ def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Pa
         "  - ' ProveKit '\n"
         "  - F2Z\n"
         "  - provekit\n"
+        "attendees:\n"
+        "  - identity: Michał\n"
         "speakers:\n"
         "  - identity: gbrain://people/alice\n"
         "    ranges:\n"
         "      - track: participants\n"
         "        start: 12.5\n"
         "        end: 18\n"
+        "edits:\n"
+        "  - track: participants\n"
+        "    start: 12.5\n"
+        "    end: 18\n"
+        "    before: F two Z\n"
+        "    after: F2Z\n"
     )
     path.write_text(raw)
     hints = load_hints(path)
     assert hints.hotwords == ("ProveKit", "F2Z")
     assert hints.speakers == (
         SpeakerHint("gbrain://people/alice", 12.5, 18.0, "participants"),
+    )
+    assert hints.attendees == ("Michał",)
+    assert hints.edits == (
+        TranscriptEdit(12.5, 18.0, "F two Z", "F2Z", "participants"),
     )
     assert hints.sha256 == hashlib.sha256(raw.encode()).hexdigest()
 
@@ -78,6 +90,12 @@ def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch
         ("hotwords: [F2Z, 3]\n", "only strings"),
         ("hotwords: ['']\n", "must not be empty"),
         ("speakers: {}\n", "must be a list"),
+        ("attendees: [Alice]\n", "must be a mapping"),
+        ("edits: {}\n", "must be a list"),
+        (
+            "edits:\n  - {start: 1, end: 2, before: old}\n",
+            "after must be a non-empty string",
+        ),
         (
             "speakers:\n  - identity: ''\n    ranges: [{start: 1, end: 2}]\n",
             "identity must be a non-empty string",
@@ -153,3 +171,23 @@ def test_conflicting_identity_ranges_are_rejected():
         SpeakerHint("Alice", 19, 30, "participants"),
     ))
     assert len(validate_hints(same_identity, [source("participants")]).speakers) == 2
+
+
+def test_localized_edit_changes_exactly_one_overlapping_occurrence():
+    segments = [
+        Segment(10, 20, "The prover uses F two Z.", "speaker-1", "participants"),
+        Segment(30, 40, "F two Z appears later.", "speaker-2", "participants"),
+    ]
+    apply_edits(
+        segments,
+        (TranscriptEdit(12, 18, "F two Z", "F2Z", "participants"),),
+    )
+    assert segments[0].text == "The prover uses F2Z."
+    assert segments[1].text == "F two Z appears later."
+
+
+def test_localized_edit_rejects_missing_or_ambiguous_occurrence():
+    segment = Segment(10, 20, "F two Z and F two Z", "speaker-1", "mixed")
+    edit = TranscriptEdit(10, 20, "F two Z", "F2Z", "mixed")
+    with pytest.raises(ValueError, match="matched 2 occurrences"):
+        apply_edits([segment], (edit,))
