@@ -8,8 +8,6 @@ from pathlib import Path
 from .model import AudioSource, ResolvedInput
 
 MEDIA_SUFFIXES = {".aac", ".caf", ".flac", ".m4a", ".mp3", ".mp4", ".ogg", ".wav", ".webm"}
-STATE_SUFFIX = ".speech2md.json"
-LEGACY_STATE_SUFFIXES = (".audio2md.json", ".voice2md.json")
 
 
 def sha256(path: Path) -> str:
@@ -58,19 +56,18 @@ def resolve_input(requested: Path) -> ResolvedInput:
         stem = requested.with_suffix("")
         return ResolvedInput(
             requested=requested,
-            state_path=stem.with_suffix(STATE_SUFFIX),
             markdown_path=stem.with_suffix(".md"),
-            capture_manifest=None,
-            meeting_id=None,
             title=None,
             started_at=None,
+            ended_at=None,
+            calendar_event=None,
             sources=((requested, "mixed", None),),
         )
 
     value = json.loads(requested.read_text())
     if value.get("schemaVersion") != 1:
         raise ValueError("unsupported meeting capture schema version")
-    required = {"meetingID", "audio", "status", "startedAt"}
+    required = {"meetingID", "audio", "status", "startedAt", "endedAt"}
     missing = required - value.keys()
     if missing:
         raise ValueError("capture manifest missing: " + ", ".join(sorted(missing)))
@@ -82,11 +79,14 @@ def resolve_input(requested: Path) -> ResolvedInput:
     base = requested.name.removesuffix("-capture.json")
     return ResolvedInput(
         requested=requested,
-        state_path=requested.parent / f"{base}{STATE_SUFFIX}",
         markdown_path=requested.parent / f"{base}.md",
-        capture_manifest=requested,
-        meeting_id=value["meetingID"],
         title=value.get("title"),
         started_at=value.get("startedAt"),
+        ended_at=value.get("endedAt"),
+        calendar_event=(
+            value.get("calendarEventID")
+            if str(value.get("calendarEventID", "")).startswith(("https://", "http://"))
+            else None
+        ),
         sources=tuple(sources),
     )

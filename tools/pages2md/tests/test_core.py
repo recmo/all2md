@@ -10,13 +10,13 @@ import fitz
 from PIL import Image
 import pytest
 
-from pages2md.chapters import chapters_from_map
 from pages2md.chapters import detect_chapters
+from pages2md.cli import parser
 from pages2md.compare import compare_text
 from pages2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
 from pages2md.native import parse_native_observation, reconcile_observations
 from pages2md.adapters import _link_target
-from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, convert
+from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _convert_workspace, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, convert
 from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from pages2md.verify import verify_bundle
 
@@ -80,6 +80,16 @@ class InterruptingFixtureOcr:
 
     def recognize(self, image: Path):
         raise AssertionError("Gundam recovery is not expected for matching fixture text")
+
+
+def test_cli_has_one_input_and_force_only():
+    arguments = parser().parse_args(["paper.pdf", "--force"])
+    assert arguments.input == Path("paper.pdf")
+    assert arguments.force is True
+    with pytest.raises(SystemExit):
+        parser().parse_args(["convert", "paper.pdf"])
+    with pytest.raises(SystemExit):
+        parser().parse_args(["paper.pdf", "--output", "result"])
 
 
 def test_parse_unlimited_output():
@@ -475,13 +485,6 @@ def test_repeated_table_cells_are_not_treated_as_generation_loop():
     assert "visual_text_repetition" not in comparison.warnings
 
 
-def test_chapter_map(tmp_path: Path):
-    path = tmp_path / "chapters.json"
-    path.write_text(json.dumps([{"title": "Intro", "start_page": 1}, {"title": "Next", "start_page": 3}]))
-    chapters = chapters_from_map(path, [1, 2, 3, 4])
-    assert [(item.start_page, item.end_page) for item in chapters] == [(1, 2), (3, 4)]
-
-
 def test_outline_splits_at_chapter_level_and_keeps_parts(tmp_path: Path):
     source = SourceDocument(
         path=tmp_path / "book.pdf",
@@ -522,7 +525,7 @@ def test_many_short_chapters_use_parts_as_file_units(tmp_path: Path):
     assert [chapter.title for chapter in chapters] == ["Front matter", "Part 1", "Part 2", "Part 3", "Back matter"]
 
 
-def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
+def test_single_markdown_with_figures_publishes_only_final_artifacts(tmp_path: Path):
     pdf = tmp_path / "paper.pdf"
     image_path = tmp_path / "source.png"
     Image.new("RGB", (100, 100), "navy").save(image_path)
@@ -533,27 +536,22 @@ def test_pdf_bundle_assets_links_and_evidence(tmp_path: Path):
     document.save(pdf)
     document.close()
 
-    bundle = convert(pdf, tmp_path / "out", backend=FixtureOcr(), split_mode="single")
-    markdown = (bundle / "book.md").read_text()
+    bundle = convert(pdf, backend=FixtureOcr())
+    assert bundle == tmp_path / "paper.pdf.md"
+    assert sorted(str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file()) == [
+        "figures/fig-0001.png",
+        "figures/fig-0002.png",
+        "paper.pdf.md",
+    ]
+    markdown = (bundle / "paper.pdf.md").read_text()
+    assert markdown.startswith("---\nsource_sha256: ")
+    assert "\npages2md_version: " in markdown.split("---", 2)[1]
     assert "The visual text has $x^2$." in markdown
     assert "broken embedded text" not in markdown
     assert "![A useful diagram.]" in markdown
     assert "![Embedded figure]" in markdown
-    page_json = json.loads((bundle / "pages/page-0001.json").read_text())
-    assert "broken embedded text" in page_json["embedded"]["text"]
-    assert "<|det|>diagram" in page_json["raw_ocr"]
-    assert (bundle / "conversion.log").exists()
-    manifest = json.loads((bundle / "assets/manifest.json").read_text())
-    assert len(manifest["assets"]) >= 2
     verification = verify_bundle(bundle)
     assert verification.ok, verification.errors
-
-    resumed = convert(pdf, tmp_path / "out", backend=FixtureOcr(), split_mode="single")
-    resumed_manifest = json.loads((resumed / "assets/manifest.json").read_text())
-    assert len(resumed_manifest["assets"]) == len(manifest["assets"])
-    resumed_metadata = json.loads((resumed / "metadata.json").read_text())
-    assert resumed_metadata["resume_stable"] is True
-    assert resumed_metadata["output_fingerprints"]
 
 
 def test_pdf_link_targets_accept_string_page_numbers():
@@ -579,7 +577,7 @@ def test_blank_pages_are_not_grouped_with_content(tmp_path: Path):
         SourcePage(1, content),
         SourcePage(3, content),
     ]
-    assert [[page.number for page in group] for group in _ocr_groups(pages, [], multi_page=True)] == [[1], [3]]
+    assert [[page.number for page in group] for group in _ocr_groups(pages, [])] == [[1], [3]]
 
 
 def test_multi_page_ocr_windows_are_bounded_for_atomic_progress(tmp_path: Path):
@@ -587,7 +585,7 @@ def test_multi_page_ocr_windows_are_bounded_for_atomic_progress(tmp_path: Path):
     Image.new("RGB", (10, 10), "white").save(image)
     pages = [SourcePage(number, image) for number in range(1, 21)]
 
-    groups = _ocr_groups(pages, [], multi_page=True)
+    groups = _ocr_groups(pages, [])
 
     assert [[page.number for page in group] for group in groups] == [
         list(range(1, 9)),
@@ -627,7 +625,7 @@ def test_conversion_progress_counts_completed_pages(tmp_path: Path, monkeypatch)
     document.save(pdf)
     document.close()
 
-    convert(pdf, tmp_path / "out", backend=FixtureOcr(), split_mode="single", quality="fast")
+    convert(pdf, backend=FixtureOcr())
 
     assert len(progress_bars) == 1
     assert progress_bars[0].total == 3
@@ -797,7 +795,7 @@ def test_recovery_observations_and_provenance_are_preserved(tmp_path: Path):
     page.insert_text((72, 72), "A truncated local sentence with recovered detail.")
     document.save(pdf)
     document.close()
-    bundle = convert(pdf, tmp_path / "out", backend=RecoveryFixtureOcr(), split_mode="single")
+    bundle = _convert_workspace(pdf, tmp_path / "out", backend=RecoveryFixtureOcr())
     page_json = json.loads((bundle / "pages/page-0001.json").read_text())
     assert page_json["visual"]["multi_page"]["raw_path"].startswith("raw/")
     assert len(page_json["visual"]["candidates"]) == 1
@@ -808,7 +806,7 @@ def test_recovery_observations_and_provenance_are_preserved(tmp_path: Path):
     assert verification.ok, verification.errors
 
 
-def test_interrupted_conversion_resumes_atomically_without_reprocessing(tmp_path: Path):
+def test_failed_conversion_publishes_no_intermediate_results(tmp_path: Path):
     pdf = tmp_path / "interrupted.pdf"
     document = fitz.open()
     for number in range(1, 4):
@@ -816,71 +814,26 @@ def test_interrupted_conversion_resumes_atomically_without_reprocessing(tmp_path
         page.insert_text((72, 72), f"Page {number} content.")
     document.save(pdf)
     document.close()
-    backend = InterruptingFixtureOcr()
+    class FailingOnce(FixtureOcr):
+        def __init__(self):
+            self.failed = False
+
+        def recognize_pages(self, images):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("simulated interruption")
+            return FixtureOcr.recognize(self, images[0])
+
+    backend = FailingOnce()
     try:
-        convert(
-            pdf,
-            tmp_path / "out",
-            backend=backend,
-            split_mode="single",
-            multi_page=False,
-            quality="balanced",
-        )
+        convert(pdf, backend=backend)
     except RuntimeError as error:
-        assert "1 page(s) failed" in str(error)
+        assert "3 page(s) failed" in str(error)
     else:
         raise AssertionError("the first conversion should be interrupted")
-    bundle = convert(
-        pdf,
-        tmp_path / "out",
-        backend=backend,
-        split_mode="single",
-        multi_page=False,
-        quality="balanced",
-    )
-    assert backend.calls == {1: 1, 2: 2, 3: 1}
-    metadata = json.loads((bundle / "metadata.json").read_text())
-    assert metadata["resume_stable"] is True
-    assert verify_bundle(bundle).ok
-
-
-def test_assembly_changes_reuse_ocr_without_reporting_instability(tmp_path: Path):
-    pdf = tmp_path / "book.pdf"
-    document = fitz.open()
-    for number in range(1, 3):
-        page = document.new_page(width=612, height=792)
-        page.insert_text((72, 72), f"Page {number} content.")
-    document.save(pdf)
-    document.close()
-    chapter_map = tmp_path / "chapters.json"
-    chapter_map.write_text(json.dumps([
-        {"title": "One", "start_page": 1},
-        {"title": "Two", "start_page": 2},
-    ]))
-    backend = InterruptingFixtureOcr()
-    backend.fail_page_two = False
-    convert(
-        pdf,
-        tmp_path / "out",
-        backend=backend,
-        split_mode="single",
-        chapter_map=chapter_map,
-        multi_page=False,
-        quality="balanced",
-    )
-    calls = dict(backend.calls)
-    bundle = convert(
-        pdf,
-        tmp_path / "out",
-        backend=backend,
-        split_mode="chapters",
-        chapter_map=chapter_map,
-        multi_page=False,
-        quality="balanced",
-    )
-    metadata = json.loads((bundle / "metadata.json").read_text())
-    assert backend.calls == calls
-    assert metadata["resume_stable"] is True
+    assert not (tmp_path / "interrupted.pdf.md").exists()
+    bundle = convert(pdf, backend=backend)
+    assert bundle == tmp_path / "interrupted.pdf.md"
     assert verify_bundle(bundle).ok
 
 
@@ -911,12 +864,11 @@ def test_embedded_table_image_is_preserved_but_not_displayed_twice(tmp_path: Pat
     page.insert_image(fitz.Rect(92, 277, 257, 475), filename=str(image_path))
     document.save(pdf)
     document.close()
-    bundle = convert(pdf, tmp_path / "out", backend=TableFixtureOcr(), split_mode="single")
-    markdown = (bundle / "book.md").read_text()
+    bundle = convert(pdf, backend=TableFixtureOcr())
+    markdown = bundle.read_text()
     assert "| A   | B   |" in markdown
     assert "![Embedded figure]" not in markdown
-    manifest = json.loads((bundle / "assets/manifest.json").read_text())
-    assert manifest["assets"]
+    assert bundle == tmp_path / "table.pdf.md"
 
 
 def test_reused_pdf_image_records_distinct_placements(tmp_path: Path):
@@ -931,12 +883,10 @@ def test_reused_pdf_image_records_distinct_placements(tmp_path: Path):
     document.save(pdf)
     document.close()
 
-    bundle = convert(
+    bundle = _convert_workspace(
         pdf,
         tmp_path / "out",
         backend=FixtureOcr(),
-        split_mode="single",
-        multi_page=False,
     )
     manifest = json.loads((bundle / "assets/manifest.json").read_text())
     embedded = next(
@@ -971,12 +921,10 @@ def test_pre_paginated_epub_uses_visual_page_pipeline(tmp_path: Path):
             '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Page One</title></head>'
             '<body><h1>Page One</h1><p>Visual page content.</p></body></html>',
         )
-    bundle = convert(
+    bundle = _convert_workspace(
         epub,
         tmp_path / "out",
         backend=FixtureOcr(),
-        split_mode="single",
-        multi_page=False,
     )
     metadata = json.loads((bundle / "metadata.json").read_text())
     assert metadata["source_kind"] == "epub-fixed"

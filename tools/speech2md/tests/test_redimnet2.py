@@ -4,14 +4,17 @@ import math
 from pathlib import Path
 
 import pytest
+import numpy as np
 
-from speech2md.model import EmbeddingSample, Segment
+from speech2md.model import EmbeddingSample, Segment, SpeakerProfile
 from speech2md.redimnet2 import (
     REDIMNET2_DIMENSION,
+    aggregate_voiceprints,
     extract_window_evidence,
     normalize_embedding,
     reconcile_speakers,
     select_clean_intervals,
+    write_voiceprints,
 )
 
 
@@ -241,15 +244,111 @@ def test_creates_new_speaker_when_best_and_second_best_are_too_close():
     assert decisions[-1]["reason"] == "ambiguous_margin"
 
 
-def test_missing_embedding_creates_new_speaker_and_microphone_stays_remco():
+def test_missing_embedding_creates_anonymous_speaker_for_every_track():
     participant = [[Segment(0, 1, "short", "W01:S01", "participants")]]
     mapping, decisions, profiles = reconcile_speakers(participant, [{}], role="participants")
     assert mapping["W01:S01"] == "Speaker 1"
     assert decisions[0]["reason"] == "no_clean_embedding"
     assert profiles["Speaker 1"].samples == []
 
-    microphone = [[Segment(0, 3, "mine", "Remco", "microphone")]]
+    microphone = [[Segment(0, 3, "mine", "W01:S01", "microphone")]]
     mapping, decisions, profiles = reconcile_speakers(microphone, [{}], role="microphone")
-    assert mapping == {"Remco": "Remco"}
-    assert decisions == []
-    assert profiles == {}
+    assert mapping == {"W01:S01": "Speaker 1"}
+    assert decisions[0]["reason"] == "no_clean_embedding"
+    assert profiles["Speaker 1"].samples == []
+
+
+def test_microphone_evidence_is_retained_as_a_voiceprint_profile():
+    microphone = [[Segment(0, 3, "mine", "W01:S01", "microphone")]]
+    mapping, decisions, profiles = reconcile_speakers(
+        microphone,
+        [evidence(**{"W01:S01": axis(0)})],
+        role="microphone",
+    )
+    assert mapping == {"W01:S01": "Speaker 1"}
+    assert decisions[0]["decision"] == "new"
+    assert len(profiles["Speaker 1"].samples) == 1
+
+
+def test_manual_anchor_seeds_identity_before_earlier_window_matching():
+    windows = [
+        [Segment(0, 3, "earlier", "W01:S01", "participants")],
+        [Segment(300, 303, "anchored", "W02:S09", "participants")],
+    ]
+    mapping, decisions, profiles = reconcile_speakers(
+        windows,
+        [evidence(**{"W01:S01": axis(0)}), evidence(**{"W02:S09": axis(0)})],
+        role="participants",
+        anchors={"W02:S09": "gbrain://people/alice"},
+    )
+    assert mapping["W01:S01"] == mapping["W02:S09"]
+    profile = profiles[mapping["W02:S09"]]
+    assert profile.identity == "gbrain://people/alice"
+    assert len(profile.samples) == 2
+    assert any(item["decision"] == "anchored" for item in decisions)
+
+
+def test_anchor_without_voice_evidence_does_not_guess_propagation():
+    windows = [
+        [Segment(0, 1, "anchored", "W01:S01", "participants")],
+        [Segment(300, 301, "unknown", "W02:S01", "participants")],
+    ]
+    mapping, _, profiles = reconcile_speakers(
+        windows,
+        [{}, {}],
+        role="participants",
+        anchors={"W01:S01": "gbrain://people/alice"},
+    )
+    assert mapping["W01:S01"] != mapping["W02:S01"]
+    assert profiles[mapping["W01:S01"]].identity == "gbrain://people/alice"
+
+
+def test_voiceprints_collapse_samples_to_one_normalized_embedding_per_handle(tmp_path: Path):
+    profiles = {
+        "speaker-2": SpeakerProfile(
+            speaker="speaker-2",
+            model="ReDimNet2",
+            model_revision="revision",
+            checkpoint_sha256="a" * 64,
+            embedding_dimension=192,
+            samples=[sample(axis(0)), sample(angled(0.9)), sample(axis(1))],
+        ),
+        "speaker-1": SpeakerProfile(
+            speaker="speaker-1",
+            model="ReDimNet2",
+            model_revision="revision",
+            checkpoint_sha256="a" * 64,
+            embedding_dimension=192,
+            samples=[sample(axis(2))],
+        ),
+        "speaker-3": SpeakerProfile(
+            speaker="speaker-3",
+            model="ReDimNet2",
+            model_revision="revision",
+            checkpoint_sha256="a" * 64,
+            embedding_dimension=192,
+            samples=[],
+        ),
+    }
+
+    handles, embeddings = aggregate_voiceprints(profiles)
+
+    assert handles.tolist() == ["speaker-1", "speaker-2"]
+    assert embeddings.shape == (2, 192)
+    assert np.linalg.norm(embeddings, axis=1).tolist() == pytest.approx([1.0, 1.0])
+    assert embeddings[1, 0] > embeddings[1, 1]
+
+    path = tmp_path / "meeting.voiceprints.npz"
+    write_voiceprints(profiles, path)
+    with np.load(path, allow_pickle=False) as voiceprints:
+        assert voiceprints.files == ["handles", "embeddings"]
+        assert voiceprints["handles"].dtype.kind == "U"
+        assert voiceprints["embeddings"].dtype == np.float32
+
+
+def test_empty_voiceprints_have_stable_shapes(tmp_path: Path):
+    path = tmp_path / "empty.voiceprints.npz"
+    write_voiceprints({}, path)
+    with np.load(path, allow_pickle=False) as voiceprints:
+        assert voiceprints["handles"].shape == (0,)
+        assert voiceprints["embeddings"].shape == (0, 192)

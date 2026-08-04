@@ -25,6 +25,8 @@ class Verification:
 
 def verify_bundle(root: Path) -> Verification:
     root = root.resolve()
+    if root.is_file() or not (root / "metadata.json").exists():
+        return _verify_public_output(root)
     errors: list[str] = []
     warnings: list[str] = []
     for required in ("book.md", "document.json", "metadata.json", "conversion.log", "assets/manifest.json"):
@@ -179,12 +181,77 @@ def verify_bundle(root: Path) -> Verification:
         errors.append("metadata reports non-idempotent formatting")
     if metadata.get("formatting", {}).get("lint_errors"):
         warnings.append("metadata reports Markdown lint failures")
-    if metadata.get("resume_stable") is False:
-        errors.append("resume changed Markdown filenames or content")
     for failed in metadata.get("failed_pages", []):
         warnings.append(f"page {failed.get('page')} failed: {failed.get('error')}")
     warnings.extend(metadata.get("warnings", []))
     return Verification(not errors, errors, sorted(set(warnings)), len(markdown_paths), len(manifest.get("assets", [])))
+
+
+def _verify_public_output(root: Path) -> Verification:
+    errors: list[str] = []
+    if root.is_file():
+        markdown_paths = [root] if root.suffix == ".md" else []
+        artifact_root = root.parent
+        allowed = {root}
+    elif root.is_dir():
+        markdown_paths = sorted(root.glob("*.md"))
+        artifact_root = root
+        allowed = set(markdown_paths)
+        figures = root / "figures"
+        if figures.exists():
+            allowed.update(path for path in figures.rglob("*") if path.is_file())
+        for path in root.rglob("*"):
+            if path.is_file() and path not in allowed:
+                errors.append(f"unexpected output file: {path.relative_to(root)}")
+    else:
+        return Verification(False, [f"output does not exist: {root}"])
+    if not markdown_paths:
+        errors.append("missing Markdown output")
+    if root.is_dir() and len(markdown_paths) > 1 and root / "index.md" not in markdown_paths:
+        errors.append("multi-file output lacks index.md")
+
+    figure_count = 0
+    for markdown_path in markdown_paths:
+        markdown = markdown_path.read_text(encoding="utf-8")
+        if not re.match(
+            r"\A---\nsource_sha256: [0-9a-f]{64}\npages2md_version: [0-9a-f]{40,64}\n---\n",
+            markdown,
+        ):
+            errors.append(f"invalid or missing provenance front matter: {markdown_path.name}")
+        if re.search(r"(?:pages/|raw/|assets/|document\.json|metadata\.json)", markdown):
+            errors.append(f"intermediate artifact reference: {markdown_path.name}")
+        for target in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", markdown):
+            clean = unquote(target.partition("#")[0].partition("?")[0])
+            if not clean.startswith("figures/"):
+                continue
+            figure_count += 1
+            if not (markdown_path.parent / clean).is_file():
+                errors.append(f"broken figure: {markdown_path.name} -> {target}")
+        for target in local_links(markdown):
+            clean, _, anchor = unquote(target).partition("#")
+            target_path = markdown_path if not clean else markdown_path.parent / clean
+            if clean and not target_path.resolve().is_relative_to(artifact_root):
+                errors.append(f"link escapes output: {markdown_path.name} -> {target}")
+            elif clean and not target_path.exists():
+                errors.append(f"broken link: {markdown_path.name} -> {target}")
+            elif anchor and target_path.is_file() and target_path.suffix == ".md":
+                if anchor not in markdown_anchors(target_path.read_text(encoding="utf-8")):
+                    errors.append(f"broken anchor: {markdown_path.name} -> {target}")
+        _verify_links(markdown, markdown_path, artifact_root, errors)
+    if root.is_dir():
+        figures = root / "figures"
+        actual_figures = {path for path in figures.rglob("*") if path.is_file()} if figures.exists() else set()
+        if figures.exists() and not actual_figures:
+            errors.append("empty figures directory")
+        referenced = {
+            (path.parent / unquote(target.partition("#")[0].partition("?")[0])).resolve()
+            for path in markdown_paths
+            for target in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", path.read_text(encoding="utf-8"))
+            if target.startswith("figures/")
+        }
+        for path in actual_figures - referenced:
+            errors.append(f"unreferenced figure: {path.relative_to(root)}")
+    return Verification(not errors, errors, [], len(markdown_paths), figure_count)
 
 
 def _verify_tables(markdown: str, markdown_path: Path, root: Path, errors: list[str]) -> None:

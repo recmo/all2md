@@ -56,20 +56,3 @@ def slugify(value: str, fallback: str = "chapter") -> str:
 def natural_key(path: Path) -> list[object]:
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
 
-
-def parse_pages(spec: str | None, total: int) -> list[int]:
-    if not spec:
-        return list(range(1, total + 1))
-    selected: set[int] = set()
-    for item in spec.split(","):
-        item = item.strip()
-        if "-" in item:
-            start, end = (int(value) for value in item.split("-", 1))
-            selected.update(range(start, end + 1))
-        else:
-            selected.add(int(item))
-    invalid = [number for number in selected if number < 1 or number > total]
-    if invalid:
-        raise ValueError(f"page numbers out of range: {invalid}")
-    return sorted(selected)
-

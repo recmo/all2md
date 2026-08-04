@@ -3,17 +3,16 @@
 `pages2md` is the document-conversion tool in the
 [`all2md`](https://github.com/recmo/all2md) monorepo.
 
-`pages2md` converts papers, books, scans, and image archives into portable,
-auditable Markdown bundles on Apple Silicon. Unlimited-OCR provides the visual
+`pages2md` converts papers, books, scans, and image archives into portable
+Markdown on Apple Silicon. Unlimited-OCR provides the visual
 interpretation; embedded PDF and DjVu text is retained only as comparison
 evidence and never silently replaces the visual result.
 
 The model contract is intentionally narrow and immutable: ordered page windows
 use Baidu's multi-page Base recipe, and affected pages use Baidu's Gundam recipe
-for local recovery. Raw output from both observations is retained untouched;
-deterministic Python code parses, validates, reconciles, structures, and renders
-the result. The model is never prompted to emit JSON or arbitrate between its
-own readings.
+for local recovery. Deterministic Python code parses, validates, reconciles,
+structures, and renders the result in a private temporary workspace. The model
+is never prompted to emit JSON or arbitrate between its own readings.
 
 ## Install
 
@@ -23,7 +22,6 @@ runtime. Model weights remain explicit, on-demand downloads:
 
 ```sh
 nix run github:recmo/all2md#pages2md -- --help
-nix run github:recmo/all2md#pages2md -- models fetch
 ```
 
 For development:
@@ -42,48 +40,40 @@ The OCR dependency is pinned to MLX-VLM revision
 ## Convert
 
 ```sh
-pages2md convert paper.pdf --output result
-pages2md convert book.djvu --output result --split auto
-pages2md convert scans/ --output result --pages 1-20
-pages2md verify result/book
+pages2md paper.pdf
+pages2md scans/
+pages2md --force paper.pdf
 ```
 
-For a large document, `--split auto` creates chapter files only when reliable
-structural boundaries exist. `--split chapters --chapter-map chapters.json`
-accepts an explicit map:
+The input is one supported document or a directory containing images. OCR,
+layout, chapter detection, and quality settings are fixed. Output is written
+beside the input by appending `.md` to its complete basename: `paper.pdf`
+becomes `paper.pdf.md`, while the image directory `scans/` becomes `scans.md`.
+Existing output requires `--force`.
 
-```json
-[
-  {"title": "Introduction", "start_page": 1},
-  {"title": "Background", "start_page": 17}
-]
-```
-
-## Bundle
+## Output
 
 ```text
-book.md
-chapters/                  # only when split
-pages/page-NNNN.json       # visual and embedded evidence
-raw/<observation-id>.txt   # untouched model invocation output
-assets/
+# paper.pdf, one Markdown file and no figures
+paper.pdf.md
+
+# paper.pdf, one Markdown file with figures
+paper.pdf.md/
+  paper.pdf.md
   figures/
-  originals/
-  evidence/
-  manifest.json
-document.json
-metadata.json
+
+# paper.pdf, multiple chapters
+paper.pdf.md/
+  index.md
+  001-introduction.md
+  002-background.md
+  figures/                 # only when figures are referenced
 ```
 
-All Markdown links are relative. Original embedded figures are preserved when
-possible; rendered PNG crops are used for page-composed graphics. Asset
-provenance and every placement remain available in the JSON artifacts.
-
-Each fixed-layout page record keeps `visual.multi_page`, `visual.gundam`,
-`embedded`, `comparison`, canonical normalized blocks, and recovery provenance
-separately. Markdown is rendered only from canonical blocks. A pinned
-`mdformat`/GFM pass and PyMarkdown lint/fix pass run after rendering, followed
-by a second byte-idempotent formatting pass and `pages2md verify` checks.
+No parsing records, raw model output, manifests, logs, or other intermediates
+are published. Every Markdown file starts with YAML front matter containing the
+SHA-256 hash of the input document and the pages2md source commit. All links are
+relative, and only figures referenced by Markdown are retained.
 
 ## Supported inputs
 

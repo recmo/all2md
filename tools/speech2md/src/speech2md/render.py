@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+import re
 
 import yaml
 
+from . import __version__
 from .model import Segment, TranscriptState
 
 
@@ -15,27 +16,43 @@ def timestamp(seconds: float) -> str:
 
 
 def render_markdown(state: TranscriptState) -> str:
+    if re.fullmatch(r"[0-9a-f]{40,64}", __version__) is None:
+        raise RuntimeError("speech2md source commit is unavailable")
     title = state.title or "Meeting transcript"
+    source_hash = state.source_sha256
+    if not isinstance(source_hash, str) or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None:
+        raise ValueError("speech2md source hash is unavailable")
+    speaker_handles: dict[str, str] = {}
+    for segment in sorted(state.segments, key=lambda item: (item.start, item.end, item.source_role)):
+        if segment.speaker in speaker_handles:
+            continue
+        handle = segment.speaker
+        if re.fullmatch(r"speaker-\d+", handle) is None or handle in speaker_handles.values():
+            number = 1
+            while f"speaker-{number}" in speaker_handles.values():
+                number += 1
+            handle = f"speaker-{number}"
+        speaker_handles[segment.speaker] = handle
+    attendees = []
+    existing = {item.get("handle"): item for item in state.attendees if item.get("handle")}
+    for handle in speaker_handles.values():
+        attendees.append({
+            "handle": handle,
+            "identity": existing.get(handle, {}).get("identity", ""),
+        })
+    attendees.extend(
+        {"identity": item.get("identity", "")}
+        for item in state.attendees
+        if not item.get("handle")
+    )
     frontmatter = {
-        "title": title,
-        "speech2md": {
-            "schema_version": state.schema_version,
-            "source": state.source,
-            "capture_manifest": state.capture_manifest,
-            "meeting_id": state.meeting_id,
-            "started_at": state.started_at,
-            "created_at": state.created_at,
-            "model": {
-                "id": state.model,
-                "revision": state.model_revision,
-            },
-            "audio": [asdict(source) for source in state.audio],
-            "processing": {
-                "duration_seconds": state.processing_seconds,
-                "warnings": state.warnings,
-            },
-            "derived_artifacts": state.derived_artifacts,
-        },
+        "source_sha256": source_hash,
+        "speech2md_version": __version__,
+        **({"hints_sha256": state.hints_sha256} if state.hints_sha256 else {}),
+        **({"started_at": state.started_at} if state.started_at else {}),
+        **({"ended_at": state.ended_at} if state.ended_at else {}),
+        **({"calendar_event": state.calendar_event} if state.calendar_event else {}),
+        "attendees": attendees,
     }
     lines = [
         "---",
@@ -52,7 +69,7 @@ def render_markdown(state: TranscriptState) -> str:
         "",
     ]
     for segment in coalesce_segments(state.segments):
-        speaker = state.speakers.get(segment.speaker, segment.speaker)
+        speaker = speaker_handles[segment.speaker]
         lines.extend([
             f"**[{timestamp(segment.start)}] {speaker}:** {segment.text.strip()}",
             "",

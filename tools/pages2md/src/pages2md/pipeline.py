@@ -16,9 +16,9 @@ from tqdm.auto import tqdm
 
 from .adapters import open_document
 from .assets import AssetStore
-from .chapters import chapters_from_map, detect_chapters
+from .chapters import detect_chapters
 from .compare import compare_text
-from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, SCHEMA_VERSION
+from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, SCHEMA_VERSION, commit_version
 from .formatting import format_and_lint
 from .lists import normalize_lists
 from .markdown import (
@@ -39,63 +39,66 @@ from .verify import verify_bundle
 
 FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
 FORMULA_KINDS = {"formula", "equation", "display_formula"}
+
+
 def convert(
     source: Path,
-    output: Path,
     *,
-    dpi: int = DEFAULT_DPI,
-    pages: str | None = None,
-    split_mode: str = "auto",
-    quality: str = "thorough",
-    chapter_map: Path | None = None,
-    languages: list[str] | None = None,
-    resume: bool = True,
-    multi_page: bool = True,
     force: bool = False,
     backend: OcrBackend | None = None,
 ) -> Path:
-    if quality not in {"fast", "balanced", "thorough"}:
-        raise ValueError(f"unsupported OCR quality: {quality}")
+    """Convert a document in a private workspace and publish only final artifacts."""
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    bundle = output.resolve() / slugify(source.stem if source.is_file() else source.name, "document")
-    if force and bundle.exists():
-        shutil.rmtree(bundle)
+    target = source.with_name(f"{source.name}.md")
+    if target.exists() and not force:
+        raise FileExistsError(f"output exists (use --force): {target}")
+    source_hash = _source_hash(source)
+    version = commit_version()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", version):
+        raise RuntimeError("pages2md source commit is unavailable")
+    with tempfile.TemporaryDirectory(prefix="pages2md-") as temporary:
+        workspace = _convert_workspace(source, Path(temporary), backend=backend)
+        return _publish_output(workspace, target, source_hash, version)
+
+
+def _convert_workspace(
+    source: Path,
+    output: Path,
+    *,
+    backend: OcrBackend | None = None,
+) -> Path:
+    source = source.resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    bundle = output.resolve() / slugify(source.name, "document")
     backend = backend or MlxUnlimitedOcr()
     ocr_fingerprint = {
         "source_sha256": _source_hash(source),
         "backend": dict(backend.identity),
-        "dpi": dpi,
-        "pages": pages,
-        "languages": languages or [],
-        "multi_page": multi_page,
-        "quality": quality,
+        "dpi": DEFAULT_DPI,
+        "multi_page": True,
+        "quality": "thorough",
         "code": _code_fingerprint(
             "adapters.py", "assets.py", "compare.py", "model.py", "native.py", "ocr.py", "pipeline.py", "quality.py"
         ),
     }
     assembly_fingerprint = {
-        "split_mode": split_mode,
-        "chapter_map_sha256": sha256_file(chapter_map) if chapter_map else None,
+        "split_mode": "auto",
         "code": _code_fingerprint(
             "chapters.py", "formatting.py", "lists.py", "markdown.py", "model.py", "pipeline.py", "quality.py", "verify.py"
         ),
     }
-    previous = _read_json(bundle / "metadata.json")
-    can_resume = bool(resume and previous and previous.get("ocr_fingerprint") == ocr_fingerprint)
-    same_assembly = bool(previous and previous.get("assembly_fingerprint") == assembly_fingerprint)
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "pages").mkdir(exist_ok=True)
     (bundle / "raw").mkdir(exist_ok=True)
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
-    if not can_resume and (bundle / "assets").exists():
-        shutil.rmtree(bundle / "assets")
-    assets = AssetStore(bundle / "assets", load_existing=can_resume)
+    assets = AssetStore(bundle / "assets")
     fingerprint = {"ocr": ocr_fingerprint, "assembly": assembly_fingerprint}
     started = time.time()
-    document = open_document(source, work, assets, dpi=dpi, page_spec=pages)
+    document = open_document(source, work, assets, dpi=DEFAULT_DPI)
 
     if document.kind == "epub":
         result = _write_epub(
@@ -107,7 +110,6 @@ def convert(
             ocr_fingerprint,
             assembly_fingerprint,
             started,
-            split_mode,
         )
         shutil.rmtree(work, ignore_errors=True)
         return result
@@ -134,16 +136,12 @@ def convert(
             page_results.append(result)
             progress.update()
 
-        for group in _ocr_groups(ocr_pages, document.outline, multi_page=multi_page):
+        for group in _ocr_groups(ocr_pages, document.outline):
             page_paths = [bundle / "pages" / f"page-{page.number:04d}.json" for page in group]
             page_range = str(group[0].number)
             if len(group) > 1:
                 page_range += f"-{group[-1].number}"
             progress.set_postfix_str(f"processing {page_range}")
-            if can_resume and all(path.exists() for path in page_paths):
-                page_results.extend(_page_from_dict(_read_json(path)) for path in page_paths)
-                progress.update(len(group))
-                continue
             try:
                 group_observation, recognized = _recognize_primary(group, backend, bundle)
             except Exception as error:
@@ -172,7 +170,6 @@ def convert(
                         group_observation,
                         backend,
                         bundle,
-                        quality=quality,
                     )
                     blocks, recovery, validation_warnings = reconcile_observations(
                         primary,
@@ -205,7 +202,6 @@ def convert(
         normalize_table_blocks(result.blocks)
     available_pages = {page.number for page in page_results}
     for result in page_results:
-        # Re-render resumed page records too, so assembly-only changes are applied.
         _apply_links_to_blocks(result.blocks, result.embedded.links)
         result.visual_markdown = strict_page_markdown(result, document.outline)
         retained_warnings = [
@@ -247,18 +243,11 @@ def convert(
     for result in page_results:
         if result.number in overlap_pages:
             atomic_json(bundle / "pages" / f"page-{result.number:04d}.json", result.to_dict())
-    chapters = chapters_from_map(chapter_map, [page.number for page in page_results]) if chapter_map else detect_chapters(document, page_results)
+    chapters = detect_chapters(document, page_results)
     combined_size = sum(len(page.visual_markdown.encode("utf-8")) for page in page_results)
-    if split_mode == "single":
-        split = False
-    elif split_mode == "chapters":
-        if len(chapters) < 2:
-            raise RuntimeError("reliable chapter boundaries were not found; provide --chapter-map")
-        split = True
-    else:
-        split = combined_size > AUTO_SPLIT_BYTES and len(chapters) >= 2
+    split = combined_size > AUTO_SPLIT_BYTES and len(chapters) >= 2
     warnings = sorted({warning for page in page_results for warning in page.warnings})
-    if split_mode == "auto" and combined_size > AUTO_SPLIT_BYTES and len(chapters) < 2:
+    if combined_size > AUTO_SPLIT_BYTES and len(chapters) < 2:
         warnings.append("chapter_boundaries_uncertain")
     files = write_markdown(
         bundle,
@@ -276,16 +265,6 @@ def convert(
     if format_result.lint_errors:
         warnings.append("markdown_lint_failed")
     output_fingerprints = {path: sha256_file(bundle / path) for path in files}
-    resume_stable = not (
-        can_resume
-        and same_assembly
-        and not previous.get("failed_pages")
-        and previous.get("page_count") == previous.get("requested_page_count")
-        and previous.get("output_fingerprints")
-        and previous["output_fingerprints"] != output_fingerprints
-    )
-    if not resume_stable:
-        warnings.append("resume_output_changed")
     assets.write_manifest()
     document_json = {
         "schema_version": SCHEMA_VERSION,
@@ -307,8 +286,8 @@ def convert(
         "page_count": len(page_results),
         "requested_page_count": len(document.pages),
         "model": dict(backend.identity),
-        "multi_page": multi_page,
-        "quality": quality,
+        "multi_page": True,
+        "quality": "thorough",
         "split": split,
         "markdown_files": files,
         "warnings": sorted(set(warnings)),
@@ -320,7 +299,6 @@ def convert(
             "preservation_skips": format_result.preservation_skips,
         },
         "output_fingerprints": output_fingerprints,
-        "resume_stable": resume_stable,
         "failed_pages": failed,
         "review_required_blocks": sum(
             bool(block.metadata.get("review_required"))
@@ -334,11 +312,96 @@ def convert(
     _write_log(bundle, metadata)
     shutil.rmtree(work, ignore_errors=True)
     if failed:
-        raise RuntimeError(f"{len(failed)} page(s) failed; successful pages are resumable in {bundle}")
+        raise RuntimeError(f"{len(failed)} page(s) failed")
     verification = verify_bundle(bundle)
     if not verification.ok:
         raise RuntimeError(f"bundle verification failed: {'; '.join(verification.errors)}")
     return bundle
+
+
+def _publish_output(
+    workspace: Path,
+    target: Path,
+    source_hash: str,
+    version: str,
+) -> Path:
+    metadata = _read_json(workspace / "metadata.json") or {}
+    markdown_files = list(metadata.get("markdown_files", ["book.md"]))
+    split = bool(metadata.get("split") or any(path.startswith("chapters/") for path in markdown_files))
+    contents = {
+        path: _public_markdown(
+            (workspace / path).read_text(encoding="utf-8"),
+            source_hash,
+            version,
+            split=split,
+            index=path == "book.md",
+        )
+        for path in markdown_files
+    }
+    figures = _referenced_figures(contents.values())
+    if not split and not figures:
+        if target.is_dir():
+            shutil.rmtree(target)
+        atomic_text(target, contents["book.md"])
+        return target
+
+    if target.is_file():
+        target.unlink()
+    with tempfile.TemporaryDirectory(prefix=f"pages2md-{target.stem}-", dir=target.parent) as temporary:
+        staged = Path(temporary) / target.name
+        staged.mkdir()
+        if split:
+            atomic_text(staged / "index.md", contents["book.md"])
+            for path, content in contents.items():
+                if path == "book.md":
+                    continue
+                atomic_text(staged / Path(path).name, content)
+        else:
+            atomic_text(staged / target.name, contents["book.md"])
+        for relative in figures:
+            source = workspace / "assets" / "figures" / relative
+            if not source.is_file():
+                raise RuntimeError(f"referenced figure is missing: {relative}")
+            destination = staged / "figures" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(staged, target)
+    return target
+
+
+def _public_markdown(
+    markdown: str,
+    source_hash: str,
+    version: str,
+    *,
+    split: bool,
+    index: bool,
+) -> str:
+    if split and index:
+        markdown = re.sub(r"\]\(chapters/([^/)]+)", r"](\1", markdown)
+    markdown = markdown.replace("../assets/figures/", "figures/")
+    markdown = markdown.replace("assets/figures/", "figures/")
+    front_matter = (
+        "---\n"
+        f"source_sha256: {source_hash}\n"
+        f"pages2md_version: {version}\n"
+        "---\n\n"
+    )
+    return front_matter + markdown.lstrip()
+
+
+def _referenced_figures(markdowns) -> set[str]:
+    figures: set[str] = set()
+    for markdown in markdowns:
+        for target in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", markdown):
+            clean = target.partition("#")[0].partition("?")[0]
+            if clean.startswith("figures/"):
+                relative = clean.removeprefix("figures/")
+                if relative and ".." not in Path(relative).parts:
+                    figures.add(relative)
+    return figures
 
 
 def _page_result(
@@ -504,8 +567,6 @@ def _collect_page_candidates(
     group_observation,
     backend,
     bundle,
-    *,
-    quality: str,
 ):
     critical = {
         "visual_empty_output",
@@ -536,12 +597,10 @@ def _collect_page_candidates(
     structural_problem = bool(set(primary.warnings) & critical or group_problem)
     needs_recovery = bool(
         structural_problem
-        or (quality in {"balanced", "thorough"} and embedded_disagreement)
-        or (quality == "thorough" and low_confidence)
+        or embedded_disagreement
+        or low_confidence
     )
-    if quality == "fast" or (quality == "balanced" and not needs_recovery):
-        return [], []
-    if quality == "thorough" and not needs_recovery:
+    if not needs_recovery:
         return [], []
 
     candidates: list[OcrObservation] = []
@@ -662,9 +721,7 @@ def _is_invocation(value) -> bool:
     )
 
 
-def _ocr_groups(pages, outline: list[dict], *, multi_page: bool, maximum: int = 8):
-    if not multi_page:
-        return [[page] for page in pages]
+def _ocr_groups(pages, outline: list[dict], maximum: int = 8):
     by_number = {page.number: page for page in pages}
     numbers = sorted(by_number)
     if not numbers:
@@ -1229,10 +1286,9 @@ def _write_epub(
     ocr_fingerprint,
     assembly_fingerprint,
     started: float,
-    split_mode: str,
 ) -> Path:
     total_size = sum(len(item["markdown"].encode("utf-8")) for item in document.semantic_chapters)
-    split = split_mode == "chapters" or (split_mode == "auto" and total_size > AUTO_SPLIT_BYTES and len(document.semantic_chapters) >= 2)
+    split = total_size > AUTO_SPLIT_BYTES and len(document.semantic_chapters) >= 2
     files = ["book.md"]
     chapters = []
     from .util import atomic_text
@@ -1294,7 +1350,6 @@ def _write_epub(
             "preservation_skips": format_result.preservation_skips,
         },
         "output_fingerprints": output_fingerprints,
-        "resume_stable": True,
         "duration_seconds": round(time.time() - started, 3),
     })
     _write_log(bundle, _read_json(bundle / "metadata.json"))
@@ -1333,27 +1388,6 @@ def _read_json(path: Path):
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _page_from_dict(value: dict[str, Any]) -> PageResult:
-    from .model import Comparison, EmbeddedEvidence, Link
-    embedded_value = value["embedded"]
-    embedded = EmbeddedEvidence(
-        text=embedded_value.get("text", ""),
-        blocks=embedded_value.get("blocks", []),
-        links=[Link(**link) for link in embedded_value.get("links", [])],
-        extractor=embedded_value.get("extractor"),
-    )
-    return PageResult(
-        number=value["number"], image=value["image"], visual_markdown=value["visual_markdown"],
-        blocks=[Block(**block) for block in value.get("blocks", [])], embedded=embedded,
-        comparison=Comparison(**value.get("comparison", {})), warnings=value.get("warnings", []),
-        generation=value.get("generation", {}),
-        source_assets=value.get("source_assets", []),
-        raw_ocr=value.get("raw_ocr", ""),
-        visual=value.get("visual", {}),
-        recovery=value.get("recovery", []),
-    )
 
 
 def _write_log(bundle: Path, metadata: dict[str, Any]) -> None:

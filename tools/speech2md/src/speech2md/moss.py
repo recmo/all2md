@@ -10,7 +10,7 @@ import tempfile
 from types import SimpleNamespace
 from typing import Any, Callable
 
-from .model import Segment, SpeakerProfile
+from .model import Segment, SpeakerHint, SpeakerProfile
 from .redimnet2 import extract_window_evidence, reconcile_speakers
 
 MOSS_MODEL = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
@@ -277,7 +277,7 @@ def parse_segments(
                 start=offset + relative_start,
                 end=offset + relative_end,
                 text=text,
-                speaker="Remco" if role == "microphone" else local_speaker,
+                speaker=local_speaker,
                 source_role=role,
             ))
     return segments
@@ -292,6 +292,7 @@ def transcribe_track(
     duration: float,
     embedder: Any | None = None,
     speaker_profiles: dict[str, SpeakerProfile] | None = None,
+    speaker_hints: tuple[SpeakerHint, ...] = (),
     progress_callback: Callable[[int, int, int, float], None] | None = None,
 ) -> tuple[list[Segment], dict[str, Any], dict[str, SpeakerProfile]]:
     silence_centers = detect_silence_centers(path) if duration > TARGET_PART_SECONDS else []
@@ -385,11 +386,7 @@ def transcribe_track(
                 )
                 evidence = {}
                 embedding_diagnostics = []
-                if role != "microphone":
-                    if embedder is None:
-                        raise RuntimeError(
-                            "ReDimNet2 embedder is required for non-microphone tracks"
-                        )
+                if embedder is not None:
                     evidence, embedding_diagnostics = extract_window_evidence(
                         path,
                         segments,
@@ -462,11 +459,14 @@ def transcribe_track(
                 start = max(planned_start, coverage_end - RECOVERY_OVERLAP_SECONDS)
                 attempt += 1
 
+    selected_for_hints = trim_overlaps(by_window, effective_windows)
+    anchors = resolve_speaker_anchors(selected_for_hints, speaker_hints, role=role)
     mapping, decisions, profiles = reconcile_speakers(
         by_window,
         evidence_by_window,
         role=role,
         profiles=speaker_profiles,
+        anchors=anchors,
     )
     for segments in by_window:
         for segment in segments:
@@ -491,6 +491,41 @@ def transcribe_track(
             default=0.0,
         ),
     }, profiles
+
+
+def resolve_speaker_anchors(
+    segments: list[Segment],
+    hints: tuple[SpeakerHint, ...],
+    *,
+    role: str,
+) -> dict[str, str]:
+    anchors: dict[str, str] = {}
+    for hint in hints:
+        if hint.track != role:
+            continue
+        speakers = {
+            segment.speaker
+            for segment in segments
+            if min(segment.end, hint.end) > max(segment.start, hint.start)
+        }
+        if not speakers:
+            raise ValueError(
+                f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
+                f"on {role} does not overlap speech"
+            )
+        if len(speakers) != 1:
+            raise ValueError(
+                f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
+                f"on {role} overlaps multiple diarized speakers"
+            )
+        speaker = speakers.pop()
+        previous = anchors.get(speaker)
+        if previous is not None and previous != hint.identity:
+            raise ValueError(
+                f"diarized speaker {speaker} is anchored to both {previous} and {hint.identity}"
+            )
+        anchors[speaker] = hint.identity
+    return anchors
 
 
 def boundaries_from_windows(windows: list[tuple[float, float]]) -> list[float]:

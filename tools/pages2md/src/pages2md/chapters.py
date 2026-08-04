@@ -1,23 +1,11 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 import re
 import statistics
 from difflib import SequenceMatcher
 
 from .model import Chapter, PageResult, SourceDocument
 from .util import slugify
-
-
-def chapters_from_map(path: Path, page_numbers: list[int]) -> list[Chapter]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list) or not data:
-        raise ValueError("chapter map must be a non-empty JSON array")
-    starts = []
-    for item in data:
-        starts.append((str(item["title"]), int(item["start_page"])))
-    return _boundaries_to_chapters(starts, page_numbers, "manual", 1.0)
 
 
 def detect_chapters(source: SourceDocument, pages: list[PageResult]) -> list[Chapter]:

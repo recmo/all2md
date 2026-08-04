@@ -377,19 +377,3 @@ def split_multi_page_output(raw: str, expected_pages: int) -> list[str]:
             f"multi-page OCR returned {len(pages)} page segment(s) for {expected_pages} input page(s)"
         )
     return pages
-
-
-class SidecarOcr:
-    """Test/debug backend reading `<page-image>.ocr.txt` files."""
-
-    identity = {"engine": "sidecar", "model": "fixture", "revision": "1"}
-
-    def recognize(self, image: Path) -> tuple[str, dict[str, object]]:
-        sidecar = image.with_suffix(image.suffix + ".ocr.txt")
-        if not sidecar.exists():
-            raise RuntimeError(f"missing OCR sidecar: {sidecar}")
-        return sidecar.read_text(encoding="utf-8"), {}
-
-    def recognize_pages(self, images: list[Path]) -> tuple[str, dict[str, object]]:
-        values = [self.recognize(image)[0] for image in images]
-        return "\n<PAGE>\n".join(values), {"mode": "multi_base", "group_size": len(images)}

@@ -159,22 +159,48 @@ def reconcile_speakers(
     *,
     role: str,
     profiles: dict[str, SpeakerProfile] | None = None,
+    anchors: dict[str, str] | None = None,
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     similarity_margin: float = DEFAULT_SIMILARITY_MARGIN,
 ) -> tuple[dict[str, str], list[dict[str, Any]], dict[str, SpeakerProfile]]:
-    if role == "microphone":
-        return {
-            segment.speaker: "Remco"
-            for segments in by_window
-            for segment in segments
-        }, [], profiles if profiles is not None else {}
     if len(by_window) != len(evidence_by_window):
         raise ValueError("speaker evidence does not match the number of MOSS windows")
 
     meeting_profiles = profiles if profiles is not None else {}
+    anchors = anchors or {}
+    local_speakers = {
+        segment.speaker
+        for segments in by_window
+        for segment in segments
+    }
+    unknown_anchors = set(anchors) - local_speakers
+    if unknown_anchors:
+        raise ValueError(f"speaker anchors reference unknown labels: {sorted(unknown_anchors)}")
     mapping: dict[str, str] = {}
     decisions: list[dict[str, Any]] = []
     next_speaker = _next_speaker_number(meeting_profiles)
+    profiles_by_identity: dict[str, str] = {}
+    for speaker, profile in meeting_profiles.items():
+        if not profile.identity:
+            continue
+        if profile.identity in profiles_by_identity:
+            raise ValueError(f"multiple profiles have identity {profile.identity}")
+        profiles_by_identity[profile.identity] = speaker
+    for identity in sorted(set(anchors.values())):
+        speaker = profiles_by_identity.get(identity)
+        if speaker is None:
+            speaker = f"Speaker {next_speaker}"
+            next_speaker += 1
+            meeting_profiles[speaker] = _new_profile(speaker, identity=identity)
+            profiles_by_identity[identity] = speaker
+    for local, identity in anchors.items():
+        speaker = profiles_by_identity[identity]
+        mapping[local] = speaker
+        meeting_profiles[speaker].samples.extend(
+            sample
+            for evidence in evidence_by_window
+            for sample in evidence.get(local, [])
+        )
 
     for window_index, (segments, window_evidence) in enumerate(
         zip(by_window, evidence_by_window, strict=True), 1
@@ -183,6 +209,9 @@ def reconcile_speakers(
         scored: dict[str, list[tuple[float, str]]] = {}
         eligible: list[tuple[float, str, str]] = []
         for local in local_speakers:
+            if local in anchors:
+                scored[local] = []
+                continue
             samples = window_evidence.get(local, [])
             scores = sorted(
                 (
@@ -201,8 +230,8 @@ def reconcile_speakers(
             if best_score >= similarity_threshold and margin >= similarity_margin:
                 eligible.append((best_score, local, best_speaker))
 
-        assigned_local: set[str] = set()
-        assigned_meeting: set[str] = set()
+        assigned_local = {local for local in local_speakers if local in anchors}
+        assigned_meeting = {mapping[local] for local in assigned_local}
         for score, local, speaker in sorted(eligible, reverse=True):
             if local in assigned_local or speaker in assigned_meeting:
                 continue
@@ -221,7 +250,11 @@ def reconcile_speakers(
                 if best_score is not None and second_score is not None
                 else None
             )
-            if local in assigned_local:
+            if local in anchors:
+                assigned = mapping[local]
+                decision = "anchored"
+                reason = "manual_range"
+            elif local in assigned_local:
                 assigned = mapping[local]
                 decision = "matched"
                 reason = "threshold_and_margin_met"
@@ -230,14 +263,7 @@ def reconcile_speakers(
                 next_speaker += 1
                 mapping[local] = assigned
                 samples = list(window_evidence.get(local, []))
-                meeting_profiles[assigned] = SpeakerProfile(
-                    speaker=assigned,
-                    model=REDIMNET2_MODEL,
-                    model_revision=REDIMNET2_REVISION,
-                    checkpoint_sha256=REDIMNET2_CHECKPOINT_SHA256,
-                    embedding_dimension=REDIMNET2_DIMENSION,
-                    samples=samples,
-                )
+                meeting_profiles[assigned] = _new_profile(assigned, samples=samples)
                 decision = "new"
                 if not samples:
                     reason = "no_clean_embedding"
@@ -268,6 +294,23 @@ def reconcile_speakers(
                 "sample_count": len(window_evidence.get(local, [])),
             })
     return mapping, decisions, meeting_profiles
+
+
+def _new_profile(
+    speaker: str,
+    *,
+    samples: list[EmbeddingSample] | None = None,
+    identity: str = "",
+) -> SpeakerProfile:
+    return SpeakerProfile(
+        speaker=speaker,
+        model=REDIMNET2_MODEL,
+        model_revision=REDIMNET2_REVISION,
+        checkpoint_sha256=REDIMNET2_CHECKPOINT_SHA256,
+        embedding_dimension=REDIMNET2_DIMENSION,
+        samples=list(samples or []),
+        identity=identity,
+    )
 
 
 def _profile_similarity(samples: list[EmbeddingSample], profile: list[EmbeddingSample]) -> float:
@@ -410,3 +453,63 @@ def profile_diagnostics(profiles: dict[str, SpeakerProfile]) -> dict[str, Any]:
         }
         for speaker, profile in profiles.items()
     }
+
+
+def aggregate_voiceprints(
+    profiles: dict[str, SpeakerProfile],
+) -> tuple[Any, Any]:
+    """Collapse clean samples into one robust, normalized embedding per handle."""
+    try:
+        import numpy as np
+    except ImportError as error:
+        raise RuntimeError("NumPy is unavailable in the speech2md environment") from error
+    handles: list[str] = []
+    embeddings = []
+    for handle in sorted(profiles, key=_speaker_sort_key):
+        samples = profiles[handle].samples
+        if not samples:
+            continue
+        vectors = np.asarray([sample.vector for sample in samples], dtype=np.float32)
+        if vectors.ndim != 2 or vectors.shape[1] != REDIMNET2_DIMENSION:
+            raise ValueError(f"voiceprints for {handle} have an unexpected dimension")
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        if not np.isfinite(vectors).all() or (norms == 0).any():
+            raise ValueError(f"voiceprints for {handle} contain invalid values")
+        vectors = vectors / norms
+        if len(vectors) > 2:
+            similarities = vectors @ vectors.T
+            medoid = vectors[int(np.argmax(similarities.sum(axis=1)))]
+            retained = vectors[(vectors @ medoid) >= DEFAULT_SIMILARITY_THRESHOLD]
+            vectors = retained if len(retained) else vectors
+        aggregate = vectors.mean(axis=0)
+        aggregate_norm = float(np.linalg.norm(aggregate))
+        if not math.isfinite(aggregate_norm) or aggregate_norm == 0:
+            raise ValueError(f"voiceprints for {handle} cannot be aggregated")
+        handles.append(handle)
+        embeddings.append(aggregate / aggregate_norm)
+    handle_width = max((len(handle) for handle in handles), default=1)
+    return (
+        np.asarray(handles, dtype=f"<U{handle_width}"),
+        np.asarray(embeddings, dtype=np.float32).reshape(-1, REDIMNET2_DIMENSION),
+    )
+
+
+def write_voiceprints(profiles: dict[str, SpeakerProfile], path: Path) -> None:
+    try:
+        import numpy as np
+    except ImportError as error:
+        raise RuntimeError("NumPy is unavailable in the speech2md environment") from error
+    handles, embeddings = aggregate_voiceprints(profiles)
+    temporary = path.with_suffix(path.suffix + ".part")
+    try:
+        with temporary.open("wb") as output:
+            np.savez_compressed(output, handles=handles, embeddings=embeddings)
+        temporary.replace(path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _speaker_sort_key(handle: str) -> tuple[str, int]:
+    prefix, separator, suffix = handle.rpartition("-")
+    return (prefix, int(suffix)) if separator and suffix.isdigit() else (handle, 0)
