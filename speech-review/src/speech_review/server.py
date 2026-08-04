@@ -6,7 +6,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import mimetypes
 from pathlib import Path
-import subprocess
 from urllib.parse import unquote, urlparse
 
 from .transcripts import (
@@ -18,6 +17,7 @@ from .transcripts import (
     transcript_payload,
     write_hint_document,
 )
+from .jobs import RegenerationQueue
 
 
 STATIC = (Path(__file__).parent / "static").resolve()
@@ -27,6 +27,11 @@ class ReviewServer(ThreadingHTTPServer):
     def __init__(self, address, root: Path):
         super().__init__(address, ReviewHandler)
         self.review_root = root.expanduser().resolve()
+        self.jobs = RegenerationQueue(self.review_root)
+
+    def server_close(self) -> None:
+        self.jobs.close()
+        super().server_close()
 
 
 class ReviewHandler(BaseHTTPRequestHandler):
@@ -53,9 +58,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
             self._post()
         except FileNotFoundError:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-        except (ValueError, subprocess.CalledProcessError) as error:
-            detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
-            self._json({"error": detail or "regeneration failed"}, HTTPStatus.BAD_REQUEST)
+        except ValueError as error:
+            self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
 
     def _get(self) -> None:
         path = unquote(urlparse(self.path).path)
@@ -72,6 +76,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
                     "turnCount": len(parsed["turns"]) if parsed else 0,
                 })
             self._json(summaries)
+            return
+        if path == "/api/jobs":
+            self._json(self.server.jobs.payload())
             return
         parts = path.strip("/").split("/")
         if len(parts) >= 3 and parts[:2] == ["api", "transcripts"]:
@@ -115,14 +122,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
         transcript = resolve_identifier(self.server.review_root, parts[2])
         if transcript.requested is None:
             raise ValueError("the original speech2md input is unavailable")
-        process = subprocess.run(
-            ["speech2md", str(transcript.requested), "--force"],
-            cwd=self.server.review_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        self._json({"status": "ready", "output": process.stdout.strip()})
+        job = self.server.jobs.enqueue(transcript)
+        self._json(job.payload(), HTTPStatus.ACCEPTED)
 
     def _json(self, value, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(value, ensure_ascii=False, default=str).encode()

@@ -37,14 +37,25 @@ button { border: 0; background: transparent; cursor: pointer; }
 .search { display: flex; align-items: center; gap: 7px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; color: var(--muted); }
 .search input { width: 100%; border: 0; outline: 0; background: transparent; font-size: 12px; }
 .transcript-list { display: flex; flex-direction: column; gap: 3px; }
-.transcript-card { text-align: left; padding: 10px 9px; border-radius: 6px; }
+.transcript-card { width: 100%; text-align: left; padding: 10px 9px; border-radius: 6px; cursor: pointer; }
 .transcript-card:hover { background: #efefeb; }
 .transcript-card.selected { background: var(--selected); box-shadow: inset 2px 0 var(--accent); }
+.transcript-card-top { display: flex; align-items: flex-start; gap: 6px; }
 .transcript-card strong { display: block; font-family: Newsreader, ui-serif, Georgia, serif; font-size: 14px; line-height: 1.15; }
+.transcript-card-top strong { flex: 1; min-width: 0; }
+.queue-action { flex: 0 0 auto; margin-top: -3px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--secondary); font: 600 8px Geist Mono, monospace; text-transform: uppercase; }
+.queue-action:hover { color: var(--accent); border-color: var(--accent); }
 .status { display: inline-block; vertical-align: 2px; margin-left: 5px; padding: 2px 4px; border-radius: 3px; color: var(--secondary); background: #e9e9e4; font: 600 7px Geist Mono, monospace; letter-spacing: .5px; text-transform: uppercase; }
 .status.ready { color: var(--green); background: #e8f5ef; }
 .status.stale { color: var(--amber); background: #fff3df; }
 .transcript-card span { display: block; color: var(--secondary); margin-top: 4px; font: 9px Geist Mono, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.job-line { display: flex; justify-content: space-between; gap: 6px; margin-top: 7px; }
+.job-line span { margin: 0; color: var(--secondary); }
+.job-line.running span:last-child { color: var(--accent); }
+.job-line.failed span:last-child { color: #c2410c; }
+.job-line.complete span:last-child { color: var(--green); }
+.job-progress { height: 2px; margin-top: 5px; overflow: hidden; background: var(--line); border-radius: 2px; }
+.job-progress i { display: block; height: 100%; background: var(--accent); transition: width .35s ease; }
 .review-panel { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .playback-panel { flex: 0 0 246px; border-bottom: 1px solid var(--line); padding: 18px 24px 12px; background: rgba(255,255,255,.97); }
 .transport { display: flex; height: 36px; align-items: center; justify-content: space-between; margin-bottom: 10px; }

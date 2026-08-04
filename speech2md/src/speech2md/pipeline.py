@@ -21,6 +21,7 @@ from .redimnet2 import (
     write_voiceprints,
 )
 from .render import coalesce_segments, render_markdown
+from .progress import emit_progress
 
 
 def transcribe(
@@ -28,6 +29,7 @@ def transcribe(
     *,
     force: bool = False,
 ) -> TranscriptState:
+    emit_progress("preparing", completed_seconds=0)
     if not re.fullmatch(r"[0-9a-f]{40,64}", __version__):
         raise RuntimeError("speech2md source commit is unavailable")
     resolved = resolve_input(requested)
@@ -46,6 +48,9 @@ def transcribe(
     for path, role, expected_checksum in resolved.sources:
         source = probe(path, expected_sha256=expected_checksum, role=role)
         sources.append((path, role, source))
+    total_seconds = sum(source.duration_seconds for _, _, source in sources)
+    processed_seconds = 0.0
+    emit_progress("loading speaker model", completed_seconds=0, total_seconds=total_seconds)
     hints = validate_hints(hints, [source for _, _, source in sources])
     prompt = build_transcription_prompt(list(hints.hotwords))
     hinted_tracks = {hint.track for hint in hints.speakers}
@@ -53,7 +58,7 @@ def transcribe(
         sources.sort(key=lambda item: item[1] not in hinted_tracks)
 
     with tqdm(
-        total=sum(source.duration_seconds for _, _, source in sources),
+        total=total_seconds,
         desc=resolved.requested.name,
         unit="audio-sec",
         dynamic_ncols=True,
@@ -63,6 +68,7 @@ def transcribe(
         progress.set_postfix_str("loading speaker model")
         embedder = get_redimnet2_embedder()
         progress.set_postfix_str("loading transcription model")
+        emit_progress("loading transcription model", completed_seconds=0, total_seconds=total_seconds)
         engine = load_moss_engine()
         for path, role, source in sources:
 
@@ -74,12 +80,23 @@ def transcribe(
                 *,
                 track_role: str = role,
             ) -> None:
+                nonlocal processed_seconds
                 status = f"{track_role} window {window}/{window_count}"
                 if attempt > 1:
                     status += f" recovery {attempt - 1}"
                 progress.set_postfix_str(status)
                 if completed_seconds:
                     progress.update(completed_seconds)
+                    processed_seconds += completed_seconds
+                emit_progress(
+                    status,
+                    completed_seconds=min(processed_seconds, total_seconds),
+                    total_seconds=total_seconds,
+                    track=track_role,
+                    window=window,
+                    window_count=window_count,
+                    attempt=attempt,
+                )
 
             track_segments, _, speaker_profiles = transcribe_track(
                 path,
@@ -114,6 +131,7 @@ def transcribe(
         ] + [{"identity": identity} for identity in attendee_identities],
         hints_sha256=hints.sha256,
     )
+    emit_progress("writing outputs", completed_seconds=total_seconds, total_seconds=total_seconds)
     with tempfile.TemporaryDirectory(
         prefix=f".{resolved.markdown_path.stem}-speech2md-",
         dir=resolved.markdown_path.parent,
@@ -125,6 +143,7 @@ def transcribe(
         write_text(render_markdown(state), staged_markdown)
         staged_voiceprints.replace(voiceprints_path)
         staged_markdown.replace(resolved.markdown_path)
+    emit_progress("complete", completed_seconds=total_seconds, total_seconds=total_seconds)
     return state
 
 

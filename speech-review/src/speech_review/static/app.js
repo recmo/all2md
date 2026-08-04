@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector)
 const colors = ['#3b82f6', '#8b5cf6', '#d97706', '#059669', '#db2777', '#0891b2']
 const zoomLevels = [1, 8, 16, 32, 64]
-const state = { summaries: [], transcript: null, selected: null, correction: null, dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null }
+const state = { summaries: [], jobs: [], seenCompleted: new Set(), transcript: null, selected: null, correction: null, dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null }
 
 const api = async (path, options) => {
   const response = await fetch(path, options)
@@ -21,18 +21,47 @@ const setSaveState = (text, kind = '') => { $('#save-state').textContent = text;
 
 async function loadSummaries() {
   state.summaries = await api('/api/transcripts')
-  $('#transcript-count').textContent = state.summaries.length
+  await refreshJobs()
+  updateTranscriptCount()
   renderSummaries()
   if (state.summaries[0]) await selectTranscript(state.summaries[0].id)
 }
 
 function renderSummaries() {
   const query = $('#search').value.toLowerCase()
-  $('#transcript-list').innerHTML = state.summaries.filter(item => `${item.title} ${item.name}`.toLowerCase().includes(query)).map(item => `
-    <button class="transcript-card ${state.transcript?.id === item.id ? 'selected' : ''}" data-id="${item.id}">
-      <strong>${escapeHtml(item.title)} <em class="status ${item.status}">${item.status}</em></strong><span>${escapeHtml(item.startedAt || item.name)}${item.status === 'ready' ? ` · ${item.turnCount} turns` : ''}</span>
-    </button>`).join('')
-  document.querySelectorAll('.transcript-card').forEach(button => button.onclick = () => selectTranscript(button.dataset.id))
+  const activeJobs = new Map(state.jobs.filter(job => ['queued','running'].includes(job.status)).map(job => [job.transcriptId, job]))
+  const latestJobs = new Map(state.jobs.map(job => [job.transcriptId, job]))
+  $('#transcript-list').innerHTML = state.summaries.filter(item => `${item.title} ${item.name}`.toLowerCase().includes(query)).map(item => {
+    const job = activeJobs.get(item.id) || latestJobs.get(item.id)
+    const active = job && ['queued','running'].includes(job.status)
+    const jobLine = job ? `<div class="job-line ${job.status}"><span>${job.status === 'queued' ? `Queue ${job.position}` : escapeHtml(job.stage)}</span><span>${job.status === 'running' ? `${Math.round(job.progress * 100)}%` : job.status}</span></div>${active ? `<div class="job-progress"><i style="width:${Math.max(2, job.progress * 100)}%"></i></div>` : ''}` : ''
+    const action = active ? '' : `<button class="queue-action" data-id="${item.id}" data-status="${item.status}">${job?.status === 'failed' ? 'Retry' : item.status === 'ready' ? 'Re-run' : 'Queue'}</button>`
+    return `<div class="transcript-card ${state.transcript?.id === item.id ? 'selected' : ''}" data-id="${item.id}" role="button" tabindex="0">
+      <div class="transcript-card-top"><strong>${escapeHtml(item.title)} <em class="status ${item.status}">${item.status}</em></strong>${action}</div>
+      <span>${escapeHtml(item.startedAt || item.name)}${item.status === 'ready' ? ` · ${item.turnCount} turns` : ''}</span>${jobLine}
+    </div>`
+  }).join('')
+  document.querySelectorAll('.transcript-card').forEach(card => {
+    card.onclick = event => { if (!event.target.closest('.queue-action')) selectTranscript(card.dataset.id) }
+    card.onkeydown = event => { if (event.key === 'Enter') selectTranscript(card.dataset.id) }
+  })
+  document.querySelectorAll('.queue-action').forEach(button => button.onclick = event => queueRecording(button.dataset.id, button.dataset.status, event))
+}
+
+function updateTranscriptCount() {
+  const active = state.jobs.filter(job => ['queued','running'].includes(job.status)).length
+  $('#transcript-count').textContent = active ? `${state.summaries.length} · ${active} queued` : state.summaries.length
+}
+
+async function refreshJobs() {
+  try {
+    const jobs = await api('/api/jobs')
+    const newlyCompleted = jobs.filter(job => job.status === 'complete' && !state.seenCompleted.has(job.id))
+    jobs.filter(job => job.status === 'complete').forEach(job => state.seenCompleted.add(job.id))
+    state.jobs = jobs
+    if (newlyCompleted.length) state.summaries = await api('/api/transcripts')
+    updateTranscriptCount(); renderSummaries()
+  } catch { }
 }
 
 async function selectTranscript(id) {
@@ -60,7 +89,7 @@ function seedAttendees() {
 function renderTranscript() {
   if (state.transcript.status !== 'ready') {
     $('#transcript').innerHTML = `<div class="empty recording-empty"><strong>${state.transcript.status === 'stale' ? 'Stale transcript' : 'No transcript yet'}</strong><span>${state.transcript.status === 'stale' ? 'This Markdown was produced by an unsupported speech2md schema.' : 'This recording has not been processed by speech2md.'}</span><button class="primary regenerate-inline">${state.transcript.status === 'stale' ? 'Regenerate transcript' : 'Generate transcript'}</button></div>`
-    $('.regenerate-inline').onclick = regenerate
+    $('.regenerate-inline').onclick = () => queueRecording(state.transcript.id, state.transcript.status)
     return
   }
   $('#transcript').innerHTML = state.transcript.turns.map(turn => {
@@ -110,7 +139,7 @@ const overlaps = (left, right) => Math.min(left.end, right.end) > Math.max(left.
 async function renderInspector() {
   if (state.transcript.status !== 'ready') {
     $('#inspector').innerHTML = `<div class="eyebrow">${state.transcript.status.toUpperCase()} RECORDING</div><h2>${escapeHtml(state.transcript.title)}</h2><div class="subhead">${escapeHtml(state.transcript.audio.map(item => item.name).join(', ') || 'No audio source found')}</div><div class="notice">↻ <span>${state.transcript.status === 'stale' ? 'The existing Markdown is left untouched until you explicitly regenerate it with the current speech2md.' : 'Generate current Markdown and voiceprints from this recording.'}</span></div><button class="primary regenerate-inspector">${state.transcript.status === 'stale' ? 'Regenerate with speech2md' : 'Generate with speech2md'}</button>`
-    $('.regenerate-inspector').onclick = regenerate
+    $('.regenerate-inspector').onclick = () => queueRecording(state.transcript.id, state.transcript.status)
     return
   }
   if (!state.selected) return
@@ -293,16 +322,13 @@ function waveformClick(event) {
   seekTo(time); selectTurn(turn.index, false)
 }
 
-async function regenerate() {
-  if (!state.transcript || !window.confirm(`${state.transcript.status === 'stale' ? 'Replace the stale transcript' : 'Process this recording'} with current speech2md output?`)) return
-  const transcriptId = state.transcript.id
-  pause(); setSaveState('Regenerating…', 'dirty'); $('#regenerate').disabled = true
+async function queueRecording(transcriptId, status, event) {
+  event?.stopPropagation()
+  if (status !== 'unprocessed' && !window.confirm('Replace the existing derived transcript and voiceprints with current speech2md output?')) return
   try {
     await api(`/api/transcripts/${transcriptId}/regenerate`, {method:'POST'})
-    state.summaries = await api('/api/transcripts'); $('#transcript-count').textContent = state.summaries.length; renderSummaries()
-    toast('Transcription regenerated'); await selectTranscript(transcriptId)
-  } catch (error) { setSaveState('Regeneration failed', 'dirty'); toast(error.message) }
-  finally { $('#regenerate').disabled = false }
+    toast('Recording added to queue'); await refreshJobs()
+  } catch (error) { toast(error.message) }
 }
 
 $('#search').oninput = renderSummaries
@@ -311,9 +337,9 @@ $('#waveform').onclick = waveformClick
 $('#zoom').oninput = event => { state.zoom = zoomLevels[Number(event.target.value)]; $('#zoom-label').textContent = state.zoom === 1 ? 'FIT' : `${state.zoom}×`; drawWaveform() }
 $('#zoom-in').onclick = () => { $('#zoom').value = Math.min(4, Number($('#zoom').value) + 1); $('#zoom').dispatchEvent(new Event('input')) }
 $('#zoom-out').onclick = () => { $('#zoom').value = Math.max(0, Number($('#zoom').value) - 1); $('#zoom').dispatchEvent(new Event('input')) }
-$('#regenerate').onclick = regenerate
+$('#regenerate').onclick = () => state.transcript && queueRecording(state.transcript.id, state.transcript.status)
 window.onresize = drawWaveform
 window.onkeydown = event => { if (event.code === 'Space' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) { event.preventDefault(); state.audio[0]?.paused ? play() : pause() } }
 window.onbeforeunload = event => { if (state.dirty) event.preventDefault() }
 
-loadSummaries().catch(error => { $('#transcript').innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>` })
+loadSummaries().then(() => setInterval(refreshJobs, 1000)).catch(error => { $('#transcript').innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>` })
