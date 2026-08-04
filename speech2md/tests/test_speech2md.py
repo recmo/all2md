@@ -222,6 +222,23 @@ def test_speaker_hint_range_resolves_exactly_one_local_speaker():
         )
 
 
+def test_speaker_hint_ignores_tiny_adjacent_boundary_overlap():
+    segments = [
+        Segment(34.95, 36.03, "Yeah, loud and clear.", "W01:S01", "mixed"),
+        Segment(36.96, 37.56, "Wonderful.", "W01:S02", "mixed"),
+        Segment(38.61, 44.82, "How are you?", "W01:S02", "mixed"),
+    ]
+
+    assert resolve_speaker_anchors(
+        segments,
+        (
+            SpeakerHint("Ulrich", 34, 36, "mixed"),
+            SpeakerHint("Remco", 36, 46, "mixed"),
+        ),
+        role="mixed",
+    ) == {"W01:S01": "Ulrich", "W01:S02": "Remco"}
+
+
 def test_speaker_hints_reject_contradictory_identities_for_one_local_speaker():
     segments = [Segment(10, 30, "speech", "W01:S01", "mixed")]
     with pytest.raises(ValueError, match="anchored to both"):

@@ -530,11 +530,17 @@ def resolve_speaker_anchors(
     for hint in hints:
         if hint.track != role:
             continue
-        speakers = {
+        overlapping = [
             segment.speaker
             for segment in segments
             if min(segment.end, hint.end) > max(segment.start, hint.start)
-        }
+        ]
+        centered = [
+            segment.speaker
+            for segment in segments
+            if hint.start <= (segment.start + segment.end) / 2 < hint.end
+        ]
+        speakers = set(centered or overlapping)
         if not speakers:
             raise ValueError(
                 f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
