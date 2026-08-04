@@ -1,0 +1,3001 @@
+{
+  "version": "2.15",
+  "children": [
+    {
+      "type": "frame",
+      "id": "LgIdS",
+      "x": 0,
+      "y": 0,
+      "name": "Transcript Review - Speaker Selected",
+      "clip": true,
+      "width": 1440,
+      "height": 960,
+      "fill": "$surface",
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "LNGYy",
+          "name": "Application Header",
+          "width": "fill_container",
+          "height": 72,
+          "stroke": "$line",
+          "strokeWidth": {
+            "bottom": 1
+          },
+          "padding": [
+            0,
+            24
+          ],
+          "justifyContent": "space_between",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "frame",
+              "id": "AEdA5",
+              "name": "Brand and Meeting",
+              "gap": 24,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "VjSEW",
+                  "name": "Speech Review Mark",
+                  "width": 34,
+                  "height": 34,
+                  "fill": "$ink",
+                  "cornerRadius": 6,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "dogUI",
+                      "name": "Waveform Icon",
+                      "width": 18,
+                      "height": 18,
+                      "icon": "audio-waveform",
+                      "library": "lucide",
+                      "fill": "#FFFFFF"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "wJL1j",
+                  "name": "Meeting Title Block",
+                  "layout": "vertical",
+                  "gap": 2,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "phDZj",
+                      "name": "Meeting Title",
+                      "fill": "$ink",
+                      "content": "ProveKit weekly check-in",
+                      "fontFamily": "$font-heading",
+                      "fontSize": 22,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "aj9ci",
+                      "name": "Meeting Metadata",
+                      "fill": "$ink-secondary",
+                      "content": "4 August 2026  ·  1:14:32  ·  4 speakers",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "yUVO8",
+              "name": "Header Actions",
+              "gap": 10,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "ylk4J",
+                  "name": "Saved State",
+                  "gap": 7,
+                  "padding": [
+                    8,
+                    10
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "ellipse",
+                      "id": "Pddjs",
+                      "name": "Saved Dot",
+                      "fill": "$speaker-green",
+                      "width": 7,
+                      "height": 7
+                    },
+                    {
+                      "type": "text",
+                      "id": "b5bkR",
+                      "name": "Saved Label",
+                      "fill": "$ink-secondary",
+                      "content": "Hints saved",
+                      "fontFamily": "$font-body",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "A15K8",
+                  "name": "Regenerate Button",
+                  "cornerRadius": 6,
+                  "stroke": "$line",
+                  "strokeWidth": 1,
+                  "gap": 8,
+                  "padding": [
+                    10,
+                    14
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "CQYA3",
+                      "name": "Regenerate Icon",
+                      "width": 15,
+                      "height": 15,
+                      "icon": "refresh-cw",
+                      "library": "lucide",
+                      "fill": "$ink"
+                    },
+                    {
+                      "type": "text",
+                      "id": "d3ptxD",
+                      "name": "Regenerate Label",
+                      "fill": "$ink",
+                      "content": "Regenerate",
+                      "fontFamily": "$font-body",
+                      "fontSize": 13,
+                      "fontWeight": "500"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "CDbuz",
+          "name": "Workspace",
+          "width": "fill_container",
+          "height": "fill_container",
+          "children": [
+            {
+              "type": "frame",
+              "id": "D8oak",
+              "name": "Transcript Browser",
+              "width": 264,
+              "height": "fill_container",
+              "fill": "$surface-subtle",
+              "stroke": "$line",
+              "strokeWidth": {
+                "right": 1
+              },
+              "layout": "vertical",
+              "gap": 16,
+              "padding": [
+                20,
+                16
+              ],
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "muHcR",
+                  "name": "Browser Heading",
+                  "width": "fill_container",
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "EBY3H",
+                      "name": "Transcripts Label",
+                      "fill": "$ink-secondary",
+                      "content": "TRANSCRIPTS",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 10,
+                      "fontWeight": "600",
+                      "letterSpacing": 1.4
+                    },
+                    {
+                      "type": "text",
+                      "id": "ac2eq",
+                      "name": "Transcript Count",
+                      "fill": "$ink-muted",
+                      "content": "28",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 10,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "Ufxg8",
+                  "name": "Search Transcripts",
+                  "width": "fill_container",
+                  "fill": "$surface",
+                  "cornerRadius": 6,
+                  "stroke": "$line",
+                  "strokeWidth": 1,
+                  "gap": 8,
+                  "padding": [
+                    9,
+                    10
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "CLWoX",
+                      "name": "Search Icon",
+                      "width": 14,
+                      "height": 14,
+                      "icon": "search",
+                      "library": "lucide",
+                      "fill": "$ink-muted"
+                    },
+                    {
+                      "type": "text",
+                      "id": "uck2Q",
+                      "name": "Search Placeholder",
+                      "fill": "$ink-muted",
+                      "content": "Search meetings",
+                      "fontFamily": "$font-body",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "OZg7k",
+                  "name": "Transcript List",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 4,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "b3ZZPu",
+                      "name": "TODAY Group Label",
+                      "fill": "$ink-muted",
+                      "content": "TODAY",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 9,
+                      "fontWeight": "600",
+                      "letterSpacing": 1.2
+                    },
+                    {
+                      "type": "frame",
+                      "id": "FdHNI",
+                      "name": "ProveKit weekly check-in Transcript",
+                      "width": "fill_container",
+                      "fill": "$surface-selected",
+                      "cornerRadius": 6,
+                      "layout": "vertical",
+                      "gap": 4,
+                      "padding": 10,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "Cr99O",
+                          "name": "ProveKit weekly check-in Title Row",
+                          "width": "fill_container",
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "T63CxK",
+                              "name": "ProveKit weekly check-in Title",
+                              "fill": "$ink",
+                              "content": "ProveKit weekly check-in",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "ellipse",
+                              "id": "IxAw3",
+                              "name": "ProveKit weekly check-in Active Dot",
+                              "fill": "$accent",
+                              "width": 6,
+                              "height": 6
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "NEZB9",
+                          "name": "ProveKit weekly check-in Metadata",
+                          "fill": "$ink-secondary",
+                          "content": "11:02 · 1h 14m",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "RR2SE",
+                      "name": "Research sync Transcript",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "layout": "vertical",
+                      "gap": 4,
+                      "padding": 10,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "c5i6XL",
+                          "name": "Research sync Title Row",
+                          "width": "fill_container",
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "u1wl2",
+                              "name": "Research sync Title",
+                              "fill": "$ink",
+                              "content": "Research sync",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "450"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "pQebG",
+                          "name": "Research sync Metadata",
+                          "fill": "$ink-secondary",
+                          "content": "09:31 · 48m",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "fGnDF",
+                      "name": "YESTERDAY Group Label",
+                      "fill": "$ink-muted",
+                      "content": "YESTERDAY",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 9,
+                      "fontWeight": "600",
+                      "letterSpacing": 1.2
+                    },
+                    {
+                      "type": "frame",
+                      "id": "W2OmJ",
+                      "name": "F2Z manuscript review Transcript",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "layout": "vertical",
+                      "gap": 4,
+                      "padding": 10,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "G1yzk8",
+                          "name": "F2Z manuscript review Title Row",
+                          "width": "fill_container",
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "J6xNXC",
+                              "name": "F2Z manuscript review Title",
+                              "fill": "$ink",
+                              "content": "F2Z manuscript review",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "450"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "tPwqn",
+                          "name": "F2Z manuscript review Metadata",
+                          "fill": "$ink-secondary",
+                          "content": "16:05 · 1h 02m",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "mqzGH",
+                      "name": "Piotr 1:1 Transcript",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "layout": "vertical",
+                      "gap": 4,
+                      "padding": 10,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "GZh6Q",
+                          "name": "Piotr 1:1 Title Row",
+                          "width": "fill_container",
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "dzIiz",
+                              "name": "Piotr 1:1 Title",
+                              "fill": "$ink",
+                              "content": "Piotr 1:1",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "450"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "zP3aY",
+                          "name": "Piotr 1:1 Metadata",
+                          "fill": "$ink-secondary",
+                          "content": "10:00 · 36m",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "V4kUKS",
+                      "name": "31 JUL Group Label",
+                      "fill": "$ink-muted",
+                      "content": "31 JUL",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 9,
+                      "fontWeight": "600",
+                      "letterSpacing": 1.2
+                    },
+                    {
+                      "type": "frame",
+                      "id": "w3rKDD",
+                      "name": "Proof systems planning Transcript",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "layout": "vertical",
+                      "gap": 4,
+                      "padding": 10,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "tjIlg",
+                          "name": "Proof systems planning Title Row",
+                          "width": "fill_container",
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "S92Mk0",
+                              "name": "Proof systems planning Title",
+                              "fill": "$ink",
+                              "content": "Proof systems planning",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "450"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "gDoM9",
+                          "name": "Proof systems planning Metadata",
+                          "fill": "$ink-secondary",
+                          "content": "14:18 · 52m",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "r6w0l",
+                      "name": "Engineering stand-up Transcript",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "layout": "vertical",
+                      "gap": 4,
+                      "padding": 10,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "kVrHy",
+                          "name": "Engineering stand-up Title Row",
+                          "width": "fill_container",
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "UXWnC",
+                              "name": "Engineering stand-up Title",
+                              "fill": "$ink",
+                              "content": "Engineering stand-up",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "450"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "jupCh",
+                          "name": "Engineering stand-up Metadata",
+                          "fill": "$ink-secondary",
+                          "content": "09:04 · 29m",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "XZNfk",
+                      "name": "29 JUL Group Label",
+                      "fill": "$ink-muted",
+                      "content": "29 JUL",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 9,
+                      "fontWeight": "600",
+                      "letterSpacing": 1.2
+                    },
+                    {
+                      "type": "frame",
+                      "id": "As64n",
+                      "name": "Binius discussion Transcript",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "layout": "vertical",
+                      "gap": 4,
+                      "padding": 10,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "a1mKM",
+                          "name": "Binius discussion Title Row",
+                          "width": "fill_container",
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "c8alHY",
+                              "name": "Binius discussion Title",
+                              "fill": "$ink",
+                              "content": "Binius discussion",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "450"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "GVrYL",
+                          "name": "Binius discussion Metadata",
+                          "fill": "$ink-secondary",
+                          "content": "15:42 · 1h 21m",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "rVgvt",
+              "name": "Playback and Transcript",
+              "width": 820,
+              "height": "fill_container",
+              "fill": "$surface",
+              "stroke": "$line",
+              "strokeWidth": {
+                "right": 1
+              },
+              "layout": "vertical",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "b9vxPZ",
+                  "name": "Sticky Playback Surface",
+                  "width": "fill_container",
+                  "height": 260,
+                  "fill": "$surface-subtle",
+                  "stroke": "$line",
+                  "strokeWidth": {
+                    "bottom": 1
+                  },
+                  "layout": "vertical",
+                  "gap": 14,
+                  "padding": [
+                    18,
+                    24
+                  ],
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "etpcs",
+                      "name": "Playback Transport",
+                      "width": "fill_container",
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "H7Ojwa",
+                          "name": "Transport Controls",
+                          "gap": 12,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "E2tvdb",
+                              "name": "Play Button",
+                              "width": 36,
+                              "height": 36,
+                              "fill": "$ink",
+                              "cornerRadius": 9999,
+                              "justifyContent": "center",
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "B7lZK",
+                                  "name": "Play Icon",
+                                  "width": 16,
+                                  "height": 16,
+                                  "icon": "play",
+                                  "library": "lucide",
+                                  "fill": "#FFFFFF"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "text",
+                              "id": "XVIu6",
+                              "name": "Current Time",
+                              "fill": "$ink",
+                              "content": "00:18:42",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 12,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "H3emHc",
+                              "name": "Duration",
+                              "fill": "$ink-muted",
+                              "content": "/ 01:14:32",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 11,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "qgasK",
+                          "name": "Playback Tools",
+                          "gap": 14,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "icon",
+                              "id": "K9OBx",
+                              "name": "Zoom Out",
+                              "width": 16,
+                              "height": 16,
+                              "icon": "zoom-out",
+                              "library": "lucide",
+                              "fill": "$ink-secondary"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "aw74D",
+                              "name": "Zoom Scale",
+                              "width": 72,
+                              "height": 3,
+                              "fill": "$line",
+                              "cornerRadius": 9999,
+                              "children": [
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 9999,
+                                  "id": "K2Diq",
+                                  "name": "Zoom Position",
+                                  "fill": "$ink",
+                                  "width": 28,
+                                  "height": 3
+                                }
+                              ]
+                            },
+                            {
+                              "type": "icon",
+                              "id": "IvZ7N",
+                              "name": "Zoom In",
+                              "width": 16,
+                              "height": 16,
+                              "icon": "zoom-in",
+                              "library": "lucide",
+                              "fill": "$ink-secondary"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "oH9T1",
+                      "name": "Audio Lanes",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 12,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "P8ZTY",
+                          "name": "MICROPHONE Lane",
+                          "width": "fill_container",
+                          "gap": 10,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "S5WIU",
+                              "name": "MICROPHONE Label",
+                              "width": 96,
+                              "layout": "vertical",
+                              "gap": 2,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "serSI",
+                                  "name": "MICROPHONE Role",
+                                  "fill": "$ink-secondary",
+                                  "content": "MICROPHONE",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 9,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 1
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "nNvuJ",
+                                  "name": "MICROPHONE Voices",
+                                  "fill": "$ink-muted",
+                                  "content": "You",
+                                  "fontFamily": "$font-body",
+                                  "fontSize": 11,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "VHGFC",
+                              "name": "MICROPHONE Waveform",
+                              "width": "fill_container",
+                              "height": 50,
+                              "fill": "#FFFFFF",
+                              "cornerRadius": 6,
+                              "stroke": "$line",
+                              "strokeWidth": 1,
+                              "gap": 3,
+                              "padding": [
+                                0,
+                                8
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "K9YP83",
+                                  "name": "MICROPHONE Wave 1",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 18
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "Xm3a7",
+                                  "name": "MICROPHONE Wave 2",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 26
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "MxmV7",
+                                  "name": "MICROPHONE Wave 3",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 14
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "PEex7",
+                                  "name": "MICROPHONE Wave 4",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 32
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "upWkU",
+                                  "name": "MICROPHONE Wave 5",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 20
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "t4fu9T",
+                                  "name": "MICROPHONE Wave 6",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 38
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "CaWRO",
+                                  "name": "MICROPHONE Wave 7",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 24
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "mxwue",
+                                  "name": "MICROPHONE Wave 8",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 28
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "CWZ6R",
+                                  "name": "MICROPHONE Wave 9",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 16
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "eyTJG",
+                                  "name": "MICROPHONE Wave 10",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 34
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "h8CuR",
+                                  "name": "MICROPHONE Wave 11",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 22
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "x4ekMk",
+                                  "name": "MICROPHONE Wave 12",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 40
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "yBRVq",
+                                  "name": "MICROPHONE Wave 13",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 28
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "BXChx",
+                                  "name": "MICROPHONE Wave 14",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 18
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "G7Lr5",
+                                  "name": "MICROPHONE Wave 15",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 30
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "B3NhCY",
+                                  "name": "MICROPHONE Wave 16",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 24
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "BptFZ",
+                                  "name": "MICROPHONE Wave 17",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 36
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "uFauv",
+                                  "name": "MICROPHONE Wave 18",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 20
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "UyOVH",
+                                  "name": "MICROPHONE Wave 19",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 26
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "Yd5mA",
+                                  "name": "MICROPHONE Wave 20",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 34
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "rwWWJ",
+                                  "name": "MICROPHONE Wave 21",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 18
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "f6IDo",
+                                  "name": "MICROPHONE Wave 22",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 30
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "s0GqL",
+                                  "name": "MICROPHONE Wave 23",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 22
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "HWtZ4",
+                                  "name": "MICROPHONE Wave 24",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 38
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "gcK2n",
+                                  "name": "MICROPHONE Wave 25",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 24
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "MO2sQ",
+                                  "name": "MICROPHONE Wave 26",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 16
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "syTbj",
+                                  "name": "MICROPHONE Wave 27",
+                                  "fill": "#3B82F6",
+                                  "width": 10,
+                                  "height": 32
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "FRcpz",
+                                  "name": "MICROPHONE Wave 28",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 26
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "nHGGm",
+                                  "name": "MICROPHONE Wave 29",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 20
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "PTcvZ",
+                                  "name": "MICROPHONE Wave 30",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 36
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "wPDlI",
+                                  "name": "MICROPHONE Wave 31",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 22
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "GutM9",
+                                  "name": "MICROPHONE Wave 32",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 28
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "UoF5q",
+                                  "name": "MICROPHONE Wave 33",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 16
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "qIql3",
+                                  "name": "MICROPHONE Wave 34",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 34
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "DhBTH",
+                                  "name": "MICROPHONE Wave 35",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 24
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "wK3vE",
+                                  "name": "MICROPHONE Wave 36",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 40
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "mICQL",
+                                  "name": "MICROPHONE Wave 37",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 18
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "qAJrY",
+                                  "name": "MICROPHONE Wave 38",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 30
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "GzW3W",
+                                  "name": "MICROPHONE Wave 39",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 22
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "Ei0wP",
+                                  "name": "MICROPHONE Wave 40",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 26
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "z7dMf",
+                                  "name": "MICROPHONE Wave 41",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 36
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "foz7v",
+                                  "name": "MICROPHONE Wave 42",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 20
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "DjQEP",
+                                  "name": "MICROPHONE Wave 43",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 28
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "o6FHd9",
+                                  "name": "MICROPHONE Wave 44",
+                                  "fill": "#3B82F64D",
+                                  "width": 10,
+                                  "height": 32
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "K3YCQw",
+                          "name": "PARTICIPANTS Lane",
+                          "width": "fill_container",
+                          "gap": 10,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "B3HtPM",
+                              "name": "PARTICIPANTS Label",
+                              "width": 96,
+                              "layout": "vertical",
+                              "gap": 2,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "SXLbj",
+                                  "name": "PARTICIPANTS Role",
+                                  "fill": "$ink-secondary",
+                                  "content": "PARTICIPANTS",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 9,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 1
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "uaHC5",
+                                  "name": "PARTICIPANTS Voices",
+                                  "fill": "$ink-muted",
+                                  "content": "3 voices",
+                                  "fontFamily": "$font-body",
+                                  "fontSize": 11,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "P0BbC",
+                              "name": "PARTICIPANTS Waveform",
+                              "width": "fill_container",
+                              "height": 50,
+                              "fill": "#FFFFFF",
+                              "cornerRadius": 6,
+                              "stroke": "$line",
+                              "strokeWidth": 1,
+                              "gap": 3,
+                              "padding": [
+                                0,
+                                8
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "BhtRo",
+                                  "name": "PARTICIPANTS Wave 1",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 28
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "AeUFu",
+                                  "name": "PARTICIPANTS Wave 2",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 16
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "klQS3",
+                                  "name": "PARTICIPANTS Wave 3",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 34
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "Uz9s9",
+                                  "name": "PARTICIPANTS Wave 4",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 22
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "jGecN",
+                                  "name": "PARTICIPANTS Wave 5",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 38
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "EjwKn",
+                                  "name": "PARTICIPANTS Wave 6",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 26
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "WZj3J",
+                                  "name": "PARTICIPANTS Wave 7",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 18
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "S9mUAX",
+                                  "name": "PARTICIPANTS Wave 8",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 30
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "cXiZy",
+                                  "name": "PARTICIPANTS Wave 9",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 36
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "jOtnm",
+                                  "name": "PARTICIPANTS Wave 10",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 20
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "VjpeF",
+                                  "name": "PARTICIPANTS Wave 11",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 32
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "mDuNo",
+                                  "name": "PARTICIPANTS Wave 12",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 24
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "KRJX2",
+                                  "name": "PARTICIPANTS Wave 13",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 40
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "qAmZF",
+                                  "name": "PARTICIPANTS Wave 14",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 18
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "R9nOsP",
+                                  "name": "PARTICIPANTS Wave 15",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 28
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "teswG",
+                                  "name": "PARTICIPANTS Wave 16",
+                                  "fill": "#0596694D",
+                                  "width": 10,
+                                  "height": 34
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "BfLL4",
+                                  "name": "PARTICIPANTS Wave 17",
+                                  "fill": "#0596694D",
+                                  "width": 10,
+                                  "height": 22
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "KQ92m",
+                                  "name": "PARTICIPANTS Wave 18",
+                                  "fill": "#0596694D",
+                                  "width": 10,
+                                  "height": 38
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "nxIP5",
+                                  "name": "PARTICIPANTS Wave 19",
+                                  "fill": "#0596694D",
+                                  "width": 10,
+                                  "height": 16
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "i68L4F",
+                                  "name": "PARTICIPANTS Wave 20",
+                                  "fill": "#0596694D",
+                                  "width": 10,
+                                  "height": 30
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "qXJgZ",
+                                  "name": "PARTICIPANTS Wave 21",
+                                  "fill": "#0596694D",
+                                  "width": 10,
+                                  "height": 26
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "PmdIp",
+                                  "name": "PARTICIPANTS Wave 22",
+                                  "fill": "#8B5CF6",
+                                  "width": 10,
+                                  "height": 36
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "zUwKR",
+                                  "name": "PARTICIPANTS Wave 23",
+                                  "fill": "#8B5CF6",
+                                  "width": 10,
+                                  "height": 20
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "rzQDk",
+                                  "name": "PARTICIPANTS Wave 24",
+                                  "fill": "#8B5CF6",
+                                  "width": 10,
+                                  "height": 32
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "C0YOc",
+                                  "name": "PARTICIPANTS Wave 25",
+                                  "fill": "#8B5CF6",
+                                  "width": 10,
+                                  "height": 24
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "mywlj",
+                                  "name": "PARTICIPANTS Wave 26",
+                                  "fill": "#8B5CF6",
+                                  "width": 10,
+                                  "height": 18
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "r8ekT",
+                                  "name": "PARTICIPANTS Wave 27",
+                                  "fill": "#8B5CF6",
+                                  "width": 10,
+                                  "height": 40
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "tjb3m",
+                                  "name": "PARTICIPANTS Wave 28",
+                                  "fill": "#8B5CF6",
+                                  "width": 10,
+                                  "height": 28
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "QMCE2",
+                                  "name": "PARTICIPANTS Wave 29",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 34
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "RRjsa",
+                                  "name": "PARTICIPANTS Wave 30",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 22
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "wc0U5",
+                                  "name": "PARTICIPANTS Wave 31",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 30
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "HHn2y",
+                                  "name": "PARTICIPANTS Wave 32",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 16
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "mkrRq",
+                                  "name": "PARTICIPANTS Wave 33",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 38
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "sG9oq",
+                                  "name": "PARTICIPANTS Wave 34",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 24
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "lFFM1",
+                                  "name": "PARTICIPANTS Wave 35",
+                                  "fill": "#D977064D",
+                                  "width": 10,
+                                  "height": 28
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "eFs5m",
+                                  "name": "PARTICIPANTS Wave 36",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 36
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "y0Sbq",
+                                  "name": "PARTICIPANTS Wave 37",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 20
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "FzJfM",
+                                  "name": "PARTICIPANTS Wave 38",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 32
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "r22x6F",
+                                  "name": "PARTICIPANTS Wave 39",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 26
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "u3Y3KU",
+                                  "name": "PARTICIPANTS Wave 40",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 18
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "VpYKo",
+                                  "name": "PARTICIPANTS Wave 41",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 34
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "rnJqE",
+                                  "name": "PARTICIPANTS Wave 42",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 22
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "Ar321",
+                                  "name": "PARTICIPANTS Wave 43",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 30
+                                },
+                                {
+                                  "type": "rectangle",
+                                  "cornerRadius": 2,
+                                  "id": "Sw7kA",
+                                  "name": "PARTICIPANTS Wave 44",
+                                  "fill": "#8B5CF64D",
+                                  "width": 10,
+                                  "height": 38
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "FLsWT",
+                      "name": "Waveform Timeline",
+                      "width": "fill_container",
+                      "padding": [
+                        0,
+                        0,
+                        0,
+                        106
+                      ],
+                      "justifyContent": "space_between",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "PDWKw",
+                          "name": "Timeline 00:00",
+                          "fill": "$ink-muted",
+                          "content": "00:00",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "rJRVY",
+                          "name": "Timeline 15:00",
+                          "fill": "$ink-muted",
+                          "content": "15:00",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "Rl2Rc",
+                          "name": "Timeline 30:00",
+                          "fill": "$ink-muted",
+                          "content": "30:00",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "SCPtn",
+                          "name": "Timeline 45:00",
+                          "fill": "$ink-muted",
+                          "content": "45:00",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "E8v3J",
+                          "name": "Timeline 60:00",
+                          "fill": "$ink-muted",
+                          "content": "60:00",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "cwpJq",
+                          "name": "Timeline 74:32",
+                          "fill": "$ink-muted",
+                          "content": "74:32",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "gjSVz",
+                  "name": "Scrolling Transcript",
+                  "clip": true,
+                  "width": "fill_container",
+                  "height": "fill_container",
+                  "layout": "vertical",
+                  "gap": 18,
+                  "padding": [
+                    22,
+                    28
+                  ],
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "YMTgP",
+                      "name": "Transcript Heading",
+                      "width": "fill_container",
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "d374tz",
+                          "name": "Transcript Title",
+                          "fill": "$ink",
+                          "content": "Transcript",
+                          "fontFamily": "$font-heading",
+                          "fontSize": 26,
+                          "fontWeight": "600"
+                        },
+                        {
+                          "type": "text",
+                          "id": "d4XeB",
+                          "name": "Keyboard Hint",
+                          "fill": "$ink-muted",
+                          "content": "SPACE  play · ⌘S  save hints",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal",
+                          "letterSpacing": 0.6
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "Iw2uV",
+                      "name": "00:17:56 speaker-1 Turn",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "gap": 12,
+                      "padding": [
+                        2,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "JqxLU",
+                          "name": "00:17:56 Timestamp",
+                          "fill": "$ink-muted",
+                          "content": "00:17:56",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "ygJtm",
+                          "name": "00:17:56 Speaker Color",
+                          "fill": "$speaker-blue",
+                          "width": 8,
+                          "height": 8
+                        },
+                        {
+                          "type": "frame",
+                          "id": "WMGG0",
+                          "name": "00:17:56 Turn Body",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 5,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "IQg1M",
+                              "name": "00:17:56 Speaker Handle",
+                              "fill": "$speaker-blue",
+                              "content": "speaker-1",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 10,
+                              "fontWeight": "600",
+                              "letterSpacing": 0.4
+                            },
+                            {
+                              "type": "text",
+                              "id": "DEU0G",
+                              "name": "00:17:56 Transcript Text",
+                              "fill": "$ink",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "So the main thing I wanted to cover is how we expose the field abstraction without making every caller understand the extension tower.",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-body",
+                              "fontSize": 15,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "HSK4w",
+                      "name": "00:18:14 speaker-3 Turn",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "gap": 12,
+                      "padding": [
+                        2,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "D3jX3W",
+                          "name": "00:18:14 Timestamp",
+                          "fill": "$ink-muted",
+                          "content": "00:18:14",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "kuMY0",
+                          "name": "00:18:14 Speaker Color",
+                          "fill": "$speaker-amber",
+                          "width": 8,
+                          "height": 8
+                        },
+                        {
+                          "type": "frame",
+                          "id": "emCXN",
+                          "name": "00:18:14 Turn Body",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 5,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "BFKEO",
+                              "name": "00:18:14 Speaker Handle",
+                              "fill": "$speaker-amber",
+                              "content": "speaker-3",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 10,
+                              "fontWeight": "600",
+                              "letterSpacing": 0.4
+                            },
+                            {
+                              "type": "text",
+                              "id": "aeXSN",
+                              "name": "00:18:14 Transcript Text",
+                              "fill": "$ink",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Right. The current trait leaks the representation in two places, especially when we construct the evaluation domain.",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-body",
+                              "fontSize": 15,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "SHXgf",
+                      "name": "00:18:42 speaker-2 Turn",
+                      "width": "fill_container",
+                      "fill": "$surface-selected",
+                      "cornerRadius": 6,
+                      "gap": 12,
+                      "padding": 12,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "lx8Hd",
+                          "name": "00:18:42 Timestamp",
+                          "fill": "$accent",
+                          "content": "00:18:42",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "UtcJT",
+                          "name": "00:18:42 Speaker Color",
+                          "fill": "$speaker-violet",
+                          "width": 8,
+                          "height": 8
+                        },
+                        {
+                          "type": "frame",
+                          "id": "cCqqE",
+                          "name": "00:18:42 Turn Body",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 5,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "a8U2f",
+                              "name": "00:18:42 Speaker Handle",
+                              "fill": "$speaker-violet",
+                              "content": "speaker-2",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 10,
+                              "fontWeight": "600",
+                              "letterSpacing": 0.4
+                            },
+                            {
+                              "type": "text",
+                              "id": "GsNr4",
+                              "name": "00:18:42 Transcript Text",
+                              "fill": "$ink",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "I think the clean boundary is the PCS itself. The prover can work over F2Z, but the commitment interface should only see the canonical field element.",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-body",
+                              "fontSize": 15,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "W7xeQo",
+                      "name": "00:19:08 speaker-1 Turn",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "gap": 12,
+                      "padding": [
+                        2,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "p20qY",
+                          "name": "00:19:08 Timestamp",
+                          "fill": "$ink-muted",
+                          "content": "00:19:08",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "VIyYE",
+                          "name": "00:19:08 Speaker Color",
+                          "fill": "$speaker-blue",
+                          "width": 8,
+                          "height": 8
+                        },
+                        {
+                          "type": "frame",
+                          "id": "YigO0",
+                          "name": "00:19:08 Turn Body",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 5,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "AAME6",
+                              "name": "00:19:08 Speaker Handle",
+                              "fill": "$speaker-blue",
+                              "content": "speaker-1",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 10,
+                              "fontWeight": "600",
+                              "letterSpacing": 0.4
+                            },
+                            {
+                              "type": "text",
+                              "id": "CgN08",
+                              "name": "00:19:08 Transcript Text",
+                              "fill": "$ink",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Would that still let us share the batching code with the Binius path, or do we end up duplicating the transcript challenge handling?",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-body",
+                              "fontSize": 15,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "KTcBH",
+                      "name": "00:19:31 speaker-2 Turn",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "gap": 12,
+                      "padding": [
+                        2,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "vdXC0",
+                          "name": "00:19:31 Timestamp",
+                          "fill": "$ink-muted",
+                          "content": "00:19:31",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "RxFTI",
+                          "name": "00:19:31 Speaker Color",
+                          "fill": "$speaker-violet",
+                          "width": 8,
+                          "height": 8
+                        },
+                        {
+                          "type": "frame",
+                          "id": "W7XyS",
+                          "name": "00:19:31 Turn Body",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 5,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "nmGCN",
+                              "name": "00:19:31 Speaker Handle",
+                              "fill": "$speaker-violet",
+                              "content": "speaker-2",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 10,
+                              "fontWeight": "600",
+                              "letterSpacing": 0.4
+                            },
+                            {
+                              "type": "text",
+                              "id": "DnpRL",
+                              "name": "00:19:31 Transcript Text",
+                              "fill": "$ink",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "The batching layer stays generic. We only need a conversion at the point where the multilinear evaluation enters the protocol.",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-body",
+                              "fontSize": 15,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "D95Gr8",
+                      "name": "00:20:02 speaker-4 Turn",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "gap": 12,
+                      "padding": [
+                        2,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "dlfrm",
+                          "name": "00:20:02 Timestamp",
+                          "fill": "$ink-muted",
+                          "content": "00:20:02",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 10,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "x0fMw",
+                          "name": "00:20:02 Speaker Color",
+                          "fill": "$speaker-green",
+                          "width": 8,
+                          "height": 8
+                        },
+                        {
+                          "type": "frame",
+                          "id": "KeuSh",
+                          "name": "00:20:02 Turn Body",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 5,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "g0hwt",
+                              "name": "00:20:02 Speaker Handle",
+                              "fill": "$speaker-green",
+                              "content": "speaker-4",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 10,
+                              "fontWeight": "600",
+                              "letterSpacing": 0.4
+                            },
+                            {
+                              "type": "text",
+                              "id": "u7hZdk",
+                              "name": "00:20:02 Transcript Text",
+                              "fill": "$ink",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "There is one caveat around serialization. We should write that down explicitly before merging the API change.",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-body",
+                              "fontSize": 15,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "H4qmnb",
+                      "name": "Scroll Fade",
+                      "width": "fill_container",
+                      "height": 38,
+                      "fill": {
+                        "type": "gradient",
+                        "gradientType": "linear",
+                        "enabled": true,
+                        "rotation": 0,
+                        "size": {
+                          "height": 1
+                        },
+                        "colors": [
+                          {
+                            "color": "#FFFFFF00",
+                            "position": 0
+                          },
+                          {
+                            "color": "#FFFFFFFF",
+                            "position": 1
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "ppHyr",
+              "name": "Speaker Inspector",
+              "width": "fill_container",
+              "height": "fill_container",
+              "fill": "$surface",
+              "layout": "vertical",
+              "gap": 24,
+              "padding": [
+                24,
+                22
+              ],
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "tQodQ",
+                  "name": "Inspector Heading",
+                  "width": "fill_container",
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "Hl9xE",
+                      "name": "Selected Speaker Heading",
+                      "layout": "vertical",
+                      "gap": 3,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "Fx6co",
+                          "name": "Speaker Eyebrow",
+                          "fill": "$ink-muted",
+                          "content": "SELECTED SPEAKER",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "600",
+                          "letterSpacing": 1.3
+                        },
+                        {
+                          "type": "text",
+                          "id": "xEKcp",
+                          "name": "Selected Speaker Name",
+                          "fill": "$ink",
+                          "content": "speaker-2",
+                          "fontFamily": "$font-heading",
+                          "fontSize": 26,
+                          "fontWeight": "600"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "zvmcP",
+                      "name": "Selected Speaker Swatch",
+                      "fill": "$speaker-violet",
+                      "width": 16,
+                      "height": 16
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "tTd9L",
+                  "name": "Inferred Track Notice",
+                  "width": "fill_container",
+                  "fill": "$surface-subtle",
+                  "cornerRadius": 6,
+                  "gap": 10,
+                  "padding": [
+                    10,
+                    12
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "zPW3X",
+                      "name": "Track Icon",
+                      "width": 15,
+                      "height": 15,
+                      "icon": "radio",
+                      "library": "lucide",
+                      "fill": "$ink-secondary"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "k1o7JM",
+                      "name": "Track Text",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 2,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "Q7DG1",
+                          "name": "Track Label",
+                          "fill": "$ink",
+                          "content": "Participants track",
+                          "fontFamily": "$font-body",
+                          "fontSize": 12,
+                          "fontWeight": "600"
+                        },
+                        {
+                          "type": "text",
+                          "id": "Xl0tb",
+                          "name": "Track Confidence",
+                          "fill": "$ink-secondary",
+                          "content": "Voiceprint confidence 0.91",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "IzjOA",
+                  "name": "Identity Section",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 9,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "m7CR9",
+                      "name": "Identity Label",
+                      "fill": "$ink-muted",
+                      "content": "IDENTITY",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 9,
+                      "fontWeight": "600",
+                      "letterSpacing": 1.3
+                    },
+                    {
+                      "type": "frame",
+                      "id": "D7DLK",
+                      "name": "Identity Input",
+                      "width": "fill_container",
+                      "cornerRadius": 6,
+                      "stroke": "$line",
+                      "strokeWidth": 1,
+                      "padding": [
+                        11,
+                        12
+                      ],
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "GjJ7O",
+                          "name": "Identity Placeholder",
+                          "fill": "$ink-muted",
+                          "content": "Enter a person or identity URI",
+                          "fontFamily": "$font-body",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "icon",
+                          "id": "lUILF",
+                          "name": "Identity Search Icon",
+                          "width": 15,
+                          "height": 15,
+                          "icon": "user-round-search",
+                          "library": "lucide",
+                          "fill": "$ink-muted"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "WUxwI",
+                  "name": "Voiceprint Candidates",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 4,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "JXWOH",
+                      "name": "Candidate Heading",
+                      "width": "fill_container",
+                      "justifyContent": "space_between",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "O90ew",
+                          "name": "Candidate Label",
+                          "fill": "$ink-muted",
+                          "content": "VOICEPRINT MATCHES",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "600",
+                          "letterSpacing": 1.2
+                        },
+                        {
+                          "type": "text",
+                          "id": "taHpy",
+                          "name": "Candidate Scope",
+                          "fill": "$ink-muted",
+                          "content": "28 transcripts",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "oQN6N",
+                      "name": "Piotr Voiceprint Candidate",
+                      "width": "fill_container",
+                      "fill": "$surface-selected",
+                      "cornerRadius": 6,
+                      "padding": 10,
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "q6SQK",
+                          "name": "Piotr Candidate Text",
+                          "layout": "vertical",
+                          "gap": 2,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "fiNQ5",
+                              "name": "Piotr Candidate Name",
+                              "fill": "$ink",
+                              "content": "Piotr",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "Xesfl",
+                              "name": "Piotr Candidate Evidence",
+                              "fill": "$ink-secondary",
+                              "content": "12 meetings",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 9,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "EpBmL",
+                          "name": "Piotr Similarity",
+                          "fill": "$accent",
+                          "cornerRadius": 9999,
+                          "padding": [
+                            5,
+                            7
+                          ],
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "q60LHj",
+                              "name": "Piotr Score",
+                              "fill": "#FFFFFF",
+                              "content": "0.87",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 10,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "lZEo1",
+                      "name": "Kobi Voiceprint Candidate",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "padding": 10,
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "g1WI7",
+                          "name": "Kobi Candidate Text",
+                          "layout": "vertical",
+                          "gap": 2,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "i7o6N6",
+                              "name": "Kobi Candidate Name",
+                              "fill": "$ink",
+                              "content": "Kobi",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "ostnC",
+                              "name": "Kobi Candidate Evidence",
+                              "fill": "$ink-secondary",
+                              "content": "4 meetings",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 9,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "V3hxJ2",
+                          "name": "Kobi Similarity",
+                          "fill": "$surface-subtle",
+                          "cornerRadius": 9999,
+                          "padding": [
+                            5,
+                            7
+                          ],
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "O4JWE2",
+                              "name": "Kobi Score",
+                              "fill": "$ink-secondary",
+                              "content": "0.72",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 10,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "ApO6I",
+                      "name": "Michał Voiceprint Candidate",
+                      "width": "fill_container",
+                      "fill": "#FFFFFF00",
+                      "cornerRadius": 6,
+                      "padding": 10,
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "f7Gj29",
+                          "name": "Michał Candidate Text",
+                          "layout": "vertical",
+                          "gap": 2,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "ffnQb",
+                              "name": "Michał Candidate Name",
+                              "fill": "$ink",
+                              "content": "Michał",
+                              "fontFamily": "$font-body",
+                              "fontSize": 13,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "zSer6",
+                              "name": "Michał Candidate Evidence",
+                              "fill": "$ink-secondary",
+                              "content": "7 meetings",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 9,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "t7lQH",
+                          "name": "Michał Similarity",
+                          "fill": "$surface-subtle",
+                          "cornerRadius": 9999,
+                          "padding": [
+                            5,
+                            7
+                          ],
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "r4cuMM",
+                              "name": "Michał Score",
+                              "fill": "$ink-secondary",
+                              "content": "0.64",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 10,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "tBign",
+                  "name": "Assign Piotr Button",
+                  "width": "fill_container",
+                  "fill": "$accent",
+                  "cornerRadius": 6,
+                  "gap": 8,
+                  "padding": [
+                    11,
+                    14
+                  ],
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "L0QwN1",
+                      "name": "Assign Icon",
+                      "width": 15,
+                      "height": 15,
+                      "icon": "user-check",
+                      "library": "lucide",
+                      "fill": "#FFFFFF"
+                    },
+                    {
+                      "type": "text",
+                      "id": "n8rKt",
+                      "name": "Assign Label",
+                      "fill": "#FFFFFF",
+                      "content": "Assign Piotr to speaker-2",
+                      "fontFamily": "$font-body",
+                      "fontSize": 13,
+                      "fontWeight": "600"
+                    }
+                  ]
+                },
+                {
+                  "type": "rectangle",
+                  "id": "lQd37",
+                  "name": "Inspector Divider",
+                  "fill": "$line",
+                  "width": "fill_container",
+                  "height": 1
+                },
+                {
+                  "type": "frame",
+                  "id": "jEoLZ",
+                  "name": "Attendee Summary",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 10,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "adVLc",
+                      "name": "Attendee Heading",
+                      "width": "fill_container",
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "ky26A",
+                          "name": "Attendee Label",
+                          "fill": "$ink-muted",
+                          "content": "ATTENDEES",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "600",
+                          "letterSpacing": 1.3
+                        },
+                        {
+                          "type": "icon",
+                          "id": "BcHjh",
+                          "name": "Add Attendee Icon",
+                          "width": 15,
+                          "height": 15,
+                          "icon": "user-plus",
+                          "library": "lucide",
+                          "fill": "$ink-secondary"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "KKKLb",
+                      "name": "Remco Attendee",
+                      "width": "fill_container",
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "pw3gK",
+                          "name": "Remco Attendee Identity",
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "JSZYx",
+                              "name": "Remco Attendee Dot",
+                              "fill": "$speaker-blue",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "tK4Ot",
+                              "name": "Remco Attendee Name",
+                              "fill": "$ink",
+                              "content": "Remco",
+                              "fontFamily": "$font-body",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "s4ClY",
+                          "name": "Remco Attendee Handle",
+                          "fill": "$ink-muted",
+                          "content": "speaker-1",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "r2Bj9",
+                      "name": "Unknown Attendee",
+                      "width": "fill_container",
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "a3pZK",
+                          "name": "Unknown Attendee Identity",
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "y1jaK",
+                              "name": "Unknown Attendee Dot",
+                              "fill": "$speaker-violet",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "TWWe8",
+                              "name": "Unknown Attendee Name",
+                              "fill": "$ink",
+                              "content": "Unknown",
+                              "fontFamily": "$font-body",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "I6aNK",
+                          "name": "Unknown Attendee Handle",
+                          "fill": "$ink-muted",
+                          "content": "speaker-2",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "rHz6y",
+                      "name": "Kobi Attendee",
+                      "width": "fill_container",
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "Zvh8n",
+                          "name": "Kobi Attendee Identity",
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "VcAha",
+                              "name": "Kobi Attendee Dot",
+                              "fill": "$speaker-amber",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "mx47I",
+                              "name": "Kobi Attendee Name",
+                              "fill": "$ink",
+                              "content": "Kobi",
+                              "fontFamily": "$font-body",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "JvQss",
+                          "name": "Kobi Attendee Handle",
+                          "fill": "$ink-muted",
+                          "content": "speaker-3",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "TOKGm",
+                      "name": "Michał Attendee",
+                      "width": "fill_container",
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "Ik0FU",
+                          "name": "Michał Attendee Identity",
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "ctAdS",
+                              "name": "Michał Attendee Dot",
+                              "fill": "$ink-muted",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "urv3h",
+                              "name": "Michał Attendee Name",
+                              "fill": "$ink",
+                              "content": "Michał",
+                              "fontFamily": "$font-body",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "IQynb",
+                          "name": "Michał Attendee Handle",
+                          "fill": "$ink-muted",
+                          "content": "No turns",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 9,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variables": {
+    "surface": {
+      "type": "color",
+      "value": "#FFFFFF"
+    },
+    "surface-subtle": {
+      "type": "color",
+      "value": "#F7F7F4"
+    },
+    "surface-selected": {
+      "type": "color",
+      "value": "#EEF4FF"
+    },
+    "ink": {
+      "type": "color",
+      "value": "#1A1A1A"
+    },
+    "ink-secondary": {
+      "type": "color",
+      "value": "#666666"
+    },
+    "ink-muted": {
+      "type": "color",
+      "value": "#999999"
+    },
+    "line": {
+      "type": "color",
+      "value": "#E5E5E0"
+    },
+    "accent": {
+      "type": "color",
+      "value": "#0066FF"
+    },
+    "speaker-blue": {
+      "type": "color",
+      "value": "#3B82F6"
+    },
+    "speaker-violet": {
+      "type": "color",
+      "value": "#8B5CF6"
+    },
+    "speaker-amber": {
+      "type": "color",
+      "value": "#D97706"
+    },
+    "speaker-green": {
+      "type": "color",
+      "value": "#059669"
+    },
+    "font-heading": {
+      "type": "string",
+      "value": "Newsreader"
+    },
+    "font-body": {
+      "type": "string",
+      "value": "Geist"
+    },
+    "font-mono": {
+      "type": "string",
+      "value": "Geist Mono"
+    }
+  },
+  "fileToken": "35127f3a-5671-4ac1-b649-7ff9a50657ae"
+}
