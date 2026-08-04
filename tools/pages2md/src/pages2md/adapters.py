@@ -15,7 +15,7 @@ from PIL import Image, ImageSequence
 
 from .assets import AssetStore
 from .model import EmbeddedEvidence, Link, SourceDocument, SourcePage
-from .util import natural_key, parse_pages
+from .util import natural_key
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
@@ -57,26 +57,25 @@ def open_document(
     assets: AssetStore,
     *,
     dpi: int,
-    page_spec: str | None,
 ) -> SourceDocument:
     kind = detect_kind(source)
     if kind == "pdf":
-        return _open_pdf(source, work, assets, dpi=dpi, page_spec=page_spec)
+        return _open_pdf(source, work, assets, dpi=dpi)
     if kind == "djvu":
-        return _open_djvu(source, work, dpi=dpi, page_spec=page_spec)
+        return _open_djvu(source, work, dpi=dpi)
     if kind == "epub":
-        return _open_epub(source, work, assets, dpi=dpi, page_spec=page_spec)
+        return _open_epub(source, work, assets, dpi=dpi)
     if kind == "cbz":
-        return _open_cbz(source, work, page_spec=page_spec)
-    return _open_images(source, work, page_spec=page_spec)
+        return _open_cbz(source, work)
+    return _open_images(source, work)
 
 
-def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int, page_spec: str | None) -> SourceDocument:
+def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int) -> SourceDocument:
     pages_dir = work / "rendered"
     pages_dir.mkdir(parents=True, exist_ok=True)
     result = SourceDocument(path=source, kind="pdf")
     with fitz.open(source) as document:
-        selected = parse_pages(page_spec, document.page_count)
+        selected = range(1, document.page_count + 1)
         result.metadata = dict(document.metadata or {})
         result.outline = [
             {"level": level, "title": title, "page": page}
@@ -182,7 +181,7 @@ def _is_page_backing_image(rect, page_rect) -> bool:
     return width_ratio >= 0.90 and height_ratio >= 0.90
 
 
-def _open_djvu(source: Path, work: Path, *, dpi: int, page_spec: str | None) -> SourceDocument:
+def _open_djvu(source: Path, work: Path, *, dpi: int) -> SourceDocument:
     for command in ("ddjvu", "djvused"):
         if not shutil.which(command):
             raise RuntimeError(f"{command} is required for DjVu input")
@@ -190,7 +189,7 @@ def _open_djvu(source: Path, work: Path, *, dpi: int, page_spec: str | None) -> 
         ["djvused", str(source), "-e", "n"], check=True, capture_output=True, text=True
     ).stdout.strip()
     total = int(count_output)
-    selected = parse_pages(page_spec, total)
+    selected = range(1, total + 1)
     pages_dir = work / "rendered"
     pages_dir.mkdir(parents=True, exist_ok=True)
     result = SourceDocument(path=source, kind="djvu")
@@ -252,7 +251,7 @@ def _open_djvu(source: Path, work: Path, *, dpi: int, page_spec: str | None) -> 
     return result
 
 
-def _open_images(source: Path, work: Path, *, page_spec: str | None) -> SourceDocument:
+def _open_images(source: Path, work: Path) -> SourceDocument:
     paths = sorted((path for path in source.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS), key=natural_key) if source.is_dir() else [source]
     frames: list[tuple[Path, int | None]] = []
     for path in paths:
@@ -262,7 +261,7 @@ def _open_images(source: Path, work: Path, *, page_spec: str | None) -> SourceDo
                     frames.append((path, frame_index))
             else:
                 frames.append((path, None))
-    selected = parse_pages(page_spec, len(frames))
+    selected = range(1, len(frames) + 1)
     pages_dir = work / "rendered"
     pages_dir.mkdir(parents=True, exist_ok=True)
     result = SourceDocument(path=source, kind="images")
@@ -277,7 +276,7 @@ def _open_images(source: Path, work: Path, *, page_spec: str | None) -> SourceDo
     return result
 
 
-def _open_cbz(source: Path, work: Path, *, page_spec: str | None) -> SourceDocument:
+def _open_cbz(source: Path, work: Path) -> SourceDocument:
     extracted = work / "cbz"
     extracted.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(source) as archive:
@@ -288,7 +287,7 @@ def _open_cbz(source: Path, work: Path, *, page_spec: str | None) -> SourceDocum
         for index, member in enumerate(members, 1):
             destination = extracted / f"{index:06d}{Path(member).suffix.lower()}"
             destination.write_bytes(archive.read(member))
-    return _open_images(extracted, work, page_spec=page_spec)
+    return _open_images(extracted, work)
 
 
 def _open_epub(
@@ -297,7 +296,6 @@ def _open_epub(
     assets: AssetStore,
     *,
     dpi: int,
-    page_spec: str | None,
 ) -> SourceDocument:
     result = SourceDocument(path=source, kind="epub")
     with zipfile.ZipFile(source) as archive:
@@ -370,7 +368,7 @@ def _open_epub(
                     markdown_lines.append(text)
             result.semantic_chapters.append({"title": title, "markdown": "\n\n".join(markdown_lines), "source": member})
     if layout.casefold() == "pre-paginated":
-        return _open_fixed_epub(source, work, result, dpi=dpi, page_spec=page_spec)
+        return _open_fixed_epub(source, work, result, dpi=dpi)
     return result
 
 
@@ -380,7 +378,6 @@ def _open_fixed_epub(
     semantic: SourceDocument,
     *,
     dpi: int,
-    page_spec: str | None,
 ) -> SourceDocument:
     pages_dir = work / "rendered"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -396,7 +393,7 @@ def _open_fixed_epub(
             for level, title, page, *_ in document.get_toc(simple=False)
             if page > 0
         ]
-        selected = parse_pages(page_spec, document.page_count)
+        selected = range(1, document.page_count + 1)
         matrix = fitz.Matrix(dpi / 72, dpi / 72)
         for page_number in selected:
             page = document[page_number - 1]

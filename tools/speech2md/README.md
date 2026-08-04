@@ -19,12 +19,11 @@ packages at runtime; only model weights and checkpoints populate user caches.
 ```sh
 uv sync --project tools/speech2md --extra dev
 uv run --project tools/speech2md pytest tools/speech2md/tests
-uv run --project tools/speech2md speech2md transcribe meeting.mp4
-uv run --project tools/speech2md speech2md transcribe meeting.mp4 \
+uv run --project tools/speech2md speech2md meeting.mp4
+uv run --project tools/speech2md speech2md meeting.mp4 \
   --hotwords 'Alice, Bob, ProveKit, F2Z, ReDimNet2'
 uv run --project tools/speech2md speech2md relabel meeting.md \
   'speaker-1=gbrain://people/alice'
-uv run --project tools/speech2md speech2md render meeting.audio2md.json
 ```
 
 The input may be an ordinary audio/video file or a Meeting Capture v1 manifest.
@@ -118,16 +117,12 @@ permissions. A recording without usable voice evidence gets stable empty shapes
 
 Raw MOSS generations, recovery records, reconciliation decisions, and individual
 embedding samples are intermediates and are not published. Failed runs publish
-nothing. States created under the earlier `*.speech2md.json`, `*.audio2md.json`,
-or `*.voice2md.json` names remain readable as migration input, but new
-transcriptions never create JSON sidecars. `render` exists only to migrate those
-legacy states; the benchmark command likewise summarizes legacy processing
-states rather than new minimal outputs.
+nothing. `relabel` accepts generated Markdown and changes attendee identity
+values only.
 
 The ReDimNet2 model and checkpoint load lazily on the first usable participant
 sample and are reused for the run. The first run requires network access to
 populate the PyTorch model cache (`$XDG_CACHE_HOME/speech2md/torch` through the
 Nix wrapper). A load, checksum or inference failure stops processing clearly;
-canonical audio remains unchanged. Existing derived artifacts require
-`--force` to replace; successful replacement also removes recognized legacy JSON
-sidecars for the same recording.
+canonical audio remains unchanged. Existing derived artifacts require `--force`
+to replace.

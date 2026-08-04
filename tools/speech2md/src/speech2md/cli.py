@@ -2,46 +2,48 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from . import __version__
-from .benchmark import summarize
-from .pipeline import relabel, render, transcribe
+from .pipeline import relabel, transcribe
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(
+    command = argparse.ArgumentParser(
         prog="speech2md",
-        description="Transcribe local meeting audio with MOSS and reconcile speakers with ReDimNet2",
+        description="Transcribe local meeting audio with MOSS and ReDimNet2",
+        epilog="Use 'speech2md relabel --help' to assign attendee identities.",
     )
-    root.add_argument("--version", action="version", version=__version__)
-    commands = root.add_subparsers(dest="command", required=True)
-
-    command = commands.add_parser("transcribe", help="transcribe a capture manifest or media file")
+    command.add_argument("--version", action="version", version=f"speech2md {__version__}")
     command.add_argument("input", type=Path)
-    command.add_argument("--force", action="store_true", help="replace derived artifacts; canonical audio is never changed")
+    command.add_argument("--force", action="store_true", help="replace existing derived output")
     command.add_argument(
         "--hotwords",
         metavar="TERM,...",
-        help="comma-separated names and domain terms to bias MOSS transcription (maximum 40)",
+        help="comma-separated names and domain terms (maximum 40)",
     )
+    return command
 
-    command = commands.add_parser("relabel", help="assign attendee identities without retranscribing")
+
+def relabel_parser() -> argparse.ArgumentParser:
+    command = argparse.ArgumentParser(
+        prog="speech2md relabel",
+        description="Assign attendee identities without retranscribing",
+    )
     command.add_argument("input", type=Path)
-    command.add_argument("mappings", nargs="+", metavar="SPEAKER=NAME")
-
-    command = commands.add_parser("render", help="migrate a legacy processing state to Markdown")
-    command.add_argument("input", type=Path)
-
-    command = commands.add_parser("benchmark", help="summarize legacy processing states")
-    command.add_argument("directory", type=Path)
-    return root
+    command.add_argument("mappings", nargs="+", metavar="HANDLE=IDENTITY")
+    return command
 
 
 def main(argv: list[str] | None = None) -> int:
-    arguments = parser().parse_args(argv)
+    values = list(sys.argv[1:] if argv is None else argv)
     try:
-        if arguments.command == "transcribe":
+        if values[:1] == ["relabel"]:
+            arguments = relabel_parser().parse_args(values[1:])
+            print(json.dumps(relabel(arguments.input, arguments.mappings), sort_keys=True))
+        else:
+            arguments = parser().parse_args(values)
             state = transcribe(
                 arguments.input,
                 force=arguments.force,
@@ -51,13 +53,6 @@ def main(argv: list[str] | None = None) -> int:
                 "segments": len(state.segments),
                 "processing_seconds": state.processing_seconds,
             }))
-        elif arguments.command == "relabel":
-            identities = relabel(arguments.input, arguments.mappings)
-            print(json.dumps(identities, sort_keys=True))
-        elif arguments.command == "render":
-            print(render(arguments.input))
-        elif arguments.command == "benchmark":
-            print(json.dumps(summarize(arguments.directory), indent=2, sort_keys=True))
     except (FileExistsError, FileNotFoundError, RuntimeError, ValueError) as error:
         parser().error(str(error))
     return 0

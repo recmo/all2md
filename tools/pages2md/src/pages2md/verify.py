@@ -181,8 +181,6 @@ def verify_bundle(root: Path) -> Verification:
         errors.append("metadata reports non-idempotent formatting")
     if metadata.get("formatting", {}).get("lint_errors"):
         warnings.append("metadata reports Markdown lint failures")
-    if metadata.get("resume_stable") is False:
-        errors.append("resume changed Markdown filenames or content")
     for failed in metadata.get("failed_pages", []):
         warnings.append(f"page {failed.get('page')} failed: {failed.get('error')}")
     warnings.extend(metadata.get("warnings", []))

@@ -220,7 +220,7 @@
               pages2md --version | grep -Eq '^pages2md [0-9a-f]{40,64}$'
               ${pagesEnvironment}/bin/python -c 'from mlx_vlm import load'
               speech2md --help > /dev/null
-              speech2md --version | grep -Eq '^[0-9a-f]{40,64}$'
+              speech2md --version | grep -Eq '^speech2md [0-9a-f]{40,64}$'
               for extension in \
                 ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
                 ${speechEnvironment}/lib/python*/site-packages/mlx/core*.so; do

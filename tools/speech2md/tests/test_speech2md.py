@@ -10,15 +10,12 @@ import numpy as np
 
 import speech2md.moss as moss
 import speech2md.pipeline as pipeline
-from speech2md.benchmark import summarize
-from speech2md.cli import parser
+from speech2md.cli import parser, relabel_parser
 from speech2md.media import resolve_input
 from speech2md.model import AudioSource, EmbeddingSample, Segment, SpeakerProfile, TranscriptState
 from speech2md.moss import (
     ENGLISH_TRANSCRIPTION_PROMPT,
     MAX_HOTWORDS,
-    MOSS_MODEL,
-    MOSS_REVISION,
     MAX_GENERATION_TOKENS,
     RECOVERY_TOKEN_THRESHOLD,
     build_transcription_prompt,
@@ -32,7 +29,7 @@ from speech2md.moss import (
     transcribe_track,
     trim_overlaps,
 )
-from speech2md.pipeline import relabel, transcribe, write_state
+from speech2md.pipeline import relabel, transcribe
 from speech2md.render import coalesce_segments, render_markdown, timestamp
 
 
@@ -41,7 +38,6 @@ def test_resolve_media_input(tmp_path: Path):
     source.touch()
     resolved = resolve_input(source)
     assert resolved.sources == ((source, "mixed", None),)
-    assert resolved.state_path.name == "meeting.speech2md.json"
     assert resolved.markdown_path.name == "meeting.md"
 
 
@@ -58,11 +54,9 @@ def test_resolve_capture_manifest(tmp_path: Path):
         "audio": [{"file": "meeting-microphone.flac", "role": "microphone", "sha256": "a" * 64}],
     }))
     resolved = resolve_input(manifest)
-    assert resolved.meeting_id == "id"
     assert resolved.sources[0][1] == "microphone"
     assert resolved.ended_at == "later"
     assert resolved.calendar_event == "https://calendar.google.com/event?id=example"
-    assert resolved.state_path.name == "2026-08-02-meeting.speech2md.json"
     assert resolved.markdown_path.name == "2026-08-02-meeting.md"
 
 
@@ -161,9 +155,13 @@ def test_build_transcription_prompt_uses_english_and_targeted_hotwords():
 
 def test_cli_accepts_comma_separated_hotwords():
     arguments = parser().parse_args([
-        "transcribe", "meeting.mp4", "--hotwords", "Remco, Piotr,F2Z",
+        "meeting.mp4", "--hotwords", "Remco, Piotr,F2Z",
     ])
     assert arguments.hotwords == "Remco, Piotr,F2Z"
+    relabel_arguments = relabel_parser().parse_args([
+        "meeting.md", "speaker-1=gbrain://people/alice",
+    ])
+    assert relabel_arguments.mappings == ["speaker-1=gbrain://people/alice"]
 
 
 @pytest.mark.parametrize(
@@ -415,7 +413,7 @@ def test_render_and_relabel_without_retranscription(tmp_path: Path):
     state = fixture_state(media)
     (tmp_path / "meeting.md").write_text(render_markdown(state))
     assert "**[00:00:01] speaker-1:** Hello" in render_markdown(state)
-    relabeled = relabel(media, ["speaker-1=gbrain://people/alice"])
+    relabeled = relabel(tmp_path / "meeting.md", ["speaker-1=gbrain://people/alice"])
     assert relabeled == {"speaker-1": "gbrain://people/alice"}
     metadata = yaml.safe_load((tmp_path / "meeting.md").read_text().split("---", 2)[1])
     assert metadata["attendees"] == [{
@@ -453,35 +451,6 @@ def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path
     assert "## Processing notes" not in body
 
 
-@pytest.mark.parametrize("suffix", [".audio2md.json", ".voice2md.json"])
-def test_relabel_reads_legacy_state(tmp_path: Path, suffix: str):
-    media = tmp_path / "meeting.mp4"
-    media.touch()
-    legacy_state = tmp_path / f"meeting{suffix}"
-    write_state(fixture_state(media), legacy_state)
-
-    relabeled = relabel(media, ["speaker-1=Alice"])
-
-    assert relabeled == {"speaker-1": "Alice"}
-    assert json.loads(legacy_state.read_text())["speakers"] == {}
-    metadata = yaml.safe_load((tmp_path / "meeting.md").read_text().split("---", 2)[1])
-    assert metadata["attendees"] == [{"handle": "speaker-1", "identity": "Alice"}]
-    assert not (tmp_path / "meeting.speech2md.json").exists()
-
-
-def test_benchmark_reads_legacy_state_without_double_counting(tmp_path: Path):
-    media = tmp_path / "meeting.mp4"
-    state = fixture_state(media)
-    write_state(state, tmp_path / "meeting.audio2md.json")
-    assert summarize(tmp_path)["recordings"] == 1
-
-    write_state(state, tmp_path / "meeting.voice2md.json")
-    assert summarize(tmp_path)["recordings"] == 1
-
-    write_state(state, tmp_path / "meeting.speech2md.json")
-    assert summarize(tmp_path)["recordings"] == 1
-
-
 def test_render_coalesces_only_same_speaker():
     segments = [
         Segment(0, 1, "One.", "Speaker 1", "mixed"),
@@ -495,7 +464,7 @@ def test_render_coalesces_only_same_speaker():
 def test_transcribe_refuses_to_overwrite_before_loading_model(tmp_path: Path):
     media = tmp_path / "meeting.mp4"
     media.touch()
-    (tmp_path / "meeting.speech2md.json").write_text("existing")
+    (tmp_path / "meeting.md").write_text("existing")
     with pytest.raises(FileExistsError, match="--force"):
         transcribe(media)
 
@@ -509,7 +478,6 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     requested.touch()
     resolved = SimpleNamespace(
         requested=requested,
-        state_path=tmp_path / "capture.speech2md.json",
         markdown_path=tmp_path / "capture.md",
         capture_manifest=requested,
         meeting_id="meeting",
@@ -637,51 +605,11 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert (tmp_path / "capture.voiceprints.npz").stat().st_mode & 0o777 == 0o600
 
 
-def test_state_round_trip_with_embeddings_and_backward_compatible_loading(tmp_path: Path):
-    state = fixture_state(tmp_path / "meeting.mp4")
-    sample = EmbeddingSample(
-        vector=[1.0] + [0.0] * 191,
-        source_track="participants",
-        start=1,
-        end=4,
-        duration_seconds=3,
-        window=1,
-        quality={"overlap_free": True},
-    )
-    state.schema_version = 2
-    state.speaker_profiles = {
-        "Speaker 1": SpeakerProfile(
-            speaker="Speaker 1",
-            model="ReDimNet2",
-            model_revision="revision",
-            checkpoint_sha256="b" * 64,
-            embedding_dimension=192,
-            samples=[sample],
-        )
-    }
-    restored = TranscriptState.from_dict(state.to_dict())
-    assert restored.speaker_profiles["Speaker 1"].samples[0] == sample
-
-    old_value = state.to_dict()
-    old_value["schema_version"] = 1
-    old_value.pop("speaker_profiles")
-    assert TranscriptState.from_dict(old_value).speaker_profiles == {}
-
-
 def fixture_state(media: Path) -> TranscriptState:
     return TranscriptState(
-        schema_version=1,
-        source=str(media),
-        capture_manifest=None,
-        meeting_id=None,
         title="Test",
         started_at=None,
-        model=MOSS_MODEL,
-        model_revision=MOSS_REVISION,
-        created_at="now",
         processing_seconds=1,
-        audio=[AudioSource(str(media), "mixed", "a" * 64, 3, "aac")],
-        speakers={},
         segments=[Segment(1, 2, "Hello", "Speaker 1", "mixed")],
-        warnings=[],
+        source_sha256="a" * 64,
     )

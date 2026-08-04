@@ -19,7 +19,7 @@ def render_markdown(state: TranscriptState) -> str:
     if re.fullmatch(r"[0-9a-f]{40,64}", __version__) is None:
         raise RuntimeError("speech2md source commit is unavailable")
     title = state.title or "Meeting transcript"
-    source_hash = state.source_sha256 or (state.audio[0].sha256 if state.audio else None)
+    source_hash = state.source_sha256
     if not isinstance(source_hash, str) or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None:
         raise ValueError("speech2md source hash is unavailable")
     speaker_handles: dict[str, str] = {}
@@ -35,13 +35,10 @@ def render_markdown(state: TranscriptState) -> str:
         speaker_handles[segment.speaker] = handle
     attendees = []
     existing = {item.get("handle"): item for item in state.attendees if item.get("handle")}
-    for source_speaker, handle in speaker_handles.items():
+    for handle in speaker_handles.values():
         attendees.append({
             "handle": handle,
-            "identity": state.speakers.get(
-                handle,
-                state.speakers.get(source_speaker, existing.get(handle, {}).get("identity", "")),
-            ),
+            "identity": existing.get(handle, {}).get("identity", ""),
         })
     attendees.extend(
         {"identity": item.get("identity", "")}

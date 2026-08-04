@@ -498,13 +498,15 @@ def test_list_output_is_stable_without_publishing_intermediates(tmp_path):
     document.close()
     backend = ListOcr()
 
-    bundle = convert(source, tmp_path / "out", backend=backend, split_mode="single", quality="fast")
+    bundle = convert(source, backend=backend)
     first = bundle.read_bytes()
 
-    repeated = convert(source, tmp_path / "out", backend=backend, split_mode="single", quality="fast")
+    with pytest.raises(FileExistsError, match="--force"):
+        convert(source, backend=backend)
+    repeated = convert(source, force=True, backend=backend)
 
-    assert backend.calls == 2
+    assert backend.calls >= 2
     assert repeated.read_bytes() == first
     assert "•" not in first.decode()
-    assert list((tmp_path / "out").iterdir()) == [bundle]
+    assert bundle == tmp_path / "fixture.pdf.md"
     assert verify_bundle(repeated).ok

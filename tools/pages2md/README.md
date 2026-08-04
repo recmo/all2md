@@ -22,7 +22,6 @@ runtime. Model weights remain explicit, on-demand downloads:
 
 ```sh
 nix run github:recmo/all2md#pages2md -- --help
-nix run github:recmo/all2md#pages2md -- models fetch
 ```
 
 For development:
@@ -41,36 +40,30 @@ The OCR dependency is pinned to MLX-VLM revision
 ## Convert
 
 ```sh
-pages2md convert paper.pdf --output result
-pages2md convert book.djvu --output result --split auto
-pages2md convert scans/ --output result --pages 1-20
-pages2md verify result/book.md
+pages2md paper.pdf
+pages2md scans/
+pages2md --force paper.pdf
 ```
 
-For a large document, `--split auto` creates chapter files only when reliable
-structural boundaries exist. `--split chapters --chapter-map chapters.json`
-accepts an explicit map:
-
-```json
-[
-  {"title": "Introduction", "start_page": 1},
-  {"title": "Background", "start_page": 17}
-]
-```
+The input is one supported document or a directory containing images. OCR,
+layout, chapter detection, and quality settings are fixed. Output is written
+beside the input by appending `.md` to its complete basename: `paper.pdf`
+becomes `paper.pdf.md`, while the image directory `scans/` becomes `scans.md`.
+Existing output requires `--force`.
 
 ## Output
 
 ```text
-# One Markdown file, no figures
-book.md
+# paper.pdf, one Markdown file and no figures
+paper.pdf.md
 
-# One Markdown file with figures
-book/
-  book.md
+# paper.pdf, one Markdown file with figures
+paper.pdf.md/
+  paper.pdf.md
   figures/
 
-# Multiple chapters
-book/
+# paper.pdf, multiple chapters
+paper.pdf.md/
   index.md
   001-introduction.md
   002-background.md
