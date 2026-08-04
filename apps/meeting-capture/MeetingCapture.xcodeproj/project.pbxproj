@@ -13,6 +13,7 @@
 		43A142377BBAB3FFF1CF36C7 /* AudioActivityMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0749EA236967FF20E57AD97C /* AudioActivityMonitor.swift */; };
 		4881C700096CF7591E632C13 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A006FF91C37787A13A91D93 /* AppModel.swift */; };
 		57C53F2F4C8D282D446ABC56 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41B7AE97EC372C0BD54E18DE /* Models.swift */; };
+		6CD35CB1AC21DC4CC793A39B /* HUDLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE8B5C5A6EACD14D4A820C38 /* HUDLayoutTests.swift */; };
 		747A9206C742279295390E27 /* MeetingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2E0E7DD1BC627C8D91E34AF /* MeetingStore.swift */; };
 		7864B4E13F70DD2709A6661E /* MeetingCaptureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18DD35ED00ADD46EF006D7B6 /* MeetingCaptureApp.swift */; };
 		82D3DE9DB4907F04E9D9FCEB /* manifest-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = C24D5A489742BE085F4C29D9 /* manifest-v1.json */; };
@@ -50,6 +51,7 @@
 		BD57CB2B550A57193DEDA1E0 /* AudioFinalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioFinalizer.swift; sourceTree = "<group>"; };
 		C24D5A489742BE085F4C29D9 /* manifest-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "manifest-v1.json"; sourceTree = "<group>"; };
 		C58BFDACDA8AEB550897A658 /* MicrophoneRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneRecorder.swift; sourceTree = "<group>"; };
+		CE8B5C5A6EACD14D4A820C38 /* HUDLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDLayoutTests.swift; sourceTree = "<group>"; };
 		E2E0E7DD1BC627C8D91E34AF /* MeetingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingStore.swift; sourceTree = "<group>"; };
 		FAF9F6DA2537AD5632D6FF77 /* MeetingCapture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MeetingCapture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -66,6 +68,7 @@
 		9FC750F119896C2558B7FB16 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				CE8B5C5A6EACD14D4A820C38 /* HUDLayoutTests.swift */,
 				520E01FDA0F33C14B50F579C /* MeetingStoreTests.swift */,
 				114CD2B3EDF42630C843A5F2 /* Fixtures */,
 			);
@@ -213,6 +216,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6CD35CB1AC21DC4CC793A39B /* HUDLayoutTests.swift in Sources */,
 				8A690EA36CA84061000E9065 /* MeetingStoreTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

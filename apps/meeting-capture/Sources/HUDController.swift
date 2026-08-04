@@ -43,15 +43,16 @@ final class HUDController {
     }
 
     private func updateLayout() {
-        guard let panel, let model, let screen = NSScreen.main else { return }
+        guard let panel, let model, let screen = targetScreen else { return }
         let layout = HUDLayout(screen: screen)
         panel.setContentSize(layout.size)
         panel.contentView = NSHostingView(rootView: RecordingHUD(model: model, layout: layout))
+        panel.setFrame(layout.frame, display: false)
+    }
 
-        let y = layout.hasNotch
-            ? screen.visibleFrame.maxY
-            : screen.visibleFrame.maxY - layout.size.height - 6
-        panel.setFrameOrigin(NSPoint(x: screen.frame.midX - layout.size.width / 2, y: y))
+    private var targetScreen: NSScreen? {
+        let screens = NSScreen.screens
+        return screens.first(where: HUDLayout.hasNotch) ?? screens.first
     }
 
     private func setVisible(_ visible: Bool) {
@@ -85,28 +86,69 @@ private extension AppModel.State {
     }
 }
 
-private struct HUDLayout {
+struct HUDLayout {
     let notchWidth: CGFloat
     let hasNotch: Bool
-    let size: NSSize
+    let frame: NSRect
+
+    var size: NSSize { frame.size }
 
     init(screen: NSScreen) {
-        if let left = screen.auxiliaryTopLeftArea,
-           let right = screen.auxiliaryTopRightArea,
-           right.minX > left.maxX {
+        self.init(
+            screenFrame: screen.frame,
+            visibleFrame: screen.visibleFrame,
+            backingScaleFactor: screen.backingScaleFactor,
+            auxiliaryTopLeftArea: screen.auxiliaryTopLeftArea,
+            auxiliaryTopRightArea: screen.auxiliaryTopRightArea
+        )
+    }
+
+    init(
+        screenFrame: NSRect,
+        visibleFrame: NSRect,
+        backingScaleFactor: CGFloat,
+        auxiliaryTopLeftArea left: NSRect?,
+        auxiliaryTopRightArea right: NSRect?
+    ) {
+        let scale = max(backingScaleFactor, 1)
+        if let left, let right, Self.hasNotch(left: left, right: right) {
             let gap = right.minX - left.maxX
-            // The safe-area inset describes the auxiliary menu-bar regions,
-            // which can be one point shorter than the actual content boundary.
-            // visibleFrame is the authoritative edge the HUD must meet.
-            let notchHeight = max(screen.frame.maxY - screen.visibleFrame.maxY, 42)
+            let onePixel = 1 / scale
+            let bottom = min(left.minY, right.minY) - onePixel
+            let width = min(gap + 320, screenFrame.width - 24)
             notchWidth = gap
             hasNotch = true
-            size = NSSize(width: min(gap + 320, screen.frame.width - 24), height: notchHeight)
+            frame = NSRect(
+                x: Self.alignToPixel(screenFrame.midX - width / 2, scale: scale),
+                y: bottom,
+                width: width,
+                height: screenFrame.maxY - bottom
+            )
         } else {
             notchWidth = 0
             hasNotch = false
-            size = NSSize(width: 360, height: 44)
+            let size = NSSize(width: 360, height: 44)
+            frame = NSRect(
+                x: Self.alignToPixel(screenFrame.midX - size.width / 2, scale: scale),
+                y: visibleFrame.maxY - size.height - 6,
+                width: size.width,
+                height: size.height
+            )
         }
+    }
+
+    static func hasNotch(_ screen: NSScreen) -> Bool {
+        guard let left = screen.auxiliaryTopLeftArea,
+              let right = screen.auxiliaryTopRightArea else { return false }
+        return hasNotch(left: left, right: right)
+    }
+
+    private static func hasNotch(left: NSRect, right: NSRect) -> Bool {
+        !left.isEmpty && !right.isEmpty && right.minX > left.maxX
+    }
+
+    private static func alignToPixel(_ value: CGFloat, scale: CGFloat) -> CGFloat {
+        (value * scale).rounded(.down) / scale
     }
 }
 
