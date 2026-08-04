@@ -100,7 +100,7 @@ meeting.voiceprints.npz
 
 The MOSS cache stores replayable raw generations and is accepted only when its
 schema, audio-track checksums and roles, normalized ordered hotwords, pinned
-MOSS model revision, generation limit, and speech2md source commit all match.
+MOSS model revision, prompt, generation limit, and window/recovery settings all match.
 Changing metadata, attendees, speaker ranges, or localized edits therefore
 reuses MOSS output while rerunning speaker reconciliation and rendering.
 Changing hotwords or audio invalidates the cache. Invalid or unreadable caches

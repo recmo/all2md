@@ -16,7 +16,7 @@ from .moss import (
     load_moss_engine,
     transcribe_track,
 )
-from .moss_cache import cache_metadata, cache_path, load_cache, source_key, write_cache
+from .moss_cache import MossCacheMiss, cache_metadata, cache_path, load_cache, source_key, write_cache
 from .redimnet2 import (
     get_redimnet2_embedder,
     write_voiceprints,
@@ -29,6 +29,7 @@ def transcribe(
     requested: Path,
     *,
     force: bool = False,
+    require_moss_cache: bool = False,
 ) -> TranscriptState:
     emit_progress("preparing", completed_seconds=0)
     if not re.fullmatch(r"[0-9a-f]{40,64}", __version__):
@@ -56,11 +57,13 @@ def transcribe(
     prompt = build_transcription_prompt(list(hints.hotwords))
     moss_path = cache_path(resolved.markdown_path)
     metadata = cache_metadata(
-        version=__version__,
+        prompt=prompt,
         hotwords=hints.hotwords,
         sources=[source for _, _, source in sources],
     )
     cached_tracks = load_cache(moss_path, metadata)
+    if require_moss_cache and any(source_key(source) not in cached_tracks for _, _, source in sources):
+        raise MossCacheMiss("current MOSS cache is unavailable")
     generated_tracks: dict[str, list[dict]] = {}
     cache_complete = True
     hinted_tracks = {hint.track for hint in hints.speakers}

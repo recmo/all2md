@@ -127,7 +127,10 @@ class ReviewHandler(BaseHTTPRequestHandler):
         transcript = resolve_identifier(self.server.review_root, parts[2])
         if transcript.requested is None:
             raise ValueError("the original speech2md input is unavailable")
-        job = self.server.jobs.enqueue(transcript)
+        job = self.server.jobs.enqueue(
+            transcript,
+            prefer_cache=transcript.status != "unprocessed",
+        )
         self._json(job.payload(), HTTPStatus.ACCEPTED)
 
     def _json(self, value, status: HTTPStatus = HTTPStatus.OK) -> None:

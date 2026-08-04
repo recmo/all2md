@@ -7,10 +7,27 @@ from typing import Any
 import numpy as np
 
 from .model import AudioSource
-from .moss import MAX_GENERATION_TOKENS, MOSS_MODEL, MOSS_REVISION
+from .moss import (
+    MAX_GENERATION_TOKENS,
+    MAX_RECOVERY_ATTEMPTS,
+    MIN_RECOVERY_PROGRESS_SECONDS,
+    MOSS_MODEL,
+    MOSS_REVISION,
+    RECOVERY_OVERLAP_SECONDS,
+    RECOVERY_TOKEN_THRESHOLD,
+    SILENCE_MIN_SECONDS,
+    SILENCE_NOISE_DB,
+    SILENCE_SEARCH_SECONDS,
+    TARGET_PART_SECONDS,
+    WINDOW_OVERLAP_SECONDS,
+)
 
 
 CACHE_SCHEMA_VERSION = 1
+
+
+class MossCacheMiss(RuntimeError):
+    pass
 
 
 def cache_path(markdown_path: Path) -> Path:
@@ -18,14 +35,27 @@ def cache_path(markdown_path: Path) -> Path:
 
 
 def cache_metadata(
-    *, version: str, hotwords: tuple[str, ...], sources: list[AudioSource]
+    *, prompt: str, hotwords: tuple[str, ...], sources: list[AudioSource]
 ) -> dict[str, Any]:
     return {
         "schema_version": CACHE_SCHEMA_VERSION,
-        "speech2md_version": version,
         "model": MOSS_MODEL,
         "model_revision": MOSS_REVISION,
+        "prompt": prompt,
         "max_generation_tokens": MAX_GENERATION_TOKENS,
+        "windowing": {
+            "target_part_seconds": TARGET_PART_SECONDS,
+            "overlap_seconds": WINDOW_OVERLAP_SECONDS,
+            "silence_search_seconds": SILENCE_SEARCH_SECONDS,
+            "silence_noise_db": SILENCE_NOISE_DB,
+            "silence_min_seconds": SILENCE_MIN_SECONDS,
+        },
+        "recovery": {
+            "token_threshold": RECOVERY_TOKEN_THRESHOLD,
+            "overlap_seconds": RECOVERY_OVERLAP_SECONDS,
+            "minimum_progress_seconds": MIN_RECOVERY_PROGRESS_SECONDS,
+            "maximum_attempts": MAX_RECOVERY_ATTEMPTS,
+        },
         "hotwords": list(hotwords),
         "sources": sorted(
             ({"role": source.role, "sha256": source.sha256} for source in sources),

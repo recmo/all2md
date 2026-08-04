@@ -15,6 +15,7 @@ from .transcripts import TranscriptFile
 
 
 ACTIVE = {"queued", "running"}
+CACHE_MISS_EXIT = 75
 
 
 @dataclass
@@ -27,6 +28,7 @@ class Job:
     stage: str = "Waiting"
     progress: float = 0.0
     error: str = ""
+    mode: str = "full"
     created_at: float = field(default_factory=time.time)
 
     def payload(self) -> dict:
@@ -38,6 +40,7 @@ class Job:
             "stage": self.stage,
             "progress": self.progress,
             "error": self.error,
+            "mode": self.mode,
         }
 
 
@@ -54,13 +57,14 @@ class RegenerationQueue:
         self._jobs: dict[str, Job] = {}
         self._pending: queue.Queue[str | None] = queue.Queue()
         self._lock = threading.Lock()
-        self._process: subprocess.Popen | None = None
+        self._processes: dict[str, subprocess.Popen] = {}
+        self._closed = False
         self._worker = None
         if start_worker:
             self._worker = threading.Thread(target=self._work, name="speech-review-jobs", daemon=True)
             self._worker.start()
 
-    def enqueue(self, transcript: TranscriptFile) -> Job:
+    def enqueue(self, transcript: TranscriptFile, *, prefer_cache: bool = False) -> Job:
         if transcript.requested is None:
             raise ValueError("the original speech2md input is unavailable")
         with self._lock:
@@ -72,9 +76,20 @@ class RegenerationQueue:
                 transcript_id=transcript.identifier,
                 name=str(transcript.relative),
                 requested=transcript.requested,
+                status="running" if prefer_cache else "queued",
+                stage="Checking MOSS cache" if prefer_cache else "Waiting",
+                mode="cached" if prefer_cache else "full",
             )
             self._jobs[job.id] = job
-        self._pending.put(job.id)
+        if prefer_cache:
+            threading.Thread(
+                target=self._run,
+                args=(job, True),
+                name=f"speech-review-cache-{job.id[:8]}",
+                daemon=True,
+            ).start()
+        else:
+            self._pending.put(job.id)
         return job
 
     def payload(self) -> list[dict]:
@@ -92,13 +107,15 @@ class RegenerationQueue:
 
     def close(self) -> None:
         with self._lock:
-            process = self._process
+            self._closed = True
+            processes = list(self._processes.values())
             for job in self._jobs.values():
                 if job.status == "queued":
                     job.status = "cancelled"
                     job.stage = "Server stopped"
-        if process and process.poll() is None:
-            process.terminate()
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
         self._pending.put(None)
 
     def _work(self) -> None:
@@ -114,14 +131,20 @@ class RegenerationQueue:
                 job.stage = "Starting speech2md"
             self._run(job)
 
-    def _run(self, job: Job) -> None:
+    def _run(self, job: Job, require_cache: bool = False) -> None:
         read_fd, write_fd = os.pipe()
         environment = os.environ.copy()
         environment["SPEECH2MD_PROGRESS_FD"] = str(write_fd)
+        process = None
         try:
             with tempfile.TemporaryFile() as output:
                 process = subprocess.Popen(
-                    [*self.command, str(job.requested), "--force"],
+                    [
+                        *self.command,
+                        str(job.requested),
+                        "--force",
+                        *(["--require-moss-cache"] if require_cache else []),
+                    ],
                     cwd=self.root,
                     env=environment,
                     pass_fds=(write_fd,),
@@ -129,7 +152,7 @@ class RegenerationQueue:
                     stderr=output,
                 )
                 with self._lock:
-                    self._process = process
+                    self._processes[job.id] = process
                 os.close(write_fd)
                 write_fd = -1
                 with os.fdopen(read_fd) as progress:
@@ -140,7 +163,13 @@ class RegenerationQueue:
                 output.seek(0)
                 log = output.read().decode(errors="replace").strip()
             with self._lock:
-                if return_code == 0:
+                if return_code == CACHE_MISS_EXIT and require_cache and not self._closed:
+                    job.status = "queued"
+                    job.stage = "Waiting for MOSS"
+                    job.mode = "full"
+                    job.progress = 0.0
+                    self._pending.put(job.id)
+                elif return_code == 0:
                     job.status = "complete"
                     job.stage = "Complete"
                     job.progress = 1.0
@@ -159,7 +188,8 @@ class RegenerationQueue:
             if read_fd >= 0:
                 os.close(read_fd)
             with self._lock:
-                self._process = None
+                if process is not None and self._processes.get(job.id) is process:
+                    self._processes.pop(job.id, None)
 
     def _update_progress(self, job: Job, line: str) -> None:
         try:

@@ -35,7 +35,7 @@ function renderSummaries() {
     const job = activeJobs.get(item.id) || latestJobs.get(item.id)
     const active = job && ['queued','running'].includes(job.status)
     const jobLine = job ? `<div class="job-line ${job.status}"><span>${job.status === 'queued' ? `Queue ${job.position}` : escapeHtml(job.stage)}</span><span>${job.status === 'running' ? `${Math.round(job.progress * 100)}%` : job.status}</span></div>${active ? `<div class="job-progress"><i style="width:${Math.max(2, job.progress * 100)}%"></i></div>` : ''}` : ''
-    const action = active ? '' : `<button class="queue-action" data-id="${item.id}" data-status="${item.status}">${job?.status === 'failed' ? 'Retry' : item.status === 'ready' ? 'Re-run' : 'Queue'}</button>`
+    const action = active ? '' : `<button class="queue-action" data-id="${item.id}" data-status="${item.status}">${job?.status === 'failed' ? 'Retry' : item.status === 'ready' ? 'Re-run' : item.status === 'stale' ? 'Update' : 'Queue'}</button>`
     return `<div class="transcript-card ${state.transcript?.id === item.id ? 'selected' : ''}" data-id="${item.id}" role="button" tabindex="0">
       <div class="transcript-card-top"><strong>${escapeHtml(item.title)} <em class="status ${item.status}">${item.status}</em></strong>${action}</div>
       <span>${escapeHtml(item.startedAt || item.name)}${item.status === 'ready' ? ` · ${item.turnCount} turns` : ''}</span>${jobLine}
@@ -422,8 +422,8 @@ function requestQueue(transcriptId, status, anchor, event) {
 
 async function enqueueRecording(transcriptId) {
   try {
-    await api(`/api/transcripts/${transcriptId}/regenerate`, {method:'POST'})
-    toast('Recording added to queue'); await refreshJobs()
+    const job = await api(`/api/transcripts/${transcriptId}/regenerate`, {method:'POST'})
+    toast(job.mode === 'cached' ? 'Fast update started' : 'Recording added to queue'); await refreshJobs()
   } catch (error) { toast(error.message) }
 }
 

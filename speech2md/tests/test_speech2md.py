@@ -495,6 +495,36 @@ def test_transcribe_refuses_to_overwrite_before_loading_model(tmp_path: Path):
         transcribe(media)
 
 
+def test_transcribe_can_require_a_current_moss_cache(tmp_path: Path, monkeypatch):
+    media = tmp_path / "meeting.mp4"
+    media.touch()
+    resolved = SimpleNamespace(
+        requested=media,
+        markdown_path=tmp_path / "meeting.md",
+        title=None,
+        started_at=None,
+        ended_at=None,
+        calendar_event=None,
+        sources=((media, "mixed", None),),
+    )
+    monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
+    monkeypatch.setattr(
+        pipeline,
+        "probe",
+        lambda path, *, expected_sha256, role: AudioSource(
+            str(path), role, "a" * 64, 10.0, "wav"
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_moss_engine",
+        lambda: (_ for _ in ()).throw(AssertionError("model must not load")),
+    )
+
+    with pytest.raises(pipeline.MossCacheMiss, match="cache is unavailable"):
+        transcribe(media, require_moss_cache=True)
+
+
 def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeypatch):
     requested = tmp_path / "capture.json"
     microphone = tmp_path / "microphone.flac"
