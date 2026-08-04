@@ -30,7 +30,7 @@ function renderSummaries() {
   const query = $('#search').value.toLowerCase()
   $('#transcript-list').innerHTML = state.summaries.filter(item => `${item.title} ${item.name}`.toLowerCase().includes(query)).map(item => `
     <button class="transcript-card ${state.transcript?.id === item.id ? 'selected' : ''}" data-id="${item.id}">
-      <strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.startedAt || item.name)} · ${item.turnCount} turns</span>
+      <strong>${escapeHtml(item.title)} <em class="status ${item.status}">${item.status}</em></strong><span>${escapeHtml(item.startedAt || item.name)}${item.status === 'ready' ? ` · ${item.turnCount} turns` : ''}</span>
     </button>`).join('')
   document.querySelectorAll('.transcript-card').forEach(button => button.onclick = () => selectTranscript(button.dataset.id))
 }
@@ -44,8 +44,8 @@ async function selectTranscript(id) {
   seedAttendees()
   state.duration = state.transcript.turns.at(-1)?.end || 0
   $('#meeting-title').textContent = state.transcript.title
-  $('#meeting-meta').textContent = `${state.transcript.name} · ${state.transcript.turns.length} turns`
-  setSaveState(state.transcript.hintRevision ? 'Hints loaded' : 'No hint file')
+  $('#meeting-meta').textContent = state.transcript.status === 'ready' ? `${state.transcript.name} · ${state.transcript.turns.length} turns` : `${state.transcript.name} · ${state.transcript.status}`
+  setSaveState(state.transcript.status === 'ready' ? (state.transcript.hintRevision ? 'Hints loaded' : 'No hint file') : 'Needs processing')
   renderSummaries(); renderTranscript(); renderInspector(); await loadAudio(); drawWaveform()
 }
 
@@ -58,6 +58,11 @@ function seedAttendees() {
 }
 
 function renderTranscript() {
+  if (state.transcript.status !== 'ready') {
+    $('#transcript').innerHTML = `<div class="empty recording-empty"><strong>${state.transcript.status === 'stale' ? 'Stale transcript' : 'No transcript yet'}</strong><span>${state.transcript.status === 'stale' ? 'This Markdown was produced by an unsupported speech2md schema.' : 'This recording has not been processed by speech2md.'}</span><button class="primary regenerate-inline">${state.transcript.status === 'stale' ? 'Regenerate transcript' : 'Generate transcript'}</button></div>`
+    $('.regenerate-inline').onclick = regenerate
+    return
+  }
   $('#transcript').innerHTML = state.transcript.turns.map(turn => {
     const color = speakerColor(turn.speaker)
     return `<article class="turn ${state.selected?.index === turn.index ? 'selected' : ''}" data-index="${turn.index}" style="--speaker-color:${color}">
@@ -103,6 +108,11 @@ function assignedIdentity(turn) {
 const overlaps = (left, right) => Math.min(left.end, right.end) > Math.max(left.start, right.start)
 
 async function renderInspector() {
+  if (state.transcript.status !== 'ready') {
+    $('#inspector').innerHTML = `<div class="eyebrow">${state.transcript.status.toUpperCase()} RECORDING</div><h2>${escapeHtml(state.transcript.title)}</h2><div class="subhead">${escapeHtml(state.transcript.audio.map(item => item.name).join(', ') || 'No audio source found')}</div><div class="notice">↻ <span>${state.transcript.status === 'stale' ? 'The existing Markdown is left untouched until you explicitly regenerate it with the current speech2md.' : 'Generate current Markdown and voiceprints from this recording.'}</span></div><button class="primary regenerate-inspector">${state.transcript.status === 'stale' ? 'Regenerate with speech2md' : 'Generate with speech2md'}</button>`
+    $('.regenerate-inspector').onclick = regenerate
+    return
+  }
   if (!state.selected) return
   if (state.correction) return renderCorrectionInspector()
   const turn = state.selected
@@ -195,11 +205,15 @@ async function loadAudio() {
   for (const audio of state.audio) { audio.pause(); audio.remove() }
   state.audio = []; state.buffers = []
   if (!state.transcript.audio.length) { inferTracks(); drawWaveform(); return }
-  const context = new AudioContext()
-  await Promise.all(state.transcript.audio.map(async source => {
+  state.transcript.audio.forEach(source => {
     const url = `/api/transcripts/${state.transcript.id}/audio/${source.index}`
     const element = new Audio(url); element.preload = 'metadata'; state.audio[source.index] = element
     element.onloadedmetadata = () => { state.duration = Math.max(state.duration, element.duration || 0); updateClock(); drawWaveform() }
+  })
+  if (state.transcript.status !== 'ready') { drawWaveform(); return }
+  const context = new AudioContext()
+  await Promise.all(state.transcript.audio.map(async source => {
+    const url = `/api/transcripts/${state.transcript.id}/audio/${source.index}`
     try { state.buffers[source.index] = await context.decodeAudioData(await (await fetch(url)).arrayBuffer()) } catch { state.buffers[source.index] = null }
   }))
   inferTracks(); drawWaveform()
@@ -279,13 +293,25 @@ function waveformClick(event) {
   seekTo(time); selectTurn(turn.index, false)
 }
 
+async function regenerate() {
+  if (!state.transcript || !window.confirm(`${state.transcript.status === 'stale' ? 'Replace the stale transcript' : 'Process this recording'} with current speech2md output?`)) return
+  const transcriptId = state.transcript.id
+  pause(); setSaveState('Regenerating…', 'dirty'); $('#regenerate').disabled = true
+  try {
+    await api(`/api/transcripts/${transcriptId}/regenerate`, {method:'POST'})
+    state.summaries = await api('/api/transcripts'); $('#transcript-count').textContent = state.summaries.length; renderSummaries()
+    toast('Transcription regenerated'); await selectTranscript(transcriptId)
+  } catch (error) { setSaveState('Regeneration failed', 'dirty'); toast(error.message) }
+  finally { $('#regenerate').disabled = false }
+}
+
 $('#search').oninput = renderSummaries
 $('#play').onclick = () => state.audio[0]?.paused ? play() : pause()
 $('#waveform').onclick = waveformClick
 $('#zoom').oninput = event => { state.zoom = zoomLevels[Number(event.target.value)]; $('#zoom-label').textContent = state.zoom === 1 ? 'FIT' : `${state.zoom}×`; drawWaveform() }
 $('#zoom-in').onclick = () => { $('#zoom').value = Math.min(4, Number($('#zoom').value) + 1); $('#zoom').dispatchEvent(new Event('input')) }
 $('#zoom-out').onclick = () => { $('#zoom').value = Math.max(0, Number($('#zoom').value) - 1); $('#zoom').dispatchEvent(new Event('input')) }
-$('#regenerate').onclick = () => toast('Regeneration remains an explicit speech2md command')
+$('#regenerate').onclick = regenerate
 window.onresize = drawWaveform
 window.onkeydown = event => { if (event.code === 'Space' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) { event.preventDefault(); state.audio[0]?.paused ? play() : pause() } }
 window.onbeforeunload = event => { if (state.dirty) event.preventDefault() }

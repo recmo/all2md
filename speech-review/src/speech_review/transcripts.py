@@ -19,10 +19,11 @@ MEDIA_SUFFIXES = {".aac", ".caf", ".flac", ".m4a", ".mp3", ".mp4", ".ogg", ".wav
 class TranscriptFile:
     root: Path
     markdown: Path
+    requested: Path | None = None
 
     @property
     def relative(self) -> Path:
-        return self.markdown.relative_to(self.root)
+        return (self.requested or self.markdown).relative_to(self.root)
 
     @property
     def identifier(self) -> str:
@@ -36,18 +37,44 @@ class TranscriptFile:
     def voiceprints_path(self) -> Path:
         return self.markdown.with_suffix(".voiceprints.npz")
 
+    @property
+    def status(self) -> str:
+        if not self.markdown.exists():
+            return "unprocessed"
+        try:
+            parse_markdown(self.markdown)
+        except ValueError:
+            return "stale"
+        return "ready"
+
 
 def discover(root: Path) -> list[TranscriptFile]:
     root = root.expanduser().resolve()
-    found = []
+    found: list[TranscriptFile] = []
+    claimed_markdown: set[Path] = set()
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in MEDIA_SUFFIXES:
+            continue
+        markdown = path.with_suffix(".md")
+        found.append(TranscriptFile(root, markdown, path))
+        claimed_markdown.add(markdown)
+    for path in root.rglob("*-capture.json"):
+        markdown = path.with_name(path.name.removesuffix("-capture.json") + ".md")
+        found.append(TranscriptFile(root, markdown, path))
+        claimed_markdown.add(markdown)
     for path in root.rglob("*.md"):
+        if path in claimed_markdown:
+            continue
         try:
-            parsed = parse_markdown(path)
+            parse_markdown(path)
         except ValueError:
             continue
-        if parsed["turns"]:
-            found.append(TranscriptFile(root, path))
-    return sorted(found, key=lambda item: item.markdown.stat().st_mtime, reverse=True)
+        found.append(TranscriptFile(root, path))
+    return sorted(
+        found,
+        key=lambda item: (item.requested or item.markdown).stat().st_mtime,
+        reverse=True,
+    )
 
 
 def resolve_identifier(root: Path, identifier: str) -> TranscriptFile:
@@ -57,12 +84,13 @@ def resolve_identifier(root: Path, identifier: str) -> TranscriptFile:
     except Exception as error:
         raise ValueError("invalid transcript id") from error
     root = root.expanduser().resolve()
-    markdown = (root / relative).resolve()
-    if markdown.parent != root and root not in markdown.parents:
+    requested = (root / relative).resolve()
+    if requested.parent != root and root not in requested.parents:
         raise ValueError("transcript escapes review folder")
-    if markdown.suffix.lower() != ".md" or not markdown.is_file():
-        raise FileNotFoundError(markdown)
-    return TranscriptFile(root, markdown)
+    for item in discover(root):
+        if (item.requested or item.markdown) == requested:
+            return item
+    raise FileNotFoundError(requested)
 
 
 def parse_markdown(path: Path) -> dict[str, Any]:
@@ -100,6 +128,17 @@ def parse_markdown(path: Path) -> dict[str, Any]:
 
 
 def audio_sources(transcript: TranscriptFile) -> list[dict[str, Any]]:
+    if transcript.requested and transcript.requested.suffix.lower() in MEDIA_SUFFIXES:
+        return [{"role": "mixed", "path": transcript.requested, "name": transcript.requested.name}]
+    if transcript.requested and transcript.requested.name.endswith("-capture.json"):
+        manifest = transcript.requested
+        value = json.loads(manifest.read_text())
+        sources = []
+        for track in value.get("audio", []):
+            path = (manifest.parent / track.get("file", "")).resolve()
+            if path.is_file() and (path.parent == transcript.root or transcript.root in path.parents):
+                sources.append({"role": track.get("role", "mixed"), "path": path, "name": path.name})
+        return sources
     direct = [
         path for path in transcript.markdown.parent.iterdir()
         if path.is_file()
@@ -209,6 +248,21 @@ def _line(value: Any) -> bool:
 
 
 def transcript_payload(transcript: TranscriptFile) -> dict[str, Any]:
+    if transcript.status != "ready":
+        return {
+            "id": transcript.identifier,
+            "name": str(transcript.relative),
+            "title": transcript.markdown.stem,
+            "status": transcript.status,
+            "frontmatter": {},
+            "turns": [],
+            "hints": {"hotwords": [], "attendees": [], "speakers": [], "edits": []},
+            "hintRevision": None,
+            "audio": [
+                {"index": index, "role": source["role"], "name": source["name"]}
+                for index, source in enumerate(audio_sources(transcript))
+            ],
+        }
     parsed = parse_markdown(transcript.markdown)
     hints, revision = load_hint_document(transcript.hint_path)
     sources = audio_sources(transcript)
@@ -216,6 +270,7 @@ def transcript_payload(transcript: TranscriptFile) -> dict[str, Any]:
         "id": transcript.identifier,
         "name": str(transcript.relative),
         "title": parsed["title"],
+        "status": "ready",
         "frontmatter": parsed["frontmatter"],
         "turns": parsed["turns"],
         "hints": hints,
@@ -233,6 +288,8 @@ def candidate_identities(root: Path, selected: TranscriptFile, handle: str) -> l
         return []
     candidates: dict[str, tuple[float, str]] = {}
     for transcript in discover(root):
+        if transcript.status != "ready":
+            continue
         parsed = parse_markdown(transcript.markdown)
         for attendee in parsed["frontmatter"].get("attendees", []):
             if not isinstance(attendee, dict):

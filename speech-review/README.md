@@ -20,9 +20,11 @@ uv run --project speech-review speech-review ~/Meetings
 Then open <http://127.0.0.1:8765>. The default folder is the current working
 directory. The service binds to localhost unless `--host` is provided.
 
-Ordinary edits never modify `.md`, audio, or `.voiceprints.npz` files. The
-Regenerate control is deliberately only a reminder of the explicit
-`speech2md --force` boundary for now.
+Ordinary edits never modify `.md`, audio, or `.voiceprints.npz` files. Raw
+recordings and recordings with an unsupported older transcript are still
+listed as `unprocessed` or `stale`. The Regenerate control is the explicit
+boundary that runs current `speech2md --force` and replaces derived Markdown
+and voiceprints; it always asks for confirmation first.
 
 ## Hint extensions
 

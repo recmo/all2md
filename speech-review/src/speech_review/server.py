@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import mimetypes
 from pathlib import Path
+import subprocess
 from urllib.parse import unquote, urlparse
 
 from .transcripts import (
@@ -47,18 +48,28 @@ class ReviewHandler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError) as error:
             self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
 
+    def do_POST(self) -> None:
+        try:
+            self._post()
+        except FileNotFoundError:
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+        except (ValueError, subprocess.CalledProcessError) as error:
+            detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
+            self._json({"error": detail or "regeneration failed"}, HTTPStatus.BAD_REQUEST)
+
     def _get(self) -> None:
         path = unquote(urlparse(self.path).path)
         if path == "/api/transcripts":
             summaries = []
             for transcript in discover(self.server.review_root):
-                parsed = parse_markdown(transcript.markdown)
+                parsed = parse_markdown(transcript.markdown) if transcript.status == "ready" else None
                 summaries.append({
                     "id": transcript.identifier,
                     "name": str(transcript.relative),
-                    "title": parsed["title"],
-                    "startedAt": parsed["frontmatter"].get("started_at"),
-                    "turnCount": len(parsed["turns"]),
+                    "title": parsed["title"] if parsed else transcript.markdown.stem,
+                    "status": transcript.status,
+                    "startedAt": parsed["frontmatter"].get("started_at") if parsed else None,
+                    "turnCount": len(parsed["turns"]) if parsed else 0,
                 })
             self._json(summaries)
             return
@@ -96,6 +107,22 @@ class ReviewHandler(BaseHTTPRequestHandler):
             value.get("revision"),
         )
         self._json({"revision": revision})
+
+    def _post(self) -> None:
+        parts = unquote(urlparse(self.path).path).strip("/").split("/")
+        if len(parts) != 4 or parts[:2] != ["api", "transcripts"] or parts[3] != "regenerate":
+            raise FileNotFoundError(self.path)
+        transcript = resolve_identifier(self.server.review_root, parts[2])
+        if transcript.requested is None:
+            raise ValueError("the original speech2md input is unavailable")
+        process = subprocess.run(
+            ["speech2md", str(transcript.requested), "--force"],
+            cwd=self.server.review_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self._json({"status": "ready", "output": process.stdout.strip()})
 
     def _json(self, value, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(value, ensure_ascii=False, default=str).encode()

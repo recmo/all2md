@@ -136,6 +136,7 @@
       };
       speech-review = pkgs.writeShellApplication {
         name = "speech-review";
+        runtimeInputs = [ speech2md ];
         text = ''
           exec ${reviewEnvironment}/bin/speech-review "$@"
         '';

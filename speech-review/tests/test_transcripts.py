@@ -50,6 +50,20 @@ def test_discovers_and_parses_frozen_markdown(tmp_path: Path):
     }
 
 
+def test_lists_unprocessed_and_stale_recordings(tmp_path: Path):
+    unprocessed = tmp_path / "unprocessed.mp4"
+    unprocessed.touch()
+    stale = tmp_path / "stale.mp4"
+    stale.touch()
+    stale.with_suffix(".md").write_text(
+        "---\ntitle: Earlier transcript\nspeech2md:\n  schema_version: 2\n---\n"
+    )
+
+    found = {item.requested.name: item for item in discover(tmp_path)}
+    assert found["unprocessed.mp4"].status == "unprocessed"
+    assert found["stale.mp4"].status == "stale"
+
+
 def test_hint_writes_are_atomic_and_revision_checked(tmp_path: Path):
     path = tmp_path / "meeting.hint.yaml"
     document = {
