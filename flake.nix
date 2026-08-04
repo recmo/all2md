@@ -185,6 +185,7 @@
               export XDG_CACHE_HOME="$TMPDIR/cache"
               mkdir -p "$HOME" "$XDG_CACHE_HOME"
               pages2md --help > /dev/null
+              ${pagesEnvironment}/bin/python -c 'from mlx_vlm import load'
               speech2md --help > /dev/null
               for extension in \
                 ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
