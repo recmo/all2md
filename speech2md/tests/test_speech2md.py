@@ -531,6 +531,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     load_calls = []
     seen_engines = []
     seen_prompts = []
+    seen_cached_generations = []
     progress_bars = []
 
     class RecordingProgress:
@@ -580,6 +581,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     def fake_transcribe_track(path, *, engine, prompt, speaker_profiles, **kwargs):
         seen_engines.append(engine)
         seen_prompts.append(prompt)
+        seen_cached_generations.append(kwargs["cached_generations"])
         kwargs["progress_callback"](1, 1, 1, kwargs["duration"])
         if path == microphone:
             segments = [Segment(0, 3, "Mine", "Local Mic", "microphone")]
@@ -602,7 +604,17 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
                 samples=[sample],
                 identity=kwargs["speaker_hints"][0].identity,
             )
-        return segments, {"windows": [{}], "actual_overlap_seconds": 0.0, "warnings": []}, speaker_profiles
+        return segments, {
+            "windows": [{}],
+            "actual_overlap_seconds": 0.0,
+            "warnings": [],
+            "generation_cache": [{
+                "text": "[0][S01]cached[3]",
+                "prompt_tokens": 10,
+                "generation_tokens": 4,
+                "total_tokens": 14,
+            }],
+        }, speaker_profiles
 
     monkeypatch.setattr(pipeline, "transcribe_track", fake_transcribe_track)
     pipeline.transcribe(requested)
@@ -621,6 +633,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         "capture.hint.yaml",
         "capture.json",
         "capture.md",
+        "capture.moss.npz",
         "capture.voiceprints.npz",
         "microphone.flac",
         "participants.flac",
@@ -638,11 +651,46 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         {"handle": "speaker-1", "identity": ""},
         {"handle": "speaker-2", "identity": "gbrain://people/alice"},
     ]
+
+    (tmp_path / "capture.hint.yaml").write_text(
+        (tmp_path / "capture.hint.yaml").read_text() + "title: Renamed meeting\n"
+    )
+    pipeline.transcribe(requested, force=True)
+
+    assert load_calls == [True]
+    assert seen_engines[-2:] == [None, None]
+    assert all(item is not None for item in seen_cached_generations[-2:])
     with np.load(tmp_path / "capture.voiceprints.npz", allow_pickle=False) as voiceprints:
         assert voiceprints.files == ["handles", "embeddings"]
         assert voiceprints["handles"].tolist() == ["speaker-1", "speaker-2"]
         assert voiceprints["embeddings"].shape == (2, 192)
     assert (tmp_path / "capture.voiceprints.npz").stat().st_mode & 0o777 == 0o600
+
+
+def test_transcribe_track_replays_cached_moss_without_engine_or_ffmpeg(tmp_path: Path):
+    audio = tmp_path / "audio.wav"
+    audio.touch()
+
+    class FailingEngine:
+        def generate(self, *args, **kwargs):
+            raise AssertionError("MOSS engine should not run")
+
+    segments, details, _ = transcribe_track(
+        audio,
+        engine=FailingEngine(),
+        prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        role="mixed",
+        duration=10,
+        cached_generations=[{
+            "text": "[0][S01]Hello[3]",
+            "prompt_tokens": 10,
+            "generation_tokens": 4,
+            "total_tokens": 14,
+        }],
+    )
+
+    assert [(item.start, item.end, item.text) for item in segments] == [(0, 3, "Hello")]
+    assert details["generation_cache"][0]["text"] == "[0][S01]Hello[3]"
 
 
 def fixture_state(media: Path) -> TranscriptState:

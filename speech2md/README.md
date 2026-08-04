@@ -49,7 +49,7 @@ out-of-bounds ranges, and ranges that ambiguously cover multiple diarized
 speakers stop processing. A track may be omitted for single-track media and is
 required for multi-track captures. Hotwords are trimmed, deduplicated
 case-insensitively, and capped at 40. The hint file is never rewritten.
-Prompts and raw generations exist only in the temporary processing workspace.
+Raw generations are retained in an adjacent cache as described below.
 
 Long recordings use one deliberately fixed policy. `speech2md` chooses the
 minimum number of roughly equal parts targeting 30 minutes, moves each ideal
@@ -90,12 +90,22 @@ assignment inside a window. Missing or ambiguous evidence creates a new
 anonymous speaker; it never falls back to transcript text.
 
 Audio overlap remains only for transcript boundary trimming and deduplication.
-Successful transcription publishes exactly two derived files:
+Successful transcription publishes three derived files:
 
 ```text
 meeting.md
+meeting.moss.npz
 meeting.voiceprints.npz
 ```
+
+The MOSS cache stores replayable raw generations and is accepted only when its
+schema, audio-track checksums and roles, normalized ordered hotwords, pinned
+MOSS model revision, generation limit, and speech2md source commit all match.
+Changing metadata, attendees, speaker ranges, or localized edits therefore
+reuses MOSS output while rerunning speaker reconciliation and rendering.
+Changing hotwords or audio invalidates the cache. Invalid or unreadable caches
+are ignored. The cache contains string arrays only and is loaded with
+`allow_pickle=False`.
 
 Markdown is the readable derived output. Its flat YAML front matter contains
 the source hash, speech2md source commit, optional hint-file hash, authoritative
@@ -130,10 +140,11 @@ handle. It is loaded with `allow_pickle=False` and written with owner-only file
 permissions. A recording without usable voice evidence gets stable empty shapes
 `(0,)` and `(0, 192)`.
 
-Raw MOSS generations, recovery records, reconciliation decisions, and individual
-embedding samples are intermediates and are not published. Failed runs publish
-nothing. Markdown is never edited in place to change speaker identities; update
-the hint file and derive it again with `--force`.
+Recovery records, reconciliation decisions, and individual embedding samples
+remain unpublished intermediates. A run that completes MOSS but fails during a
+later hint or rendering stage may still publish the reusable MOSS cache.
+Markdown is never edited in place to change speaker identities; update the hint
+file and derive it again with `--force`.
 
 The ReDimNet2 model and checkpoint load lazily on the first usable participant
 sample and are reused for the run. The first run requires network access to

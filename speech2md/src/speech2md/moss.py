@@ -293,6 +293,7 @@ def transcribe_track(
     embedder: Any | None = None,
     speaker_profiles: dict[str, SpeakerProfile] | None = None,
     speaker_hints: tuple[SpeakerHint, ...] = (),
+    cached_generations: list[dict[str, Any]] | None = None,
     progress_callback: Callable[[int, int, int, float], None] | None = None,
 ) -> tuple[list[Segment], dict[str, Any], dict[str, SpeakerProfile]]:
     silence_centers = detect_silence_centers(path) if duration > TARGET_PART_SECONDS else []
@@ -302,6 +303,8 @@ def transcribe_track(
     effective_windows: list[tuple[float, float]] = []
     evidence_by_window = []
     warnings = []
+    generation_cache: list[dict[str, Any]] = []
+    cached_iterator = iter(cached_generations) if cached_generations is not None else None
     reported_through = 0.0
     with tempfile.TemporaryDirectory(prefix="speech2md-moss-") as temporary:
         directory = Path(temporary)
@@ -320,15 +323,6 @@ def transcribe_track(
                         0.0,
                     )
                 chunk = directory / f"window-{inference_index:03d}.wav"
-                subprocess.run(
-                    [
-                        "ffmpeg", "-nostdin", "-v", "error", "-ss", str(start),
-                        "-t", str(planned_end - start), "-i", str(path),
-                        "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-y",
-                        str(chunk),
-                    ],
-                    check=True,
-                )
 
                 def report_timestamp(relative_seconds: float) -> None:
                     nonlocal reported_through
@@ -343,12 +337,36 @@ def transcribe_track(
                             newly_reported,
                         )
 
-                result = _generate_with_timestamp_progress(
-                    engine,
-                    str(chunk),
-                    prompt=prompt,
-                    timestamp_callback=report_timestamp,
-                )
+                if cached_iterator is None:
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-nostdin", "-v", "error", "-ss", str(start),
+                            "-t", str(planned_end - start), "-i", str(path),
+                            "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-y",
+                            str(chunk),
+                        ],
+                        check=True,
+                    )
+                    result = _generate_with_timestamp_progress(
+                        engine,
+                        str(chunk),
+                        prompt=prompt,
+                        timestamp_callback=report_timestamp,
+                    )
+                else:
+                    try:
+                        cached_result = next(cached_iterator)
+                    except StopIteration as error:
+                        raise ValueError("MOSS cache ended before transcription completed") from error
+                    if not isinstance(cached_result, dict):
+                        raise ValueError("MOSS cache contains an invalid generation")
+                    result = SimpleNamespace(**cached_result)
+                generation_cache.append({
+                    "text": str(getattr(result, "text", "")),
+                    "prompt_tokens": getattr(result, "prompt_tokens", None),
+                    "generation_tokens": getattr(result, "generation_tokens", None),
+                    "total_tokens": getattr(result, "total_tokens", None),
+                })
                 diagnostics = generation_diagnostics(result)
                 segments = parse_segments(
                     diagnostics["parsed"],
@@ -459,6 +477,14 @@ def transcribe_track(
                 start = max(planned_start, coverage_end - RECOVERY_OVERLAP_SECONDS)
                 attempt += 1
 
+    if cached_iterator is not None:
+        try:
+            next(cached_iterator)
+        except StopIteration:
+            pass
+        else:
+            raise ValueError("MOSS cache has unused generations")
+
     selected_for_hints = trim_overlaps(by_window, effective_windows)
     anchors = resolve_speaker_anchors(selected_for_hints, speaker_hints, role=role)
     mapping, decisions, profiles = reconcile_speakers(
@@ -481,6 +507,7 @@ def transcribe_track(
         "speaker_mapping": mapping,
         "speaker_reconciliation": decisions,
         "warnings": warnings,
+        "generation_cache": generation_cache,
         "window_strategy": "equal-silence-aligned",
         "silence_boundaries": boundaries_from_windows(planned_windows),
         "actual_overlap_seconds": max(

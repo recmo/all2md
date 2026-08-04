@@ -16,6 +16,7 @@ from .moss import (
     load_moss_engine,
     transcribe_track,
 )
+from .moss_cache import cache_metadata, cache_path, load_cache, source_key, write_cache
 from .redimnet2 import (
     get_redimnet2_embedder,
     write_voiceprints,
@@ -53,6 +54,15 @@ def transcribe(
     emit_progress("loading speaker model", completed_seconds=0, total_seconds=total_seconds)
     hints = validate_hints(hints, [source for _, _, source in sources])
     prompt = build_transcription_prompt(list(hints.hotwords))
+    moss_path = cache_path(resolved.markdown_path)
+    metadata = cache_metadata(
+        version=__version__,
+        hotwords=hints.hotwords,
+        sources=[source for _, _, source in sources],
+    )
+    cached_tracks = load_cache(moss_path, metadata)
+    generated_tracks: dict[str, list[dict]] = {}
+    cache_complete = True
     hinted_tracks = {hint.track for hint in hints.speakers}
     if hinted_tracks:
         sources.sort(key=lambda item: item[1] not in hinted_tracks)
@@ -67,9 +77,7 @@ def transcribe(
     ) as progress:
         progress.set_postfix_str("loading speaker model")
         embedder = get_redimnet2_embedder()
-        progress.set_postfix_str("loading transcription model")
-        emit_progress("loading transcription model", completed_seconds=0, total_seconds=total_seconds)
-        engine = load_moss_engine()
+        engine = None
         for path, role, source in sources:
 
             def report_progress(
@@ -98,18 +106,46 @@ def transcribe(
                     attempt=attempt,
                 )
 
-            track_segments, _, speaker_profiles = transcribe_track(
-                path,
-                engine=engine,
-                prompt=prompt,
-                role=role,
-                duration=source.duration_seconds,
-                embedder=embedder,
-                speaker_profiles=speaker_profiles,
-                speaker_hints=hints.speakers,
-                progress_callback=report_progress,
-            )
+            key = source_key(source)
+            cached_generations = cached_tracks.get(key)
+            if cached_generations is None and engine is None:
+                progress.set_postfix_str("loading transcription model")
+                emit_progress("loading transcription model", completed_seconds=processed_seconds, total_seconds=total_seconds)
+                engine = load_moss_engine()
+            elif cached_generations is not None:
+                progress.set_postfix_str(f"{role} cached MOSS")
+                emit_progress("replaying cached MOSS", completed_seconds=processed_seconds, total_seconds=total_seconds, track=role)
+            arguments = {
+                "engine": engine,
+                "prompt": prompt,
+                "role": role,
+                "duration": source.duration_seconds,
+                "embedder": embedder,
+                "speaker_profiles": speaker_profiles,
+                "speaker_hints": hints.speakers,
+                "progress_callback": report_progress,
+            }
+            try:
+                track_segments, moss_details, speaker_profiles = transcribe_track(
+                    path, cached_generations=cached_generations, **arguments
+                )
+            except ValueError as error:
+                if cached_generations is None or not str(error).startswith("MOSS cache"):
+                    raise
+                progress.set_postfix_str("discarding invalid MOSS cache")
+                engine = engine or load_moss_engine()
+                arguments["engine"] = engine
+                track_segments, moss_details, speaker_profiles = transcribe_track(
+                    path, cached_generations=None, **arguments
+                )
+            generations = moss_details.get("generation_cache")
+            if generations is None:
+                cache_complete = False
+            else:
+                generated_tracks[key] = generations
             segments.extend(track_segments)
+    if cache_complete:
+        write_cache(moss_path, metadata, generated_tracks)
     speaker_profiles, identities = _canonicalize_speakers(segments, speaker_profiles)
     segments = coalesce_segments(segments)
     apply_edits(segments, hints.edits)
