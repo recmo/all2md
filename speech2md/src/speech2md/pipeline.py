@@ -12,6 +12,7 @@ from .hints import apply_edits, hint_path, load_hints, validate_hints
 from .media import probe, resolve_input, sha256
 from .model import TranscriptState
 from .moss import (
+    MossGuidanceRequired,
     build_transcription_prompt,
     load_moss_engine,
     transcribe_track,
@@ -135,11 +136,25 @@ def transcribe(
                 "embedder": embedder,
                 "speaker_profiles": speaker_profiles,
                 "speaker_hints": hints.speakers,
+                "generation_cache_callback": persist_generation_cache,
                 "progress_callback": report_progress,
             }
-            if cached_generations is None:
-                arguments["generation_cache_callback"] = persist_generation_cache
             try:
+                track_segments, moss_details, speaker_profiles = transcribe_track(
+                    path, cached_generations=cached_generations, **arguments
+                )
+            except MossGuidanceRequired as error:
+                if require_moss_cache:
+                    raise MossCacheMiss(str(error)) from error
+                progress.set_postfix_str(f"{role} guided MOSS")
+                emit_progress(
+                    "guiding cached MOSS",
+                    completed_seconds=processed_seconds,
+                    total_seconds=total_seconds,
+                    track=role,
+                )
+                engine = engine or load_moss_engine()
+                arguments["engine"] = engine
                 track_segments, moss_details, speaker_profiles = transcribe_track(
                     path, cached_generations=cached_generations, **arguments
                 )
@@ -149,7 +164,6 @@ def transcribe(
                 progress.set_postfix_str("discarding invalid MOSS cache")
                 engine = engine or load_moss_engine()
                 arguments["engine"] = engine
-                arguments["generation_cache_callback"] = persist_generation_cache
                 track_segments, moss_details, speaker_profiles = transcribe_track(
                     path, cached_generations=None, **arguments
                 )

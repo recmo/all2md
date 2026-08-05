@@ -26,6 +26,7 @@ MAX_HOTWORDS = 40
 RECOVERY_OVERLAP_SECONDS = 30.0
 MIN_RECOVERY_PROGRESS_SECONDS = 5.0
 MAX_RECOVERY_ATTEMPTS = 8
+SPEAKER_FORCE_TOLERANCE_SECONDS = 0.5
 # Independent reports of premature end tokens on long recordings:
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/26
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/34
@@ -40,6 +41,11 @@ TRANSCRIPT_START_RE = re.compile(
     r"\[(?P<start>\d+(?:\.\d+)?)\]\s*\[(?P<speaker>S\d+)\]"
 )
 TIMESTAMP_RE = re.compile(r"\[(?P<value>\d+(?:\.\d+)?)\]")
+SPEAKER_PREFIX_RE = re.compile(r"\[(?P<start>\d+(?:\.\d+)?)\]\[S$")
+
+
+class MossGuidanceRequired(RuntimeError):
+    """A cached window needs model decoding to satisfy speaker hints."""
 
 
 def normalize_hotwords(hotwords: list[str] | None) -> list[str]:
@@ -207,7 +213,16 @@ def _generate_with_timestamp_progress(
     *,
     prompt: str,
     timestamp_callback: Callable[[float], None] | None = None,
+    speaker_forces: list[dict[str, Any]] | None = None,
 ) -> Any:
+    if speaker_forces:
+        return _generate_with_speaker_forces(
+            engine,
+            audio,
+            prompt=prompt,
+            timestamp_callback=timestamp_callback,
+            speaker_forces=speaker_forces,
+        )
     generated = engine.generate(
         audio,
         max_tokens=MAX_GENERATION_TOKENS,
@@ -248,6 +263,248 @@ def _generate_with_timestamp_progress(
         generation_tokens=generation_tokens,
         total_tokens=None,
     )
+
+
+def _generate_with_speaker_forces(
+    engine: Any,
+    audio: str,
+    *,
+    prompt: str,
+    timestamp_callback: Callable[[float], None] | None,
+    speaker_forces: list[dict[str, Any]],
+) -> Any:
+    try:
+        import mlx.core as mx
+    except ImportError as error:
+        raise RuntimeError("MOSS speaker guidance requires the MLX runtime") from error
+
+    tokenizer = engine._tokenizer
+    pending: list[int] = []
+    applied: list[dict[str, Any]] = []
+    remaining = list(speaker_forces)
+
+    def force_speaker(tokens, logits):
+        nonlocal pending
+        if not pending:
+            tail = tokenizer.decode(
+                [int(token) for token in tokens[-64:].tolist()],
+                skip_special_tokens=True,
+            )
+            match = SPEAKER_PREFIX_RE.search(tail)
+            if match is not None:
+                start = float(match.group("start"))
+                force = min(
+                    remaining,
+                    key=lambda item: abs(float(item["start"]) - start),
+                    default=None,
+                )
+                if force is not None and (
+                    abs(float(force["start"]) - start) > SPEAKER_FORCE_TOLERANCE_SECONDS
+                ):
+                    force = None
+                if force is not None:
+                    full = tokenizer.encode(
+                        f"[{force['speaker']}]",
+                        add_special_tokens=False,
+                    )
+                    prefix = tokenizer.encode("[S", add_special_tokens=False)
+                    if full[:len(prefix)] != prefix:
+                        raise RuntimeError("MOSS tokenizer has an unsupported speaker-token shape")
+                    pending = [int(token) for token in full[len(prefix):]]
+                    remaining.remove(force)
+                    applied.append(force)
+        if not pending:
+            return logits
+        target = pending.pop(0)
+        mask = mx.arange(logits.shape[-1])[None, :] == target
+        return mx.where(mask, logits, mx.array(-float("inf"), dtype=logits.dtype))
+
+    text_parts = []
+    timestamp_tail = ""
+    generation_tokens = 0
+    for token, _ in engine.stream_generate(
+        audio,
+        max_tokens=MAX_GENERATION_TOKENS,
+        prompt=prompt,
+        logits_processors=[force_speaker],
+    ):
+        generation_tokens += 1
+        text = tokenizer.decode([int(token)], skip_special_tokens=True)
+        text_parts.append(text)
+        previous_tail_length = len(timestamp_tail)
+        timestamp_text = timestamp_tail + text
+        new_timestamps = [
+            match
+            for match in TIMESTAMP_RE.finditer(timestamp_text)
+            if match.end() > previous_tail_length
+        ]
+        timestamp_tail = timestamp_text[-64:]
+        if timestamp_callback is not None:
+            for match in new_timestamps:
+                timestamp_callback(float(match.group("value")))
+
+    if remaining:
+        missed = ", ".join(f"{item['start']:g}s" for item in remaining)
+        raise RuntimeError(f"MOSS did not emit forced speaker boundary/boundaries at {missed}")
+    return SimpleNamespace(
+        text="".join(text_parts).strip(),
+        prompt_tokens=None,
+        generation_tokens=generation_tokens,
+        total_tokens=None,
+        speaker_forces_applied=applied,
+    )
+
+
+def _select_hint_segments(
+    segments: list[Segment],
+    hints: tuple[SpeakerHint, ...],
+    *,
+    role: str,
+) -> tuple[list[tuple[SpeakerHint, list[Segment]]], list[SpeakerHint]]:
+    relevant_hints = [hint for hint in hints if hint.track == role]
+    assigned: dict[SpeakerHint, list[Segment]] = {}
+    for segment in segments:
+        midpoint = (segment.start + segment.end) / 2
+        centered = [
+            hint for hint in relevant_hints
+            if hint.start <= midpoint < hint.end
+        ]
+        if centered:
+            assigned.setdefault(centered[0], []).append(segment)
+
+    assigned_segments = {id(segment) for selected in assigned.values() for segment in selected}
+    for hint in relevant_hints:
+        if hint in assigned:
+            continue
+        overlapping = [
+            segment for segment in segments
+            if id(segment) not in assigned_segments
+            and min(segment.end, hint.end) > max(segment.start, hint.start)
+        ]
+        if not overlapping:
+            continue
+        overlaps = {
+            id(segment): min(segment.end, hint.end) - max(segment.start, hint.start)
+            for segment in overlapping
+        }
+        best_overlap = max(overlaps.values())
+        selected = [
+            segment for segment in overlapping
+            if abs(overlaps[id(segment)] - best_overlap) <= 1e-6
+        ]
+        assigned[hint] = selected
+        assigned_segments.update(id(segment) for segment in selected)
+
+    unassigned = [hint for hint in relevant_hints if hint not in assigned]
+    return list(assigned.items()), unassigned
+
+
+def plan_speaker_forces(
+    segments: list[Segment],
+    hints: tuple[SpeakerHint, ...],
+    *,
+    role: str,
+    offset: float,
+) -> list[dict[str, Any]]:
+    selections, _ = _select_hint_segments(segments, hints, role=role)
+
+    label_identities: dict[str, set[str]] = {}
+    scores: dict[tuple[str, str], float] = {}
+    first_occurrence: dict[tuple[str, str], float] = {}
+    for hint, selected in selections:
+        for segment in selected:
+            label_identities.setdefault(segment.speaker, set()).add(hint.identity)
+            overlap = max(0.0, min(segment.end, hint.end) - max(segment.start, hint.start))
+            key = (segment.speaker, hint.identity)
+            scores[key] = scores.get(key, 0.0) + overlap
+            first_occurrence[key] = min(first_occurrence.get(key, math.inf), segment.start)
+
+    collisions = {
+        label: identities
+        for label, identities in label_identities.items()
+        if len(identities) > 1
+    }
+    if not collisions:
+        return []
+
+    preferred: dict[str, str] = {}
+    for label, identities in label_identities.items():
+        if len(identities) != 1:
+            continue
+        identity = next(iter(identities))
+        current = preferred.get(identity)
+        if current is None or scores[(label, identity)] > scores[(current, identity)]:
+            preferred[identity] = label
+
+    used_numbers = {
+        int(match.group(1))
+        for segment in segments
+        if (match := re.search(r":S(\d+)$", segment.speaker))
+    }
+    allocated: dict[str, str] = {}
+
+    def unused_label(window_label: str) -> str:
+        window = window_label.rsplit(":", 1)[0]
+        number = 1
+        while number in used_numbers:
+            number += 1
+        used_numbers.add(number)
+        return f"{window}:S{number:02d}"
+
+    replacements: dict[tuple[str, str], str] = {}
+    for label, identities in sorted(collisions.items()):
+        ordered_identities = sorted(
+            identities,
+            key=lambda identity: first_occurrence[(label, identity)],
+        )
+        owner = max(
+            ordered_identities,
+            key=lambda identity: (
+                scores[(label, identity)],
+                -first_occurrence[(label, identity)],
+            ),
+        )
+        for identity in ordered_identities:
+            if identity == owner:
+                target = label
+            else:
+                target = preferred.get(identity) or allocated.get(identity)
+                if target is None:
+                    target = unused_label(label)
+                    allocated[identity] = target
+            replacements[(label, identity)] = target
+
+    forces: list[dict[str, Any]] = []
+    seen: set[tuple[float, str]] = set()
+    for hint, selected in selections:
+        for segment in selected:
+            target = replacements.get((segment.speaker, hint.identity))
+            if target is None:
+                continue
+            start = round(segment.start - offset, 2)
+            speaker = target.rsplit(":", 1)[-1]
+            key = (start, speaker)
+            if key in seen:
+                continue
+            seen.add(key)
+            forces.append({"start": start, "speaker": speaker, "identity": hint.identity})
+    return sorted(forces, key=lambda item: (item["start"], item["speaker"], item["identity"]))
+
+
+def _force_signature(forces: list[dict[str, Any]]) -> list[tuple[float, str]]:
+    return sorted(
+        (round(float(force["start"]), 2), str(force["speaker"]))
+        for force in forces
+    )
+
+
+def _generation_fields(result: Any) -> dict[str, Any]:
+    return {
+        "text": str(getattr(result, "text", "")),
+        "prompt_tokens": getattr(result, "prompt_tokens", None),
+        "generation_tokens": getattr(result, "generation_tokens", None),
+        "total_tokens": getattr(result, "total_tokens", None),
+    }
 
 
 def parse_segments(
@@ -338,7 +595,7 @@ def transcribe_track(
                             newly_reported,
                         )
 
-                if cached_iterator is None:
+                def extract_chunk() -> None:
                     subprocess.run(
                         [
                             "ffmpeg", "-nostdin", "-v", "error", "-ss", str(start),
@@ -348,12 +605,40 @@ def transcribe_track(
                         ],
                         check=True,
                     )
-                    result = _generate_with_timestamp_progress(
+
+                if cached_iterator is None:
+                    extract_chunk()
+                    base_result = _generate_with_timestamp_progress(
                         engine,
                         str(chunk),
                         prompt=prompt,
                         timestamp_callback=report_timestamp,
                     )
+                    base_fields = _generation_fields(base_result)
+                    base_diagnostics = generation_diagnostics(base_result)
+                    base_segments = parse_segments(
+                        base_diagnostics["parsed"],
+                        window=inference_index,
+                        offset=start,
+                        duration=planned_end - start,
+                        role=role,
+                    )
+                    speaker_forces = plan_speaker_forces(
+                        base_segments,
+                        speaker_hints,
+                        role=role,
+                        offset=start,
+                    )
+                    if speaker_forces:
+                        result = _generate_with_timestamp_progress(
+                            engine,
+                            str(chunk),
+                            prompt=prompt,
+                            timestamp_callback=report_timestamp,
+                            speaker_forces=speaker_forces,
+                        )
+                    else:
+                        result = base_result
                 else:
                     try:
                         cached_result = next(cached_iterator)
@@ -361,13 +646,50 @@ def transcribe_track(
                         raise ValueError("MOSS cache ended before transcription completed") from error
                     if not isinstance(cached_result, dict):
                         raise ValueError("MOSS cache contains an invalid generation")
-                    result = SimpleNamespace(**cached_result)
-                generation_cache.append({
-                    "text": str(getattr(result, "text", "")),
-                    "prompt_tokens": getattr(result, "prompt_tokens", None),
-                    "generation_tokens": getattr(result, "generation_tokens", None),
-                    "total_tokens": getattr(result, "total_tokens", None),
-                })
+                    base_fields = cached_result.get("base", cached_result)
+                    if not isinstance(base_fields, dict):
+                        raise ValueError("MOSS cache contains an invalid base generation")
+                    base_result = SimpleNamespace(**base_fields)
+                    base_diagnostics = generation_diagnostics(base_result)
+                    base_segments = parse_segments(
+                        base_diagnostics["parsed"],
+                        window=inference_index,
+                        offset=start,
+                        duration=planned_end - start,
+                        role=role,
+                    )
+                    speaker_forces = plan_speaker_forces(
+                        base_segments,
+                        speaker_hints,
+                        role=role,
+                        offset=start,
+                    )
+                    cached_forces = cached_result.get("speaker_forces", [])
+                    if not isinstance(cached_forces, list):
+                        raise ValueError("MOSS cache contains invalid speaker guidance")
+                    if not speaker_forces:
+                        result = base_result
+                    elif _force_signature(cached_forces) == _force_signature(speaker_forces):
+                        result = SimpleNamespace(**cached_result)
+                    else:
+                        if engine is None:
+                            raise MossGuidanceRequired(
+                                f"MOSS {role} inference {inference_index} needs guided decoding"
+                            )
+                        extract_chunk()
+                        result = _generate_with_timestamp_progress(
+                            engine,
+                            str(chunk),
+                            prompt=prompt,
+                            timestamp_callback=report_timestamp,
+                            speaker_forces=speaker_forces,
+                        )
+                active_fields = _generation_fields(result)
+                cache_entry = dict(active_fields)
+                if speaker_forces:
+                    cache_entry["base"] = dict(base_fields)
+                    cache_entry["speaker_forces"] = speaker_forces
+                generation_cache.append(cache_entry)
                 diagnostics = generation_diagnostics(result)
                 segments = parse_segments(
                     diagnostics["parsed"],
@@ -493,6 +815,7 @@ def transcribe_track(
 
     selected_for_hints = trim_overlaps(by_window, effective_windows)
     anchors = resolve_speaker_anchors(selected_for_hints, speaker_hints, role=role)
+
     mapping, decisions, profiles = reconcile_speakers(
         by_window,
         evidence_by_window,
@@ -533,25 +856,9 @@ def resolve_speaker_anchors(
     role: str,
 ) -> dict[str, str]:
     anchors: dict[str, str] = {}
-    for hint in hints:
-        if hint.track != role:
-            continue
-        overlapping = [
-            segment.speaker
-            for segment in segments
-            if min(segment.end, hint.end) > max(segment.start, hint.start)
-        ]
-        centered = [
-            segment.speaker
-            for segment in segments
-            if hint.start <= (segment.start + segment.end) / 2 < hint.end
-        ]
-        speakers = set(centered or overlapping)
-        if not speakers:
-            raise ValueError(
-                f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
-                f"on {role} does not overlap speech"
-            )
+    selections, unassigned = _select_hint_segments(segments, hints, role=role)
+    for hint, selected in selections:
+        speakers = {segment.speaker for segment in selected}
         if len(speakers) != 1:
             raise ValueError(
                 f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
@@ -564,6 +871,21 @@ def resolve_speaker_anchors(
                 f"diarized speaker {speaker} is anchored to both {previous} and {hint.identity}"
             )
         anchors[speaker] = hint.identity
+    for hint in unassigned:
+        if hint.identity in anchors.values():
+            continue
+        if not any(
+            min(segment.end, hint.end) > max(segment.start, hint.start)
+            for segment in segments
+        ):
+            raise ValueError(
+                f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
+                f"on {role} does not overlap speech"
+            )
+        raise ValueError(
+            f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
+            f"on {role} cannot be separated from an adjacent hinted range"
+        )
     return anchors
 
 

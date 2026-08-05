@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -105,10 +107,45 @@ def load_cache(path: Path, expected_metadata: dict[str, Any]) -> dict[str, list[
 def _valid_generation(value: Any) -> bool:
     if not isinstance(value, dict) or not isinstance(value.get("text"), str):
         return False
-    return all(
+    if not all(
         value.get(key) is None
         or (isinstance(value.get(key), int) and not isinstance(value.get(key), bool))
         for key in ("prompt_tokens", "generation_tokens", "total_tokens")
+    ):
+        return False
+    base = value.get("base")
+    if base is not None and (
+        not isinstance(base, dict)
+        or "base" in base
+        or "speaker_forces" in base
+        or not _valid_generation(base)
+    ):
+        return False
+    forces = value.get("speaker_forces")
+    if forces is not None and (
+        not isinstance(forces, list)
+        or not forces
+        or any(not _valid_speaker_force(force) for force in forces)
+    ):
+        return False
+    if (base is None) != (forces is None):
+        return False
+    return True
+
+
+def _valid_speaker_force(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    start = value.get("start")
+    return (
+        isinstance(start, (int, float))
+        and not isinstance(start, bool)
+        and math.isfinite(start)
+        and start >= 0
+        and isinstance(value.get("speaker"), str)
+        and re.fullmatch(r"S\d+", value["speaker"]) is not None
+        and isinstance(value.get("identity"), str)
+        and bool(value["identity"].strip())
     )
 
 

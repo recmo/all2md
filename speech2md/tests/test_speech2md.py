@@ -17,6 +17,7 @@ from speech2md.moss import (
     ENGLISH_TRANSCRIPTION_PROMPT,
     MAX_HOTWORDS,
     MAX_GENERATION_TOKENS,
+    MossGuidanceRequired,
     RECOVERY_TOKEN_THRESHOLD,
     build_transcription_prompt,
     deduplicate_boundaries,
@@ -25,6 +26,7 @@ from speech2md.moss import (
     parse_moss_transcript,
     parse_silence_centers,
     parse_segments,
+    plan_speaker_forces,
     plan_windows,
     resolve_speaker_anchors,
     transcribe_track,
@@ -239,9 +241,9 @@ def test_speaker_hint_ignores_tiny_adjacent_boundary_overlap():
     ) == {"W01:S01": "Ulrich", "W01:S02": "Remco"}
 
 
-def test_speaker_hints_reject_contradictory_identities_for_one_local_speaker():
+def test_speaker_hints_reject_identities_without_a_separating_turn_boundary():
     segments = [Segment(10, 30, "speech", "W01:S01", "mixed")]
-    with pytest.raises(ValueError, match="anchored to both"):
+    with pytest.raises(ValueError, match="cannot be separated"):
         resolve_speaker_anchors(
             segments,
             (
@@ -250,6 +252,145 @@ def test_speaker_hints_reject_contradictory_identities_for_one_local_speaker():
             ),
             role="mixed",
         )
+
+
+def test_speaker_guidance_reuses_an_identitys_unambiguous_local_label():
+    segments = [
+        Segment(0, 5, "Cody", "W01:S01", "mixed"),
+        Segment(10, 11, "Steffen begins", "W01:S01", "mixed"),
+        Segment(11, 15, "Steffen continues", "W01:S06", "mixed"),
+    ]
+
+    forces = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Cody", 0, 5, "mixed"),
+            SpeakerHint("Steffen", 10, 15, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+
+    assert forces == [
+        {"start": 0, "speaker": "S01", "identity": "Cody"},
+        {"start": 10, "speaker": "S06", "identity": "Steffen"},
+    ]
+
+
+def test_speaker_guidance_allocates_a_new_label_for_a_true_collision():
+    segments = [
+        Segment(12, 22, "Piotr", "W01:S04", "mixed"),
+        Segment(30, 34, "Fares", "W01:S04", "mixed"),
+        Segment(40, 50, "Piotr again", "W01:S04", "mixed"),
+    ]
+
+    forces = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Piotr", 12, 22, "mixed"),
+            SpeakerHint("Fares", 30, 34, "mixed"),
+            SpeakerHint("Piotr", 40, 50, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+
+    assert forces == [
+        {"start": 12, "speaker": "S04", "identity": "Piotr"},
+        {"start": 30, "speaker": "S01", "identity": "Fares"},
+        {"start": 40, "speaker": "S04", "identity": "Piotr"},
+    ]
+
+
+def test_speaker_guidance_is_stable_when_identities_are_renamed():
+    segments = [
+        Segment(0, 5, "first", "W01:S01", "mixed"),
+        Segment(5, 10, "second", "W01:S01", "mixed"),
+    ]
+
+    before = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Alice", 0, 5, "mixed"),
+            SpeakerHint("Bob", 5, 10, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+    after = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Zoe", 0, 5, "mixed"),
+            SpeakerHint("Aaron", 5, 10, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+
+    assert [(item["start"], item["speaker"]) for item in before] == [
+        (item["start"], item["speaker"]) for item in after
+    ]
+
+
+def test_cached_collision_requests_guided_decoding(tmp_path: Path):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+
+    with pytest.raises(MossGuidanceRequired, match="needs guided decoding"):
+        transcribe_track(
+            source,
+            engine=None,
+            prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+            role="mixed",
+            duration=10,
+            cached_generations=[{
+                "text": "[0][S01]Alice[5][5][S01]Bob[10]",
+                "generation_tokens": 10,
+            }],
+            speaker_hints=(
+                SpeakerHint("Alice", 0, 5, "mixed"),
+                SpeakerHint("Bob", 5, 10, "mixed"),
+            ),
+        )
+
+
+def test_matching_guided_cache_replays_without_model(tmp_path: Path):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    base = {
+        "text": "[0][S01]Alice[5][5][S01]Bob[10]",
+        "prompt_tokens": None,
+        "generation_tokens": 10,
+        "total_tokens": None,
+    }
+    forces = [
+        {"start": 0, "speaker": "S01", "identity": "Alice"},
+        {"start": 5, "speaker": "S02", "identity": "Bob"},
+    ]
+
+    segments, details, _ = transcribe_track(
+        source,
+        engine=None,
+        prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        role="mixed",
+        duration=10,
+        cached_generations=[{
+            "text": "[0][S01]Alice[5][5][S02]Bob[10]",
+            "prompt_tokens": None,
+            "generation_tokens": 10,
+            "total_tokens": None,
+            "base": base,
+            "speaker_forces": forces,
+        }],
+        speaker_hints=(
+            SpeakerHint("Alice", 0, 5, "mixed"),
+            SpeakerHint("Bob", 5, 10, "mixed"),
+        ),
+    )
+
+    assert [segment.text for segment in segments] == ["Alice", "Bob"]
+    assert details["generation_cache"][0]["base"] == base
+    assert details["generation_cache"][0]["speaker_forces"] == forces
 
 
 def test_transcribe_publishes_generation_cache_before_speaker_hint_reconciliation(
@@ -569,6 +710,51 @@ def test_transcribe_can_require_a_current_moss_cache(tmp_path: Path, monkeypatch
     )
 
     with pytest.raises(pipeline.MossCacheMiss, match="cache is unavailable"):
+        transcribe(media, require_moss_cache=True)
+
+
+def test_cache_only_transcribe_reports_when_speaker_guidance_is_needed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    media = tmp_path / "meeting.mp4"
+    media.touch()
+    resolved = SimpleNamespace(
+        requested=media,
+        markdown_path=tmp_path / "meeting.md",
+        title=None,
+        started_at=None,
+        ended_at=None,
+        calendar_event=None,
+        sources=((media, "mixed", None),),
+    )
+    source = AudioSource(str(media), "mixed", "a" * 64, 10.0, "wav")
+    monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
+    monkeypatch.setattr(
+        pipeline,
+        "probe",
+        lambda path, *, expected_sha256, role: source,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_cache",
+        lambda *args, **kwargs: {pipeline.source_key(source): [{"text": "cached"}]},
+    )
+    monkeypatch.setattr(pipeline, "get_redimnet2_embedder", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "transcribe_track",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            MossGuidanceRequired("cached window needs guided decoding")
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_moss_engine",
+        lambda: (_ for _ in ()).throw(AssertionError("model must not load")),
+    )
+
+    with pytest.raises(pipeline.MossCacheMiss, match="needs guided decoding"):
         transcribe(media, require_moss_cache=True)
 
 

@@ -45,8 +45,8 @@ speakers:
 ```
 
 The two sections are independently optional. Unknown fields, invalid tracks,
-out-of-bounds ranges, and ranges that ambiguously cover multiple diarized
-speakers stop processing. A track may be omitted for single-track media and is
+out-of-bounds ranges, and identities that cannot be separated at a MOSS turn
+boundary stop processing. A track may be omitted for single-track media and is
 required for multi-track captures. Hotwords are trimmed, deduplicated
 case-insensitively, and capped at 40. The hint file is never rewritten.
 Raw generations are retained in an adjacent cache as described below.
@@ -102,7 +102,15 @@ The MOSS cache stores replayable raw generations and is accepted only when its
 schema, audio-track checksums and roles, normalized ordered hotwords, pinned
 MOSS model revision, prompt, generation limit, and window/recovery settings all match.
 Changing metadata, attendees, speaker ranges, or localized edits therefore
-reuses MOSS output while rerunning speaker reconciliation and rendering.
+normally reuses MOSS output while rerunning speaker reconciliation and rendering.
+If explicit ranges show that one window-local MOSS label was collapsed across
+two identities, `speech2md` re-decodes only that affected window with forced
+speaker labels at the conflicting turn boundaries. The cache retains the
+original unguided generation as `base` beside the guided variant and the exact
+forces used. Further relabeling is cache-only unless it changes those boundary
+forces; identity renames alone remain cache-only. `--require-moss-cache` reports
+a cache miss when new guidance is required, allowing callers to move the work
+to their normal model queue instead of blocking a fast-update path.
 Changing hotwords or audio invalidates the cache. Invalid or unreadable caches
 are ignored. The cache contains string arrays only and is loaded with
 `allow_pickle=False`.
