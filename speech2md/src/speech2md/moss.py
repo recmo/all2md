@@ -10,6 +10,8 @@ import tempfile
 from types import SimpleNamespace
 from typing import Any, Callable
 
+import numpy as np
+
 from .model import Segment, SpeakerHint, SpeakerProfile
 from .redimnet2 import (
     extract_window_evidence,
@@ -21,9 +23,12 @@ MOSS_MODEL = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
 MOSS_REVISION = "e8681d68e7042738ffca8ac8212bc8fcb1131ab8"
 TARGET_PART_SECONDS = 30 * 60.0
 WINDOW_OVERLAP_SECONDS = 2.0
+HARD_SPLIT_OVERLAP_SECONDS = 6.0
 SILENCE_SEARCH_SECONDS = 60.0
 SILENCE_NOISE_DB = -35
 SILENCE_MIN_SECONDS = 0.5
+ENERGY_SAMPLE_RATE = 8_000
+ENERGY_WINDOW_SECONDS = 0.1
 MAX_GENERATION_TOKENS = 16_384
 RECOVERY_TOKEN_THRESHOLD = 14_000
 MAX_HOTWORDS = 40
@@ -87,6 +92,7 @@ def plan_windows(
     duration: float,
     *,
     silence_centers: list[float],
+    hard_split_boundary: Callable[[float], float] | None = None,
 ) -> list[tuple[float, float]]:
     if duration <= 0:
         return []
@@ -96,6 +102,7 @@ def plan_windows(
 
     ideal_part_seconds = duration / part_count
     boundaries = []
+    boundary_overlaps = []
     for index in range(1, part_count):
         ideal = index * ideal_part_seconds
         nearby = [
@@ -103,19 +110,40 @@ def plan_windows(
             for center in silence_centers
             if abs(center - ideal) <= SILENCE_SEARCH_SECONDS
         ]
-        if not nearby:
+        if nearby:
+            boundaries.append(min(nearby, key=lambda center: abs(center - ideal)))
+            boundary_overlaps.append(WINDOW_OVERLAP_SECONDS)
+            continue
+        if hard_split_boundary is None:
             raise RuntimeError(
                 f"no silence found within {SILENCE_SEARCH_SECONDS:.0f}s of "
                 f"the ideal {ideal:.2f}s part boundary"
             )
-        boundaries.append(min(nearby, key=lambda center: abs(center - ideal)))
+        boundary = hard_split_boundary(ideal)
+        if not 0 < boundary < duration or abs(boundary - ideal) > SILENCE_SEARCH_SECONDS:
+            raise RuntimeError(
+                f"hard split {boundary:.2f}s falls outside the acceptable range "
+                f"around the ideal {ideal:.2f}s part boundary"
+            )
+        boundaries.append(boundary)
+        boundary_overlaps.append(HARD_SPLIT_OVERLAP_SECONDS)
 
     edges = [0.0, *boundaries, duration]
-    half_overlap = WINDOW_OVERLAP_SECONDS / 2
     return [
         (
-            max(0.0, start - (half_overlap if index else 0.0)),
-            min(duration, end + (half_overlap if index < part_count - 1 else 0.0)),
+            max(
+                0.0,
+                start - (boundary_overlaps[index - 1] / 2 if index else 0.0),
+            ),
+            min(
+                duration,
+                end
+                + (
+                    boundary_overlaps[index] / 2
+                    if index < part_count - 1
+                    else 0.0
+                ),
+            ),
         )
         for index, (start, end) in enumerate(zip(edges, edges[1:]))
     ]
@@ -146,6 +174,41 @@ def parse_silence_centers(log: str) -> list[float]:
             centers.append((start + float(match.group("value"))) / 2)
             start = None
     return centers
+
+
+def find_min_energy_boundary(path: Path, *, ideal: float, duration: float) -> float:
+    search_start = max(0.0, ideal - SILENCE_SEARCH_SECONDS)
+    search_end = min(duration, ideal + SILENCE_SEARCH_SECONDS)
+    result = subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-v", "error", "-ss", str(search_start),
+            "-t", str(search_end - search_start), "-i", str(path),
+            "-map", "0:a:0", "-ac", "1", "-ar", str(ENERGY_SAMPLE_RATE),
+            "-f", "f32le", "pipe:1",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    samples = np.frombuffer(result.stdout, dtype="<f4")
+    window_samples = max(1, round(ENERGY_WINDOW_SECONDS * ENERGY_SAMPLE_RATE))
+    if samples.size < window_samples:
+        raise RuntimeError(
+            f"not enough decoded audio to find a hard split near {ideal:.2f}s"
+        )
+
+    squared = np.square(samples, dtype=np.float64)
+    cumulative = np.concatenate(([0.0], np.cumsum(squared)))
+    energies = (
+        cumulative[window_samples:] - cumulative[:-window_samples]
+    ) / window_samples
+    minimum = float(np.min(energies))
+    candidates = np.flatnonzero(energies == minimum)
+    ideal_sample = (ideal - search_start) * ENERGY_SAMPLE_RATE
+    window_start = int(min(
+        candidates,
+        key=lambda candidate: abs(candidate + window_samples / 2 - ideal_sample),
+    ))
+    return search_start + (window_start + window_samples / 2) / ENERGY_SAMPLE_RATE
 
 
 def _parse_moss_transcript(text: str) -> tuple[list[dict[str, Any]], int]:
@@ -690,7 +753,18 @@ def transcribe_track(
     progress_callback: Callable[[int, int, int, float], None] | None = None,
 ) -> tuple[list[Segment], dict[str, Any], dict[str, SpeakerProfile]]:
     silence_centers = detect_silence_centers(path) if duration > TARGET_PART_SECONDS else []
-    planned_windows = plan_windows(duration, silence_centers=silence_centers)
+    hard_split_boundaries: list[float] = []
+
+    def hard_split_boundary(ideal: float) -> float:
+        boundary = find_min_energy_boundary(path, ideal=ideal, duration=duration)
+        hard_split_boundaries.append(boundary)
+        return boundary
+
+    planned_windows = plan_windows(
+        duration,
+        silence_centers=silence_centers,
+        hard_split_boundary=hard_split_boundary,
+    )
     raw_windows: list[dict[str, Any]] = []
     by_window: list[list[Segment]] = []
     effective_windows: list[tuple[float, float]] = []
@@ -966,6 +1040,7 @@ def transcribe_track(
             segment.speaker = mapping.get(segment.speaker, segment.speaker)
     selected = trim_overlaps(run_windows, effective_windows)
     selected = deduplicate_boundaries(selected)
+    window_boundaries = boundaries_from_windows(planned_windows)
     return selected, {
         "role": role,
         "audio": str(path),
@@ -976,8 +1051,21 @@ def transcribe_track(
         "speaker_reconciliation": decisions,
         "warnings": warnings,
         "generation_cache": generation_cache,
-        "window_strategy": "equal-silence-aligned",
-        "silence_boundaries": boundaries_from_windows(planned_windows),
+        "window_strategy": (
+            "equal-silence-aligned-with-energy-fallback"
+            if hard_split_boundaries
+            else "equal-silence-aligned"
+        ),
+        "window_boundaries": window_boundaries,
+        "silence_boundaries": [
+            boundary
+            for boundary in window_boundaries
+            if not any(
+                math.isclose(boundary, hard_split, abs_tol=1e-6)
+                for hard_split in hard_split_boundaries
+            )
+        ],
+        "hard_split_boundaries": hard_split_boundaries,
         "actual_overlap_seconds": max(
             (
                 max(0.0, effective_windows[index - 1][1] - effective_windows[index][0])
