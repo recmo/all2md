@@ -28,6 +28,7 @@ MIN_RECOVERY_PROGRESS_SECONDS = 5.0
 MAX_RECOVERY_ATTEMPTS = 8
 SPEAKER_FORCE_TOLERANCE_SECONDS = 0.5
 MOSS_TIMESTAMP_TOLERANCE_SECONDS = 0.02
+SYNTHETIC_SPEAKER_NUMBER_START = 99
 # Independent reports of premature end tokens on long recordings:
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/26
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/34
@@ -467,15 +468,6 @@ def plan_speaker_forces(
     if not collisions:
         return []
 
-    preferred: dict[str, str] = {}
-    for label, identities in label_identities.items():
-        if len(identities) != 1:
-            continue
-        identity = next(iter(identities))
-        current = preferred.get(identity)
-        if current is None or scores[(label, identity)] > scores[(current, identity)]:
-            preferred[identity] = label
-
     used_numbers = {
         int(match.group(1))
         for segment in segments
@@ -485,9 +477,11 @@ def plan_speaker_forces(
 
     def unused_label(window_label: str) -> str:
         window = window_label.rsplit(":", 1)[0]
-        number = 1
-        while number in used_numbers:
-            number += 1
+        number = SYNTHETIC_SPEAKER_NUMBER_START
+        while number in used_numbers and number > 0:
+            number -= 1
+        if number == 0:
+            raise RuntimeError("no synthetic MOSS speaker labels remain")
         used_numbers.add(number)
         return f"{window}:S{number:02d}"
 
@@ -508,7 +502,7 @@ def plan_speaker_forces(
             if identity == owner:
                 target = label
             else:
-                target = preferred.get(identity) or allocated.get(identity)
+                target = allocated.get(identity)
                 if target is None:
                     target = unused_label(label)
                     allocated[identity] = target
@@ -906,7 +900,13 @@ def resolve_speaker_anchors(
     for hint, selected in selections:
         speakers = {segment.speaker for segment in selected}
         if len(speakers) == 1:
-            speaker = speakers.pop()
+            selected_speakers = speakers
+        elif all(
+            segment.start >= hint.start - 1e-6
+            and segment.end <= hint.end + 1e-6
+            for segment in selected
+        ):
+            selected_speakers = speakers
         else:
             overlap_by_speaker = {
                 speaker: sum(
@@ -927,13 +927,15 @@ def resolve_speaker_anchors(
                     f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
                     f"on {role} overlaps multiple diarized speakers"
                 )
-            speaker = best_speakers[0]
-        previous = anchors.get(speaker)
-        if previous is not None and previous != hint.identity:
-            raise ValueError(
-                f"diarized speaker {speaker} is anchored to both {previous} and {hint.identity}"
-            )
-        anchors[speaker] = hint.identity
+            selected_speakers = set(best_speakers)
+        for speaker in selected_speakers:
+            previous = anchors.get(speaker)
+            if previous is not None and previous != hint.identity:
+                raise ValueError(
+                    f"diarized speaker {speaker} is anchored to both "
+                    f"{previous} and {hint.identity}"
+                )
+            anchors[speaker] = hint.identity
     for hint in unassigned:
         if hint.identity in anchors.values():
             continue

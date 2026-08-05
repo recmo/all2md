@@ -299,7 +299,7 @@ def test_speaker_hints_reject_identities_without_a_separating_turn_boundary():
         )
 
 
-def test_speaker_guidance_reuses_an_identitys_unambiguous_local_label():
+def test_speaker_guidance_allocates_a_fresh_label_for_a_split_identity():
     segments = [
         Segment(0, 5, "Cody", "W01:S01", "mixed"),
         Segment(10, 11, "Steffen begins", "W01:S01", "mixed"),
@@ -318,8 +318,21 @@ def test_speaker_guidance_reuses_an_identitys_unambiguous_local_label():
 
     assert forces == [
         {"start": 0, "speaker": "S01", "identity": "Cody"},
-        {"start": 10, "speaker": "S06", "identity": "Steffen"},
+        {"start": 10, "speaker": "S99", "identity": "Steffen"},
     ]
+
+
+def test_speaker_hint_can_anchor_multiple_fully_contained_local_labels():
+    segments = [
+        Segment(10, 11, "Steffen begins", "W01:S02", "mixed"),
+        Segment(11, 15, "Steffen continues", "W01:S06", "mixed"),
+    ]
+
+    assert resolve_speaker_anchors(
+        segments,
+        (SpeakerHint("Steffen", 10, 15, "mixed"),),
+        role="mixed",
+    ) == {"W01:S02": "Steffen", "W01:S06": "Steffen"}
 
 
 def test_speaker_guidance_allocates_a_new_label_for_a_true_collision():
@@ -342,7 +355,7 @@ def test_speaker_guidance_allocates_a_new_label_for_a_true_collision():
 
     assert forces == [
         {"start": 12, "speaker": "S04", "identity": "Piotr"},
-        {"start": 30, "speaker": "S01", "identity": "Fares"},
+        {"start": 30, "speaker": "S99", "identity": "Fares"},
         {"start": 40, "speaker": "S04", "identity": "Piotr"},
     ]
 
@@ -410,7 +423,7 @@ def test_matching_guided_cache_replays_without_model(tmp_path: Path):
     }
     forces = [
         {"start": 0, "speaker": "S01", "identity": "Alice"},
-        {"start": 5, "speaker": "S02", "identity": "Bob"},
+        {"start": 5, "speaker": "S99", "identity": "Bob"},
     ]
 
     segments, details, _ = transcribe_track(
@@ -420,7 +433,7 @@ def test_matching_guided_cache_replays_without_model(tmp_path: Path):
         role="mixed",
         duration=10,
         cached_generations=[{
-            "text": "[0][S01]Alice[5][5][S02]Bob[10]",
+            "text": "[0][S01]Alice[5][5][S99]Bob[10]",
             "prompt_tokens": None,
             "generation_tokens": 10,
             "total_tokens": None,
