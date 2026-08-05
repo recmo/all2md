@@ -115,8 +115,13 @@ def extract_window_evidence(
     window: int,
     source_track: str,
     embedder: Any,
+    maximum_samples_per_speaker: int = MAX_SAMPLES_PER_SPEAKER,
 ) -> tuple[dict[str, list[EmbeddingSample]], list[dict[str, Any]]]:
-    intervals = select_clean_intervals(segments, window=window)
+    intervals = select_clean_intervals(
+        segments,
+        window=window,
+        maximum_samples=maximum_samples_per_speaker,
+    )
     evidence: dict[str, list[EmbeddingSample]] = {}
     diagnostics: list[dict[str, Any]] = []
     for speaker, speaker_intervals in intervals.items():
@@ -292,6 +297,175 @@ def reconcile_speakers(
                     for score, speaker in scores
                 ],
                 "sample_count": len(window_evidence.get(local, [])),
+            })
+    return mapping, decisions, meeting_profiles
+
+
+def split_speaker_runs(
+    by_window: list[list[Segment]],
+) -> tuple[list[list[Segment]], dict[str, str]]:
+    """Give each contiguous use of a MOSS label its own reconciliation label."""
+    run_windows: list[list[Segment]] = []
+    original_labels: dict[str, str] = {}
+    for segments in by_window:
+        run_segments: list[Segment] = []
+        previous: str | None = None
+        run = 0
+        current = ""
+        for segment in segments:
+            if segment.speaker != previous:
+                previous = segment.speaker
+                run += 1
+                current = f"{segment.speaker}:R{run:03d}"
+                original_labels[current] = segment.speaker
+            run_segments.append(Segment(
+                start=segment.start,
+                end=segment.end,
+                text=segment.text,
+                speaker=current,
+                source_role=segment.source_role,
+            ))
+        run_windows.append(run_segments)
+    return run_windows, original_labels
+
+
+def reconcile_speaker_runs(
+    by_window: list[list[Segment]],
+    evidence_by_window: list[dict[str, list[EmbeddingSample]]],
+    *,
+    original_labels: dict[str, str],
+    role: str,
+    profiles: dict[str, SpeakerProfile] | None = None,
+    anchors: dict[str, str] | None = None,
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    similarity_margin: float = DEFAULT_SIMILARITY_MARGIN,
+) -> tuple[dict[str, str], list[dict[str, Any]], dict[str, SpeakerProfile]]:
+    """Reconcile contiguous runs while using MOSS labels as a weak fallback prior."""
+    if len(by_window) != len(evidence_by_window):
+        raise ValueError("speaker evidence does not match the number of MOSS windows")
+    local_speakers = {
+        segment.speaker
+        for segments in by_window
+        for segment in segments
+    }
+    if set(original_labels) != local_speakers:
+        raise ValueError("original speaker labels do not match speaker runs")
+
+    meeting_profiles = profiles if profiles is not None else {}
+    anchors = anchors or {}
+    unknown_anchors = set(anchors) - local_speakers
+    if unknown_anchors:
+        raise ValueError(f"speaker anchors reference unknown labels: {sorted(unknown_anchors)}")
+    mapping: dict[str, str] = {}
+    decisions: list[dict[str, Any]] = []
+    next_speaker = _next_speaker_number(meeting_profiles)
+    profiles_by_identity: dict[str, str] = {}
+    for speaker, profile in meeting_profiles.items():
+        if not profile.identity:
+            continue
+        if profile.identity in profiles_by_identity:
+            raise ValueError(f"multiple profiles have identity {profile.identity}")
+        profiles_by_identity[profile.identity] = speaker
+    for identity in sorted(set(anchors.values())):
+        speaker = profiles_by_identity.get(identity)
+        if speaker is None:
+            speaker = f"Speaker {next_speaker}"
+            next_speaker += 1
+            meeting_profiles[speaker] = _new_profile(speaker, identity=identity)
+            profiles_by_identity[identity] = speaker
+    for local, identity in anchors.items():
+        speaker = profiles_by_identity[identity]
+        mapping[local] = speaker
+        meeting_profiles[speaker].samples.extend(
+            sample
+            for evidence in evidence_by_window
+            for sample in evidence.get(local, [])
+        )
+
+    latest_by_original: dict[str, str] = {}
+    for window_index, (segments, window_evidence) in enumerate(
+        zip(by_window, evidence_by_window, strict=True), 1
+    ):
+        ordered_runs = list(dict.fromkeys(segment.speaker for segment in segments))
+        for local in ordered_runs:
+            run_segments = [segment for segment in segments if segment.speaker == local]
+            original = original_labels[local]
+            samples = window_evidence.get(local, [])
+            scores = sorted(
+                (
+                    (_profile_similarity(samples, profile.samples), speaker)
+                    for speaker, profile in meeting_profiles.items()
+                    if samples and profile.samples
+                ),
+                reverse=True,
+            )
+            best_score = scores[0][0] if scores else None
+            best_speaker = scores[0][1] if scores else None
+            second_score = scores[1][0] if len(scores) > 1 else None
+            score_margin = (
+                best_score - second_score
+                if best_score is not None and second_score is not None
+                else None
+            )
+            confident_match = (
+                best_score is not None
+                and best_score >= similarity_threshold
+                and (score_margin is None or score_margin >= similarity_margin)
+            )
+
+            if local in anchors:
+                assigned = mapping[local]
+                decision = "anchored"
+                reason = "manual_range"
+            elif confident_match:
+                assigned = best_speaker
+                mapping[local] = assigned
+                meeting_profiles[assigned].samples.extend(samples)
+                decision = "matched"
+                reason = "threshold_and_margin_met"
+            elif original in latest_by_original:
+                assigned = latest_by_original[original]
+                mapping[local] = assigned
+                decision = "fallback"
+                reason = "moss_label_prior"
+            else:
+                assigned = f"Speaker {next_speaker}"
+                next_speaker += 1
+                mapping[local] = assigned
+                meeting_profiles[assigned] = _new_profile(
+                    assigned,
+                    samples=list(samples),
+                )
+                decision = "new"
+                if not samples:
+                    reason = "no_clean_embedding"
+                elif best_score is None:
+                    reason = "no_existing_profile"
+                elif best_score < similarity_threshold:
+                    reason = "below_similarity_threshold"
+                else:
+                    reason = "ambiguous_margin"
+            latest_by_original[original] = assigned
+            decisions.append({
+                "window": window_index,
+                "local_speaker": local,
+                "original_speaker": original,
+                "start": min(segment.start for segment in run_segments),
+                "end": max(segment.end for segment in run_segments),
+                "speaker": assigned,
+                "decision": decision,
+                "reason": reason,
+                "similarity_threshold": similarity_threshold,
+                "similarity_margin": similarity_margin,
+                "best_candidate": best_speaker,
+                "best_score": best_score,
+                "second_best_score": second_score,
+                "score_margin": score_margin,
+                "scores": [
+                    {"speaker": speaker, "cosine_similarity": score}
+                    for score, speaker in scores
+                ],
+                "sample_count": len(samples),
             })
     return mapping, decisions, meeting_profiles
 

@@ -11,7 +11,11 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from .model import Segment, SpeakerHint, SpeakerProfile
-from .redimnet2 import extract_window_evidence, reconcile_speakers
+from .redimnet2 import (
+    extract_window_evidence,
+    reconcile_speaker_runs,
+    split_speaker_runs,
+)
 
 MOSS_MODEL = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
 MOSS_REVISION = "e8681d68e7042738ffca8ac8212bc8fcb1131ab8"
@@ -30,6 +34,7 @@ SPEAKER_FORCE_TOLERANCE_SECONDS = 0.5
 MOSS_TIMESTAMP_TOLERANCE_SECONDS = 0.02
 FRESH_SPEAKER_MIN_PROBABILITY = 0.10
 FRESH_SPEAKER_MIN_TOP_RATIO = 0.10
+RUN_VOICEPRINT_SAMPLES = 1
 # Independent reports of premature end tokens on long recordings:
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/26
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/34
@@ -927,7 +932,8 @@ def transcribe_track(
     if generation_cache_callback is not None:
         generation_cache_callback(list(generation_cache))
 
-    for index, segments in enumerate(by_window, 1):
+    run_windows, original_labels = split_speaker_runs(by_window)
+    for index, segments in enumerate(run_windows, 1):
         evidence = {}
         if embedder is not None:
             evidence, embedding_diagnostics = extract_window_evidence(
@@ -936,24 +942,26 @@ def transcribe_track(
                 window=index,
                 source_track=role,
                 embedder=embedder,
+                maximum_samples_per_speaker=RUN_VOICEPRINT_SAMPLES,
             )
             raw_windows[index - 1]["embedding_samples"] = embedding_diagnostics
         evidence_by_window.append(evidence)
 
-    selected_for_hints = trim_overlaps(by_window, effective_windows)
+    selected_for_hints = trim_overlaps(run_windows, effective_windows)
     anchors = resolve_speaker_anchors(selected_for_hints, speaker_hints, role=role)
 
-    mapping, decisions, profiles = reconcile_speakers(
-        by_window,
+    mapping, decisions, profiles = reconcile_speaker_runs(
+        run_windows,
         evidence_by_window,
+        original_labels=original_labels,
         role=role,
         profiles=speaker_profiles,
         anchors=anchors,
     )
-    for segments in by_window:
+    for segments in run_windows:
         for segment in segments:
             segment.speaker = mapping.get(segment.speaker, segment.speaker)
-    selected = trim_overlaps(by_window, effective_windows)
+    selected = trim_overlaps(run_windows, effective_windows)
     selected = deduplicate_boundaries(selected)
     return selected, {
         "role": role,
@@ -961,6 +969,7 @@ def transcribe_track(
         "prompt": prompt,
         "windows": raw_windows,
         "speaker_mapping": mapping,
+        "speaker_run_origins": original_labels,
         "speaker_reconciliation": decisions,
         "warnings": warnings,
         "generation_cache": generation_cache,
