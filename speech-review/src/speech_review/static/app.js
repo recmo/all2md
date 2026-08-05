@@ -85,14 +85,23 @@ async function refreshJobs() {
   try {
     const jobs = await api('/api/jobs')
     const newlyCompleted = jobs.filter(job => job.status === 'complete' && !state.seenCompleted.has(job.id))
+    const currentId = state.transcript?.id
+    const completedCurrent = newlyCompleted.some(job => job.transcriptId === currentId)
     jobs.filter(job => job.status === 'complete').forEach(job => state.seenCompleted.add(job.id))
     state.jobs = jobs
     if (newlyCompleted.length) state.summaries = sortSummaries(await api('/api/transcripts'))
     updateTranscriptCount(); renderSummaries()
+    if (completedCurrent && state.transcript?.id === currentId) {
+      await selectTranscript(currentId, {preservePosition: true})
+      toast('Transcript updated')
+    }
   } catch { }
 }
 
-async function selectTranscript(id) {
+async function selectTranscript(id, {preservePosition = false} = {}) {
+  const previousPosition = preservePosition && state.transcript?.id === id
+    ? (state.audio[0]?.currentTime ?? state.selected?.start ?? 0)
+    : null
   pause()
   state.transcript = await api(`/api/transcripts/${id}`)
   state.selected = state.transcript.turns[0] || null
@@ -105,7 +114,12 @@ async function selectTranscript(id) {
   $('#meeting-title').textContent = state.transcript.title
   $('#meeting-meta').textContent = state.transcript.editable ? `${state.transcript.name} · ${state.transcript.turns.length} turns · ${state.transcript.status}` : `${state.transcript.name} · ${state.transcript.status}`
   setSaveState(state.transcript.status === 'stale' && state.transcript.staleReason === 'hints' ? 'Guidance changed · regenerate' : state.transcript.editable ? (state.transcript.hintRevision ? 'Guidance loaded' : 'No guidance file') : 'Needs processing')
-  renderSummaries(); renderTranscript(); renderInspector(); await loadAudio(); drawWaveform()
+  renderSummaries(); renderTranscript(); renderInspector(); await loadAudio()
+  if (previousPosition != null) {
+    const position = Math.min(previousPosition, state.duration)
+    seekTo(position); syncSelectionToTime(position)
+  }
+  drawWaveform()
 }
 
 function seedAttendees() {
