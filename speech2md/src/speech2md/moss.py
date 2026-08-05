@@ -859,12 +859,29 @@ def resolve_speaker_anchors(
     selections, unassigned = _select_hint_segments(segments, hints, role=role)
     for hint, selected in selections:
         speakers = {segment.speaker for segment in selected}
-        if len(speakers) != 1:
-            raise ValueError(
-                f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
-                f"on {role} overlaps multiple diarized speakers"
-            )
-        speaker = speakers.pop()
+        if len(speakers) == 1:
+            speaker = speakers.pop()
+        else:
+            overlap_by_speaker = {
+                speaker: sum(
+                    max(0.0, min(segment.end, hint.end) - max(segment.start, hint.start))
+                    for segment in selected
+                    if segment.speaker == speaker
+                )
+                for speaker in speakers
+            }
+            best_overlap = max(overlap_by_speaker.values())
+            best_speakers = [
+                speaker
+                for speaker, overlap in overlap_by_speaker.items()
+                if abs(overlap - best_overlap) <= 1e-6
+            ]
+            if len(best_speakers) != 1:
+                raise ValueError(
+                    f"speaker hint {hint.identity} at {hint.start:g}-{hint.end:g}s "
+                    f"on {role} overlaps multiple diarized speakers"
+                )
+            speaker = best_speakers[0]
         previous = anchors.get(speaker)
         if previous is not None and previous != hint.identity:
             raise ValueError(

@@ -241,6 +241,19 @@ def test_speaker_hint_ignores_tiny_adjacent_boundary_overlap():
     ) == {"W01:S01": "Ulrich", "W01:S02": "Remco"}
 
 
+def test_speaker_hint_uses_dominant_overlap_when_timestamps_round_together():
+    segments = [
+        Segment(1304.48, 1304.96, "Uh.", "W02:S02", "mixed"),
+        Segment(1304.97, 1305.80, "Makes sense, right?", "W02:S03", "mixed"),
+    ]
+
+    assert resolve_speaker_anchors(
+        segments,
+        (SpeakerHint("Sina", 1304, 1306, "mixed"),),
+        role="mixed",
+    ) == {"W02:S03": "Sina"}
+
+
 def test_speaker_hints_reject_identities_without_a_separating_turn_boundary():
     segments = [Segment(10, 30, "speech", "W01:S01", "mixed")]
     with pytest.raises(ValueError, match="cannot be separated"):
