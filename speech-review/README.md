@@ -1,6 +1,6 @@
 # speech-review
 
-`speech-review` is a local web editor for `speech2md` review hints. It scans a
+`speech-review` is a local web editor for `speech2md` review guidance. It scans a
 folder recursively for generated transcripts, plays their adjacent recording
 tracks, visualizes speaker turns, ranks known identities by voiceprint
 similarity, and writes review decisions to the adjacent `.hint.yaml` only.
@@ -16,6 +16,19 @@ the next turn timestamp. For multi-track captures, the browser compares audio
 activity during a turn and uses the loudest track unless an existing hint range
 already identifies the track. When several turns overlap at the clicked time,
 the latest-starting turn in the clicked lane wins.
+
+A coalesced Markdown turn can be split at the audio playhead. The resulting
+subranges can be assigned independently and are reconstructed from speaker hint
+range boundaries when the transcript is reopened. The split does not add or
+change Markdown timestamps; only assigned ranges are persisted to `.hint.yaml`.
+Every persisted range remains visible as a `GUIDED` subrange, including ranges
+whose identity already agrees with the currently rendered transcript.
+
+The right column mirrors the guidance sidecar: document metadata, hotwords, and
+attendees with their speaker ranges nested underneath. Selecting an unidentified
+run expands its closest voiceprint matches in place. Matches are grouped into
+current attendees and identities found only in other transcripts; choosing the
+latter also adds that identity to the attendee list.
 
 ## Run
 

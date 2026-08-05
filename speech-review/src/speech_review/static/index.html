@@ -9,7 +9,7 @@
 <body>
   <header class="app-header">
     <div class="brand"><span class="brand-mark">S</span><span>Speech Review</span></div>
-    <div class="meeting-title"><strong id="meeting-title">Choose a transcript</strong><span id="meeting-meta">Hint-only transcript editor</span></div>
+    <div class="meeting-title"><strong id="meeting-title">Choose a transcript</strong><span id="meeting-meta">Guidance-only transcript editor</span></div>
     <div class="header-actions"><span id="save-state" class="save-state">No changes</span><button id="regenerate" class="secondary" title="Run speech2md explicitly outside the editor">Regenerate ↗</button></div>
   </header>
   <main class="workspace">
@@ -33,7 +33,7 @@
       <div class="transcript-heading"><h1>Transcript</h1><span>Select text to correct · Space to play/pause</span></div>
       <div id="transcript" class="transcript"><div class="empty">Select a transcript from the folder.</div></div>
     </section>
-    <aside id="inspector" class="inspector"><div class="empty">Select a speaker turn or some text.</div></aside>
+    <aside id="inspector" class="inspector"><div class="empty legacy-inspector">Select a transcript to edit its guidance.</div></aside>
   </main>
   <div id="action-popover" class="action-popover" role="dialog" aria-modal="false" aria-labelledby="action-popover-title" hidden>
     <strong id="action-popover-title">Replace derived transcript?</strong>

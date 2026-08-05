@@ -1,7 +1,8 @@
 const $ = selector => document.querySelector(selector)
 const colors = ['#3b82f6', '#8b5cf6', '#d97706', '#059669', '#db2777', '#0891b2']
 const zoomLevels = [1, 8, 16, 32, 64]
-const state = { summaries: [], jobs: [], seenCompleted: new Set(), transcript: null, selected: null, correction: null, dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null }
+const state = { summaries: [], jobs: [], seenCompleted: new Set(), transcript: null, selected: null, selectedRange: null, splitPoints: new Map(), correction: null, dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null }
+const RANGE_EPSILON = 0.01
 
 const api = async (path, options) => {
   const response = await fetch(path, options)
@@ -14,6 +15,11 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character =>
 const clock = seconds => {
   const value = Math.max(0, Math.floor(seconds || 0))
   return [Math.floor(value / 3600), Math.floor(value / 60) % 60, value % 60].map(item => String(item).padStart(2, '0')).join(':')
+}
+const preciseClock = seconds => {
+  const totalHundredths = Math.max(0, Math.round((seconds || 0) * 100))
+  const whole = Math.floor(totalHundredths / 100), hundredths = totalHundredths % 100
+  return `${clock(whole)}.${String(hundredths).padStart(2, '0')}`
 }
 const speakerColor = speaker => colors[Math.abs([...speaker].reduce((sum, character) => sum + character.charCodeAt(0), 0)) % colors.length]
 const toast = message => { $('#toast').textContent = message; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 1800) }
@@ -68,21 +74,22 @@ async function selectTranscript(id) {
   pause()
   state.transcript = await api(`/api/transcripts/${id}`)
   state.selected = state.transcript.turns[0] || null
+  state.selectedRange = null
+  state.splitPoints = new Map()
   state.correction = null
   state.dirty = false
   seedAttendees()
+  selectDefaultRange(state.selected)
   state.duration = state.transcript.turns.at(-1)?.end || 0
   $('#meeting-title').textContent = state.transcript.title
   $('#meeting-meta').textContent = state.transcript.editable ? `${state.transcript.name} · ${state.transcript.turns.length} turns · ${state.transcript.status}` : `${state.transcript.name} · ${state.transcript.status}`
-  setSaveState(state.transcript.status === 'stale' && state.transcript.staleReason === 'hints' ? 'Hints changed · regenerate' : state.transcript.editable ? (state.transcript.hintRevision ? 'Hints loaded' : 'No hint file') : 'Needs processing')
+  setSaveState(state.transcript.status === 'stale' && state.transcript.staleReason === 'hints' ? 'Guidance changed · regenerate' : state.transcript.editable ? (state.transcript.hintRevision ? 'Guidance loaded' : 'No guidance file') : 'Needs processing')
   renderSummaries(); renderTranscript(); renderInspector(); await loadAudio(); drawWaveform()
 }
 
 function seedAttendees() {
   const hints = state.transcript.hints
-  const existing = new Set((hints.attendees || []).map(item => typeof item === 'string' ? item : item.identity).filter(Boolean))
-  for (const item of state.transcript.frontmatter.attendees || []) if (item?.identity) existing.add(item.identity)
-  hints.attendees = [...existing]
+  hints.attendees = [...new Set((hints.attendees || []).map(item => typeof item === 'string' ? item : item.identity).filter(Boolean))]
   hints.hotwords ||= []; hints.speakers ||= []; hints.edits ||= []
 }
 
@@ -95,13 +102,26 @@ function renderTranscript() {
   $('#transcript').innerHTML = state.transcript.turns.map(turn => {
     const color = speakerColor(turn.speaker)
     const assignment = speakerAssignment(turn)
-    const proposal = assignment.changed
+    const slices = turnSlices(turn)
+    const hinted = slices.some(slice => proposedIdentity(slice))
+    const identities = [...new Set(slices.map(slice => assignedIdentity(slice) || turn.speaker))]
+    const proposal = slices.length > 1 && identities.length > 1
+      ? `<span class="proposed-speaker" title="Proposed split speaker assignments">→ split: ${identities.map(escapeHtml).join(' / ')}</span>`
+      : assignment.changed
       ? `<span class="proposed-speaker" title="Proposed speaker reassignment">→ ${escapeHtml(assignment.proposed)}</span>`
+      : hinted
+      ? '<span class="hinted-speaker" title="Explicit speaker guidance">GUIDED</span>'
       : ''
     const wording = proposedWording(turn)
+    const ranges = (slices.length > 1 || hinted) ? `<div class="turn-ranges">${slices.map(slice => {
+      const identity = assignedIdentity(slice) || turn.speaker
+      const selected = selectedRangeMatches(slice) ? 'selected' : ''
+      const explicit = proposedIdentity(slice) ? 'hinted' : ''
+      return `<button class="turn-range ${selected} ${explicit}" data-start="${slice.start}" data-end="${slice.end}"><span>${preciseClock(slice.start)}–${preciseClock(slice.end)}</span><strong>${explicit ? 'GUIDED · ' : ''}${escapeHtml(identity)}</strong></button>`
+    }).join('')}</div>` : ''
     return `<article class="turn ${state.selected?.index === turn.index ? 'selected' : ''}" data-index="${turn.index}" style="--speaker-color:${color}">
       <span class="turn-time">${clock(turn.start)}</span><span class="speaker-dot"></span>
-      <div class="turn-body"><div class="turn-speaker"><span>${escapeHtml(assignment.current)}</span>${proposal}</div><div class="turn-text">${escapeHtml(turn.text)}</div>${wording ? `<div class="proposed-wording"><span>PROPOSED</span><div>${wording}</div></div>` : ''}</div>
+      <div class="turn-body"><div class="turn-speaker"><span>${escapeHtml(assignment.current)}</span>${proposal}</div><div class="turn-text">${escapeHtml(turn.text)}</div>${ranges}${wording ? `<div class="proposed-wording"><span>PROPOSED</span><div>${wording}</div></div>` : ''}</div>
     </article>`
   }).join('')
   document.querySelectorAll('.turn').forEach(element => {
@@ -110,16 +130,44 @@ function renderTranscript() {
       selectTurn(Number(element.dataset.index), true)
     }
     element.onmouseup = () => captureCorrection(element)
+    element.querySelectorAll('.turn-range').forEach(button => button.onclick = event => {
+      event.stopPropagation()
+      selectTurnRange(Number(element.dataset.index), Number(button.dataset.start), Number(button.dataset.end), true)
+    })
   })
 }
 
 function selectTurn(index, seek = false) {
   state.selected = state.transcript.turns[index]
+  state.selectedRange = null
+  selectDefaultRange(state.selected)
   state.correction = null
   document.querySelectorAll('.turn').forEach((element, item) => element.classList.toggle('selected', item === index))
   document.querySelector(`.turn[data-index="${index}"]`)?.scrollIntoView({block:'center', behavior:'smooth'})
   if (seek) seekTo(state.selected.start)
   renderInspector(); drawWaveform()
+}
+
+function selectDefaultRange(turn) {
+  if (!turn) return
+  const slices = turnSlices(turn)
+  if (slices.length > 1) state.selectedRange = {turnIndex: turn.index, start: slices[0].start, end: slices[0].end}
+}
+
+function reconcileSelectedRange() {
+  if (!state.selected) return
+  const slices = turnSlices(state.selected)
+  if (slices.length <= 1) { state.selectedRange = null; return }
+  const selected = slices.find(selectedRangeMatches) || slices[0]
+  state.selectedRange = {turnIndex: state.selected.index, start: selected.start, end: selected.end}
+}
+
+function selectTurnRange(index, start, end, seek = false) {
+  state.selected = state.transcript.turns[index]
+  state.selectedRange = {turnIndex: index, start, end}
+  state.correction = null
+  if (seek) seekTo(start)
+  renderTranscript(); renderInspector(); drawWaveform()
 }
 
 function captureCorrection(element) {
@@ -138,6 +186,39 @@ function proposedIdentity(turn) {
     if ((speaker.ranges || []).some(range => overlaps(turn, range))) return speaker.identity
   }
   return ''
+}
+
+function turnSlices(turn) {
+  const boundaries = new Set([turn.start, turn.end])
+  const track = turn.track || state.transcript.audio[0]?.role
+  for (const speaker of state.transcript.hints.speakers) {
+    for (const range of speaker.ranges || []) {
+      if (!sameTrack(range.track, track) || !overlaps(turn, range)) continue
+      if (range.start > turn.start + RANGE_EPSILON && range.start < turn.end - RANGE_EPSILON) boundaries.add(range.start)
+      if (range.end > turn.start + RANGE_EPSILON && range.end < turn.end - RANGE_EPSILON) boundaries.add(range.end)
+    }
+  }
+  for (const point of state.splitPoints.get(turn.index) || []) {
+    if (point > turn.start + RANGE_EPSILON && point < turn.end - RANGE_EPSILON) boundaries.add(point)
+  }
+  const ordered = [...boundaries].sort((left, right) => left - right)
+  return ordered.slice(0, -1).map((start, index) => ({
+    ...turn,
+    start,
+    end: ordered[index + 1],
+    parentIndex: turn.index,
+  }))
+}
+
+function selectedRangeMatches(range) {
+  return state.selectedRange?.turnIndex === range.parentIndex
+    && Math.abs(state.selectedRange.start - range.start) < RANGE_EPSILON
+    && Math.abs(state.selectedRange.end - range.end) < RANGE_EPSILON
+}
+
+function assignmentRange(turn) {
+  if (state.selectedRange?.turnIndex !== turn.index) return turn
+  return {...turn, start: state.selectedRange.start, end: state.selectedRange.end, parentIndex: turn.index}
 }
 
 function renderedIdentity(turn) {
@@ -184,7 +265,7 @@ function proposedWording(turn) {
 
 async function renderInspector() {
   if (!state.transcript.editable) {
-    $('#inspector').innerHTML = `<div class="eyebrow">${state.transcript.status.toUpperCase()} RECORDING</div><h2>${escapeHtml(state.transcript.title)}</h2><div class="subhead">${escapeHtml(state.transcript.audio.map(item => item.name).join(', ') || 'No audio source found')}</div><div class="notice">↻ <span>${state.transcript.status === 'stale' ? 'The existing Markdown is left untouched until you explicitly regenerate it with the current speech2md.' : 'Generate current Markdown and voiceprints from this recording.'}</span></div>${metadataEditorHtml()}<button class="primary regenerate-inspector">${state.transcript.status === 'stale' ? 'Regenerate with speech2md' : 'Generate with speech2md'}</button>`
+    $('#inspector').innerHTML = `<div class="legacy-inspector"><div class="eyebrow">${state.transcript.status.toUpperCase()} RECORDING</div><h2>${escapeHtml(state.transcript.title)}</h2><div class="subhead">${escapeHtml(state.transcript.audio.map(item => item.name).join(', ') || 'No audio source found')}</div><div class="notice">↻ <span>${state.transcript.status === 'stale' ? 'The existing Markdown is left untouched until you explicitly regenerate it with the current speech2md.' : 'Generate current Markdown and voiceprints from this recording.'}</span></div>${metadataEditorHtml()}<button class="primary regenerate-inspector">${state.transcript.status === 'stale' ? 'Regenerate with speech2md' : 'Generate with speech2md'}</button></div>`
     $('.regenerate-inspector').onclick = event => requestQueue(state.transcript.id, state.transcript.status, event.currentTarget, event)
     bindMetadataEditor()
     return
@@ -192,45 +273,153 @@ async function renderInspector() {
   if (!state.selected) return
   if (state.correction) return renderCorrectionInspector()
   const turn = state.selected
-  const identity = assignedIdentity(turn)
-  const assignment = speakerAssignment(turn)
-  const wording = proposedWording(turn)
-  const track = turn.track || state.transcript.audio[0]?.role || 'inferred after audio loads'
-  $('#inspector').innerHTML = `
-    <div class="eyebrow">SPEAKER TURN</div><h2>${clock(turn.start)} · ${escapeHtml(turn.speaker)}</h2><div class="subhead">${escapeHtml(track)} track</div>
-    ${assignment.changed ? `<div class="assignment-notice"><span>${escapeHtml(assignment.current)}</span><strong>→ ${escapeHtml(assignment.proposed)}</strong><small>proposed after regeneration</small></div>` : ''}
-    ${wording ? `<div class="wording-notice"><span>PROPOSED WORDING</span><div>${wording}</div><small>applied after regeneration</small></div>` : ''}
-    <div class="notice">◌ <span>Turn end is inferred from the next turn. Track is chosen by the strongest audio activity in this interval.</span></div>
-    <div class="section"><label class="section-label">SPEAKER IDENTITY</label><input id="identity" class="field" value="${escapeHtml(identity)}" placeholder="Name or identity URI"></div>
-    <div class="section"><span class="section-label">VOICEPRINT MATCHES</span><div id="candidates"><div class="empty">Comparing voiceprints…</div></div></div>
-    <button id="assign" class="primary">Assign identity</button>
-    <div class="section"><span class="section-label">ATTENDEES</span><div id="attendees"></div><div class="add-row"><input id="new-attendee" class="field" placeholder="Add attendee"><button id="add-attendee">+</button></div></div>
-    ${metadataEditorHtml()}`
-  $('#assign').onclick = () => assignIdentity($('#identity').value.trim())
-  $('#add-attendee').onclick = addAttendee
-  renderAttendees()
-  bindMetadataEditor()
+  const target = assignmentRange(turn)
+  const slices = turnSlices(turn)
+  const playhead = state.audio[0]?.currentTime ?? turn.start
+  const existingBoundary = slices.some(slice => Math.abs(slice.start - playhead) < RANGE_EPSILON || Math.abs(slice.end - playhead) < RANGE_EPSILON)
+  const canSplit = playhead > turn.start + RANGE_EPSILON && playhead < turn.end - RANGE_EPSILON && !existingBoundary
+  const unidentified = !assignedIdentity(target)
+  const filename = state.transcript.name.replace(/\.[^.]+$/, '.hint.yaml')
+  $('#inspector').innerHTML = `<div class="legacy-inspector">
+    <header class="guidance-header">
+      <div><span class="guidance-title">◫ Guidance</span><small>${escapeHtml(filename)}</small></div>
+      <span class="guidance-saved">● ${state.dirty ? 'Unsaved' : 'Saved'}</span>
+    </header>
+    ${guidanceDocumentHtml()}
+    ${guidanceHotwordsHtml()}
+    <section class="guidance-section people-guidance">
+      <div class="guidance-section-heading"><div><strong>SPEAKERS &amp; ATTENDEES</strong><small>${unidentified ? 'Selected run is not assigned yet' : 'Speaker ranges are nested guidance'}</small></div><button id="show-add-attendee" title="Add attendee">＋</button></div>
+      ${unidentified ? unidentifiedSelectionHtml(target, canSplit, playhead) : ''}
+      <div id="guidance-people">${guidancePeopleHtml()}</div>
+      <form id="add-attendee-form" class="guidance-add-row" hidden><input id="new-attendee" class="field" placeholder="Name"><button class="secondary">Add person</button></form>
+    </section>`
+  bindGuidanceEditor()
+  if (!unidentified) return
   try {
     const candidates = await api(`/api/transcripts/${state.transcript.id}/candidates/${encodeURIComponent(turn.speaker)}`)
     if (state.selected !== turn || state.correction) return
-    $('#candidates').innerHTML = candidates.length ? candidates.slice(0, 6).map(candidate => `
-      <button class="candidate" data-identity="${escapeHtml(candidate.identity)}"><strong>${escapeHtml(candidate.identity)}</strong><span class="score">${candidate.similarity.toFixed(2)}</span><small>${escapeHtml(candidate.source)}</small></button>`).join('') : '<div class="empty">No identified voiceprints in this folder yet.</div>'
-    document.querySelectorAll('.candidate').forEach(button => button.onclick = () => { $('#identity').value = button.dataset.identity })
-  } catch (error) { $('#candidates').innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>` }
+    const container = $('#voiceprint-candidates')
+    if (!container) return
+    container.innerHTML = voiceprintCandidatesHtml(candidates)
+    container.querySelectorAll('.candidate').forEach(button => button.onclick = () => assignIdentity(button.dataset.identity))
+  } catch (error) { const container = $('#voiceprint-candidates'); if (container) container.innerHTML = `<div class="guidance-empty">${escapeHtml(error.message)}</div>` }
 }
 
-function renderAttendees() {
-  const container = $('#attendees'); if (!container) return
-  container.innerHTML = state.transcript.hints.attendees.map(item => {
-    const identity = typeof item === 'string' ? item : item.identity
-    const assigned = state.transcript.hints.speakers.some(speaker => speaker.identity === identity)
-    return `<div class="attendee"><span class="avatar">${escapeHtml(identity.slice(0,2).toUpperCase())}</span><span class="attendee-name">${escapeHtml(identity)}</span><small>${assigned ? 'has turns' : 'no turns'}</small><button class="remove" data-identity="${escapeHtml(identity)}" ${assigned ? 'title="Remove speaker assignments first"' : ''}>×</button></div>`
+function guidanceDocumentHtml() {
+  const metadata = metadataValues()
+  const row = (key, value, type = 'text') => `<label class="guidance-property"><span>${key}</span><input data-guidance-metadata="${key}" type="${type}" value="${escapeHtml(value)}"></label>`
+  return `<section class="guidance-section guidance-document"><div class="guidance-section-heading"><strong>DOCUMENT</strong></div>
+    ${row('title', metadata.title)}${row('started_at', metadata.started_at)}${row('ended_at', metadata.ended_at)}${row('calendar_event', metadata.calendar_event, 'url')}
+  </section>`
+}
+
+function guidanceHotwordsHtml() {
+  const words = state.transcript.hints.hotwords || []
+  return `<section class="guidance-section guidance-hotwords"><div class="guidance-section-heading"><strong>HOTWORDS <em>${words.length}</em></strong><button id="show-add-hotword" title="Add hotword">＋</button></div>
+    <div class="hotword-list">${words.map(word => `<button class="hotword" data-hotword="${escapeHtml(word)}" title="Remove hotword">${escapeHtml(word)} <span>×</span></button>`).join('') || '<span class="guidance-empty">None</span>'}</div>
+    <form id="add-hotword-form" class="guidance-add-row" hidden><input id="new-hotword" class="field" placeholder="Hotword"><button class="secondary">Add</button></form>
+  </section>`
+}
+
+function unidentifiedSelectionHtml(target, canSplit, playhead) {
+  return `<div class="unidentified-guidance">
+    <div class="unidentified-run"><span class="identity-dot" style="--identity-color:var(--muted)"></span><strong>Unidentified speaker</strong><time>${preciseClock(target.start)} → ${preciseClock(target.end)}</time></div>
+    <div class="voiceprint-panel"><div class="voiceprint-heading"><strong>CLOSEST VOICEPRINTS</strong><small>all transcripts</small></div><div id="voiceprint-candidates"><div class="guidance-empty">Comparing voiceprints…</div></div>
+      <form id="custom-identity-form" class="guidance-add-row"><input id="custom-identity" class="field" placeholder="Assign another name"><button class="secondary">Assign</button></form>
+      <button id="split-turn" class="split-guidance" ${canSplit ? '' : 'disabled'}>Split at playhead${canSplit ? ` · ${preciseClock(playhead)}` : ''}</button>
+    </div>
+  </div>`
+}
+
+function voiceprintCandidatesHtml(candidates) {
+  if (!candidates.length) return '<div class="guidance-empty">No identified voiceprints in this folder yet.</div>'
+  const attendees = new Set(attendeeNames())
+  const groups = [
+    ['ATTENDEES', candidates.filter(candidate => attendees.has(candidate.identity))],
+    ['OTHER TRANSCRIPTS', candidates.filter(candidate => !attendees.has(candidate.identity))],
+  ]
+  return groups.map(([label, items]) => items.length ? `<div class="candidate-group"><span>${label}</span>${items.slice(0, 4).map(candidate => `
+    <button class="candidate" data-identity="${escapeHtml(candidate.identity)}"><i class="identity-dot" style="--identity-color:${speakerColor(candidate.identity)}"></i><strong>${escapeHtml(candidate.identity)}</strong><small>${escapeHtml(candidate.source)}</small><b>${Math.round(candidate.similarity * 100)}%</b><em>${attendees.has(candidate.identity) ? '✓' : '+'}</em></button>`).join('')}</div>` : '').join('')
+}
+
+function attendeeNames() {
+  return (state.transcript.hints.attendees || []).map(item => typeof item === 'string' ? item : item.identity).filter(Boolean)
+}
+
+function guidancePeopleHtml() {
+  const speakers = new Map((state.transcript.hints.speakers || []).map(speaker => [speaker.identity, speaker.ranges || []]))
+  return attendeeNames().map(identity => {
+    const ranges = speakers.get(identity) || []
+    return `<div class="guidance-person">
+      <div class="guidance-person-row"><span class="identity-dot" style="--identity-color:${speakerColor(identity)}"></span><strong>${escapeHtml(identity)}</strong><button class="assign-person" data-identity="${escapeHtml(identity)}" title="Assign selected range to ${escapeHtml(identity)}">＋</button><button class="remove-person" data-identity="${escapeHtml(identity)}" title="Remove attendee">×</button></div>
+      <div class="nested-ranges">${ranges.length ? ranges.map((range, index) => ({range, index})).sort((left, right) => left.range.start - right.range.start || left.range.end - right.range.end).map(({range, index}) => guidanceRangeHtml(identity, range, index)).join('') : '<span class="no-ranges">↳ No speaker range guidance</span>'}</div>
+    </div>`
   }).join('')
-  container.querySelectorAll('.remove').forEach(button => button.onclick = async () => {
-    if (state.transcript.hints.speakers.some(speaker => speaker.identity === button.dataset.identity)) return toast('Remove speaker assignments first')
-    state.transcript.hints.attendees = state.transcript.hints.attendees.filter(item => (typeof item === 'string' ? item : item.identity) !== button.dataset.identity)
-    markDirty(); renderAttendees(); await saveHints()
+}
+
+function guidanceRangeHtml(identity, range, index) {
+  const selected = selectedGuidanceRange(identity, range) ? 'selected' : ''
+  return `<div class="nested-range ${selected}"><button class="select-guidance-range" data-identity="${escapeHtml(identity)}" data-index="${index}">↳ <time>${preciseClock(range.start)} → ${preciseClock(range.end)}</time>${range.track ? `<small>${escapeHtml(range.track)}</small>` : ''}</button><button class="remove-guidance-range" data-identity="${escapeHtml(identity)}" data-index="${index}" title="Remove range">×</button></div>`
+}
+
+function selectedGuidanceRange(identity, range) {
+  if (!state.selected) return false
+  const target = assignmentRange(state.selected)
+  return assignedIdentity(target) === identity && sameTrack(range.track, target.track) && overlaps(range, target)
+}
+
+function bindGuidanceEditor() {
+  document.querySelectorAll('[data-guidance-metadata]').forEach(input => input.onchange = saveGuidanceMetadata)
+  $('#show-add-hotword').onclick = () => { $('#add-hotword-form').hidden = false; $('#new-hotword').focus() }
+  $('#add-hotword-form').onsubmit = async event => {
+    event.preventDefault()
+    const word = $('#new-hotword').value.trim(); if (!word) return
+    if (!state.transcript.hints.hotwords.some(value => value.toLowerCase() === word.toLowerCase())) state.transcript.hints.hotwords.push(word)
+    markDirty(); await saveHints(); renderInspector()
+  }
+  document.querySelectorAll('.hotword').forEach(button => button.onclick = async () => {
+    state.transcript.hints.hotwords = state.transcript.hints.hotwords.filter(word => word !== button.dataset.hotword)
+    markDirty(); await saveHints(); renderInspector()
   })
+  $('#show-add-attendee').onclick = () => { $('#add-attendee-form').hidden = false; $('#new-attendee').focus() }
+  $('#add-attendee-form').onsubmit = addAttendee
+  document.querySelectorAll('.assign-person').forEach(button => button.onclick = () => assignIdentity(button.dataset.identity))
+  document.querySelectorAll('.remove-person').forEach(button => button.onclick = () => removeAttendee(button.dataset.identity))
+  document.querySelectorAll('.select-guidance-range').forEach(button => button.onclick = () => selectGuidanceRange(button.dataset.identity, Number(button.dataset.index)))
+  document.querySelectorAll('.remove-guidance-range').forEach(button => button.onclick = () => removeGuidanceRange(button.dataset.identity, Number(button.dataset.index)))
+  if ($('#split-turn')) $('#split-turn').onclick = splitTurnAtPlayhead
+  if ($('#custom-identity-form')) $('#custom-identity-form').onsubmit = event => { event.preventDefault(); assignIdentity($('#custom-identity').value.trim()) }
+}
+
+async function saveGuidanceMetadata() {
+  const selectors = {title:'title', started_at:'started_at', ended_at:'ended_at', calendar_event:'calendar_event'}
+  for (const key of Object.keys(selectors)) state.transcript.hints[key] = document.querySelector(`[data-guidance-metadata="${key}"]`).value.trim() || null
+  if (state.transcript.hints.title) { state.transcript.title = state.transcript.hints.title; $('#meeting-title').textContent = state.transcript.title }
+  markDirty(); await saveHints(); renderInspector()
+}
+
+async function removeAttendee(identity) {
+  if (state.transcript.hints.speakers.some(speaker => speaker.identity === identity)) return toast('Remove speaker guidance first')
+  state.transcript.hints.attendees = attendeeNames().filter(name => name !== identity)
+  markDirty(); await saveHints(); renderInspector()
+}
+
+function selectGuidanceRange(identity, index) {
+  const range = state.transcript.hints.speakers.find(speaker => speaker.identity === identity)?.ranges[index]
+  if (!range) return
+  const turn = state.transcript.turns.find(candidate => sameTrack(range.track, candidate.track) && candidate.start <= range.start + RANGE_EPSILON && candidate.end > range.start + RANGE_EPSILON)
+    || state.transcript.turns.find(candidate => sameTrack(range.track, candidate.track) && overlaps(candidate, range))
+  if (!turn) return
+  const slice = turnSlices(turn).find(candidate => proposedIdentity(candidate) === identity && overlaps(candidate, range)) || turn
+  selectTurnRange(turn.index, slice.start, slice.end, true)
+}
+
+async function removeGuidanceRange(identity, index) {
+  const speaker = state.transcript.hints.speakers.find(item => item.identity === identity)
+  if (!speaker?.ranges[index]) return
+  speaker.ranges.splice(index, 1)
+  state.transcript.hints.speakers = state.transcript.hints.speakers.filter(item => item.ranges.length)
+  reconcileSelectedRange(); markDirty(); await saveHints(); renderTranscript(); renderInspector(); drawWaveform()
 }
 
 function metadataValues() {
@@ -250,7 +439,7 @@ function metadataEditorHtml() {
     <label>Recording started<input id="metadata-started" class="field mono-field" value="${escapeHtml(metadata.started_at)}" placeholder="2026-08-04T09:00:00+02:00"></label>
     <label>Recording ended<input id="metadata-ended" class="field mono-field" value="${escapeHtml(metadata.ended_at)}" placeholder="2026-08-04T10:00:00+02:00"></label>
     <label>Calendar event link<input id="metadata-event" class="field mono-field" value="${escapeHtml(metadata.calendar_event)}" placeholder="https://…"></label>
-    <button id="save-metadata" class="secondary metadata-save">Save metadata hints</button>
+    <button id="save-metadata" class="secondary metadata-save">Save metadata guidance</button>
   </div>`
 }
 
@@ -267,24 +456,60 @@ function bindMetadataEditor() {
   }
 }
 
-async function addAttendee() {
+async function addAttendee(event) {
+  event?.preventDefault()
   const input = $('#new-attendee'); const identity = input.value.trim(); if (!identity) return
-  if (!state.transcript.hints.attendees.some(item => (typeof item === 'string' ? item : item.identity) === identity)) state.transcript.hints.attendees.push(identity)
-  input.value = ''; markDirty(); renderAttendees(); await saveHints()
+  if (!attendeeNames().includes(identity)) state.transcript.hints.attendees.push(identity)
+  input.value = ''; markDirty(); await saveHints(); renderInspector()
 }
 
 async function assignIdentity(identity) {
   if (!identity) return toast('Enter an identity first')
-  const turn = state.selected; const track = turn.track || state.transcript.audio[0]?.role
-  for (const speaker of state.transcript.hints.speakers) speaker.ranges = (speaker.ranges || []).filter(range => !sameTrack(range.track, track) || !overlaps(range, turn))
+  const turn = state.selected; const target = assignmentRange(turn); const track = turn.track || state.transcript.audio[0]?.role
+  for (const speaker of state.transcript.hints.speakers) {
+    speaker.ranges = (speaker.ranges || []).flatMap(range => subtractRange(range, target, track))
+  }
   state.transcript.hints.speakers = state.transcript.hints.speakers.filter(speaker => speaker.ranges.length)
   let speaker = state.transcript.hints.speakers.find(item => item.identity === identity)
   if (!speaker) { speaker = {identity, ranges: []}; state.transcript.hints.speakers.push(speaker) }
-  speaker.ranges.push({...(state.transcript.audio.length > 1 ? {track} : {}), start: turn.start, end: turn.end})
+  speaker.ranges.push({...(state.transcript.audio.length > 1 ? {track} : {}), start: target.start, end: target.end})
+  speaker.ranges = mergeRanges(speaker.ranges)
   if (!state.transcript.hints.attendees.some(item => (typeof item === 'string' ? item : item.identity) === identity)) state.transcript.hints.attendees.push(identity)
+  reconcileSelectedRange()
   markDirty(); await saveHints(); renderInspector(); renderTranscript(); drawWaveform()
 }
 const sameTrack = (left, right) => !left || !right || left === right
+
+function subtractRange(range, target, track) {
+  if (!sameTrack(range.track, track) || !overlaps(range, target)) return [range]
+  const remaining = []
+  if (range.start < target.start - RANGE_EPSILON) remaining.push({...range, end: target.start})
+  if (range.end > target.end + RANGE_EPSILON) remaining.push({...range, start: target.end})
+  return remaining
+}
+
+function mergeRanges(ranges) {
+  const ordered = [...ranges].sort((left, right) => (left.track || '').localeCompare(right.track || '') || left.start - right.start || left.end - right.end)
+  const merged = []
+  for (const range of ordered) {
+    const previous = merged.at(-1)
+    if (previous && (previous.track || '') === (range.track || '') && range.start <= previous.end + RANGE_EPSILON) previous.end = Math.max(previous.end, range.end)
+    else merged.push({...range})
+  }
+  return merged
+}
+
+function splitTurnAtPlayhead() {
+  const turn = state.selected
+  const point = Math.round((state.audio[0]?.currentTime ?? turn.start) * 100) / 100
+  if (point <= turn.start + RANGE_EPSILON || point >= turn.end - RANGE_EPSILON) return toast('Move the playhead inside this turn first')
+  const points = state.splitPoints.get(turn.index) || []
+  if (!points.some(value => Math.abs(value - point) < RANGE_EPSILON)) points.push(point)
+  state.splitPoints.set(turn.index, points)
+  const right = turnSlices(turn).find(slice => Math.abs(slice.start - point) < RANGE_EPSILON)
+  state.selectedRange = right ? {turnIndex: turn.index, start: right.start, end: right.end} : null
+  renderTranscript(); renderInspector(); drawWaveform(); toast(`Split at ${preciseClock(point)}`)
+}
 
 function renderCorrectionInspector() {
   const turn = state.selected; const correction = state.correction
@@ -293,9 +518,9 @@ function renderCorrectionInspector() {
     <div class="section"><span class="section-label">SELECTED TEXT</span><div class="selected-phrase">${escapeHtml(correction.before)}</div></div>
     <div class="section"><label class="section-label">REPLACE WITH</label><input id="replacement" class="field" value="${escapeHtml(correction.after)}"></div>
     <div class="section checkbox"><input id="add-hotword" type="checkbox" ${correction.hotword ? 'checked' : ''}><label for="add-hotword"><strong>Add replacement as a hotword</strong><br><small>Helps future transcriptions recognize this term.</small></label></div>
-    <div class="hint-note">Saves a localized edit to the adjacent <code>.hint.yaml</code> only. Transcript Markdown changes only after explicit regeneration.</div>
+    <div class="hint-note">Saves localized guidance to the adjacent <code>.hint.yaml</code> only. Transcript Markdown changes only after explicit regeneration.</div>
     <button id="save-correction" class="primary">Save correction</button>
-    <button id="cancel-correction" class="secondary" style="width:100%;margin-top:8px">Cancel</button>`
+    <button id="cancel-correction" class="secondary" style="width:100%;margin-top:8px">Cancel</button></div>`
   $('#replacement').select()
   $('#save-correction').onclick = async () => {
     const after = $('#replacement').value.trim(); if (!after) return toast('Replacement cannot be empty')
@@ -308,7 +533,7 @@ function renderCorrectionInspector() {
   $('#cancel-correction').onclick = () => { state.correction = null; renderInspector() }
 }
 
-function markDirty() { state.dirty = true; setSaveState('Unsaved hints', 'dirty') }
+function markDirty() { state.dirty = true; setSaveState('Unsaved guidance', 'dirty') }
 async function saveHints() {
   try {
     setSaveState('Saving…')
@@ -318,7 +543,7 @@ async function saveHints() {
     const summary = state.summaries.find(item => item.id === state.transcript.id)
     if (summary) state.transcript.status = summary.status
     $('#meeting-meta').textContent = state.transcript.editable ? `${state.transcript.name} · ${state.transcript.turns.length} turns · ${state.transcript.status}` : `${state.transcript.name} · ${state.transcript.status}`
-    setSaveState(state.transcript.status === 'stale' ? 'Saved · regenerate' : 'Saved to hints', 'saved'); renderSummaries(); toast('Hint file saved')
+    setSaveState(state.transcript.status === 'stale' ? 'Saved · regenerate' : 'Guidance saved', 'saved'); renderSummaries(); toast('Guidance saved')
   } catch (error) { setSaveState('Save failed', 'dirty'); toast(error.message) }
 }
 
@@ -341,7 +566,11 @@ async function loadAudio() {
 }
 
 function inferTracks() {
-  if (state.transcript.audio.length <= 1) { for (const turn of state.transcript.turns) turn.track = state.transcript.audio[0]?.role || 'mixed'; return }
+  if (state.transcript.audio.length <= 1) {
+    for (const turn of state.transcript.turns) turn.track = state.transcript.audio[0]?.role || 'mixed'
+    reconcileSelectedRange()
+    return
+  }
   for (const turn of state.transcript.turns) {
     const hinted = state.transcript.hints.speakers.flatMap(item => item.ranges || []).find(range => range.track && overlaps(range, turn))
     if (hinted) { turn.track = hinted.track; continue }
@@ -356,6 +585,7 @@ function inferTracks() {
     })
     turn.track = state.transcript.audio[best]?.role || state.transcript.audio[0]?.role || 'mixed'
   }
+  reconcileSelectedRange()
   renderTranscript(); renderInspector()
 }
 
@@ -382,7 +612,7 @@ function drawWaveform() {
   context.clearRect(0, 0, width, height); const lanes = Math.max(1, state.transcript?.audio.length || 1), laneHeight = height / lanes, [start, end] = visibleRange()
   for (let lane = 0; lane < lanes; lane++) {
     const y = lane * laneHeight; context.fillStyle = lane % 2 ? '#fbfbf8' : '#f7f7f4'; context.fillRect(0, y, width, laneHeight - 2)
-    context.fillStyle = '#777'; context.font = '9px Geist Mono'; context.fillText((state.transcript.audio[lane]?.role || 'MIXED').toUpperCase(), 8, y + 13)
+    context.fillStyle = '#777'; context.font = '9px Geist Mono'; context.fillText((state.transcript?.audio[lane]?.role || 'MIXED').toUpperCase(), 8, y + 13)
     const buffer = state.buffers[lane]
     if (buffer) {
       const data = buffer.getChannelData(0); context.fillStyle = '#c7c7c2'
@@ -394,10 +624,14 @@ function drawWaveform() {
     }
   }
   for (const turn of state.transcript?.turns || []) {
-    if (turn.end <= start || turn.start >= end) continue
     const lane = Math.max(0, state.transcript.audio.findIndex(source => source.role === turn.track)), y = lane * laneHeight
-    const x = (turn.start - start) / (end - start) * width, right = (turn.end - start) / (end - start) * width
-    context.fillStyle = speakerColor(turn.speaker) + (state.selected?.index === turn.index ? 'cc' : '50'); context.fillRect(x, y + laneHeight - 8, Math.max(1, right - x), 6)
+    for (const slice of turnSlices(turn)) {
+      if (slice.end <= start || slice.start >= end) continue
+      const x = (slice.start - start) / (end - start) * width, right = (slice.end - start) / (end - start) * width
+      const selected = selectedRangeMatches(slice) || (state.selected?.index === turn.index && !state.selectedRange)
+      context.fillStyle = speakerColor(assignedIdentity(slice) || turn.speaker) + (selected ? 'cc' : '50')
+      context.fillRect(x, y + laneHeight - 8, Math.max(1, right - x), 6)
+    }
   }
   const current = state.audio[0]?.currentTime || 0
   if (current >= start && current <= end) { const x = (current - start) / (end - start) * width; context.fillStyle = '#0066ff'; context.fillRect(x, 0, 1.5, height) }
@@ -411,7 +645,11 @@ function waveformClick(event) {
   const lane = Math.floor((event.clientY - bounds.top) / bounds.height * Math.max(1, state.transcript.audio.length)), role = state.transcript.audio[lane]?.role
   const containing = state.transcript.turns.filter(turn => turn.start <= time && turn.end > time && (!role || turn.track === role)).sort((a,b) => b.start - a.start)
   const turn = containing[0] || state.transcript.turns.reduce((best, item) => Math.abs(item.start-time) < Math.abs(best.start-time) ? item : best)
-  seekTo(time); selectTurn(turn.index, false)
+  seekTo(time)
+  const slices = turnSlices(turn)
+  const slice = slices.length > 1 && slices.find(item => item.start <= time && item.end > time)
+  if (slice) selectTurnRange(turn.index, slice.start, slice.end, false)
+  else selectTurn(turn.index, false)
 }
 
 function requestQueue(transcriptId, status, anchor, event) {
