@@ -60,6 +60,16 @@ class RecoveryFixtureOcr:
         )
 
 
+class RepeatingFixtureOcr:
+    identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
+
+    def recognize(self, image: Path):
+        return (
+            "<|det|>text [100,100,800,300]<|/det|>" + "repeated phrase " * 20,
+            {"mode": "multi_base", "finish_reason": "stop"},
+        )
+
+
 class InterruptingFixtureOcr:
     identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
 
@@ -835,6 +845,26 @@ def test_failed_conversion_publishes_no_intermediate_results(tmp_path: Path):
     bundle = convert(pdf, backend=backend)
     assert bundle == tmp_path / "interrupted.pdf.md"
     assert verify_bundle(bundle).ok
+
+
+def test_content_quality_warning_does_not_suppress_output(tmp_path: Path):
+    pdf = tmp_path / "repetition.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "repeated phrase")
+    document.save(pdf)
+    document.close()
+
+    workspace = _convert_workspace(pdf, tmp_path / "workspace", backend=RepeatingFixtureOcr())
+    verification = verify_bundle(workspace)
+    assert verification.ok, verification.errors
+    assert "page 1 needs content review: visual_text_repetition" in verification.warnings
+    assert "visual_text_repetition" in verification.warnings
+
+    output = convert(pdf, backend=RepeatingFixtureOcr())
+    assert output == tmp_path / "repetition.pdf.md"
+    assert output.is_file()
+    assert "repeated phrase" in output.read_text()
 
 
 def test_embedded_links_are_geometry_aware_and_idempotent():

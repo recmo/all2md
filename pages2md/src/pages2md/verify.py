@@ -124,7 +124,7 @@ def verify_bundle(root: Path) -> Verification:
         errors.append("page comments are missing, duplicated, or reordered")
     for page in pages:
         for warning in output_quality_warnings(page.get("visual_markdown", "")):
-            errors.append(f"page {page.get('number')} fails content quality: {warning}")
+            warnings.append(f"page {page.get('number')} needs content review: {warning}")
     for previous, current in zip(pages, pages[1:]):
         if (
             current.get("number") == previous.get("number", 0) + 1
