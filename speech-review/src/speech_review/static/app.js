@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector)
 const colors = ['#3b82f6', '#8b5cf6', '#d97706', '#059669', '#db2777', '#0891b2']
 const zoomLevels = [1, 8, 16, 32, 64]
-const state = { summaries: [], jobs: [], seenCompleted: new Set(), transcript: null, selected: null, selectedRange: null, splitPoints: new Map(), dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null, playUntil: null }
+const state = { summaries: [], jobs: [], seenCompleted: new Set(), transcript: null, selected: null, selectedRange: null, splitPoints: new Map(), speakerNames: new Map(), dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null, playUntil: null }
 const RANGE_EPSILON = 0.01
 
 const api = async (path, options) => {
@@ -107,8 +107,10 @@ async function selectTranscript(id, {preservePosition = false} = {}) {
   state.selected = state.transcript.turns[0] || null
   state.selectedRange = null
   state.splitPoints = new Map()
+  state.speakerNames = new Map()
   state.dirty = false
   seedAttendees()
+  seedSpeakerNames()
   selectDefaultRange(state.selected)
   state.duration = state.transcript.turns.at(-1)?.end || 0
   $('#meeting-title').textContent = state.transcript.title
@@ -126,6 +128,23 @@ function seedAttendees() {
   const hints = state.transcript.hints
   hints.attendees = [...new Set((hints.attendees || []).map(item => typeof item === 'string' ? item : item.identity).filter(Boolean))]
   hints.hotwords ||= []; hints.speakers ||= []; hints.edits ||= []
+}
+
+function seedSpeakerNames() {
+  const conflicts = new Set()
+  for (const speaker of state.transcript.hints.speakers) {
+    for (const range of speaker.ranges || []) {
+      const turn = state.transcript.turns.find(candidate =>
+        sameTrack(range.track, candidate.track)
+        && Math.abs(range.start - candidate.start) < RANGE_EPSILON
+        && Math.abs(range.end - candidate.end) < RANGE_EPSILON)
+      if (!turn || renderedIdentity(turn)) continue
+      const previous = state.speakerNames.get(turn.speaker)
+      if (previous && previous !== speaker.identity) conflicts.add(turn.speaker)
+      else state.speakerNames.set(turn.speaker, speaker.identity)
+    }
+  }
+  for (const handle of conflicts) state.speakerNames.delete(handle)
 }
 
 function renderTranscript() {
@@ -234,7 +253,7 @@ function proposedIdentity(turn) {
   for (const speaker of state.transcript.hints.speakers) {
     if ((speaker.ranges || []).some(range => overlaps(turn, range))) return speaker.identity
   }
-  return ''
+  return state.speakerNames.get(turn.speaker) || ''
 }
 
 function turnSlices(turn) {
@@ -566,25 +585,20 @@ async function assignIdentity(identity) {
   const wholeAnonymousSpeaker = !assignedIdentity(target)
     && Math.abs(target.start - turn.start) < RANGE_EPSILON
     && Math.abs(target.end - turn.end) < RANGE_EPSILON
-  const targets = wholeAnonymousSpeaker
-    ? anonymousRuns()
-      .filter(run => run.turn.speaker === turn.speaker)
-      .map(run => ({...run.slice, track: run.turn.track || state.transcript.audio[0]?.role}))
-    : [{...target, track}]
+  const assignment = {...target, track}
   for (const speaker of state.transcript.hints.speakers) {
-    for (const assignment of targets) {
-      speaker.ranges = (speaker.ranges || []).flatMap(range => subtractRange(range, assignment, assignment.track))
-    }
+    speaker.ranges = (speaker.ranges || []).flatMap(range => subtractRange(range, assignment, assignment.track))
   }
   state.transcript.hints.speakers = state.transcript.hints.speakers.filter(speaker => speaker.ranges.length)
   let speaker = state.transcript.hints.speakers.find(item => item.identity === identity)
   if (!speaker) { speaker = {identity, ranges: []}; state.transcript.hints.speakers.push(speaker) }
-  speaker.ranges.push(...targets.map(assignment => ({
+  speaker.ranges.push({
     ...(state.transcript.audio.length > 1 ? {track: assignment.track} : {}),
     start: assignment.start,
     end: assignment.end,
-  })))
+  })
   speaker.ranges = mergeRanges(speaker.ranges)
+  if (wholeAnonymousSpeaker) state.speakerNames.set(turn.speaker, identity)
   if (!state.transcript.hints.attendees.some(item => (typeof item === 'string' ? item : item.identity) === identity)) state.transcript.hints.attendees.push(identity)
   reconcileSelectedRange()
   markDirty(); renderInspector(); renderTranscript(); drawWaveform(); await saveHints()

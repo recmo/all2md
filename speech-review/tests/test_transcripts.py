@@ -76,6 +76,27 @@ def test_review_progress_counts_unnamed_slices(tmp_path: Path):
     }
 
 
+def test_review_progress_propagates_a_whole_turn_hint_to_its_handle(tmp_path: Path):
+    parsed = parse_markdown(transcript(tmp_path / "meeting.md", identity="Alice"))
+    parsed["turns"].append({
+        "index": 2,
+        "start": 22,
+        "end": 30,
+        "speaker": "speaker-2",
+        "text": "Another turn.",
+    })
+
+    progress = review_progress(parsed, {
+        "speakers": [{"identity": "Bob", "ranges": [{"start": 12, "end": 22}]}],
+    })
+
+    assert progress == {
+        "complete": True,
+        "unassignedRunCount": 0,
+        "unassignedSpeakerCount": 0,
+    }
+
+
 def test_lists_unprocessed_and_stale_recordings(tmp_path: Path):
     unprocessed = tmp_path / "unprocessed.mp4"
     unprocessed.touch()

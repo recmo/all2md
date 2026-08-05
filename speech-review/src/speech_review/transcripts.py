@@ -158,9 +158,17 @@ def review_progress(parsed: dict[str, Any], hints: dict[str, Any]) -> dict[str, 
         for value in speaker.get("ranges", [])
         if isinstance(value, dict)
     ]
+    turns = parsed.get("turns", [])
+    for value in guided_ranges:
+        for turn in turns:
+            if (
+                abs(float(value.get("start", -1)) - turn["start"]) <= 0.01
+                and abs(float(value.get("end", -1)) - turn["end"]) <= 0.01
+            ):
+                identified_handles.add(turn["speaker"])
+                break
     unassigned_runs = 0
     anonymous_speakers = set()
-    turns = parsed.get("turns", [])
     for turn in turns:
         if turn["speaker"] in identified_handles:
             continue
