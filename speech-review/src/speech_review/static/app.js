@@ -563,17 +563,31 @@ async function addAttendee(event) {
 async function assignIdentity(identity) {
   if (!identity) return toast('Enter an identity first')
   const turn = state.selected; const target = assignmentRange(turn); const track = turn.track || state.transcript.audio[0]?.role
+  const wholeAnonymousSpeaker = !assignedIdentity(target)
+    && Math.abs(target.start - turn.start) < RANGE_EPSILON
+    && Math.abs(target.end - turn.end) < RANGE_EPSILON
+  const targets = wholeAnonymousSpeaker
+    ? anonymousRuns()
+      .filter(run => run.turn.speaker === turn.speaker)
+      .map(run => ({...run.slice, track: run.turn.track || state.transcript.audio[0]?.role}))
+    : [{...target, track}]
   for (const speaker of state.transcript.hints.speakers) {
-    speaker.ranges = (speaker.ranges || []).flatMap(range => subtractRange(range, target, track))
+    for (const assignment of targets) {
+      speaker.ranges = (speaker.ranges || []).flatMap(range => subtractRange(range, assignment, assignment.track))
+    }
   }
   state.transcript.hints.speakers = state.transcript.hints.speakers.filter(speaker => speaker.ranges.length)
   let speaker = state.transcript.hints.speakers.find(item => item.identity === identity)
   if (!speaker) { speaker = {identity, ranges: []}; state.transcript.hints.speakers.push(speaker) }
-  speaker.ranges.push({...(state.transcript.audio.length > 1 ? {track} : {}), start: target.start, end: target.end})
+  speaker.ranges.push(...targets.map(assignment => ({
+    ...(state.transcript.audio.length > 1 ? {track: assignment.track} : {}),
+    start: assignment.start,
+    end: assignment.end,
+  })))
   speaker.ranges = mergeRanges(speaker.ranges)
   if (!state.transcript.hints.attendees.some(item => (typeof item === 'string' ? item : item.identity) === identity)) state.transcript.hints.attendees.push(identity)
   reconcileSelectedRange()
-  markDirty(); await saveHints(); renderInspector(); renderTranscript(); drawWaveform()
+  markDirty(); renderInspector(); renderTranscript(); drawWaveform(); await saveHints()
 }
 const sameTrack = (left, right) => !left || !right || left === right
 
