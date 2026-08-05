@@ -32,7 +32,9 @@ class ReviewServer(ThreadingHTTPServer):
         self.jobs = RegenerationQueue(self.review_root)
 
     def server_close(self) -> None:
-        self.jobs.close()
+        jobs = getattr(self, "jobs", None)
+        if jobs is not None:
+            jobs.close()
         super().server_close()
 
 
