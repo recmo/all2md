@@ -142,6 +142,55 @@ def parse_markdown(path: Path) -> dict[str, Any]:
     }
 
 
+def review_progress(parsed: dict[str, Any], hints: dict[str, Any]) -> dict[str, Any]:
+    identified_handles = {
+        attendee.get("handle", "").strip()
+        for attendee in parsed.get("frontmatter", {}).get("attendees", [])
+        if isinstance(attendee, dict)
+        and isinstance(attendee.get("handle"), str)
+        and isinstance(attendee.get("identity"), str)
+        and attendee["identity"].strip()
+    }
+    guided_ranges = [
+        value
+        for speaker in hints.get("speakers", [])
+        if isinstance(speaker, dict)
+        for value in speaker.get("ranges", [])
+        if isinstance(value, dict)
+    ]
+    unassigned_runs = 0
+    anonymous_speakers = set()
+    turns = parsed.get("turns", [])
+    for turn in turns:
+        if turn["speaker"] in identified_handles:
+            continue
+        intervals = sorted(
+            (
+                max(turn["start"], float(value["start"])),
+                min(turn["end"], float(value["end"])),
+            )
+            for value in guided_ranges
+            if float(value.get("end", 0)) > turn["start"]
+            and float(value.get("start", 0)) < turn["end"]
+        )
+        cursor = turn["start"]
+        turn_unassigned = 0
+        for start, end in intervals:
+            if start > cursor + 0.01:
+                turn_unassigned += 1
+            cursor = max(cursor, end)
+        if cursor < turn["end"] - 0.01:
+            turn_unassigned += 1
+        if turn_unassigned:
+            anonymous_speakers.add(turn["speaker"])
+            unassigned_runs += turn_unassigned
+    return {
+        "complete": bool(turns) and unassigned_runs == 0,
+        "unassignedRunCount": unassigned_runs,
+        "unassignedSpeakerCount": len(anonymous_speakers),
+    }
+
+
 def audio_sources(transcript: TranscriptFile) -> list[dict[str, Any]]:
     if transcript.requested and transcript.requested.suffix.lower() in MEDIA_SUFFIXES:
         return [{"role": "mixed", "path": transcript.requested, "name": transcript.requested.name}]

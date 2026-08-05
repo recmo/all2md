@@ -11,6 +11,7 @@ from speech_review.transcripts import (
     discover,
     load_hint_document,
     parse_markdown,
+    review_progress,
     resolve_identifier,
     write_hint_document,
 )
@@ -47,6 +48,31 @@ def test_discovers_and_parses_frozen_markdown(tmp_path: Path):
         "end": 12,
         "speaker": "speaker-1",
         "text": "Hello there.",
+    }
+
+
+def test_review_progress_counts_unnamed_slices(tmp_path: Path):
+    parsed = parse_markdown(transcript(tmp_path / "meeting.md", identity="Alice"))
+    empty = review_progress(parsed, {"speakers": []})
+    assert empty == {
+        "complete": False,
+        "unassignedRunCount": 1,
+        "unassignedSpeakerCount": 1,
+    }
+
+    partial = review_progress(parsed, {
+        "speakers": [{"identity": "Bob", "ranges": [{"start": 14, "end": 18}]}],
+    })
+    assert partial["unassignedRunCount"] == 2
+    assert partial["unassignedSpeakerCount"] == 1
+
+    complete = review_progress(parsed, {
+        "speakers": [{"identity": "Bob", "ranges": [{"start": 12, "end": 22}]}],
+    })
+    assert complete == {
+        "complete": True,
+        "unassignedRunCount": 0,
+        "unassignedSpeakerCount": 0,
     }
 
 

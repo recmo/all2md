@@ -40,10 +40,11 @@ function renderSummaries() {
   $('#transcript-list').innerHTML = state.summaries.filter(item => `${item.title} ${item.name}`.toLowerCase().includes(query)).map(item => {
     const job = activeJobs.get(item.id) || latestJobs.get(item.id)
     const active = job && ['queued','running'].includes(job.status)
+    const review = transcriptReviewStatus(item, job)
     const jobLine = job ? `<div class="job-line ${job.status}"><span>${job.status === 'queued' ? `Queue ${job.position}` : escapeHtml(job.stage)}</span><span>${job.status === 'running' ? `${Math.round(job.progress * 100)}%` : job.status}</span></div>${active ? `<div class="job-progress"><i style="width:${Math.max(2, job.progress * 100)}%"></i></div>` : ''}` : ''
     const action = active ? '' : `<button class="queue-action" data-id="${item.id}" data-status="${item.status}">${job?.status === 'failed' ? 'Retry' : item.status === 'ready' ? 'Re-run' : item.status === 'stale' ? 'Update' : 'Queue'}</button>`
     return `<div class="transcript-card ${state.transcript?.id === item.id ? 'selected' : ''}" data-id="${item.id}" role="button" tabindex="0">
-      <div class="transcript-card-top"><strong>${escapeHtml(item.title)} <em class="status ${item.status}">${item.status}</em></strong>${action}</div>
+      <div class="transcript-card-top"><strong>${escapeHtml(item.title)} <em class="status ${review.kind}" title="${escapeHtml(review.title)}">${escapeHtml(review.label)}</em></strong>${action}</div>
       <span>${escapeHtml(item.startedAt || item.name)}${item.status === 'ready' ? ` · ${item.turnCount} turns` : ''}</span>${jobLine}
     </div>`
   }).join('')
@@ -52,6 +53,22 @@ function renderSummaries() {
     card.onkeydown = event => { if (event.key === 'Enter') selectTranscript(card.dataset.id) }
   })
   document.querySelectorAll('.queue-action').forEach(button => button.onclick = event => requestQueue(button.dataset.id, button.dataset.status, event.currentTarget, event))
+}
+
+function transcriptReviewStatus(item, job) {
+  if (job?.status === 'failed') return {kind:'failed', label:'FAILED', title:job.error || 'Processing failed'}
+  if (job?.status === 'running') return {kind:'processing', label:'PROCESSING', title:job.stage || 'Processing recording'}
+  if (job?.status === 'queued') return {kind:'processing', label:'QUEUED', title:'Waiting to process'}
+  if (item.status === 'unprocessed') return {kind:'work', label:'TO PROCESS', title:'Transcript has not been generated'}
+  if (item.status === 'stale') return {kind:'work', label:'UPDATE', title:'Derived transcript needs regeneration'}
+  if (item.review?.complete) return {kind:'done', label:'DONE', title:'All speaker runs are assigned'}
+  const runs = item.review?.unassignedRunCount
+  const speakers = item.review?.unassignedSpeakerCount
+  return {
+    kind:'work',
+    label:runs == null ? 'REVIEW' : `${runs} UNNAMED`,
+    title:runs == null ? 'Transcript needs review' : `${speakers} anonymous ${speakers === 1 ? 'speaker' : 'speakers'} across ${runs} unnamed ${runs === 1 ? 'run' : 'runs'}`,
+  }
 }
 
 function updateTranscriptCount() {

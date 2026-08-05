@@ -46,8 +46,10 @@ button { border: 0; background: transparent; cursor: pointer; }
 .queue-action { flex: 0 0 auto; margin-top: -3px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--secondary); font: 600 8px Geist Mono, monospace; text-transform: uppercase; }
 .queue-action:hover { color: var(--accent); border-color: var(--accent); }
 .status { display: inline-block; vertical-align: 2px; margin-left: 5px; padding: 2px 4px; border-radius: 3px; color: var(--secondary); background: #e9e9e4; font: 600 7px Geist Mono, monospace; letter-spacing: .5px; text-transform: uppercase; }
-.status.ready { color: var(--green); background: #e8f5ef; }
-.status.stale { color: var(--amber); background: #fff3df; }
+.status.done { color: var(--green); background: #e8f5ef; }
+.status.work { color: var(--amber); background: #fff3df; }
+.status.failed { color: #c2410c; background: #fff0eb; }
+.status.processing { color: var(--accent); background: var(--selected); }
 .transcript-card span { display: block; color: var(--secondary); margin-top: 4px; font: 9px Geist Mono, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .job-line { display: flex; justify-content: space-between; gap: 6px; margin-top: 7px; }
 .job-line span { margin: 0; color: var(--secondary); }

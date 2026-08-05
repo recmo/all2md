@@ -14,6 +14,7 @@ from .transcripts import (
     discover,
     load_hint_document,
     parse_markdown,
+    review_progress,
     resolve_identifier,
     transcript_payload,
     write_hint_document,
@@ -72,6 +73,11 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 except (FileNotFoundError, ValueError):
                     parsed = None
                 hints, _ = load_hint_document(transcript.hint_path)
+                progress = review_progress(parsed, hints) if parsed else {
+                    "complete": False,
+                    "unassignedRunCount": None,
+                    "unassignedSpeakerCount": None,
+                }
                 summaries.append({
                     "id": transcript.identifier,
                     "name": str(transcript.relative),
@@ -79,6 +85,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                     "status": transcript.status,
                     "startedAt": hints.get("started_at") or (parsed["frontmatter"].get("started_at") if parsed else None),
                     "turnCount": len(parsed["turns"]) if parsed else 0,
+                    "review": progress,
                 })
             self._json(summaries)
             return

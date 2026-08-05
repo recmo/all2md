@@ -11,6 +11,10 @@ shows its queue position, current model/window stage, and completed audio
 percentage. The operational queue is process-local and is cleared when the
 review server stops.
 
+Each transcript row reports review completeness independently of processing:
+`DONE` means every speaker run is assigned, while actionable rows show their
+unnamed-run count or an unprocessed, stale, queued, running, or failed state.
+
 Transcript Markdown is treated as immutable input. Turn ends are inferred from
 the next turn timestamp. For multi-track captures, the browser compares audio
 activity during a turn and uses the loudest track unless an existing hint range
