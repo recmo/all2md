@@ -31,7 +31,7 @@ RECOVERY_OVERLAP_SECONDS = 30.0
 MIN_RECOVERY_PROGRESS_SECONDS = 5.0
 MAX_RECOVERY_ATTEMPTS = 8
 SPEAKER_FORCE_TOLERANCE_SECONDS = 0.5
-MOSS_TIMESTAMP_TOLERANCE_SECONDS = 0.02
+MOSS_TIMESTAMP_TOLERANCE_SECONDS = 1.0
 FRESH_SPEAKER_MIN_PROBABILITY = 0.10
 FRESH_SPEAKER_MIN_TOP_RATIO = 0.10
 RUN_VOICEPRINT_SAMPLES = 1
@@ -652,7 +652,10 @@ def parse_segments(
             relative_start < 0
             or relative_end < relative_start
             or relative_start > duration
-            or relative_end > duration + MOSS_TIMESTAMP_TOLERANCE_SECONDS
+            or (
+                relative_end > duration
+                and relative_end - duration >= MOSS_TIMESTAMP_TOLERANCE_SECONDS
+            )
         ):
             raise ValueError(
                 f"MOSS segment [{relative_start}, {relative_end}] falls outside "

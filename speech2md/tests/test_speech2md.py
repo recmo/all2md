@@ -125,6 +125,18 @@ def test_parse_moss_clamps_centisecond_terminal_timestamp_rounding():
     assert segments == [Segment(109.5, 110.0007, "Done", "W01:S01", "mixed")]
 
 
+def test_parse_moss_trims_subsecond_end_overshoot():
+    segments = parse_segments(
+        [{"start": 9, "end": 10.75, "speaker_id": "S01", "text": "Last words"}],
+        window=1,
+        offset=20,
+        duration=10,
+        role="mixed",
+    )
+
+    assert segments == [Segment(29, 30, "Last words", "W01:S01", "mixed")]
+
+
 def test_parse_moss_transcript_preserves_numeric_brackets_in_text():
     raw = "[0.0][S01]Version [123] is here[3.0][3.1][S02]Next[4.0]"
     assert parse_moss_transcript(raw) == [
