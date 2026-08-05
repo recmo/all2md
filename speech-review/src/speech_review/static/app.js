@@ -332,14 +332,18 @@ function unidentifiedSelectionHtml(target, canSplit, playhead) {
 }
 
 function voiceprintCandidatesHtml(candidates) {
-  if (!candidates.length) return '<div class="guidance-empty">No identified voiceprints in this folder yet.</div>'
-  const attendees = new Set(attendeeNames())
+  const names = attendeeNames()
+  const attendees = new Set(names)
+  const matches = new Map(candidates.map(candidate => [candidate.identity, candidate]))
+  const attendeeCandidates = names.map((identity, order) => matches.get(identity) || {identity, similarity: null, source: 'No comparable voiceprint', order})
+    .sort((left, right) => (right.similarity ?? -1) - (left.similarity ?? -1) || (left.order ?? 0) - (right.order ?? 0))
   const groups = [
-    ['ATTENDEES', candidates.filter(candidate => attendees.has(candidate.identity))],
-    ['OTHER TRANSCRIPTS', candidates.filter(candidate => !attendees.has(candidate.identity))],
+    ['ATTENDEES', attendeeCandidates, attendeeCandidates.length],
+    ['OTHER TRANSCRIPTS', candidates.filter(candidate => !attendees.has(candidate.identity)), 4],
   ]
-  return groups.map(([label, items]) => items.length ? `<div class="candidate-group"><span>${label}</span>${items.slice(0, 4).map(candidate => `
-    <button class="candidate" data-identity="${escapeHtml(candidate.identity)}"><i class="identity-dot" style="--identity-color:${speakerColor(candidate.identity)}"></i><strong>${escapeHtml(candidate.identity)}</strong><small>${escapeHtml(candidate.source)}</small><b>${Math.round(candidate.similarity * 100)}%</b><em>${attendees.has(candidate.identity) ? '✓' : '+'}</em></button>`).join('')}</div>` : '').join('')
+  const html = groups.map(([label, items, limit]) => items.length ? `<div class="candidate-group"><span>${label}</span>${items.slice(0, limit).map(candidate => `
+    <button class="candidate" data-identity="${escapeHtml(candidate.identity)}"><i class="identity-dot" style="--identity-color:${speakerColor(candidate.identity)}"></i><strong>${escapeHtml(candidate.identity)}</strong><small>${escapeHtml(candidate.source)}</small><b class="${candidate.similarity == null ? 'unavailable' : ''}">${candidate.similarity == null ? '—' : `${Math.round(candidate.similarity * 100)}%`}</b><em>${attendees.has(candidate.identity) ? '✓' : '+'}</em></button>`).join('')}</div>` : '').join('')
+  return html || '<div class="guidance-empty">No attendees or identified voiceprints in this folder yet.</div>'
 }
 
 function attendeeNames() {

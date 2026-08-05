@@ -29,6 +29,8 @@ attendees with their speaker ranges nested underneath. Selecting an unidentified
 run expands its closest voiceprint matches in place. Matches are grouped into
 current attendees and identities found only in other transcripts; choosing the
 latter also adds that identity to the attendee list.
+Every current attendee remains assignable even when no comparable voiceprint is
+available for them.
 
 ## Run
 
