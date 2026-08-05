@@ -10,6 +10,8 @@ import numpy as np
 
 from .model import AudioSource
 from .moss import (
+    FRESH_SPEAKER_MIN_PROBABILITY,
+    FRESH_SPEAKER_MIN_TOP_RATIO,
     MAX_GENERATION_TOKENS,
     MAX_RECOVERY_ATTEMPTS,
     MIN_RECOVERY_PROGRESS_SECONDS,
@@ -46,6 +48,10 @@ def cache_metadata(
         "model_revision": MOSS_REVISION,
         "prompt": prompt,
         "max_generation_tokens": MAX_GENERATION_TOKENS,
+        "speaker_novelty": {
+            "minimum_probability": FRESH_SPEAKER_MIN_PROBABILITY,
+            "minimum_top_ratio": FRESH_SPEAKER_MIN_TOP_RATIO,
+        },
         "windowing": {
             "target_part_seconds": TARGET_PART_SECONDS,
             "overlap_seconds": WINDOW_OVERLAP_SECONDS,
@@ -129,6 +135,12 @@ def _valid_generation(value: Any) -> bool:
     ):
         return False
     if (base is None) != (forces is None):
+        return False
+    decisions = value.get("speaker_decisions")
+    if decisions is not None and (
+        not isinstance(decisions, list)
+        or any(not isinstance(decision, dict) for decision in decisions)
+    ):
         return False
     return True
 

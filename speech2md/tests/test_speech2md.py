@@ -23,6 +23,7 @@ from speech2md.moss import (
     deduplicate_boundaries,
     generation_diagnostics,
     _generate_with_timestamp_progress,
+    _speaker_decision,
     parse_moss_transcript,
     parse_silence_centers,
     parse_segments,
@@ -317,8 +318,7 @@ def test_speaker_guidance_allocates_a_fresh_label_for_a_split_identity():
     )
 
     assert forces == [
-        {"start": 0, "speaker": "S01", "identity": "Cody"},
-        {"start": 10, "speaker": "S99", "identity": "Steffen"},
+        {"start": 10, "speaker": "S02", "identity": "Steffen"},
     ]
 
 
@@ -354,10 +354,45 @@ def test_speaker_guidance_allocates_a_new_label_for_a_true_collision():
     )
 
     assert forces == [
-        {"start": 12, "speaker": "S04", "identity": "Piotr"},
-        {"start": 30, "speaker": "S99", "identity": "Fares"},
-        {"start": 40, "speaker": "S04", "identity": "Piotr"},
+        {"start": 30, "speaker": "S01", "identity": "Fares"},
     ]
+
+
+def test_speaker_guidance_uses_the_next_label_free_at_the_conflict():
+    segments = [
+        Segment(13, 29, "Remco", "W01:S01", "mixed"),
+        Segment(36.72, 39.15, "Ulrich", "W01:S02", "mixed"),
+        Segment(41.86, 43.92, "Ara", "W01:S03", "mixed"),
+        Segment(159.55, 162.22, "Marcin", "W01:S02", "mixed"),
+        Segment(281.72, 288.68, "Yogesh", "W01:S04", "mixed"),
+    ]
+
+    assert plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Ulrich", 36, 39, "mixed"),
+            SpeakerHint("Marcin", 159, 163, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    ) == [{"start": 159.55, "speaker": "S04", "identity": "Marcin"}]
+
+
+def test_fresh_speaker_bias_requires_a_supported_runner_up():
+    decision, force = _speaker_decision(
+        {"S01": 0.00001, "S02": 0.8519, "S03": 0.00001, "S04": 0.14808},
+        {"S01", "S02", "S03"},
+    )
+    assert force == "S04"
+    assert decision["top_candidate"] == "S02"
+    assert decision["alternative_candidate"] == "S04"
+    assert decision["alternative_is_fresh"] is True
+
+    _, force = _speaker_decision(
+        {"S01": 0.3775, "S02": 0.0001, "S03": 0.6224, "S04": 0.00001},
+        {"S01", "S02", "S03"},
+    )
+    assert force is None
 
 
 def test_speaker_guidance_is_stable_when_identities_are_renamed():
@@ -422,8 +457,7 @@ def test_matching_guided_cache_replays_without_model(tmp_path: Path):
         "total_tokens": None,
     }
     forces = [
-        {"start": 0, "speaker": "S01", "identity": "Alice"},
-        {"start": 5, "speaker": "S99", "identity": "Bob"},
+        {"start": 5, "speaker": "S02", "identity": "Bob"},
     ]
 
     segments, details, _ = transcribe_track(
@@ -433,7 +467,7 @@ def test_matching_guided_cache_replays_without_model(tmp_path: Path):
         role="mixed",
         duration=10,
         cached_generations=[{
-            "text": "[0][S01]Alice[5][5][S99]Bob[10]",
+            "text": "[0][S01]Alice[5][5][S02]Bob[10]",
             "prompt_tokens": None,
             "generation_tokens": 10,
             "total_tokens": None,

@@ -28,7 +28,8 @@ MIN_RECOVERY_PROGRESS_SECONDS = 5.0
 MAX_RECOVERY_ATTEMPTS = 8
 SPEAKER_FORCE_TOLERANCE_SECONDS = 0.5
 MOSS_TIMESTAMP_TOLERANCE_SECONDS = 0.02
-SYNTHETIC_SPEAKER_NUMBER_START = 99
+FRESH_SPEAKER_MIN_PROBABILITY = 0.10
+FRESH_SPEAKER_MIN_TOP_RATIO = 0.10
 # Independent reports of premature end tokens on long recordings:
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/26
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/34
@@ -44,6 +45,8 @@ TRANSCRIPT_START_RE = re.compile(
 )
 TIMESTAMP_RE = re.compile(r"\[(?P<value>\d+(?:\.\d+)?)\]")
 SPEAKER_PREFIX_RE = re.compile(r"\[(?P<start>\d+(?:\.\d+)?)\]\[S$")
+SPEAKER_DIGIT_RE = re.compile(r"\[(?P<start>\d+(?:\.\d+)?)\]\[S0$")
+SPEAKER_LABEL_RE = re.compile(r"\[S(?P<number>\d+)\]")
 
 
 class MossGuidanceRequired(RuntimeError):
@@ -225,6 +228,14 @@ def _generate_with_timestamp_progress(
             timestamp_callback=timestamp_callback,
             speaker_forces=speaker_forces,
         )
+    if hasattr(engine, "stream_generate"):
+        return _generate_with_speaker_forces(
+            engine,
+            audio,
+            prompt=prompt,
+            timestamp_callback=timestamp_callback,
+            speaker_forces=[],
+        )
     generated = engine.generate(
         audio,
         max_tokens=MAX_GENERATION_TOKENS,
@@ -267,6 +278,37 @@ def _generate_with_timestamp_progress(
     )
 
 
+def _speaker_decision(
+    probabilities: dict[str, float],
+    used_speakers: set[str],
+) -> tuple[dict[str, Any], str | None]:
+    ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
+    top, alternative = ranked[:2]
+    fresh = next(
+        (f"S{number:02d}" for number in range(1, 10) if f"S{number:02d}" not in used_speakers),
+        None,
+    )
+    alternative_is_fresh = alternative[0] == fresh
+    ratio = alternative[1] / top[1] if top[1] else 0.0
+    force = (
+        alternative[0]
+        if top[0] in used_speakers
+        and alternative_is_fresh
+        and alternative[1] >= FRESH_SPEAKER_MIN_PROBABILITY
+        and ratio >= FRESH_SPEAKER_MIN_TOP_RATIO
+        else None
+    )
+    return {
+        "top_candidate": top[0],
+        "top_probability": round(top[1], 8),
+        "alternative_candidate": alternative[0],
+        "alternative_probability": round(alternative[1], 8),
+        "alternative_is_fresh": alternative_is_fresh,
+        "fresh_candidate": fresh,
+        "alternative_top_ratio": round(ratio, 8),
+    }, force
+
+
 def _generate_with_speaker_forces(
     engine: Any,
     audio: str,
@@ -284,14 +326,37 @@ def _generate_with_speaker_forces(
     pending: list[int] = []
     applied: list[dict[str, Any]] = []
     remaining = list(speaker_forces)
+    decisions: list[dict[str, Any]] = []
+    used_speakers: set[str] = set()
+    active_force: dict[str, Any] | None = None
+    digit_ids = {
+        f"S0{digit}": tokenizer.encode(str(digit), add_special_tokens=False)[0]
+        for digit in range(1, 10)
+    }
+
+    def speaker_probabilities(logits) -> dict[str, float]:
+        values = {
+            label: float(logits[0, token_id] if logits.ndim > 1 else logits[token_id])
+            for label, token_id in digit_ids.items()
+        }
+        peak = max(values.values())
+        denominator = sum(math.exp(value - peak) for value in values.values())
+        return {
+            label: math.exp(value - peak) / denominator
+            for label, value in values.items()
+        }
 
     def force_speaker(tokens, logits):
-        nonlocal pending
+        nonlocal active_force, pending
+        tail = tokenizer.decode(
+            [int(token) for token in tokens[-64:].tolist()],
+            skip_special_tokens=True,
+        )
+        used_speakers.update(
+            f"S{int(match.group('number')):02d}"
+            for match in SPEAKER_LABEL_RE.finditer(tail)
+        )
         if not pending:
-            tail = tokenizer.decode(
-                [int(token) for token in tokens[-64:].tolist()],
-                skip_special_tokens=True,
-            )
             match = SPEAKER_PREFIX_RE.search(tail)
             if match is not None:
                 start = float(match.group("start"))
@@ -314,10 +379,30 @@ def _generate_with_speaker_forces(
                         raise RuntimeError("MOSS tokenizer has an unsupported speaker-token shape")
                     pending = [int(token) for token in full[len(prefix):]]
                     remaining.remove(force)
-                    applied.append(force)
+                    active_force = dict(force)
+                    applied.append(active_force)
+        digit_match = SPEAKER_DIGIT_RE.search(tail)
+        if digit_match is not None:
+            probabilities = speaker_probabilities(logits)
+            decision, novelty_force = _speaker_decision(probabilities, used_speakers)
+            decision["start"] = float(digit_match.group("start"))
+            if active_force is not None:
+                decision["forced_candidate"] = active_force["speaker"]
+                decision["force_reason"] = "guidance"
+            elif novelty_force is not None:
+                full = tokenizer.encode(f"[{novelty_force}]", add_special_tokens=False)
+                prefix = tokenizer.encode("[S0", add_special_tokens=False)
+                if full[:len(prefix)] != prefix:
+                    raise RuntimeError("MOSS tokenizer has an unsupported speaker-token shape")
+                pending = [int(token) for token in full[len(prefix):]]
+                decision["forced_candidate"] = novelty_force
+                decision["force_reason"] = "fresh_alternative"
+            decisions.append(decision)
         if not pending:
             return logits
         target = pending.pop(0)
+        if not pending:
+            active_force = None
         mask = mx.arange(logits.shape[-1])[None, :] == target
         return mx.where(mask, logits, mx.array(-float("inf"), dtype=logits.dtype))
 
@@ -354,6 +439,7 @@ def _generate_with_speaker_forces(
         generation_tokens=generation_tokens,
         total_tokens=None,
         speaker_forces_applied=applied,
+        speaker_decisions=decisions,
     )
 
 
@@ -468,21 +554,21 @@ def plan_speaker_forces(
     if not collisions:
         return []
 
-    used_numbers = {
-        int(match.group(1))
-        for segment in segments
-        if (match := re.search(r":S(\d+)$", segment.speaker))
-    }
     allocated: dict[str, str] = {}
+    allocated_numbers: set[int] = set()
 
-    def unused_label(window_label: str) -> str:
+    def unused_label(window_label: str, before: float) -> str:
         window = window_label.rsplit(":", 1)[0]
-        number = SYNTHETIC_SPEAKER_NUMBER_START
-        while number in used_numbers and number > 0:
-            number -= 1
-        if number == 0:
-            raise RuntimeError("no synthetic MOSS speaker labels remain")
-        used_numbers.add(number)
+        used_numbers = {
+            int(match.group(1))
+            for segment in segments
+            if segment.start < before
+            and (match := re.search(r":S(\d+)$", segment.speaker))
+        } | allocated_numbers
+        number = 1
+        while number in used_numbers:
+            number += 1
+        allocated_numbers.add(number)
         return f"{window}:S{number:02d}"
 
     replacements: dict[tuple[str, str], str] = {}
@@ -491,20 +577,17 @@ def plan_speaker_forces(
             identities,
             key=lambda identity: first_occurrence[(label, identity)],
         )
-        owner = max(
-            ordered_identities,
-            key=lambda identity: (
-                scores[(label, identity)],
-                -first_occurrence[(label, identity)],
-            ),
-        )
+        owner = ordered_identities[0]
         for identity in ordered_identities:
             if identity == owner:
                 target = label
             else:
                 target = allocated.get(identity)
                 if target is None:
-                    target = unused_label(label)
+                    target = unused_label(
+                        label,
+                        first_occurrence[(label, identity)],
+                    )
                     allocated[identity] = target
             replacements[(label, identity)] = target
 
@@ -513,7 +596,7 @@ def plan_speaker_forces(
     for hint, selected in selections:
         for segment in selected:
             target = replacements.get((segment.speaker, hint.identity))
-            if target is None:
+            if target is None or target == segment.speaker:
                 continue
             start = round(segment.start - offset, 2)
             speaker = target.rsplit(":", 1)[-1]
@@ -533,12 +616,16 @@ def _force_signature(forces: list[dict[str, Any]]) -> list[tuple[float, str]]:
 
 
 def _generation_fields(result: Any) -> dict[str, Any]:
-    return {
+    fields = {
         "text": str(getattr(result, "text", "")),
         "prompt_tokens": getattr(result, "prompt_tokens", None),
         "generation_tokens": getattr(result, "generation_tokens", None),
         "total_tokens": getattr(result, "total_tokens", None),
     }
+    decisions = getattr(result, "speaker_decisions", None)
+    if decisions is not None:
+        fields["speaker_decisions"] = decisions
+    return fields
 
 
 def parse_segments(
