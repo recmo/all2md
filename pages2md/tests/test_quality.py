@@ -10,6 +10,7 @@ from pages2md.quality import (
     math_syntax_errors,
     output_quality_warnings,
     table_quality_errors,
+    truncate_runaway_repetition,
 )
 
 
@@ -18,6 +19,15 @@ def test_runaway_generation_is_rejected_independently_of_model_confidence():
     warnings = output_quality_warnings(markdown)
     assert "visual_text_repetition" in warnings
     assert "visual_implausible_output_length" in warnings
+
+
+def test_runaway_generation_is_truncated_after_one_cycle():
+    markdown = "Useful answer.\n\n" + ("Answer: ABC\nLabels: 1 2 3\n\n" * 20)
+    repaired, changed = truncate_runaway_repetition(markdown)
+    assert changed is True
+    assert repaired.startswith("Useful answer.")
+    assert repaired.count("Answer: ABC") == 1
+    assert "visual_text_repetition" not in output_quality_warnings(repaired)
 
 
 def test_repetitive_table_is_semantically_invalid():

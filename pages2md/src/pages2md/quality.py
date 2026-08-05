@@ -55,6 +55,39 @@ def severe_text_repetition(markdown: str) -> bool:
     return False
 
 
+def truncate_runaway_repetition(markdown: str) -> tuple[str, bool]:
+    """Keep one cycle of a proven generation loop and discard its repeated tail."""
+    if not severe_text_repetition(markdown):
+        return markdown, False
+
+    lines = markdown.splitlines(keepends=True)
+    positions: dict[str, list[int]] = {}
+    offset = 0
+    for line in lines:
+        normalized = normalize(line)
+        if normalized:
+            seen = positions.setdefault(normalized, [])
+            seen.append(offset)
+            if len(seen) == 5:
+                # Preserve the first cycle and cut before the second occurrence.
+                return markdown[: seen[1]].rstrip(), True
+        offset += len(line)
+
+    tokens = list(re.finditer(r"\S+", markdown))
+    values = [match.group(0).casefold() for match in tokens]
+    for size in range(1, min(36, len(values) // 3 + 1)):
+        required = 12 if size == 1 else 8 if size <= 4 else 5 if size <= 12 else 3
+        for start in range(0, len(values) - size * required + 1):
+            phrase = values[start : start + size]
+            if all(
+                phrase == values[start + repeat * size : start + (repeat + 1) * size]
+                for repeat in range(1, required)
+            ):
+                end = tokens[start + size - 1].end()
+                return markdown[:end].rstrip(), True
+    return markdown, False
+
+
 def table_quality_errors(markdown: str) -> list[str]:
     errors: list[str] = []
     for table_index, source in enumerate(HTML_TABLE.findall(markdown), 1):

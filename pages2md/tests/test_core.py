@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import fitz
-from PIL import Image
+from PIL import Image, ImageDraw
 import pytest
 
 from pages2md.chapters import detect_chapters
@@ -16,7 +16,7 @@ from pages2md.compare import compare_text
 from pages2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
 from pages2md.native import parse_native_observation, reconcile_observations
 from pages2md.adapters import _link_target
-from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _convert_workspace, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, convert
+from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _canonicalize_figure_blocks, _convert_workspace, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, _repair_runaway_repetition, convert
 from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from pages2md.verify import verify_bundle
 
@@ -65,7 +65,8 @@ class RepeatingFixtureOcr:
 
     def recognize(self, image: Path):
         return (
-            "<|det|>text [100,100,800,300]<|/det|>" + "repeated phrase " * 20,
+            "<|det|>text [100,100,800,300]<|/det|>Useful introduction. "
+            + "repeated phrase " * 20,
             {"mode": "multi_base", "finish_reason": "stop"},
         )
 
@@ -858,13 +859,94 @@ def test_content_quality_warning_does_not_suppress_output(tmp_path: Path):
     workspace = _convert_workspace(pdf, tmp_path / "workspace", backend=RepeatingFixtureOcr())
     verification = verify_bundle(workspace)
     assert verification.ok, verification.errors
-    assert "page 1 needs content review: visual_text_repetition" in verification.warnings
-    assert "visual_text_repetition" in verification.warnings
+    assert "visual_text_repetition_repaired" in verification.warnings
+    assert not any("needs content review: visual_text_repetition" in warning for warning in verification.warnings)
 
     output = convert(pdf, backend=RepeatingFixtureOcr())
     assert output == tmp_path / "repetition.pdf.md"
     assert output.is_file()
+    assert "Useful introduction." in output.read_text()
     assert "repeated phrase" in output.read_text()
+    assert output.read_text().count("repeated phrase") == 1
+
+
+def test_figure_crops_reject_blank_text_and_nested_boxes(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    image = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((300, 300, 700, 700), outline="black", width=8)
+    draw.line((300, 500, 700, 500), fill="black", width=8)
+    draw.rectangle((720, 100, 980, 300), outline="black", width=8)
+    draw.rectangle((0, 692, 188, 858), outline="black", width=8)
+    draw.line((210, 920, 790, 920), fill="black", width=8)
+    draw.text((50, 100), "prose only", fill="black")
+    image.save(image_path)
+    blocks = [
+        Block("figure", "", bbox=(290, 290, 710, 710)),
+        Block("figure", "", bbox=(350, 350, 650, 650)),
+        Block("figure", "", bbox=(40, 80, 180, 130)),
+        Block("figure", "", bbox=(720, 100, 980, 300)),
+        Block("figure", "", bbox=(0, 700, 180, 850)),
+        Block("figure", "", bbox=(200, 870, 800, 970)),
+        Block("figure", "", bbox=(750, 750, 850, 850)),
+    ]
+    warnings = _canonicalize_figure_blocks(
+        blocks,
+        image_path,
+        [
+            {"text": "prose only", "bbox": [40, 80, 180, 130]},
+            {
+                "text": "This is a long prose paragraph incorrectly included in a figure box. "
+                * 3,
+                "bbox": [730, 110, 970, 290],
+            },
+        ],
+    )
+    assert len(blocks) == 1
+    assert blocks[0].bbox == (282.0, 282.0, 718.0, 718.0)
+    assert warnings == [
+        "visual_blank_figure_crop_rejected",
+        "visual_clipped_figure_crop_rejected",
+        "visual_duplicate_figure_crop_rejected",
+        "visual_running_matter_figure_crop_rejected",
+        "visual_text_only_figure_crop_rejected",
+    ]
+
+
+def test_repetition_across_ocr_blocks_discards_the_repeated_tail():
+    blocks = [Block("paragraph", "Useful introduction.")]
+    blocks.extend(
+        Block("paragraph", "Answer: ABC\nLabels: 1 2 3")
+        for _ in range(20)
+    )
+    blocks.append(Block("paragraph", "unreachable hallucinated tail"))
+
+    warnings = _repair_runaway_repetition(blocks)
+
+    assert [block.markdown for block in blocks] == [
+        "Useful introduction.",
+        "Answer: ABC\nLabels: 1 2 3",
+    ]
+    assert warnings == ["visual_text_repetition_repaired"]
+
+
+def test_untrustworthy_figure_boxes_fall_back_to_the_full_page(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (1000, 1000), "white").save(image_path)
+    blocks = [Block("figure", "", bbox=(100, 100, 200, 200))]
+
+    warnings = _canonicalize_figure_blocks(blocks, image_path, [])
+
+    assert len(blocks) == 1
+    assert blocks[0].bbox == (0.0, 0.0, 1000.0, 1000.0)
+    assert blocks[0].markdown == ""
+    assert blocks[0].metadata["alt_text"] == "page visual fallback"
+    assert blocks[0].metadata["suppress_caption"] is True
+    assert blocks[0].metadata["review_reason"] == "insufficient_figure_crop_coverage"
+    assert warnings == [
+        "visual_blank_figure_crop_rejected",
+        "visual_full_page_figure_fallback",
+    ]
 
 
 def test_embedded_links_are_geometry_aware_and_idempotent():
