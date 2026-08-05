@@ -24,9 +24,14 @@ const preciseClock = seconds => {
 const speakerColor = speaker => colors[Math.abs([...speaker].reduce((sum, character) => sum + character.charCodeAt(0), 0)) % colors.length]
 const toast = message => { $('#toast').textContent = message; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 1800) }
 const setSaveState = (text, kind = '') => { $('#save-state').textContent = text; $('#save-state').className = `save-state ${kind}` }
+const sortSummaries = summaries => [...summaries].sort((left, right) => {
+  const leftTime = Date.parse(left.startedAt), rightTime = Date.parse(right.startedAt)
+  const chronological = (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0)
+  return chronological || right.name.localeCompare(left.name)
+})
 
 async function loadSummaries() {
-  state.summaries = await api('/api/transcripts')
+  state.summaries = sortSummaries(await api('/api/transcripts'))
   await refreshJobs()
   updateTranscriptCount()
   renderSummaries()
@@ -45,7 +50,7 @@ function renderSummaries() {
     const action = active ? '' : `<button class="queue-action" data-id="${item.id}" data-status="${item.status}">${job?.status === 'failed' ? 'Retry' : item.status === 'ready' ? 'Re-run' : item.status === 'stale' ? 'Update' : 'Queue'}</button>`
     return `<div class="transcript-card ${state.transcript?.id === item.id ? 'selected' : ''}" data-id="${item.id}" role="button" tabindex="0">
       <div class="transcript-card-top"><strong>${escapeHtml(item.title)} <em class="status ${review.kind}" title="${escapeHtml(review.title)}">${escapeHtml(review.label)}</em></strong>${action}</div>
-      <span>${escapeHtml(item.startedAt || item.name)}${item.status === 'ready' ? ` · ${item.turnCount} turns` : ''}</span>${jobLine}
+      <span>${escapeHtml(item.name)}${item.status === 'ready' ? ` · ${item.turnCount} turns` : ''}</span>${jobLine}
     </div>`
   }).join('')
   document.querySelectorAll('.transcript-card').forEach(card => {
@@ -82,7 +87,7 @@ async function refreshJobs() {
     const newlyCompleted = jobs.filter(job => job.status === 'complete' && !state.seenCompleted.has(job.id))
     jobs.filter(job => job.status === 'complete').forEach(job => state.seenCompleted.add(job.id))
     state.jobs = jobs
-    if (newlyCompleted.length) state.summaries = await api('/api/transcripts')
+    if (newlyCompleted.length) state.summaries = sortSummaries(await api('/api/transcripts'))
     updateTranscriptCount(); renderSummaries()
   } catch { }
 }
@@ -623,7 +628,7 @@ async function saveHints() {
     setSaveState('Saving…')
     const result = await api(`/api/transcripts/${state.transcript.id}/hints`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({revision:state.transcript.hintRevision, hints:state.transcript.hints})})
     state.transcript.hintRevision = result.revision; state.dirty = false
-    state.summaries = await api('/api/transcripts')
+    state.summaries = sortSummaries(await api('/api/transcripts'))
     const summary = state.summaries.find(item => item.id === state.transcript.id)
     if (summary) state.transcript.status = summary.status
     $('#meeting-meta').textContent = state.transcript.editable ? `${state.transcript.name} · ${state.transcript.turns.length} turns · ${state.transcript.status}` : `${state.transcript.name} · ${state.transcript.status}`
