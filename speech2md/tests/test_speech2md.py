@@ -266,6 +266,26 @@ def test_speaker_hint_uses_dominant_overlap_when_timestamps_round_together():
     ) == {"W02:S03": "Sina"}
 
 
+def test_speaker_guidance_ignores_a_neighbor_with_the_same_rounded_start():
+    segments = [
+        Segment(167.44, 169.44, "No.", "W01:S02", "mixed"),
+        Segment(262.06, 262.62, "Yeah.", "W01:S02", "mixed"),
+        Segment(262.94, 269.42, "Longer answer.", "W01:S05", "mixed"),
+    ]
+
+    forces = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Marcin", 167, 170, "mixed"),
+            SpeakerHint("Remco", 262, 269, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+
+    assert forces == []
+
+
 def test_speaker_hints_reject_identities_without_a_separating_turn_boundary():
     segments = [Segment(10, 30, "speech", "W01:S01", "mixed")]
     with pytest.raises(ValueError, match="cannot be separated"):

@@ -362,6 +362,39 @@ def _select_hint_segments(
     *,
     role: str,
 ) -> tuple[list[tuple[SpeakerHint, list[Segment]]], list[SpeakerHint]]:
+    def prefer_dominant_rounded_start(
+        hint: SpeakerHint,
+        selected: list[Segment],
+    ) -> list[Segment]:
+        if abs(hint.start - round(hint.start)) > 1e-6:
+            return selected
+        starting_speakers = {
+            segment.speaker
+            for segment in selected
+            if hint.start <= segment.start < hint.start + 1.0
+        }
+        if len(starting_speakers) < 2:
+            return selected
+        overlaps = {
+            speaker: sum(
+                max(0.0, min(segment.end, hint.end) - max(segment.start, hint.start))
+                for segment in selected
+                if segment.speaker == speaker
+            )
+            for speaker in {segment.speaker for segment in selected}
+        }
+        best_overlap = max(overlaps.values())
+        best_speakers = [
+            speaker for speaker, overlap in overlaps.items()
+            if abs(overlap - best_overlap) <= 1e-6
+        ]
+        if len(best_speakers) != 1:
+            return selected
+        return [
+            segment for segment in selected
+            if segment.speaker == best_speakers[0]
+        ]
+
     relevant_hints = [hint for hint in hints if hint.track == role]
     assigned: dict[SpeakerHint, list[Segment]] = {}
     for segment in segments:
@@ -372,6 +405,11 @@ def _select_hint_segments(
         ]
         if centered:
             assigned.setdefault(centered[0], []).append(segment)
+
+    assigned = {
+        hint: prefer_dominant_rounded_start(hint, selected)
+        for hint, selected in assigned.items()
+    }
 
     assigned_segments = {id(segment) for selected in assigned.values() for segment in selected}
     for hint in relevant_hints:
@@ -393,6 +431,7 @@ def _select_hint_segments(
             segment for segment in overlapping
             if abs(overlaps[id(segment)] - best_overlap) <= 1e-6
         ]
+        selected = prefer_dominant_rounded_start(hint, selected)
         assigned[hint] = selected
         assigned_segments.update(id(segment) for segment in selected)
 
