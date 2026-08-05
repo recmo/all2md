@@ -18,6 +18,10 @@ def test_moss_cache_round_trip_and_invalidation(tmp_path: Path):
     write_cache(path, metadata, tracks)
 
     assert load_cache(path, metadata) == tracks
+    metadata_with_commit = {**metadata, "speech2md_version": "b" * 40}
+    write_cache(path, metadata_with_commit, tracks)
+    assert load_cache(path, metadata) == tracks
+    assert load_cache(path, {**metadata, "speech2md_version": "c" * 40}) == tracks
     changed = cache_metadata(prompt="Prompt: ProveKit", hotwords=("ProveKit",), sources=[source])
     assert load_cache(path, changed) == {}
     assert path.stat().st_mode & 0o777 == 0o600

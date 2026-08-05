@@ -24,6 +24,7 @@ from .moss import (
 
 
 CACHE_SCHEMA_VERSION = 1
+CACHE_COMPATIBILITY_IGNORED_KEYS = {"speech2md_version"}
 
 
 class MossCacheMiss(RuntimeError):
@@ -77,7 +78,19 @@ def load_cache(path: Path, expected_metadata: dict[str, Any]) -> dict[str, list[
             tracks = json.loads(str(archive["tracks"].item()))
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         return {}
-    if metadata != expected_metadata or not isinstance(tracks, dict):
+    if not isinstance(metadata, dict) or not isinstance(tracks, dict):
+        return {}
+    comparable_metadata = {
+        key: value
+        for key, value in metadata.items()
+        if key not in CACHE_COMPATIBILITY_IGNORED_KEYS
+    }
+    comparable_expected = {
+        key: value
+        for key, value in expected_metadata.items()
+        if key not in CACHE_COMPATIBILITY_IGNORED_KEYS
+    }
+    if comparable_metadata != comparable_expected:
         return {}
     if not all(
         isinstance(key, str)
