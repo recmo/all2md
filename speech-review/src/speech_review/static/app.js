@@ -94,6 +94,7 @@ function seedAttendees() {
 }
 
 function renderTranscript() {
+  renderTranscriptHeader()
   if (!state.transcript.editable) {
     $('#transcript').innerHTML = `<div class="empty recording-empty"><strong>${state.transcript.status === 'stale' ? 'Stale transcript' : 'No transcript yet'}</strong><span>${state.transcript.status === 'stale' ? 'This Markdown was produced by an unsupported speech2md schema.' : 'This recording has not been processed by speech2md.'}</span><button class="primary regenerate-inline">${state.transcript.status === 'stale' ? 'Regenerate transcript' : 'Generate transcript'}</button></div>`
     $('.regenerate-inline').onclick = event => requestQueue(state.transcript.id, state.transcript.status, event.currentTarget, event)
@@ -291,6 +292,7 @@ async function renderInspector() {
       <div class="guidance-section-heading"><div><strong>SPEAKERS &amp; ATTENDEES</strong><small>${unidentified ? 'Selected run is not assigned yet' : 'Speaker ranges are nested guidance'}</small></div><button id="show-add-attendee" title="Add attendee">＋</button></div>
       ${unidentified ? unidentifiedSelectionHtml(target, canSplit, playhead) : ''}
       <div id="guidance-people">${guidancePeopleHtml()}</div>
+      <div id="anonymous-speakers">${anonymousSpeakersHtml()}</div>
       <form id="add-attendee-form" class="guidance-add-row" hidden><input id="new-attendee" class="field" placeholder="Name"><button class="secondary">Add person</button></form>
     </section>`
   bindGuidanceEditor()
@@ -361,6 +363,42 @@ function guidancePeopleHtml() {
   }).join('')
 }
 
+function anonymousRuns() {
+  const runs = []
+  for (const turn of state.transcript?.turns || []) {
+    for (const slice of turnSlices(turn)) if (!assignedIdentity(slice)) runs.push({turn, slice})
+  }
+  return runs
+}
+
+function anonymousSpeakersHtml() {
+  const groups = new Map()
+  for (const {turn, slice} of anonymousRuns()) {
+    const group = groups.get(turn.speaker) || {speaker: turn.speaker, count: 0, duration: 0}
+    group.count += 1
+    group.duration += slice.end - slice.start
+    groups.set(turn.speaker, group)
+  }
+  if (!groups.size) return ''
+  return `<div class="anonymous-heading"><strong>ANONYMOUS SPEAKERS</strong><span>${groups.size}</span></div>${[...groups.values()].map(group => `
+    <button class="anonymous-speaker ${state.selected?.speaker === group.speaker && !assignedIdentity(assignmentRange(state.selected)) ? 'selected' : ''}" data-speaker="${escapeHtml(group.speaker)}"><i class="identity-dot" style="--identity-color:${speakerColor(group.speaker)}"></i><strong>${escapeHtml(group.speaker)}</strong><small>${group.count} ${group.count === 1 ? 'run' : 'runs'} · ${clock(group.duration)}</small><span>Jump →</span></button>`).join('')}`
+}
+
+function renderTranscriptHeader() {
+  const button = $('#next-unidentified')
+  const count = state.transcript?.editable ? anonymousRuns().length : 0
+  button.disabled = !count
+  button.textContent = count ? `Next unnamed · ${count} →` : 'No unnamed speakers'
+}
+
+function jumpToUnnamed(speaker = '') {
+  const runs = anonymousRuns().filter(({turn}) => !speaker || turn.speaker === speaker)
+  if (!runs.length) return toast(speaker ? `${speaker} has no unnamed runs` : 'No unnamed speakers remain')
+  const anchor = state.selected ? assignmentRange(state.selected).start : (state.audio[0]?.currentTime || -1)
+  const next = runs.find(({slice}) => slice.start > anchor + RANGE_EPSILON) || runs[0]
+  selectTurnRange(next.turn.index, next.slice.start, next.slice.end, true)
+}
+
 function guidanceRangeHtml(identity, range, index) {
   const selected = selectedGuidanceRange(identity, range) ? 'selected' : ''
   return `<div class="nested-range ${selected}"><button class="select-guidance-range" data-identity="${escapeHtml(identity)}" data-index="${index}">↳ <time>${preciseClock(range.start)} → ${preciseClock(range.end)}</time>${range.track ? `<small>${escapeHtml(range.track)}</small>` : ''}</button><button class="remove-guidance-range" data-identity="${escapeHtml(identity)}" data-index="${index}" title="Remove range">×</button></div>`
@@ -391,6 +429,7 @@ function bindGuidanceEditor() {
   document.querySelectorAll('.remove-person').forEach(button => button.onclick = () => removeAttendee(button.dataset.identity))
   document.querySelectorAll('.select-guidance-range').forEach(button => button.onclick = () => selectGuidanceRange(button.dataset.identity, Number(button.dataset.index)))
   document.querySelectorAll('.remove-guidance-range').forEach(button => button.onclick = () => removeGuidanceRange(button.dataset.identity, Number(button.dataset.index)))
+  document.querySelectorAll('.anonymous-speaker').forEach(button => button.onclick = () => jumpToUnnamed(button.dataset.speaker))
   if ($('#split-turn')) $('#split-turn').onclick = splitTurnAtPlayhead
   if ($('#custom-identity-form')) $('#custom-identity-form').onsubmit = event => { event.preventDefault(); assignIdentity($('#custom-identity').value.trim()) }
 }
@@ -698,6 +737,7 @@ function closeQueuePopover() {
 }
 
 $('#search').oninput = renderSummaries
+$('#next-unidentified').onclick = () => jumpToUnnamed()
 $('#play').onclick = () => state.audio[0]?.paused ? play() : pause()
 $('#waveform').onclick = waveformClick
 $('#zoom').oninput = event => { state.zoom = zoomLevels[Number(event.target.value)]; $('#zoom-label').textContent = state.zoom === 1 ? 'FIT' : `${state.zoom}×`; drawWaveform() }

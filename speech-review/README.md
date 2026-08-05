@@ -31,6 +31,9 @@ current attendees and identities found only in other transcripts; choosing the
 latter also adds that identity to the attendee list.
 Every current attendee remains assignable even when no comparable voiceprint is
 available for them.
+Anonymous speaker handles are listed beneath the attendees with their remaining
+unnamed run counts. The transcript header can jump to the next unnamed run,
+while selecting a handle in the sidebar advances through that speaker's runs.
 
 ## Run
 
