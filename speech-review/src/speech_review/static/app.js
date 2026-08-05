@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector)
 const colors = ['#3b82f6', '#8b5cf6', '#d97706', '#059669', '#db2777', '#0891b2']
 const zoomLevels = [1, 8, 16, 32, 64]
-const state = { summaries: [], jobs: [], seenCompleted: new Set(), transcript: null, selected: null, selectedRange: null, splitPoints: new Map(), correction: null, dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null }
+const state = { summaries: [], jobs: [], seenCompleted: new Set(), transcript: null, selected: null, selectedRange: null, splitPoints: new Map(), dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null }
 const RANGE_EPSILON = 0.01
 
 const api = async (path, options) => {
@@ -98,7 +98,6 @@ async function selectTranscript(id) {
   state.selected = state.transcript.turns[0] || null
   state.selectedRange = null
   state.splitPoints = new Map()
-  state.correction = null
   state.dirty = false
   seedAttendees()
   selectDefaultRange(state.selected)
@@ -135,7 +134,6 @@ function renderTranscript() {
       : hinted
       ? '<span class="hinted-speaker" title="Explicit speaker guidance">GUIDED</span>'
       : ''
-    const wording = proposedWording(turn)
     const ranges = (slices.length > 1 || hinted) ? `<div class="turn-ranges">${slices.map(slice => {
       const identity = assignedIdentity(slice) || turn.speaker
       const selected = selectedRangeMatches(slice) ? 'selected' : ''
@@ -144,7 +142,7 @@ function renderTranscript() {
     }).join('')}</div>` : ''
     return `<article class="turn ${state.selected?.index === turn.index ? 'selected' : ''}" data-index="${turn.index}" style="--speaker-color:${color}">
       <span class="turn-time">${clock(turn.start)}</span><span class="speaker-dot"></span>
-      <div class="turn-body"><div class="turn-speaker"><span>${escapeHtml(assignment.current)}</span>${proposal}</div><div class="turn-text">${escapeHtml(turn.text)}</div>${ranges}${wording ? `<div class="proposed-wording"><span>PROPOSED</span><div>${wording}</div></div>` : ''}</div>
+      <div class="turn-body"><div class="turn-speaker"><span>${escapeHtml(assignment.current)}</span>${proposal}</div><div class="turn-text">${escapeHtml(turn.text)}</div>${ranges}</div>
     </article>`
   }).join('')
   document.querySelectorAll('.turn').forEach(element => {
@@ -152,8 +150,12 @@ function renderTranscript() {
       if (window.getSelection()?.toString().trim()) return
       selectTurn(Number(element.dataset.index), true)
     }
-    element.ondblclick = () => { if (state.audio[0]?.paused) play() }
-    element.onmouseup = () => captureCorrection(element)
+    element.ondblclick = event => {
+      event.preventDefault()
+      window.getSelection()?.removeAllRanges()
+      selectTurn(Number(element.dataset.index), true)
+      if (state.audio[0]?.paused) play()
+    }
     element.querySelectorAll('.turn-range').forEach(button => button.onclick = event => {
       event.stopPropagation()
       selectTurnRange(Number(element.dataset.index), Number(button.dataset.start), Number(button.dataset.end), true)
@@ -165,7 +167,6 @@ function selectTurn(index, seek = false) {
   state.selected = state.transcript.turns[index]
   state.selectedRange = null
   selectDefaultRange(state.selected)
-  state.correction = null
   if (seek) seekTo(state.selected.start)
   renderTranscript(); renderInspector(); drawWaveform(); scrollSelectedTurn()
 }
@@ -187,7 +188,6 @@ function reconcileSelectedRange() {
 function selectTurnRange(index, start, end, seek = false) {
   state.selected = state.transcript.turns[index]
   state.selectedRange = {turnIndex: index, start, end}
-  state.correction = null
   if (seek) seekTo(start)
   renderTranscript(); renderInspector(); drawWaveform(); scrollSelectedTurn()
 }
@@ -213,19 +213,7 @@ function syncSelectionToTime(time) {
   if (unchanged) return
   state.selected = turn
   state.selectedRange = range
-  state.correction = null
   renderTranscript(); renderInspector(); scrollSelectedTurn('auto')
-}
-
-function captureCorrection(element) {
-  const selection = window.getSelection()
-  const before = selection?.toString().trim()
-  if (!before || !element.querySelector('.turn-text')?.contains(selection.anchorNode)) return
-  const turn = state.transcript.turns[Number(element.dataset.index)]
-  if (!turn.text.includes(before)) return
-  state.selected = turn
-  state.correction = {before, after: before, hotword: true}
-  renderTranscript(); renderInspector()
 }
 
 function proposedIdentity(turn) {
@@ -284,32 +272,6 @@ function assignedIdentity(turn) {
 }
 const overlaps = (left, right) => Math.min(left.end, right.end) > Math.max(left.start, right.start)
 
-function editMatchesTurn(edit, turn) {
-  return (!edit.track || edit.track === turn.track) && overlaps(edit, turn) && turn.text.includes(edit.before)
-}
-
-function proposedWording(turn) {
-  const replacements = []
-  for (const edit of state.transcript.hints.edits) {
-    const occurrences = state.transcript.turns.reduce((count, candidate) => {
-      if (!editMatchesTurn(edit, candidate)) return count
-      return count + candidate.text.split(edit.before).length - 1
-    }, 0)
-    if (occurrences !== 1 || !editMatchesTurn(edit, turn)) continue
-    replacements.push({start: turn.text.indexOf(edit.before), before: edit.before, after: edit.after})
-  }
-  replacements.sort((left, right) => left.start - right.start)
-  let cursor = 0, applied = 0, html = ''
-  for (const replacement of replacements) {
-    if (replacement.start < cursor) continue
-    html += escapeHtml(turn.text.slice(cursor, replacement.start))
-    html += `<del>${escapeHtml(replacement.before)}</del><ins>${escapeHtml(replacement.after)}</ins>`
-    cursor = replacement.start + replacement.before.length
-    applied += 1
-  }
-  return applied ? html + escapeHtml(turn.text.slice(cursor)) : ''
-}
-
 async function renderInspector() {
   if (!state.transcript.editable) {
     $('#inspector').innerHTML = `<div class="legacy-inspector"><div class="eyebrow">${state.transcript.status.toUpperCase()} RECORDING</div><h2>${escapeHtml(state.transcript.title)}</h2><div class="subhead">${escapeHtml(state.transcript.audio.map(item => item.name).join(', ') || 'No audio source found')}</div><div class="notice">↻ <span>${state.transcript.status === 'stale' ? 'The existing Markdown is left untouched until you explicitly regenerate it with the current speech2md.' : 'Generate current Markdown and voiceprints from this recording.'}</span></div>${metadataEditorHtml()}<button class="primary regenerate-inspector">${state.transcript.status === 'stale' ? 'Regenerate with speech2md' : 'Generate with speech2md'}</button></div>`
@@ -318,7 +280,6 @@ async function renderInspector() {
     return
   }
   if (!state.selected) return
-  if (state.correction) return renderCorrectionInspector()
   const turn = state.selected
   const target = assignmentRange(turn)
   const slices = turnSlices(turn)
@@ -345,7 +306,7 @@ async function renderInspector() {
   if (!unidentified) return
   try {
     const candidates = await api(`/api/transcripts/${state.transcript.id}/candidates/${encodeURIComponent(turn.speaker)}`)
-    if (state.selected !== turn || state.correction) return
+    if (state.selected !== turn) return
     const container = $('#voiceprint-candidates')
     if (!container) return
     container.innerHTML = voiceprintCandidatesHtml(candidates)
@@ -598,28 +559,6 @@ function splitTurnAtPlayhead() {
   const right = turnSlices(turn).find(slice => Math.abs(slice.start - point) < RANGE_EPSILON)
   state.selectedRange = right ? {turnIndex: turn.index, start: right.start, end: right.end} : null
   renderTranscript(); renderInspector(); drawWaveform(); toast(`Split at ${preciseClock(point)}`)
-}
-
-function renderCorrectionInspector() {
-  const turn = state.selected; const correction = state.correction
-  $('#inspector').innerHTML = `
-    <div class="eyebrow">TRANSCRIPT CORRECTION</div><h2>${clock(turn.start)} · ${escapeHtml(turn.speaker)}</h2><div class="subhead">${escapeHtml(turn.track || state.transcript.audio[0]?.role || 'mixed')} track</div>
-    <div class="section"><span class="section-label">SELECTED TEXT</span><div class="selected-phrase">${escapeHtml(correction.before)}</div></div>
-    <div class="section"><label class="section-label">REPLACE WITH</label><input id="replacement" class="field" value="${escapeHtml(correction.after)}"></div>
-    <div class="section checkbox"><input id="add-hotword" type="checkbox" ${correction.hotword ? 'checked' : ''}><label for="add-hotword"><strong>Add replacement as a hotword</strong><br><small>Helps future transcriptions recognize this term.</small></label></div>
-    <div class="hint-note">Saves localized guidance to the adjacent <code>.hint.yaml</code> only. Transcript Markdown changes only after explicit regeneration.</div>
-    <button id="save-correction" class="primary">Save correction</button>
-    <button id="cancel-correction" class="secondary" style="width:100%;margin-top:8px">Cancel</button></div>`
-  $('#replacement').select()
-  $('#save-correction').onclick = async () => {
-    const after = $('#replacement').value.trim(); if (!after) return toast('Replacement cannot be empty')
-    const edit = {start: turn.start, end: turn.end, before: correction.before, after}
-    if (state.transcript.audio.length > 1 && turn.track) edit.track = turn.track
-    state.transcript.hints.edits.push(edit)
-    if ($('#add-hotword').checked && !state.transcript.hints.hotwords.some(value => value.toLowerCase() === after.toLowerCase())) state.transcript.hints.hotwords.push(after)
-    markDirty(); await saveHints(); state.correction = null; renderTranscript(); renderInspector()
-  }
-  $('#cancel-correction').onclick = () => { state.correction = null; renderInspector() }
 }
 
 function markDirty() { state.dirty = true; setSaveState('Unsaved guidance', 'dirty') }
