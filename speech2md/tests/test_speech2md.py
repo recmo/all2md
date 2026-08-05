@@ -112,6 +112,18 @@ def test_parse_moss_uses_local_speakers_for_every_track():
         )
 
 
+def test_parse_moss_clamps_centisecond_terminal_timestamp_rounding():
+    segments = parse_segments(
+        [{"start": 9.5, "end": 10.01, "speaker_id": "S01", "text": "Done"}],
+        window=1,
+        offset=100,
+        duration=10.0007,
+        role="mixed",
+    )
+
+    assert segments == [Segment(109.5, 110.0007, "Done", "W01:S01", "mixed")]
+
+
 def test_parse_moss_transcript_preserves_numeric_brackets_in_text():
     raw = "[0.0][S01]Version [123] is here[3.0][3.1][S02]Next[4.0]"
     assert parse_moss_transcript(raw) == [

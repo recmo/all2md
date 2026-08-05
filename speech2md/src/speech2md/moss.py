@@ -27,6 +27,7 @@ RECOVERY_OVERLAP_SECONDS = 30.0
 MIN_RECOVERY_PROGRESS_SECONDS = 5.0
 MAX_RECOVERY_ATTEMPTS = 8
 SPEAKER_FORCE_TOLERANCE_SECONDS = 0.5
+MOSS_TIMESTAMP_TOLERANCE_SECONDS = 0.02
 # Independent reports of premature end tokens on long recordings:
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/26
 # https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/34
@@ -522,11 +523,17 @@ def parse_segments(
             raise ValueError(f"invalid or missing MOSS speaker id: {speaker_id!r}")
         relative_start = float(item["start"])
         relative_end = float(item["end"])
-        if relative_start < 0 or relative_end < relative_start or relative_end > duration:
+        if (
+            relative_start < 0
+            or relative_end < relative_start
+            or relative_start > duration
+            or relative_end > duration + MOSS_TIMESTAMP_TOLERANCE_SECONDS
+        ):
             raise ValueError(
                 f"MOSS segment [{relative_start}, {relative_end}] falls outside "
                 f"the submitted {duration:.2f}s audio span"
             )
+        relative_end = min(relative_end, duration)
         local_speaker = f"W{window:02d}:S{int(speaker_id[1:]):02d}"
         text = str(item.get("text", "")).removeprefix(f"[{speaker_id}]").strip()
         if text:
