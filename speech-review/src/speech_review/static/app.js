@@ -160,10 +160,8 @@ function selectTurn(index, seek = false) {
   state.selectedRange = null
   selectDefaultRange(state.selected)
   state.correction = null
-  document.querySelectorAll('.turn').forEach((element, item) => element.classList.toggle('selected', item === index))
-  document.querySelector(`.turn[data-index="${index}"]`)?.scrollIntoView({block:'center', behavior:'smooth'})
   if (seek) seekTo(state.selected.start)
-  renderInspector(); drawWaveform()
+  renderTranscript(); renderInspector(); drawWaveform(); scrollSelectedTurn()
 }
 
 function selectDefaultRange(turn) {
@@ -185,7 +183,32 @@ function selectTurnRange(index, start, end, seek = false) {
   state.selectedRange = {turnIndex: index, start, end}
   state.correction = null
   if (seek) seekTo(start)
-  renderTranscript(); renderInspector(); drawWaveform()
+  renderTranscript(); renderInspector(); drawWaveform(); scrollSelectedTurn()
+}
+
+function scrollSelectedTurn(behavior = 'auto') {
+  const index = state.selected?.index
+  if (index == null) return
+  requestAnimationFrame(() => document.querySelector(`.turn[data-index="${index}"]`)?.scrollIntoView({block:'center', behavior}))
+}
+
+function syncSelectionToTime(time) {
+  if (!state.transcript?.editable) return
+  const containing = state.transcript.turns
+    .filter(turn => turn.start <= time && turn.end > time)
+    .sort((left, right) => right.start - left.start)
+  const turn = containing.find(candidate => candidate.index === state.selected?.index) || containing[0]
+  if (!turn) return
+  const slices = turnSlices(turn)
+  const slice = slices.find(candidate => candidate.start <= time && candidate.end > time) || slices[0]
+  const range = slices.length > 1 ? {turnIndex: turn.index, start: slice.start, end: slice.end} : null
+  const unchanged = state.selected?.index === turn.index
+    && ((!range && !state.selectedRange) || (range && selectedRangeMatches(slice)))
+  if (unchanged) return
+  state.selected = turn
+  state.selectedRange = range
+  state.correction = null
+  renderTranscript(); renderInspector(); scrollSelectedTurn('auto')
 }
 
 function captureCorrection(element) {
@@ -656,7 +679,12 @@ function play() {
 }
 function pause() { state.audio.forEach(audio => audio.pause()); cancelAnimationFrame(state.raf); $('#play').textContent = '▶' }
 function seekTo(seconds) { state.audio.forEach(audio => { audio.currentTime = Math.min(seconds, audio.duration || seconds) }); updateClock(); drawWaveform() }
-function tick() { updateClock(); drawWaveform(); if (!state.audio[0]?.paused) state.raf = requestAnimationFrame(tick); else pause() }
+function tick() {
+  updateClock()
+  syncSelectionToTime(state.audio[0]?.currentTime || 0)
+  drawWaveform()
+  if (!state.audio[0]?.paused) state.raf = requestAnimationFrame(tick); else pause()
+}
 function updateClock() { $('#current-time').textContent = clock(state.audio[0]?.currentTime || 0); $('#duration').textContent = `/ ${clock(state.duration)}` }
 
 function visibleRange() {
