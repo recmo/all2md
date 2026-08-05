@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector)
 const colors = ['#3b82f6', '#8b5cf6', '#d97706', '#059669', '#db2777', '#0891b2']
 const zoomLevels = [1, 8, 16, 32, 64]
-const state = { summaries: [], jobs: [], seenCompleted: new Set(), transcript: null, selected: null, selectedRange: null, splitPoints: new Map(), dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null }
+const state = { summaries: [], jobs: [], seenCompleted: new Set(), transcript: null, selected: null, selectedRange: null, splitPoints: new Map(), dirty: false, buffers: [], audio: [], duration: 0, zoom: 1, raf: null, playUntil: null }
 const RANGE_EPSILON = 0.01
 
 const api = async (path, options) => {
@@ -67,12 +67,12 @@ function transcriptReviewStatus(item, job) {
   if (item.status === 'unprocessed') return {kind:'work', label:'TO PROCESS', title:'Transcript has not been generated'}
   if (item.status === 'stale') return {kind:'work', label:'UPDATE', title:'Derived transcript needs regeneration'}
   if (item.review?.complete) return {kind:'done', label:'DONE', title:'All speaker runs are assigned'}
-  const runs = item.review?.unassignedRunCount
   const speakers = item.review?.unassignedSpeakerCount
+  const runs = item.review?.unassignedRunCount
   return {
     kind:'work',
-    label:runs == null ? 'REVIEW' : `${runs} UNNAMED`,
-    title:runs == null ? 'Transcript needs review' : `${speakers} anonymous ${speakers === 1 ? 'speaker' : 'speakers'} across ${runs} unnamed ${runs === 1 ? 'run' : 'runs'}`,
+    label:speakers == null ? 'REVIEW' : `${speakers} UNNAMED`,
+    title:speakers == null ? 'Transcript needs review' : `${speakers} anonymous ${speakers === 1 ? 'speaker' : 'speakers'} across ${runs} unnamed ${runs === 1 ? 'run' : 'runs'}`,
   }
 }
 
@@ -154,7 +154,7 @@ function renderTranscript() {
       event.preventDefault()
       window.getSelection()?.removeAllRanges()
       selectTurn(Number(element.dataset.index), true)
-      if (state.audio[0]?.paused) play()
+      play(state.selected.end)
     }
     element.querySelectorAll('.turn-range').forEach(button => button.onclick = event => {
       event.stopPropagation()
@@ -378,31 +378,44 @@ function anonymousRuns() {
   return runs
 }
 
-function anonymousSpeakersHtml() {
+function anonymousSpeakerGroups() {
   const groups = new Map()
-  for (const {turn, slice} of anonymousRuns()) {
-    const group = groups.get(turn.speaker) || {speaker: turn.speaker, count: 0, duration: 0}
-    group.count += 1
-    group.duration += slice.end - slice.start
-    groups.set(turn.speaker, group)
+  for (const run of anonymousRuns()) {
+    const group = groups.get(run.turn.speaker) || {speaker: run.turn.speaker, runs: [], duration: 0}
+    group.runs.push(run)
+    group.duration += run.slice.end - run.slice.start
+    groups.set(run.turn.speaker, group)
   }
-  if (!groups.size) return ''
-  return `<div class="anonymous-heading"><strong>ANONYMOUS SPEAKERS</strong><span>${groups.size}</span></div>${[...groups.values()].map(group => `
-    <button class="anonymous-speaker ${state.selected?.speaker === group.speaker && !assignedIdentity(assignmentRange(state.selected)) ? 'selected' : ''}" data-speaker="${escapeHtml(group.speaker)}"><i class="identity-dot" style="--identity-color:${speakerColor(group.speaker)}"></i><strong>${escapeHtml(group.speaker)}</strong><small>${group.count} ${group.count === 1 ? 'run' : 'runs'} · ${clock(group.duration)}</small><span>Jump →</span></button>`).join('')}`
+  return [...groups.values()]
+}
+
+function anonymousSpeakersHtml() {
+  const groups = anonymousSpeakerGroups()
+  if (!groups.length) return ''
+  return `<div class="anonymous-heading"><strong>ANONYMOUS SPEAKERS</strong><span>${groups.length}</span></div>${groups.map(group => `
+    <button class="anonymous-speaker ${state.selected?.speaker === group.speaker && !assignedIdentity(assignmentRange(state.selected)) ? 'selected' : ''}" data-speaker="${escapeHtml(group.speaker)}"><i class="identity-dot" style="--identity-color:${speakerColor(group.speaker)}"></i><strong>${escapeHtml(group.speaker)}</strong><small>${group.runs.length} ${group.runs.length === 1 ? 'run' : 'runs'} · ${clock(group.duration)}</small><span>Jump →</span></button>`).join('')}`
 }
 
 function renderTranscriptHeader() {
   const button = $('#next-unidentified')
-  const count = state.transcript?.editable ? anonymousRuns().length : 0
+  const count = state.transcript?.editable ? anonymousSpeakerGroups().length : 0
   button.disabled = !count
   button.textContent = count ? `Next unnamed · ${count} →` : 'No unnamed speakers'
 }
 
 function jumpToUnnamed(speaker = '') {
-  const runs = anonymousRuns().filter(({turn}) => !speaker || turn.speaker === speaker)
-  if (!runs.length) return toast(speaker ? `${speaker} has no unnamed runs` : 'No unnamed speakers remain')
+  const groups = anonymousSpeakerGroups()
+  if (!groups.length) return toast('No unnamed speakers remain')
   const anchor = state.selected ? assignmentRange(state.selected).start : (state.audio[0]?.currentTime || -1)
-  const next = runs.find(({slice}) => slice.start > anchor + RANGE_EPSILON) || runs[0]
+  let group = groups.find(item => item.speaker === speaker)
+  if (!group) {
+    const currentSpeaker = state.selected && !assignedIdentity(assignmentRange(state.selected)) ? state.selected.speaker : ''
+    const currentIndex = groups.findIndex(item => item.speaker === currentSpeaker)
+    group = currentIndex >= 0
+      ? groups[(currentIndex + 1) % groups.length]
+      : groups.find(item => item.runs[0].slice.start > anchor + RANGE_EPSILON) || groups[0]
+  }
+  const next = group.runs.find(({slice}) => slice.start > anchor + RANGE_EPSILON) || group.runs[0]
   selectTurnRange(next.turn.index, next.slice.start, next.slice.end, true)
 }
 
@@ -617,16 +630,25 @@ function inferTracks() {
   renderTranscript(); renderInspector()
 }
 
-function play() {
+function play(until = null) {
   if (!state.audio.length) return
+  cancelAnimationFrame(state.raf)
+  state.playUntil = until
   state.audio.forEach(audio => { audio.currentTime = state.audio[0].currentTime; audio.play().catch(() => {}) })
   $('#play').textContent = '❚❚'; tick()
 }
-function pause() { state.audio.forEach(audio => audio.pause()); cancelAnimationFrame(state.raf); $('#play').textContent = '▶' }
-function seekTo(seconds) { state.audio.forEach(audio => { audio.currentTime = Math.min(seconds, audio.duration || seconds) }); updateClock(); drawWaveform() }
+function pause() { state.audio.forEach(audio => audio.pause()); cancelAnimationFrame(state.raf); state.playUntil = null; $('#play').textContent = '▶' }
+function seekTo(seconds) { state.playUntil = null; state.audio.forEach(audio => { audio.currentTime = Math.min(seconds, audio.duration || seconds) }); updateClock(); drawWaveform() }
 function tick() {
+  const current = state.audio[0]?.currentTime || 0
+  if (state.playUntil != null && current >= state.playUntil - RANGE_EPSILON) {
+    const end = state.playUntil
+    state.audio.forEach(audio => { audio.currentTime = Math.min(end, audio.duration || end) })
+    updateClock(); drawWaveform(); pause()
+    return
+  }
   updateClock()
-  syncSelectionToTime(state.audio[0]?.currentTime || 0)
+  syncSelectionToTime(current)
   drawWaveform()
   if (!state.audio[0]?.paused) state.raf = requestAnimationFrame(tick); else pause()
 }
