@@ -140,7 +140,9 @@ button { border: 0; background: transparent; cursor: pointer; }
 .identity-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--identity-color); }
 .guidance-person { border-bottom: 1px solid var(--line); }
 .guidance-person-row { min-height: 38px; display: flex; align-items: center; gap: 9px; padding: 0 18px; }
-.guidance-person-row strong { flex: 1; font-size: 12px; }
+.attendee-name-input { min-width: 0; flex: 1; margin-left: -6px; padding: 5px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; outline: 0; font-size: 12px; }
+.attendee-name-input:hover { border-color: var(--line); background: var(--surface); }
+.attendee-name-input:focus { border-color: var(--accent); background: var(--surface); }
 .guidance-person-row button { color: var(--muted); font-size: 14px; }
 .guidance-person-row .assign-person { color: var(--secondary); }
 .nested-ranges { padding-bottom: 5px; }

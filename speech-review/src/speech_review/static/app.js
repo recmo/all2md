@@ -378,7 +378,7 @@ function guidancePeopleHtml() {
   return attendeeNames().map(identity => {
     const ranges = speakers.get(identity) || []
     return `<div class="guidance-person">
-      <div class="guidance-person-row"><span class="identity-dot" style="--identity-color:${speakerColor(identity)}"></span><strong>${escapeHtml(identity)}</strong><button class="assign-person" data-identity="${escapeHtml(identity)}" title="Assign selected range to ${escapeHtml(identity)}">＋</button><button class="remove-person" data-identity="${escapeHtml(identity)}" title="Remove attendee">×</button></div>
+      <div class="guidance-person-row"><span class="identity-dot" style="--identity-color:${speakerColor(identity)}"></span><input class="attendee-name-input" data-identity="${escapeHtml(identity)}" value="${escapeHtml(identity)}" aria-label="Attendee name"><button class="assign-person" data-identity="${escapeHtml(identity)}" title="Assign selected range to ${escapeHtml(identity)}">＋</button><button class="remove-person" data-identity="${escapeHtml(identity)}" title="Remove attendee">×</button></div>
       <div class="nested-ranges">${ranges.length ? ranges.map((range, index) => ({range, index})).sort((left, right) => left.range.start - right.range.start || left.range.end - right.range.end).map(({range, index}) => guidanceRangeHtml(identity, range, index)).join('') : '<span class="no-ranges">↳ No speaker range guidance</span>'}</div>
     </div>`
   }).join('')
@@ -459,6 +459,13 @@ function bindGuidanceEditor() {
   })
   $('#show-add-attendee').onclick = () => { $('#add-attendee-form').hidden = false; $('#new-attendee').focus() }
   $('#add-attendee-form').onsubmit = addAttendee
+  document.querySelectorAll('.attendee-name-input').forEach(input => {
+    input.onchange = () => renameAttendee(input.dataset.identity, input.value)
+    input.onkeydown = event => {
+      if (event.key === 'Enter') input.blur()
+      if (event.key === 'Escape') { input.value = input.dataset.identity; input.blur() }
+    }
+  })
   document.querySelectorAll('.assign-person').forEach(button => button.onclick = () => assignIdentity(button.dataset.identity))
   document.querySelectorAll('.remove-person').forEach(button => button.onclick = () => removeAttendee(button.dataset.identity))
   document.querySelectorAll('.select-guidance-range').forEach(button => button.onclick = () => selectGuidanceRange(button.dataset.identity, Number(button.dataset.index)))
@@ -479,6 +486,19 @@ async function removeAttendee(identity) {
   if (state.transcript.hints.speakers.some(speaker => speaker.identity === identity)) return toast('Remove speaker guidance first')
   state.transcript.hints.attendees = attendeeNames().filter(name => name !== identity)
   markDirty(); await saveHints(); renderInspector()
+}
+
+async function renameAttendee(previous, value) {
+  const identity = value.trim()
+  if (!identity) { toast('Attendee name cannot be empty'); renderInspector(); return }
+  if (identity === previous) { renderInspector(); return }
+  const names = attendeeNames()
+  const duplicate = names.some(name => name !== previous && name.toLowerCase() === identity.toLowerCase())
+    || state.transcript.hints.speakers.some(speaker => speaker.identity !== previous && speaker.identity.toLowerCase() === identity.toLowerCase())
+  if (duplicate) { toast(`${identity} already exists`); renderInspector(); return }
+  state.transcript.hints.attendees = names.map(name => name === previous ? identity : name)
+  for (const speaker of state.transcript.hints.speakers) if (speaker.identity === previous) speaker.identity = identity
+  markDirty(); await saveHints(); renderTranscript(); renderInspector()
 }
 
 function selectGuidanceRange(identity, index) {
