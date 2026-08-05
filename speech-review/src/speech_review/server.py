@@ -153,35 +153,38 @@ class ReviewHandler(BaseHTTPRequestHandler):
     def _file(self, path: Path) -> None:
         if not path.is_file():
             raise FileNotFoundError(path)
-        size = path.stat().st_size
-        start, end = 0, size - 1
-        status = HTTPStatus.OK
-        range_header = self.headers.get("Range")
-        if range_header and range_header.startswith("bytes="):
-            raw_start, _, raw_end = range_header.removeprefix("bytes=").partition("-")
-            start = int(raw_start or 0)
-            end = min(int(raw_end) if raw_end else size - 1, size - 1)
-            if start < 0 or start > end:
-                self.send_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                return
-            status = HTTPStatus.PARTIAL_CONTENT
-        length = end - start + 1
-        self.send_response(status)
-        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
-        self.send_header("Content-Length", str(length))
-        self.send_header("Accept-Ranges", "bytes")
-        if status == HTTPStatus.PARTIAL_CONTENT:
-            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self.end_headers()
-        with path.open("rb") as handle:
-            handle.seek(start)
-            remaining = length
-            while remaining:
-                chunk = handle.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                remaining -= len(chunk)
+        try:
+            size = path.stat().st_size
+            start, end = 0, size - 1
+            status = HTTPStatus.OK
+            range_header = self.headers.get("Range")
+            if range_header and range_header.startswith("bytes="):
+                raw_start, _, raw_end = range_header.removeprefix("bytes=").partition("-")
+                start = int(raw_start or 0)
+                end = min(int(raw_end) if raw_end else size - 1, size - 1)
+                if start < 0 or start > end:
+                    self.send_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                    return
+                status = HTTPStatus.PARTIAL_CONTENT
+            length = end - start + 1
+            self.send_response(status)
+            self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            if status == HTTPStatus.PARTIAL_CONTENT:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            with path.open("rb") as handle:
+                handle.seek(start)
+                remaining = length
+                while remaining:
+                    chunk = handle.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def log_message(self, format: str, *args) -> None:
         print(f"speech-review: {format % args}")
