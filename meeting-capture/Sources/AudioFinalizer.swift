@@ -11,16 +11,22 @@ enum AudioFinalizer {
             AVSampleRateKey: format.sampleRate,
             AVNumberOfChannelsKey: format.channelCount,
         ]
-        let output = try AVAudioFile(forWriting: destination, settings: settings)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 32_768) else {
             throw CaptureError.writerFailure("cannot allocate conversion buffer")
         }
+
+        // AVAudioFile finishes the FLAC header and metadata when it is released.
+        // Release it explicitly before hashing so the manifest describes the
+        // bytes that remain on disk, rather than the still-open file.
+        var output: AVAudioFile? = try AVAudioFile(forWriting: destination, settings: settings)
         while input.framePosition < input.length {
             buffer.frameLength = 0
             try input.read(into: buffer)
             if buffer.frameLength == 0 { break }
-            try output.write(from: buffer)
+            try output?.write(from: buffer)
         }
+        output = nil
+
         let duration = format.sampleRate > 0 ? Double(input.length) / format.sampleRate : 0
         return AudioTrack(
             role: role,

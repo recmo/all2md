@@ -8,6 +8,13 @@ struct AudioClient: Identifiable, Equatable, Sendable {
     var id: pid_t { processID }
 }
 
+struct CaptureApplicationIdentity: Equatable, Sendable {
+    let processID: pid_t
+    let bundleID: String?
+    let applicationName: String
+    let isUserApplication: Bool
+}
+
 enum TriggerMethod: String, Codable, Sendable { case audioProcess, deviceRunning, manual }
 
 struct CaptureTrigger: Codable, Equatable, Sendable {

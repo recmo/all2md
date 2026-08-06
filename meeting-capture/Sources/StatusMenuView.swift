@@ -37,6 +37,9 @@ struct StatusMenuView: View {
                 ProgressView("Preparing recording…")
             case let .error(message):
                 Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                if model.screenRecordingPermissionNeeded {
+                    Button("Open Screen & System Audio Settings") { model.openScreenRecordingSettings() }
+                }
                 Button("Dismiss") { model.dismissError() }
             }
             if model.lastManifest != nil { Button("Reveal last recording") { model.revealLastRecording() } }

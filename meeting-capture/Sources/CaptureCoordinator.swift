@@ -29,14 +29,15 @@ final class CaptureCoordinator: ObservableObject {
         do {
             try microphone.start(to: paths.microphoneTemporary)
             if let pid = trigger.processID {
-                do { try await participants.start(processID: pid, to: paths.participantsTemporary) }
-                catch { warnings.append("Participant audio unavailable: \(error.localizedDescription)") }
+                try await participants.start(processID: pid, bundleID: trigger.bundleID, to: paths.participantsTemporary)
             } else {
                 warnings.append("Participant audio unavailable for a manual recording without a selected process.")
             }
         } catch {
             microphone.stop()
+            try? await participants.stop()
             try? FileManager.default.removeItem(at: paths.microphoneTemporary)
+            try? FileManager.default.removeItem(at: paths.participantsTemporary)
             throw error
         }
     }

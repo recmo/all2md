@@ -13,6 +13,7 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    @Published private(set) var screenRecordingPermissionNeeded = false
     @Published var lastManifest: URL?
     @Published var recoverableFiles: [URL] = []
     let capture = CaptureCoordinator()
@@ -78,6 +79,11 @@ final class AppModel: ObservableObject {
 
     func dismissError() { state = .idle }
 
+    func openScreenRecordingSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     func recoverInterruptedRecordings() {
         state = .finalizing
         Task {
@@ -140,9 +146,16 @@ final class AppModel: ObservableObject {
         state = .finalizing
         let resolvedMethod: TriggerMethod = method == .manual ? .manual : (client.processID > 0 ? .audioProcess : .deviceRunning)
         let trigger = CaptureTrigger(method: resolvedMethod, processID: client.processID > 0 ? client.processID : nil, bundleID: client.bundleID, applicationName: client.applicationName)
+        screenRecordingPermissionNeeded = false
         Task {
             do { try await capture.start(trigger: trigger); state = .recording(client) }
-            catch { state = .error(error.localizedDescription) }
+            catch {
+                if let captureError = error as? CaptureError,
+                   case .screenRecordingPermissionRequired = captureError {
+                    screenRecordingPermissionNeeded = true
+                }
+                state = .error(error.localizedDescription)
+            }
         }
     }
 
