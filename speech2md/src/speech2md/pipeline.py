@@ -176,7 +176,6 @@ def transcribe(
     if cache_complete:
         write_cache(moss_path, metadata, generated_tracks)
     speaker_profiles, identities = _canonicalize_speakers(segments, speaker_profiles)
-    segments = coalesce_segments(segments)
     apply_edits(segments, hints.edits)
     attendee_identities = list(hints.attendees)
     for identity in identities.values():
@@ -209,6 +208,7 @@ def transcribe(
         staged_voiceprints.replace(voiceprints_path)
         staged_markdown.replace(resolved.markdown_path)
     emit_progress("complete", completed_seconds=total_seconds, total_seconds=total_seconds)
+    state.segments = coalesce_segments(state.segments)
     return state
 
 

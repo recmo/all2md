@@ -15,11 +15,14 @@ Each transcript row reports review completeness independently of processing:
 `DONE` means every speaker run is assigned, while actionable rows show their
 unnamed-run count or an unprocessed, stale, queued, running, or failed state.
 
-Transcript Markdown is treated as immutable input. Turn ends are inferred from
-the next turn timestamp. For multi-track captures, the browser compares audio
-activity during a turn and uses the loudest track unless an existing hint range
-already identifies the track. When several turns overlap at the clicked time,
-the latest-starting turn in the clicked lane wins.
+Transcript Markdown is treated as immutable input. Run headers use fixed
+centisecond timestamps, and invisible timing comments contain centisecond
+offsets from that header. The final comment defines the run end; it is never
+inferred from the next speaker. For multi-track captures, the browser compares
+audio activity during a turn and uses the loudest track unless an existing hint
+range already identifies the track. When several turns overlap at the clicked
+time, the latest-starting turn in the clicked lane wins. Older transcripts
+without explicit timing comments are stale and require regeneration.
 
 A coalesced Markdown turn can be split at the audio playhead. The resulting
 subranges can be assigned independently and are reconstructed from speaker hint

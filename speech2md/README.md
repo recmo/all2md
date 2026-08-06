@@ -141,6 +141,15 @@ attendees:
 Unavailable timestamps and calendar links are omitted rather than written as
 null values.
 
+Transcript run headers and invisible timing comments use the same centisecond
+precision. Comment values are offsets from the run header; comments at retained
+MOSS boundaries provide intermediate timing, and the final comment is the
+authoritative run end.
+
+```markdown
+**[00:00:29.99] speaker-1:** How is everyone doing? <!-- 1.53s --> I think most of us is here. <!-- 3.69s -->
+```
+
 The NPZ contains only `handles`, a Unicode array of shape `(S,)`, and
 `embeddings`, a float32 array of shape `(S, 192)`. Each row is a robust,
 unit-normalized aggregate of the clean ReDimNet2 samples for the corresponding

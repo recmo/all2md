@@ -27,8 +27,8 @@ def transcript(path: Path, *, identity: str = "", handle: str = "speaker-1") -> 
         "---\n\n"
         f"# {path.stem}\n\n"
         "## Transcript\n\n"
-        "**[00:00:05] speaker-1:** Hello there.\n\n"
-        "**[00:00:12] speaker-2:** General Kenobi.\n"
+        "**[00:00:05.00] speaker-1:** Hello <!-- 3.25s --> there. <!-- 7.00s -->\n\n"
+        "**[00:00:12.00] speaker-2:** General Kenobi. <!-- 10.00s -->\n"
     )
     return path
 
@@ -44,11 +44,52 @@ def test_discovers_and_parses_frozen_markdown(tmp_path: Path):
     assert parsed["title"] == "meeting"
     assert parsed["turns"][0] == {
         "index": 0,
-        "start": 5,
-        "end": 12,
+        "start": 5.0,
+        "end": 12.0,
         "speaker": "speaker-1",
         "text": "Hello there.",
+        "timestamps": [8.25, 12.0],
     }
+
+
+def test_rejects_transcript_turn_without_an_explicit_end_marker(tmp_path: Path):
+    path = transcript(tmp_path / "meeting.md")
+    path.write_text(path.read_text().replace(" <!-- 10.00s -->", ""))
+
+    with pytest.raises(ValueError, match="missing timing comments"):
+        parse_markdown(path)
+
+
+def test_rejects_legacy_integer_turn_timestamps(tmp_path: Path):
+    path = transcript(tmp_path / "meeting.md")
+    path.write_text(path.read_text().replace(".00]", "]"))
+
+    with pytest.raises(ValueError, match="no supported timestamped turns"):
+        parse_markdown(path)
+
+
+def test_rejects_content_after_the_final_timing_marker(tmp_path: Path):
+    path = transcript(tmp_path / "meeting.md")
+    path.write_text(path.read_text().replace(
+        "General Kenobi. <!-- 10.00s -->",
+        "General Kenobi. <!-- 10.00s --> trailing",
+    ))
+
+    with pytest.raises(ValueError, match="must end with a timing comment"):
+        parse_markdown(path)
+
+
+def test_turn_end_can_overlap_the_next_turn(tmp_path: Path):
+    path = transcript(tmp_path / "meeting.md")
+    path.write_text(path.read_text().replace(
+        "there. <!-- 7.00s -->",
+        "there. <!-- 8.00s -->",
+    ))
+
+    parsed = parse_markdown(path)
+
+    assert parsed["turns"][0]["end"] == 13.0
+    assert parsed["turns"][1]["start"] == 12.0
 
 
 def test_review_progress_counts_unnamed_slices(tmp_path: Path):

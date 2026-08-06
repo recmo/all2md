@@ -112,7 +112,7 @@ async function selectTranscript(id, {preservePosition = false} = {}) {
   seedAttendees()
   seedSpeakerNames()
   selectDefaultRange(state.selected)
-  state.duration = state.transcript.turns.at(-1)?.end || 0
+  state.duration = Math.max(0, ...state.transcript.turns.map(turn => turn.end))
   $('#meeting-title').textContent = state.transcript.title
   $('#meeting-meta').textContent = state.transcript.editable ? `${state.transcript.name} · ${state.transcript.turns.length} turns · ${state.transcript.status}` : `${state.transcript.name} · ${state.transcript.status}`
   setSaveState(state.transcript.status === 'stale' && state.transcript.staleReason === 'hints' ? 'Guidance changed · regenerate' : state.transcript.editable ? (state.transcript.hintRevision ? 'Guidance loaded' : 'No guidance file') : 'Needs processing')

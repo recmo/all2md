@@ -753,6 +753,7 @@ def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path
         ],
     }
     assert body.startswith("\n\n# Test\n\n## Transcript\n")
+    assert "**[00:00:01.00] speaker-1:** Hello <!-- 1.00s -->" in body
     assert "## Capture" not in body
     assert "## Processing notes" not in body
 
@@ -764,7 +765,25 @@ def test_render_coalesces_only_same_speaker():
         Segment(2.1, 3, "Three.", "Speaker 2", "mixed"),
     ]
     assert [item.text for item in coalesce_segments(segments)] == ["One. Two.", "Three."]
-    assert timestamp(3661) == "01:01:01"
+    assert timestamp(3661.239) == "01:01:01.24"
+
+    state = TranscriptState(
+        title="Timed",
+        started_at=None,
+        processing_seconds=1,
+        segments=segments,
+        source_sha256="a" * 64,
+    )
+    body = render_markdown(state)
+    assert (
+        "**[00:00:00.00] speaker-1:** One. <!-- 1.00s --> "
+        "Two. <!-- 2.00s -->"
+    ) in body
+    assert "**[00:00:02.10] speaker-2:** Three. <!-- 0.90s -->" in body
+
+    state.segments = [Segment(4, 4, "Instant.", "Speaker 1", "mixed")]
+    body = render_markdown(state)
+    assert "**[00:00:04.00] speaker-1:** Instant. <!-- 0.01s -->" in body
 
 
 def test_transcribe_refuses_to_overwrite_before_loading_model(tmp_path: Path):

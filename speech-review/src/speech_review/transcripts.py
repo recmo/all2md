@@ -12,7 +12,8 @@ import numpy as np
 import yaml
 
 
-TURN = re.compile(r"^\*\*\[(\d{2}):(\d{2}):(\d{2})\] ([^:]+):\*\*\s?(.*)$")
+TURN = re.compile(r"^\*\*\[(\d{2}):(\d{2}):(\d{2}\.\d{2})\] ([^:]+):\*\*\s?(.*)$")
+TIMING = re.compile(r"<!--\s*(\d+\.\d{2})s\s*-->")
 MEDIA_SUFFIXES = {".aac", ".caf", ".flac", ".m4a", ".mp3", ".mp4", ".ogg", ".wav", ".webm"}
 
 
@@ -126,15 +127,27 @@ def parse_markdown(path: Path) -> dict[str, Any]:
         if not match:
             continue
         hours, minutes, seconds, speaker, content = match.groups()
-        start = int(hours) * 3600 + int(minutes) * 60 + int(seconds)
+        start = round(int(hours) * 3600 + int(minutes) * 60 + float(seconds), 2)
+        timing_matches = list(TIMING.finditer(content))
+        offsets = [float(match.group(1)) for match in timing_matches]
+        if not timing_matches:
+            raise ValueError("transcript turn is missing timing comments")
+        if timing_matches[-1].end() != len(content.rstrip()):
+            raise ValueError("transcript turn must end with a timing comment")
+        if offsets[0] <= 0 or any(
+            right <= left for left, right in zip(offsets, offsets[1:])
+        ):
+            raise ValueError("transcript turn timing comments must increase")
         turns.append({
             "index": len(turns),
             "start": start,
+            "end": round(start + offsets[-1], 2),
             "speaker": speaker.strip(),
-            "text": content.strip(),
+            "text": re.sub(r"\s+", " ", TIMING.sub("", content)).strip(),
+            "timestamps": [round(start + offset, 2) for offset in offsets],
         })
-    for index, turn in enumerate(turns):
-        turn["end"] = turns[index + 1]["start"] if index + 1 < len(turns) else turn["start"] + 10
+    if not turns:
+        raise ValueError("transcript has no supported timestamped turns")
     return {
         "title": title_match.group(1).strip() if title_match else path.stem,
         "frontmatter": frontmatter,
