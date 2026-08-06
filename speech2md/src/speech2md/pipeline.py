@@ -177,10 +177,15 @@ def transcribe(
         write_cache(moss_path, metadata, generated_tracks)
     speaker_profiles, identities = _canonicalize_speakers(segments, speaker_profiles)
     apply_edits(segments, hints.edits)
-    attendee_handles = list(hints.attendees)
-    for identity in identities.values():
-        if identity not in attendee_handles:
-            attendee_handles.append(identity)
+    attendees = [
+        {"handle": attendee.handle, "identity": attendee.identity}
+        for attendee in hints.attendees
+    ]
+    attendee_handles = {attendee["handle"] for attendee in attendees}
+    for handle in identities.values():
+        if handle not in attendee_handles:
+            attendees.append({"handle": handle, "identity": ""})
+            attendee_handles.add(handle)
     state = TranscriptState(
         title=hints.title or resolved.title,
         started_at=hints.started_at or resolved.started_at,
@@ -189,10 +194,8 @@ def transcribe(
         source_sha256=source_hash,
         processing_seconds=time.monotonic() - started,
         segments=sorted(segments, key=lambda item: (item.start, item.end, item.source_role)),
-        attendees=[{"identity": handle} for handle in attendee_handles] + [
-            {"handle": handle, "identity": identity}
-            for handle, identity in identities.items()
-        ],
+        attendees=attendees,
+        speaker_names=identities,
         hints_sha256=hints.sha256,
     )
     emit_progress("writing outputs", completed_seconds=total_seconds, total_seconds=total_seconds)

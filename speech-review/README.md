@@ -59,11 +59,12 @@ Ordinary edits never modify `.md`, audio, or `.voiceprints.npz` files. Raw
 recordings and recordings with an unsupported older transcript are still
 listed as `unprocessed` or `stale`. The Regenerate control is the explicit
 boundary that runs current `speech2md --force` and replaces derived Markdown
-and voiceprints; it always asks for confirmation first.
+and voiceprints; it queues the work immediately.
 
 ## Hint extensions
 
-In addition to `hotwords` and `speakers`, the editor stores:
+The editor stores metadata, hotwords, and one unified attendee list. Speaker
+range guidance is nested directly under the attendee it identifies:
 
 ```yaml
 title: ProveKit weekly check-in
@@ -71,7 +72,14 @@ started_at: '2026-08-04T09:00:00+02:00'
 ended_at: '2026-08-04T10:00:00+02:00'
 calendar_event: https://calendar.google.com/example
 attendees:
-  - Michał
+  - handle: Michał
+    identity: ''
+  - handle: Alice
+    identity: ''
+    ranges:
+      - track: participants
+        start: 1122
+        end: 1148
 edits:
   - track: participants
     start: 1122

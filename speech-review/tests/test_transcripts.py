@@ -118,7 +118,7 @@ def test_attendee_roster_does_not_identify_local_speakers(tmp_path: Path):
         attendee_handle="Alice",
     ))
 
-    assert review_progress(parsed, {"speakers": []}) == {
+    assert review_progress(parsed, {"attendees": [{"handle": "Alice", "identity": ""}]}) == {
         "complete": False,
         "unassignedRunCount": 2,
         "unassignedSpeakerCount": 2,
@@ -131,7 +131,7 @@ def test_review_progress_counts_unnamed_slices(tmp_path: Path):
         attendee_handle="Alice",
         first_speaker="Alice",
     ))
-    empty = review_progress(parsed, {"speakers": []})
+    empty = review_progress(parsed, {"attendees": [{"handle": "Alice", "identity": ""}]})
     assert empty == {
         "complete": False,
         "unassignedRunCount": 1,
@@ -139,13 +139,13 @@ def test_review_progress_counts_unnamed_slices(tmp_path: Path):
     }
 
     partial = review_progress(parsed, {
-        "speakers": [{"identity": "Bob", "ranges": [{"start": 14, "end": 18}]}],
+        "attendees": [{"handle": "Bob", "identity": "", "ranges": [{"start": 14, "end": 18}]}],
     })
     assert partial["unassignedRunCount"] == 2
     assert partial["unassignedSpeakerCount"] == 1
 
     complete = review_progress(parsed, {
-        "speakers": [{"identity": "Bob", "ranges": [{"start": 12, "end": 22}]}],
+        "attendees": [{"handle": "Bob", "identity": "", "ranges": [{"start": 12, "end": 22}]}],
     })
     assert complete == {
         "complete": True,
@@ -169,7 +169,7 @@ def test_review_progress_propagates_a_whole_turn_hint_to_its_handle(tmp_path: Pa
     })
 
     progress = review_progress(parsed, {
-        "speakers": [{"identity": "Bob", "ranges": [{"start": 12, "end": 22}]}],
+        "attendees": [{"handle": "Bob", "identity": "", "ranges": [{"start": 12, "end": 22}]}],
     })
 
     assert progress == {
@@ -201,9 +201,9 @@ def test_hint_writes_are_atomic_and_revision_checked(tmp_path: Path):
         "started_at": "2026-08-04T09:00:00+02:00",
         "ended_at": "2026-08-04T10:00:00+02:00",
         "calendar_event": "https://calendar.google.com/example",
-        "attendees": ["Michał"],
-        "speakers": [{
-            "identity": "Alice",
+        "attendees": [{
+            "handle": "Michał",
+            "identity": "",
             "ranges": [{"track": "participants", "start": 5, "end": 12}],
         }],
         "edits": [{
@@ -222,6 +222,26 @@ def test_hint_writes_are_atomic_and_revision_checked(tmp_path: Path):
         write_hint_document(path, document, None)
 
 
+def test_attendee_without_ranges_is_preserved_without_an_empty_ranges_field(tmp_path: Path):
+    path = tmp_path / "meeting.hint.yaml"
+    document = {
+        "attendees": [{"handle": "Michał", "identity": "", "ranges": []}],
+    }
+
+    write_hint_document(path, document, None)
+
+    assert path.read_text() == "attendees:\n- handle: Michał\n  identity: ''\n"
+
+
+def test_separate_speakers_collection_is_rejected(tmp_path: Path):
+    with pytest.raises(ValueError, match="unknown fields"):
+        write_hint_document(
+            tmp_path / "meeting.hint.yaml",
+            {"attendees": [], "speakers": []},
+            None,
+        )
+
+
 def test_current_transcript_becomes_stale_when_hints_change(tmp_path: Path):
     path = transcript(tmp_path / "meeting.md", attendee_handle="Alice")
     item = TranscriptFile(tmp_path, path)
@@ -229,7 +249,7 @@ def test_current_transcript_becomes_stale_when_hints_change(tmp_path: Path):
 
     write_hint_document(
         item.hint_path,
-        {"hotwords": ["F2Z"], "attendees": [], "speakers": [], "edits": []},
+        {"hotwords": ["F2Z"], "attendees": [], "edits": []},
         None,
     )
 

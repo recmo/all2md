@@ -126,22 +126,23 @@ async function selectTranscript(id, {preservePosition = false} = {}) {
 
 function seedAttendees() {
   const hints = state.transcript.hints
-  hints.attendees = [...new Set((hints.attendees || []).map(item => typeof item === 'string' ? item : item.identity).filter(Boolean))]
-  hints.hotwords ||= []; hints.speakers ||= []; hints.edits ||= []
+  hints.attendees ||= []
+  for (const attendee of hints.attendees) attendee.ranges ||= []
+  hints.hotwords ||= []; hints.edits ||= []
 }
 
 function seedSpeakerNames() {
   const conflicts = new Set()
-  for (const speaker of state.transcript.hints.speakers) {
-    for (const range of speaker.ranges || []) {
+  for (const attendee of state.transcript.hints.attendees) {
+    for (const range of attendee.ranges || []) {
       const turn = state.transcript.turns.find(candidate =>
         sameTrack(range.track, candidate.track)
         && Math.abs(range.start - candidate.start) < RANGE_EPSILON
         && Math.abs(range.end - candidate.end) < RANGE_EPSILON)
       if (!turn || renderedIdentity(turn)) continue
       const previous = state.speakerNames.get(turn.speaker)
-      if (previous && previous !== speaker.identity) conflicts.add(turn.speaker)
-      else state.speakerNames.set(turn.speaker, speaker.identity)
+      if (previous && previous !== attendee.handle) conflicts.add(turn.speaker)
+      else state.speakerNames.set(turn.speaker, attendee.handle)
     }
   }
   for (const handle of conflicts) state.speakerNames.delete(handle)
@@ -250,8 +251,8 @@ function syncSelectionToTime(time) {
 }
 
 function proposedIdentity(turn) {
-  for (const speaker of state.transcript.hints.speakers) {
-    if ((speaker.ranges || []).some(range => overlaps(turn, range))) return speaker.identity
+  for (const attendee of state.transcript.hints.attendees) {
+    if ((attendee.ranges || []).some(range => overlaps(turn, range))) return attendee.handle
   }
   return state.speakerNames.get(turn.speaker) || ''
 }
@@ -259,8 +260,8 @@ function proposedIdentity(turn) {
 function turnSlices(turn) {
   const boundaries = new Set([turn.start, turn.end])
   const track = turn.track || state.transcript.audio[0]?.role
-  for (const speaker of state.transcript.hints.speakers) {
-    for (const range of speaker.ranges || []) {
+  for (const attendee of state.transcript.hints.attendees) {
+    for (const range of attendee.ranges || []) {
       if (!sameTrack(range.track, track) || !overlaps(turn, range)) continue
       if (range.start > turn.start + RANGE_EPSILON && range.start < turn.end - RANGE_EPSILON) boundaries.add(range.start)
       if (range.end > turn.start + RANGE_EPSILON && range.end < turn.end - RANGE_EPSILON) boundaries.add(range.end)
@@ -389,13 +390,12 @@ function voiceprintCandidatesHtml(candidates) {
 }
 
 function attendeeNames() {
-  return (state.transcript.hints.attendees || []).map(item => typeof item === 'string' ? item : item.identity).filter(Boolean)
+  return (state.transcript.hints.attendees || []).map(item => item.handle).filter(Boolean)
 }
 
 function guidancePeopleHtml() {
-  const speakers = new Map((state.transcript.hints.speakers || []).map(speaker => [speaker.identity, speaker.ranges || []]))
   return attendeeNames().map(identity => {
-    const ranges = speakers.get(identity) || []
+    const ranges = state.transcript.hints.attendees.find(attendee => attendee.handle === identity)?.ranges || []
     return `<div class="guidance-person">
       <div class="guidance-person-row"><span class="identity-dot" style="--identity-color:${speakerColor(identity)}"></span><input class="attendee-name-input" data-identity="${escapeHtml(identity)}" value="${escapeHtml(identity)}" aria-label="Attendee name"><button class="assign-person" data-identity="${escapeHtml(identity)}" title="Assign selected range to ${escapeHtml(identity)}">＋</button><button class="remove-person" data-identity="${escapeHtml(identity)}" title="Remove attendee">×</button></div>
       <div class="nested-ranges">${ranges.length ? ranges.map((range, index) => ({range, index})).sort((left, right) => left.range.start - right.range.start || left.range.end - right.range.end).map(({range, index}) => guidanceRangeHtml(identity, range, index)).join('') : '<span class="no-ranges">↳ No speaker range guidance</span>'}</div>
@@ -502,8 +502,9 @@ async function saveGuidanceMetadata() {
 }
 
 async function removeAttendee(identity) {
-  if (state.transcript.hints.speakers.some(speaker => speaker.identity === identity)) return toast('Remove speaker guidance first')
-  state.transcript.hints.attendees = attendeeNames().filter(name => name !== identity)
+  const attendee = state.transcript.hints.attendees.find(item => item.handle === identity)
+  if (attendee?.ranges.length) return toast('Remove speaker guidance first')
+  state.transcript.hints.attendees = state.transcript.hints.attendees.filter(item => item.handle !== identity)
   markDirty(); await saveHints(); renderInspector()
 }
 
@@ -513,15 +514,14 @@ async function renameAttendee(previous, value) {
   if (identity === previous) { renderInspector(); return }
   const names = attendeeNames()
   const duplicate = names.some(name => name !== previous && name.toLowerCase() === identity.toLowerCase())
-    || state.transcript.hints.speakers.some(speaker => speaker.identity !== previous && speaker.identity.toLowerCase() === identity.toLowerCase())
   if (duplicate) { toast(`${identity} already exists`); renderInspector(); return }
-  state.transcript.hints.attendees = names.map(name => name === previous ? identity : name)
-  for (const speaker of state.transcript.hints.speakers) if (speaker.identity === previous) speaker.identity = identity
+  const attendee = state.transcript.hints.attendees.find(item => item.handle === previous)
+  if (attendee) attendee.handle = identity
   markDirty(); await saveHints(); renderTranscript(); renderInspector()
 }
 
 function selectGuidanceRange(identity, index) {
-  const range = state.transcript.hints.speakers.find(speaker => speaker.identity === identity)?.ranges[index]
+  const range = state.transcript.hints.attendees.find(attendee => attendee.handle === identity)?.ranges[index]
   if (!range) return
   const turn = state.transcript.turns.find(candidate => sameTrack(range.track, candidate.track) && candidate.start <= range.start + RANGE_EPSILON && candidate.end > range.start + RANGE_EPSILON)
     || state.transcript.turns.find(candidate => sameTrack(range.track, candidate.track) && overlaps(candidate, range))
@@ -531,10 +531,9 @@ function selectGuidanceRange(identity, index) {
 }
 
 async function removeGuidanceRange(identity, index) {
-  const speaker = state.transcript.hints.speakers.find(item => item.identity === identity)
-  if (!speaker?.ranges[index]) return
-  speaker.ranges.splice(index, 1)
-  state.transcript.hints.speakers = state.transcript.hints.speakers.filter(item => item.ranges.length)
+  const attendee = state.transcript.hints.attendees.find(item => item.handle === identity)
+  if (!attendee?.ranges[index]) return
+  attendee.ranges.splice(index, 1)
   reconcileSelectedRange(); markDirty(); await saveHints(); renderTranscript(); renderInspector(); drawWaveform()
 }
 
@@ -575,7 +574,7 @@ function bindMetadataEditor() {
 async function addAttendee(event) {
   event?.preventDefault()
   const input = $('#new-attendee'); const identity = input.value.trim(); if (!identity) return
-  if (!attendeeNames().includes(identity)) state.transcript.hints.attendees.push(identity)
+  if (!attendeeNames().includes(identity)) state.transcript.hints.attendees.push({handle: identity, identity: '', ranges: []})
   input.value = ''; markDirty(); await saveHints(); renderInspector()
 }
 
@@ -586,20 +585,18 @@ async function assignIdentity(identity) {
     && Math.abs(target.start - turn.start) < RANGE_EPSILON
     && Math.abs(target.end - turn.end) < RANGE_EPSILON
   const assignment = {...target, track}
-  for (const speaker of state.transcript.hints.speakers) {
-    speaker.ranges = (speaker.ranges || []).flatMap(range => subtractRange(range, assignment, assignment.track))
+  for (const attendee of state.transcript.hints.attendees) {
+    attendee.ranges = (attendee.ranges || []).flatMap(range => subtractRange(range, assignment, assignment.track))
   }
-  state.transcript.hints.speakers = state.transcript.hints.speakers.filter(speaker => speaker.ranges.length)
-  let speaker = state.transcript.hints.speakers.find(item => item.identity === identity)
-  if (!speaker) { speaker = {identity, ranges: []}; state.transcript.hints.speakers.push(speaker) }
-  speaker.ranges.push({
+  let attendee = state.transcript.hints.attendees.find(item => item.handle === identity)
+  if (!attendee) { attendee = {handle: identity, identity: '', ranges: []}; state.transcript.hints.attendees.push(attendee) }
+  attendee.ranges.push({
     ...(state.transcript.audio.length > 1 ? {track: assignment.track} : {}),
     start: assignment.start,
     end: assignment.end,
   })
-  speaker.ranges = mergeRanges(speaker.ranges)
+  attendee.ranges = mergeRanges(attendee.ranges)
   if (wholeAnonymousSpeaker) state.speakerNames.set(turn.speaker, identity)
-  if (!state.transcript.hints.attendees.some(item => (typeof item === 'string' ? item : item.identity) === identity)) state.transcript.hints.attendees.push(identity)
   reconcileSelectedRange()
   markDirty(); renderInspector(); renderTranscript(); drawWaveform(); await saveHints()
 }
@@ -675,7 +672,7 @@ function inferTracks() {
     return
   }
   for (const turn of state.transcript.turns) {
-    const hinted = state.transcript.hints.speakers.flatMap(item => item.ranges || []).find(range => range.track && overlaps(range, turn))
+    const hinted = state.transcript.hints.attendees.flatMap(item => item.ranges || []).find(range => range.track && overlaps(range, turn))
     if (hinted) { turn.track = hinted.track; continue }
     let best = -1; let bestEnergy = -1
     state.buffers.forEach((buffer, index) => {

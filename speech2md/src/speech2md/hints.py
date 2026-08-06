@@ -12,16 +12,26 @@ from .moss import normalize_hotwords
 
 
 @dataclass(frozen=True)
+class AttendeeHint:
+    handle: str
+    identity: str = ""
+    ranges: tuple[SpeakerHint, ...] = ()
+
+
+@dataclass(frozen=True)
 class SpeechHints:
     hotwords: tuple[str, ...] = ()
-    speakers: tuple[SpeakerHint, ...] = ()
-    attendees: tuple[str, ...] = ()
+    attendees: tuple[AttendeeHint, ...] = ()
     edits: tuple[TranscriptEdit, ...] = ()
     title: str | None = None
     started_at: str | None = None
     ended_at: str | None = None
     calendar_event: str | None = None
     sha256: str | None = None
+
+    @property
+    def speakers(self) -> tuple[SpeakerHint, ...]:
+        return tuple(value for attendee in self.attendees for value in attendee.ranges)
 
 
 def hint_path(resolved: ResolvedInput) -> Path:
@@ -43,7 +53,7 @@ def load_hints(path: Path) -> SpeechHints:
     mapping = _mapping(value, "hint sidecar")
     _only(
         mapping,
-        {"attendees", "calendar_event", "edits", "ended_at", "hotwords", "speakers", "started_at", "title"},
+        {"attendees", "calendar_event", "edits", "ended_at", "hotwords", "started_at", "title"},
         "hint sidecar",
     )
     title = _optional_single_line(mapping.get("title"), "hint title")
@@ -63,40 +73,36 @@ def load_hints(path: Path) -> SpeechHints:
     raw_attendees = mapping.get("attendees", [])
     if not isinstance(raw_attendees, list):
         raise ValueError("hint attendees must be a list")
-    attendees: list[str] = []
+    attendees: list[AttendeeHint] = []
+    handles: set[str] = set()
     for attendee_index, raw_attendee in enumerate(raw_attendees, 1):
-        identity = _single_line(raw_attendee, f"hint attendee {attendee_index}")
-        if identity in attendees:
-            raise ValueError(f"duplicate hint attendee identity: {identity}")
-        attendees.append(identity)
-
-    raw_speakers = mapping.get("speakers", [])
-    if not isinstance(raw_speakers, list):
-        raise ValueError("hint speakers must be a list")
-    speakers: list[SpeakerHint] = []
-    identities: set[str] = set()
-    for speaker_index, raw_speaker in enumerate(raw_speakers, 1):
-        speaker = _mapping(raw_speaker, f"hint speaker {speaker_index}")
-        _only(speaker, {"identity", "ranges"}, f"hint speaker {speaker_index}")
-        identity = _single_line(speaker.get("identity"), f"hint speaker {speaker_index} identity")
-        if identity in identities:
-            raise ValueError(f"duplicate hint speaker identity: {identity}")
-        identities.add(identity)
-        raw_ranges = speaker.get("ranges")
-        if not isinstance(raw_ranges, list) or not raw_ranges:
-            raise ValueError(f"hint speaker {identity} ranges must be a non-empty list")
+        label = f"hint attendee {attendee_index}"
+        attendee = _mapping(raw_attendee, label)
+        _only(attendee, {"handle", "identity", "ranges"}, label)
+        if not {"handle", "identity"} <= set(attendee):
+            raise ValueError(f"{label} must contain handle and identity")
+        handle = _single_line(attendee.get("handle"), f"{label} handle")
+        identity = _empty_or_single_line(attendee.get("identity"), f"{label} identity")
+        if handle in handles:
+            raise ValueError(f"duplicate hint attendee handle: {handle}")
+        handles.add(handle)
+        raw_ranges = attendee.get("ranges", [])
+        if not isinstance(raw_ranges, list):
+            raise ValueError(f"hint attendee {handle} ranges must be a list")
+        ranges: list[SpeakerHint] = []
         for range_index, raw_range in enumerate(raw_ranges, 1):
-            label = f"hint range {identity} #{range_index}"
-            range_value = _mapping(raw_range, label)
-            _only(range_value, {"track", "start", "end"}, label)
-            start = _number(range_value.get("start"), f"{label} start")
-            end = _number(range_value.get("end"), f"{label} end")
+            range_label = f"hint range {handle} #{range_index}"
+            range_value = _mapping(raw_range, range_label)
+            _only(range_value, {"track", "start", "end"}, range_label)
+            start = _number(range_value.get("start"), f"{range_label} start")
+            end = _number(range_value.get("end"), f"{range_label} end")
             if start < 0 or end <= start:
-                raise ValueError(f"{label} must have 0 <= start < end")
+                raise ValueError(f"{range_label} must have 0 <= start < end")
             track = range_value.get("track")
             if track is not None and (not isinstance(track, str) or not track.strip()):
-                raise ValueError(f"{label} track must be a non-empty string")
-            speakers.append(SpeakerHint(identity, start, end, track.strip() if track else None))
+                raise ValueError(f"{range_label} track must be a non-empty string")
+            ranges.append(SpeakerHint(handle, start, end, track.strip() if track else None))
+        attendees.append(AttendeeHint(handle, identity, tuple(ranges)))
     raw_edits = mapping.get("edits", [])
     if not isinstance(raw_edits, list):
         raise ValueError("hint edits must be a list")
@@ -117,7 +123,6 @@ def load_hints(path: Path) -> SpeechHints:
         edits.append(TranscriptEdit(start, end, before, after, track))
     return SpeechHints(
         hotwords=hotwords,
-        speakers=tuple(speakers),
         attendees=tuple(attendees),
         edits=tuple(edits),
         title=title,
@@ -132,29 +137,35 @@ def validate_hints(hints: SpeechHints, sources: list[AudioSource]) -> SpeechHint
     by_role: dict[str, list[AudioSource]] = {}
     for source in sources:
         by_role.setdefault(source.role, []).append(source)
+    validated_attendees: list[AttendeeHint] = []
     validated: list[SpeakerHint] = []
-    for item in hints.speakers:
-        if item.track is None:
-            if len(sources) != 1:
+    for attendee in hints.attendees:
+        attendee_ranges: list[SpeakerHint] = []
+        for item in attendee.ranges:
+            if item.track is None:
+                if len(sources) != 1:
+                    raise ValueError(
+                        f"hint range {item.identity} at {item.start:g}-{item.end:g}s requires a track"
+                    )
+                track = sources[0].role
+                source = sources[0]
+            else:
+                matches = by_role.get(item.track, [])
+                if not matches:
+                    raise ValueError(f"unknown hint track: {item.track}")
+                if len(matches) != 1:
+                    raise ValueError(f"ambiguous hint track: {item.track}")
+                track = item.track
+                source = matches[0]
+            if item.end > source.duration_seconds:
                 raise ValueError(
-                    f"hint range {item.identity} at {item.start:g}-{item.end:g}s requires a track"
+                    f"hint range {item.identity} at {item.start:g}-{item.end:g}s exceeds "
+                    f"{track} duration {source.duration_seconds:g}s"
                 )
-            track = sources[0].role
-            source = sources[0]
-        else:
-            matches = by_role.get(item.track, [])
-            if not matches:
-                raise ValueError(f"unknown hint track: {item.track}")
-            if len(matches) != 1:
-                raise ValueError(f"ambiguous hint track: {item.track}")
-            track = item.track
-            source = matches[0]
-        if item.end > source.duration_seconds:
-            raise ValueError(
-                f"hint range {item.identity} at {item.start:g}-{item.end:g}s exceeds "
-                f"{track} duration {source.duration_seconds:g}s"
-            )
-        validated.append(SpeakerHint(item.identity, item.start, item.end, track))
+            value = SpeakerHint(item.identity, item.start, item.end, track)
+            attendee_ranges.append(value)
+            validated.append(value)
+        validated_attendees.append(AttendeeHint(attendee.handle, attendee.identity, tuple(attendee_ranges)))
 
     for index, left in enumerate(validated):
         for right in validated[index + 1 :]:
@@ -186,8 +197,7 @@ def validate_hints(hints: SpeechHints, sources: list[AudioSource]) -> SpeechHint
             )
     return SpeechHints(
         hotwords=hints.hotwords,
-        speakers=tuple(validated),
-        attendees=hints.attendees,
+        attendees=tuple(validated_attendees),
         edits=hints.edits,
         title=hints.title,
         started_at=hints.started_at,
@@ -252,3 +262,9 @@ def _optional_single_line(value, label: str) -> str | None:
     if value is None:
         return None
     return _single_line(value, label)
+
+
+def _empty_or_single_line(value, label: str) -> str:
+    if not isinstance(value, str) or "\n" in value or "\r" in value:
+        raise ValueError(f"{label} must be a single-line string")
+    return value.strip()

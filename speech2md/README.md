@@ -36,15 +36,16 @@ hotwords:
   - ProveKit
   - F2Z
   - ReDimNet2
-speakers:
-  - identity: Alice
+attendees:
+  - handle: Alice
+    identity: ''
     ranges:
       - track: mixed
         start: 754.0
         end: 762.0
 ```
 
-The two sections are independently optional. Unknown fields, invalid tracks,
+Both fields are optional, as are `ranges` on each attendee. Unknown fields, invalid tracks,
 out-of-bounds ranges, and identities that cannot be separated at a MOSS turn
 boundary stop processing. A track may be omitted for single-track media and is
 required for multi-track captures. Hotwords are trimmed, deduplicated

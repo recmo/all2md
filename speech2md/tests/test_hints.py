@@ -5,12 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from speech2md.hints import SpeechHints, apply_edits, load_hints, validate_hints
+from speech2md.hints import AttendeeHint, SpeechHints, apply_edits, load_hints, validate_hints
 from speech2md.model import AudioSource, Segment, SpeakerHint, TranscriptEdit
 
 
 def source(role: str = "mixed", duration: float = 900) -> AudioSource:
     return AudioSource(f"/tmp/{role}.flac", role, "a" * 64, duration, "flac")
+
+
+def attendee(handle: str, *ranges: SpeakerHint) -> AttendeeHint:
+    return AttendeeHint(handle, "", tuple(ranges))
 
 
 def test_absent_and_empty_hint_sidecars(tmp_path: Path):
@@ -37,9 +41,8 @@ def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Pa
         "ended_at: '2026-08-04T10:00:00+02:00'\n"
         "calendar_event: https://calendar.google.com/example\n"
         "attendees:\n"
-        "  - Michał\n"
-        "speakers:\n"
-        "  - identity: gbrain://people/alice\n"
+        "  - handle: Michał\n"
+        "    identity: gbrain://people/michal\n"
         "    ranges:\n"
         "      - track: participants\n"
         "        start: 12.5\n"
@@ -55,9 +58,15 @@ def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Pa
     hints = load_hints(path)
     assert hints.hotwords == ("ProveKit", "F2Z")
     assert hints.speakers == (
-        SpeakerHint("gbrain://people/alice", 12.5, 18.0, "participants"),
+        SpeakerHint("Michał", 12.5, 18.0, "participants"),
     )
-    assert hints.attendees == ("Michał",)
+    assert hints.attendees == (
+        AttendeeHint(
+            "Michał",
+            "gbrain://people/michal",
+            (SpeakerHint("Michał", 12.5, 18.0, "participants"),),
+        ),
+    )
     assert hints.title == "ProveKit weekly check-in"
     assert hints.started_at == "2026-08-04T09:00:00+02:00"
     assert hints.ended_at == "2026-08-04T10:00:00+02:00"
@@ -97,8 +106,10 @@ def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch
         ("hotwords: F2Z\n", "must be a list"),
         ("hotwords: [F2Z, 3]\n", "only strings"),
         ("hotwords: ['']\n", "must not be empty"),
-        ("speakers: {}\n", "must be a list"),
-        ("attendees: [{identity: Alice}]\n", "must be a non-empty string"),
+        ("speakers: {}\n", "unknown field"),
+        ("attendees: [{identity: Alice}]\n", "must contain handle and identity"),
+        ("attendees: [{handle: Alice}]\n", "must contain handle and identity"),
+        ("attendees: [Alice]\n", "must be a mapping"),
         ("edits: {}\n", "must be a list"),
         ("calendar_event: calendar-id\n", "must be an http"),
         (
@@ -106,19 +117,19 @@ def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch
             "after must be a non-empty string",
         ),
         (
-            "speakers:\n  - identity: ''\n    ranges: [{start: 1, end: 2}]\n",
-            "identity must be a non-empty string",
+            "attendees:\n  - handle: ''\n    identity: ''\n    ranges: [{start: 1, end: 2}]\n",
+            "handle must be a non-empty string",
         ),
         (
-            "speakers:\n  - identity: Alice\n    ranges: [{start: 2, end: 1}]\n",
+            "attendees:\n  - handle: Alice\n    identity: ''\n    ranges: [{start: 2, end: 1}]\n",
             "0 <= start < end",
         ),
         (
-            "speakers:\n  - identity: Alice\n    extra: true\n    ranges: [{start: 1, end: 2}]\n",
+            "attendees:\n  - handle: Alice\n    identity: ''\n    extra: true\n    ranges: [{start: 1, end: 2}]\n",
             "unknown field",
         ),
         (
-            "speakers:\n  - identity: Alice\n    ranges: [{start: 1, end: 2, extra: true}]\n",
+            "attendees:\n  - handle: Alice\n    identity: ''\n    ranges: [{start: 1, end: 2, extra: true}]\n",
             "unknown field",
         ),
     ],
@@ -132,14 +143,14 @@ def test_invalid_hint_shapes_fail_clearly(tmp_path: Path, raw: str, message: str
 
 def test_malformed_yaml_fails_clearly(tmp_path: Path):
     path = tmp_path / "meeting.hint.yaml"
-    path.write_text("speakers: [\n")
+    path.write_text("attendees: [\n")
     with pytest.raises(ValueError, match="invalid hint YAML"):
         load_hints(path)
 
 
 def test_single_track_is_inferred_and_ranges_are_checked():
     hints = SpeechHints(
-        speakers=(SpeakerHint("Alice", 10, 20),),
+        attendees=(attendee("Alice", SpeakerHint("Alice", 10, 20)),),
         sha256="b" * 64,
     )
     validated = validate_hints(hints, [source()])
@@ -148,7 +159,7 @@ def test_single_track_is_inferred_and_ranges_are_checked():
 
     with pytest.raises(ValueError, match="exceeds mixed duration"):
         validate_hints(
-            SpeechHints(speakers=(SpeakerHint("Alice", 899, 901),)),
+            SpeechHints(attendees=(attendee("Alice", SpeakerHint("Alice", 899, 901)),)),
             [source()],
         )
 
@@ -157,28 +168,29 @@ def test_multitrack_hints_require_a_unique_known_track():
     sources = [source("microphone"), source("participants")]
     with pytest.raises(ValueError, match="requires a track"):
         validate_hints(
-            SpeechHints(speakers=(SpeakerHint("Alice", 10, 20),)),
+            SpeechHints(attendees=(attendee("Alice", SpeakerHint("Alice", 10, 20)),)),
             sources,
         )
     with pytest.raises(ValueError, match="unknown hint track"):
         validate_hints(
-            SpeechHints(speakers=(SpeakerHint("Alice", 10, 20, "mixed"),)),
+            SpeechHints(attendees=(attendee("Alice", SpeakerHint("Alice", 10, 20, "mixed")),)),
             sources,
         )
 
 
 def test_conflicting_identity_ranges_are_rejected():
-    hints = SpeechHints(speakers=(
-        SpeakerHint("Alice", 10, 20, "participants"),
-        SpeakerHint("Bob", 19, 30, "participants"),
+    hints = SpeechHints(attendees=(
+        attendee("Alice", SpeakerHint("Alice", 10, 20, "participants")),
+        attendee("Bob", SpeakerHint("Bob", 19, 30, "participants")),
     ))
     with pytest.raises(ValueError, match="conflicting hint ranges"):
         validate_hints(hints, [source("participants")])
 
-    same_identity = SpeechHints(speakers=(
+    same_identity = SpeechHints(attendees=(attendee(
+        "Alice",
         SpeakerHint("Alice", 10, 20, "participants"),
         SpeakerHint("Alice", 19, 30, "participants"),
-    ))
+    ),))
     assert len(validate_hints(same_identity, [source("participants")]).speakers) == 2
 
 

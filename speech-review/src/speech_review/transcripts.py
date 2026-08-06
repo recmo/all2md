@@ -179,9 +179,9 @@ def review_progress(parsed: dict[str, Any], hints: dict[str, Any]) -> dict[str, 
     }
     guided_ranges = [
         value
-        for speaker in hints.get("speakers", [])
-        if isinstance(speaker, dict)
-        for value in speaker.get("ranges", [])
+        for attendee in hints.get("attendees", [])
+        if isinstance(attendee, dict)
+        for value in attendee.get("ranges", [])
         if isinstance(value, dict)
     ]
     turns = parsed.get("turns", [])
@@ -266,7 +266,6 @@ def load_hint_document(path: Path) -> tuple[dict[str, Any], str | None]:
             "calendar_event": None,
             "hotwords": [],
             "attendees": [],
-            "speakers": [],
             "edits": [],
         }, None
     raw = path.read_bytes()
@@ -280,7 +279,6 @@ def load_hint_document(path: Path) -> tuple[dict[str, Any], str | None]:
         "calendar_event": value.get("calendar_event"),
         "hotwords": value.get("hotwords", []),
         "attendees": value.get("attendees", []),
-        "speakers": value.get("speakers", []),
         "edits": value.get("edits", []),
     }
     return document, hashlib.sha256(raw).hexdigest()
@@ -295,10 +293,19 @@ def write_hint_document(path: Path, document: dict[str, Any], revision: str | No
         key: document.get(key, [])
         for key in (
             "title", "started_at", "ended_at", "calendar_event",
-            "hotwords", "attendees", "speakers", "edits",
+            "hotwords", "attendees", "edits",
         )
         if document.get(key)
     }
+    if "attendees" in cleaned:
+        cleaned["attendees"] = [
+            {
+                "handle": attendee["handle"],
+                "identity": attendee["identity"],
+                **({"ranges": attendee["ranges"]} if attendee.get("ranges") else {}),
+            }
+            for attendee in cleaned["attendees"]
+        ]
     raw = yaml.safe_dump(cleaned, allow_unicode=True, sort_keys=False).encode()
     temporary = path.with_suffix(path.suffix + ".part")
     temporary.write_bytes(raw)
@@ -309,7 +316,7 @@ def write_hint_document(path: Path, document: dict[str, Any], revision: str | No
 def validate_hint_document(document: dict[str, Any]) -> None:
     allowed = {
         "title", "started_at", "ended_at", "calendar_event",
-        "hotwords", "attendees", "speakers", "edits",
+        "hotwords", "attendees", "edits",
     }
     if set(document) - allowed:
         raise ValueError("hint document has unknown fields")
@@ -325,27 +332,24 @@ def validate_hint_document(document: dict[str, Any]) -> None:
     attendees = document.get("attendees", [])
     if not isinstance(attendees, list):
         raise ValueError("attendees must be a list")
-    attendee_names = []
+    attendee_handles = []
     for attendee in attendees:
-        if not _line(attendee):
-            raise ValueError("each attendee must be a non-empty single-line string")
-        attendee_names.append(attendee.strip())
-    if len(attendee_names) != len(set(attendee_names)):
-        raise ValueError("attendee identities must be unique")
-    speakers = document.get("speakers", [])
-    if not isinstance(speakers, list):
-        raise ValueError("speakers must be a list")
-    identities = set()
-    for speaker in speakers:
-        if not isinstance(speaker, dict) or set(speaker) != {"identity", "ranges"} or not _line(speaker["identity"]):
-            raise ValueError("each speaker must contain only identity and ranges")
-        if speaker["identity"].strip() in identities:
-            raise ValueError("speaker identities must be unique")
-        identities.add(speaker["identity"].strip())
-        if not isinstance(speaker["ranges"], list) or not speaker["ranges"]:
-            raise ValueError("speaker ranges must be a non-empty list")
-        for value in speaker["ranges"]:
-            _validate_range(value, {"start", "end", "track"}, "speaker range")
+        if (
+            not isinstance(attendee, dict)
+            or set(attendee) - {"handle", "identity", "ranges"}
+            or not {"handle", "identity"} <= set(attendee)
+            or not _line(attendee["handle"])
+            or not _empty_line(attendee["identity"])
+        ):
+            raise ValueError("each attendee must contain handle, identity, and optional ranges")
+        attendee_handles.append(attendee["handle"].strip())
+        ranges = attendee.get("ranges", [])
+        if not isinstance(ranges, list):
+            raise ValueError("attendee ranges must be a list")
+        for value in ranges:
+            _validate_range(value, {"start", "end", "track"}, "attendee range")
+    if len(attendee_handles) != len(set(attendee_handles)):
+        raise ValueError("attendee handles must be unique")
     edits = document.get("edits", [])
     if not isinstance(edits, list):
         raise ValueError("edits must be a list")
@@ -367,6 +371,10 @@ def _validate_range(value: Any, allowed: set[str], label: str) -> None:
 
 def _line(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip()) and "\n" not in value and "\r" not in value
+
+
+def _empty_line(value: Any) -> bool:
+    return isinstance(value, str) and "\n" not in value and "\r" not in value
 
 
 def transcript_payload(transcript: TranscriptFile) -> dict[str, Any]:

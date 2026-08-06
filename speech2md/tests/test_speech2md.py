@@ -731,9 +731,10 @@ def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path
     state.calendar_event = "https://calendar.google.com/event?id=example"
     state.hints_sha256 = "b" * 64
     state.attendees = [
-        {"handle": "speaker-1", "identity": "Alice"},
-        {"identity": "Michał"},
+        {"handle": "Alice", "identity": "gbrain://people/alice"},
+        {"handle": "Michał", "identity": ""},
     ]
+    state.speaker_names = {"speaker-1": "Alice"}
 
     rendered = render_markdown(state)
     opening, raw_frontmatter, body = rendered.split("---", 2)
@@ -748,7 +749,7 @@ def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path
         "ended_at": "2026-08-04T11:00:00+02:00",
         "calendar_event": "https://calendar.google.com/event?id=example",
         "attendees": [
-            {"handle": "Alice", "identity": ""},
+            {"handle": "Alice", "identity": "gbrain://people/alice"},
             {"handle": "Michał", "identity": ""},
         ],
     }
@@ -880,8 +881,9 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         "hotwords:\n"
         "  - ProveKit\n"
         "  - F2Z\n"
-        "speakers:\n"
-        "  - identity: Alice\n"
+        "attendees:\n"
+        "  - handle: Alice\n"
+        "    identity: ''\n"
         "    ranges:\n"
         "      - track: participants\n"
         "        start: 1\n"

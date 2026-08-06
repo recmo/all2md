@@ -72,6 +72,7 @@ class TranscriptState:
     ended_at: str | None = None
     calendar_event: str | None = None
     attendees: list[dict[str, str]] = field(default_factory=list)
+    speaker_names: dict[str, str] = field(default_factory=dict)
     hints_sha256: str | None = None
 
 
