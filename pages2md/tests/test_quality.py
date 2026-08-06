@@ -22,11 +22,17 @@ def test_runaway_generation_is_rejected_independently_of_model_confidence():
 
 
 def test_runaway_generation_is_truncated_after_one_cycle():
-    markdown = "Useful answer.\n\n" + ("Answer: ABC\nLabels: 1 2 3\n\n" * 20)
+    markdown = (
+        "".join(f"Answer\nUnique section {index}\n" for index in range(5))
+        + ("loop phrase " * 20)
+        + "\nLegitimate conclusion."
+    )
     repaired, changed = truncate_runaway_repetition(markdown)
     assert changed is True
-    assert repaired.startswith("Useful answer.")
-    assert repaired.count("Answer: ABC") == 1
+    assert repaired.startswith("Answer\nUnique section 0")
+    assert "Unique section 4" in repaired
+    assert repaired.count("loop phrase") == 1
+    assert repaired.endswith("Legitimate conclusion.")
     assert "visual_text_repetition" not in output_quality_warnings(repaired)
 
 
@@ -44,6 +50,14 @@ def test_dense_rectangular_table_is_not_mistaken_for_collapse():
         for number in range(150)
     )
     assert table_quality_errors(f"<table>{rows}</table>") == []
+
+
+def test_repeated_figure_markup_is_not_mistaken_for_text_repetition():
+    markdown = "\n".join(
+        f"![Figure](figures/fig-{index:04d}.png)"
+        for index in range(30)
+    )
+    assert "visual_text_repetition" not in output_quality_warnings(markdown)
 
 
 def test_math_validator_catches_local_unclosed_delimiter():

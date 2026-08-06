@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from .compare import normalize
 
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
+MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 MAX_PAGE_CHARACTERS = 20_000
 
 
@@ -29,12 +30,15 @@ def output_quality_warnings(markdown: str, *, page_count: int = 1) -> list[str]:
 
 def severe_text_repetition(markdown: str) -> bool:
     """Detect runaway prose/formula generation while leaving tables to table checks."""
-    without_tables = HTML_TABLE.sub(" ", markdown)
-    without_tables = re.sub(r"(?m)^\|.*\|\s*$", " ", without_tables)
-    without_tables = re.sub(r"\\\(.*?\\\)|\\\[.*?\\\]|\$\$.*?\$\$", " ", without_tables, flags=re.DOTALL)
-    words = normalize(without_tables).split()
+    return runaway_repetition_span(markdown) is not None
+
+
+def runaway_repetition_span(markdown: str) -> tuple[int, int] | None:
+    """Return the exact duplicate interval for a contiguous generation loop."""
+    tokens = _repetition_tokens(markdown)
+    words = [value for value, _, _ in tokens]
     if len(words) < 6:
-        return False
+        return None
     # Long outputs should not be quadratic to validate. Repetition collapse is
     # local, so overlapping bounded windows are sufficient.
     window = 2_000
@@ -49,43 +53,60 @@ def severe_text_repetition(markdown: str) -> bool:
                     phrase == sample[start + repeat * size : start + (repeat + 1) * size]
                     for repeat in range(1, required)
                 ):
-                    return True
+                    absolute_start = offset + start
+                    cursor = absolute_start + size * required
+                    while words[cursor : cursor + size] == phrase:
+                        cursor += size
+                    return tokens[absolute_start + size][1], tokens[cursor - 1][2]
         if offset + window >= len(words):
             break
-    return False
+    return None
 
 
 def truncate_runaway_repetition(markdown: str) -> tuple[str, bool]:
-    """Keep one cycle of a proven generation loop and discard its repeated tail."""
-    if not severe_text_repetition(markdown):
-        return markdown, False
+    """Keep one cycle of a proven loop while preserving unrelated surrounding text."""
+    repaired = markdown
+    changed = False
+    for _ in range(128):
+        span = runaway_repetition_span(repaired)
+        if span is None:
+            break
+        start, end = span
+        repaired = repaired[:start] + repaired[end:]
+        changed = True
+    return repaired.rstrip(), changed
 
-    lines = markdown.splitlines(keepends=True)
-    positions: dict[str, list[int]] = {}
-    offset = 0
-    for line in lines:
-        normalized = normalize(line)
-        if normalized:
-            seen = positions.setdefault(normalized, [])
-            seen.append(offset)
-            if len(seen) == 5:
-                # Preserve the first cycle and cut before the second occurrence.
-                return markdown[: seen[1]].rstrip(), True
-        offset += len(line)
 
-    tokens = list(re.finditer(r"\S+", markdown))
-    values = [match.group(0).casefold() for match in tokens]
-    for size in range(1, min(36, len(values) // 3 + 1)):
-        required = 12 if size == 1 else 8 if size <= 4 else 5 if size <= 12 else 3
-        for start in range(0, len(values) - size * required + 1):
-            phrase = values[start : start + size]
-            if all(
-                phrase == values[start + repeat * size : start + (repeat + 1) * size]
-                for repeat in range(1, required)
-            ):
-                end = tokens[start + size - 1].end()
-                return markdown[:end].rstrip(), True
-    return markdown, False
+def _repetition_tokens(markdown: str) -> list[tuple[str, int, int]]:
+    ignored = sorted(
+        [match.span() for match in HTML_TABLE.finditer(markdown)]
+        + [match.span() for match in MARKDOWN_IMAGE.finditer(markdown)]
+        + [match.span() for match in re.finditer(r"(?m)^\|.*\|\s*$", markdown)]
+        + [
+            match.span()
+            for match in re.finditer(
+                r"\\\(.*?\\\)|\\\[.*?\\\]|\$\$.*?\$\$",
+                markdown,
+                flags=re.DOTALL,
+            )
+        ]
+    )
+    tokens: list[tuple[str, int, int]] = []
+    ignored_index = 0
+    for match in re.finditer(r"\S+", markdown):
+        while ignored_index < len(ignored) and ignored[ignored_index][1] <= match.start():
+            ignored_index += 1
+        if (
+            ignored_index < len(ignored)
+            and ignored[ignored_index][0] < match.end()
+            and match.start() < ignored[ignored_index][1]
+        ):
+            continue
+        tokens.extend(
+            (value, match.start(), match.end())
+            for value in normalize(match.group()).split()
+        )
+    return tokens
 
 
 def table_quality_errors(markdown: str) -> list[str]:

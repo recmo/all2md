@@ -71,6 +71,17 @@ class RepeatingFixtureOcr:
         )
 
 
+class LongFixtureOcr:
+    identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
+
+    def recognize(self, image: Path):
+        text = " ".join(f"token{index:05d}" for index in range(2_500))
+        return (
+            f"<|det|>text [100,100,800,300]<|/det|>{text}",
+            {"mode": "multi_base", "finish_reason": "stop"},
+        )
+
+
 class InterruptingFixtureOcr:
     identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
 
@@ -848,7 +859,7 @@ def test_failed_conversion_publishes_no_intermediate_results(tmp_path: Path):
     assert verify_bundle(bundle).ok
 
 
-def test_content_quality_warning_does_not_suppress_output(tmp_path: Path):
+def test_content_quality_warning_does_not_suppress_output(tmp_path: Path, capsys):
     pdf = tmp_path / "repetition.pdf"
     document = fitz.open()
     page = document.new_page(width=612, height=792)
@@ -869,84 +880,95 @@ def test_content_quality_warning_does_not_suppress_output(tmp_path: Path):
     assert "repeated phrase" in output.read_text()
     assert output.read_text().count("repeated phrase") == 1
 
+    long_pdf = tmp_path / "long.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "source text")
+    document.save(long_pdf)
+    document.close()
+    long_output = convert(long_pdf, backend=LongFixtureOcr())
+    captured = capsys.readouterr()
+    assert long_output.is_file()
+    assert "needs content review: visual_implausible_output_length" in captured.err
 
-def test_figure_crops_reject_blank_text_and_nested_boxes(tmp_path: Path):
+
+def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path):
     image_path = tmp_path / "page.png"
     image = Image.new("RGB", (1000, 1000), "white")
     draw = ImageDraw.Draw(image)
     draw.rectangle((300, 300, 700, 700), outline="black", width=8)
     draw.line((300, 500, 700, 500), fill="black", width=8)
-    draw.rectangle((720, 100, 980, 300), outline="black", width=8)
-    draw.rectangle((0, 692, 188, 858), outline="black", width=8)
-    draw.line((210, 920, 790, 920), fill="black", width=8)
-    draw.text((50, 100), "prose only", fill="black")
     image.save(image_path)
     blocks = [
         Block("figure", "", bbox=(290, 290, 710, 710)),
+        Block("figure", "", bbox=(292, 292, 708, 708)),
         Block("figure", "", bbox=(350, 350, 650, 650)),
-        Block("figure", "", bbox=(40, 80, 180, 130)),
-        Block("figure", "", bbox=(720, 100, 980, 300)),
-        Block("figure", "", bbox=(0, 700, 180, 850)),
-        Block("figure", "", bbox=(200, 870, 800, 970)),
         Block("figure", "", bbox=(750, 750, 850, 850)),
     ]
-    warnings = _canonicalize_figure_blocks(
-        blocks,
-        image_path,
-        [
-            {"text": "prose only", "bbox": [40, 80, 180, 130]},
-            {
-                "text": "This is a long prose paragraph incorrectly included in a figure box. "
-                * 3,
-                "bbox": [730, 110, 970, 290],
-            },
-        ],
-    )
-    assert len(blocks) == 1
+    warnings = _canonicalize_figure_blocks(blocks, image_path)
+    assert len(blocks) == 2
     assert blocks[0].bbox == (282.0, 282.0, 718.0, 718.0)
+    assert blocks[1].bbox == (342.0, 342.0, 658.0, 658.0)
+    assert blocks[1].metadata["review_reason"] == "figure_crop_touches_edge"
     assert warnings == [
         "visual_blank_figure_crop_rejected",
-        "visual_clipped_figure_crop_rejected",
         "visual_duplicate_figure_crop_rejected",
-        "visual_running_matter_figure_crop_rejected",
-        "visual_text_only_figure_crop_rejected",
+        "visual_figure_crop_may_be_clipped",
     ]
 
 
-def test_repetition_across_ocr_blocks_discards_the_repeated_tail():
-    blocks = [Block("paragraph", "Useful introduction.")]
+def test_figure_crops_retain_full_bleed_text_heavy_and_margin_images(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    image = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((42, 42, 258, 258), fill="navy")
+    draw.rectangle((300, 300, 700, 600), outline="black", width=8)
+    draw.text((320, 330), "A text-heavy screenshot " * 5, fill="black")
+    draw.line((210, 920, 790, 920), fill="black", width=8)
+    image.save(image_path)
+    blocks = [
+        Block("figure", "", bbox=(50, 50, 250, 250)),
+        Block("figure", "", bbox=(300, 300, 700, 600)),
+        Block("figure", "", bbox=(200, 870, 800, 970)),
+    ]
+
+    warnings = _canonicalize_figure_blocks(blocks, image_path)
+
+    assert len(blocks) == 3
+    assert blocks[0].metadata["review_reason"] == "figure_crop_touches_edge"
+    assert warnings == ["visual_figure_crop_may_be_clipped"]
+
+
+def test_repetition_across_blocks_removes_only_the_proven_loop():
+    blocks = [
+        Block("paragraph", f"Answer\nUnique section {index}")
+        for index in range(5)
+    ]
     blocks.extend(
-        Block("paragraph", "Answer: ABC\nLabels: 1 2 3")
+        Block("paragraph", "loop phrase")
         for _ in range(20)
     )
-    blocks.append(Block("paragraph", "unreachable hallucinated tail"))
+    blocks.append(Block("paragraph", "Legitimate conclusion."))
 
     warnings = _repair_runaway_repetition(blocks)
 
     assert [block.markdown for block in blocks] == [
-        "Useful introduction.",
-        "Answer: ABC\nLabels: 1 2 3",
+        *[f"Answer\nUnique section {index}" for index in range(5)],
+        "loop phrase",
+        "Legitimate conclusion.",
     ]
     assert warnings == ["visual_text_repetition_repaired"]
 
 
-def test_untrustworthy_figure_boxes_fall_back_to_the_full_page(tmp_path: Path):
+def test_blank_figure_does_not_create_a_full_page_fallback(tmp_path: Path):
     image_path = tmp_path / "page.png"
     Image.new("RGB", (1000, 1000), "white").save(image_path)
     blocks = [Block("figure", "", bbox=(100, 100, 200, 200))]
 
-    warnings = _canonicalize_figure_blocks(blocks, image_path, [])
+    warnings = _canonicalize_figure_blocks(blocks, image_path)
 
-    assert len(blocks) == 1
-    assert blocks[0].bbox == (0.0, 0.0, 1000.0, 1000.0)
-    assert blocks[0].markdown == ""
-    assert blocks[0].metadata["alt_text"] == "page visual fallback"
-    assert blocks[0].metadata["suppress_caption"] is True
-    assert blocks[0].metadata["review_reason"] == "insufficient_figure_crop_coverage"
-    assert warnings == [
-        "visual_blank_figure_crop_rejected",
-        "visual_full_page_figure_fallback",
-    ]
+    assert blocks == []
+    assert warnings == ["visual_blank_figure_crop_rejected"]
 
 
 def test_embedded_links_are_geometry_aware_and_idempotent():

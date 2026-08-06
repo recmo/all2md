@@ -5,6 +5,7 @@ import json
 import platform
 import re
 import shutil
+import sys
 import tempfile
 import time
 from dataclasses import asdict
@@ -32,7 +33,7 @@ from .markdown import (
 from .model import Block, OcrObservation, PageResult
 from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, confidence_summary, split_multi_page_output
-from .quality import adjacent_overlap, output_quality_warnings, truncate_runaway_repetition
+from .quality import adjacent_overlap, output_quality_warnings, runaway_repetition_span
 from .util import atomic_json, sha256_file, slugify
 from .util import atomic_text
 from .verify import verify_bundle
@@ -60,6 +61,9 @@ def convert(
         raise RuntimeError("pages2md source commit is unavailable")
     with tempfile.TemporaryDirectory(prefix="pages2md-") as temporary:
         workspace = _convert_workspace(source, Path(temporary), backend=backend)
+        verification = verify_bundle(workspace)
+        for warning in verification.warnings:
+            print(f"pages2md: warning: {warning}", file=sys.stderr)
         return _publish_output(workspace, target, source_hash, version)
 
 
@@ -420,7 +424,6 @@ def _page_result(
         _canonicalize_figure_blocks(
             blocks,
             source_page.image_path,
-            source_page.embedded.blocks,
         )
     )
     visual_markdown = _blocks_markdown(blocks, "")
@@ -1095,14 +1098,8 @@ def _materialize_figures(
                 claimed_assets.add(placement.get("asset_id", ""))
     for block in blocks:
         if block.bbox and block.kind in FIGURE_KINDS:
-            caption = (
-                None
-                if block.metadata.get("suppress_caption")
-                else block.markdown.strip() or None
-            )
-            alt = str(block.metadata.get("alt_text", "")).strip()
-            if not alt:
-                alt = caption.splitlines()[0][:160] if caption else block.kind.capitalize()
+            caption = block.markdown.strip() or None
+            alt = caption.splitlines()[0][:160] if caption else block.kind.capitalize()
             asset = _matching_original(block.bbox, source_assets, assets)
             if asset is None:
                 asset = assets.add_crop(page_image, block.bbox, page=page, caption=caption, alt_text=alt)
@@ -1146,120 +1143,117 @@ def _materialize_figures(
 
 
 def _repair_runaway_repetition(blocks: list[Block]) -> list[str]:
-    repaired = False
-    for block in blocks:
+    groups: list[list[int]] = []
+    current: list[int] = []
+    for index, block in enumerate(blocks):
         if block.kind in {"table", *FORMULA_KINDS} or not block.markdown.strip():
+            if current:
+                groups.append(current)
+                current = []
             continue
-        original = block.markdown
-        block.markdown, changed = truncate_runaway_repetition(original)
-        if not changed:
+        current.append(index)
+    if current:
+        groups.append(current)
+
+    repaired = False
+    for indices in reversed(groups):
+        original_characters = sum(len(blocks[index].markdown) for index in indices)
+        affected: set[int] = set()
+        for _ in range(128):
+            active = [index for index in indices if blocks[index].markdown]
+            combined, segments = _joined_block_text(blocks, active)
+            span = runaway_repetition_span(combined)
+            if span is None:
+                break
+            start, end = span
+            for index, segment_start, segment_end in segments:
+                overlap_start = max(start, segment_start)
+                overlap_end = min(end, segment_end)
+                if overlap_start >= overlap_end:
+                    continue
+                block = blocks[index]
+                local_start = overlap_start - segment_start
+                local_end = overlap_end - segment_start
+                block.markdown = (
+                    block.markdown[:local_start] + block.markdown[local_end:]
+                ).strip()
+                affected.add(index)
+            repaired = True
+        if not affected:
             continue
-        repaired = True
-        block.metadata.update({
+        anchor = next(
+            (index for index in indices if blocks[index].markdown),
+            indices[0],
+        )
+        blocks[anchor].metadata.update({
             "review_required": True,
             "review_reason": "runaway_repetition_truncated",
-            "original_characters": len(original),
-            "retained_characters": len(block.markdown),
+            "original_characters": original_characters,
+            "retained_characters": sum(
+                len(blocks[index].markdown) for index in indices
+            ),
         })
-    combined = _blocks_markdown(blocks, "")
-    if "visual_text_repetition" not in output_quality_warnings(combined):
-        return ["visual_text_repetition_repaired"] if repaired else []
-    line_positions: dict[str, list[int]] = {}
-    cutoff: int | None = None
-    for index, block in enumerate(blocks):
-        if block.kind in {"table", *FORMULA_KINDS}:
-            continue
-        for line in block.markdown.splitlines():
-            normalized = re.sub(r"\s+", " ", line).strip().casefold()
-            if not normalized:
-                continue
-            seen = line_positions.setdefault(normalized, [])
-            if not seen or seen[-1] != index:
-                seen.append(index)
-            if len(seen) == 5:
-                cutoff = seen[1]
-                break
-        if cutoff is not None:
-            break
-    if cutoff is not None:
-        del blocks[cutoff:]
-        repaired = True
+        for index in sorted(affected, reverse=True):
+            if index != anchor and not blocks[index].markdown:
+                del blocks[index]
     return ["visual_text_repetition_repaired"] if repaired else []
+
+
+def _joined_block_text(
+    blocks: list[Block],
+    indices: list[int],
+) -> tuple[str, list[tuple[int, int, int]]]:
+    parts: list[str] = []
+    segments: list[tuple[int, int, int]] = []
+    cursor = 0
+    for index in indices:
+        if parts:
+            parts.append("\n\n")
+            cursor += 2
+        text = blocks[index].markdown
+        segments.append((index, cursor, cursor + len(text)))
+        parts.append(text)
+        cursor += len(text)
+    return "".join(parts), segments
 
 
 def _canonicalize_figure_blocks(
     blocks: list[Block],
     page_image: Path,
-    embedded_blocks: list[dict[str, Any]],
 ) -> list[str]:
-    """Reject uninformative OCR boxes and retain one padded crop per visual region."""
-    original_figure_count = sum(
-        block.kind in FIGURE_KINDS and block.bbox is not None
-        for block in blocks
-    )
-    candidates: list[tuple[int, Block, dict[str, float | bool]]] = []
+    """Clamp figure boxes and remove only provably blank or duplicate crops."""
+    candidates: list[tuple[int, Block]] = []
     warnings: list[str] = []
     rejected: set[int] = set()
-    for index, block in enumerate(blocks):
-        if block.kind not in FIGURE_KINDS or not block.bbox:
-            continue
-        block.bbox = _padded_bbox(block.bbox)
-        metrics = _figure_crop_metrics(page_image, block.bbox)
-        if float(metrics["ink_fraction"]) < 0.001:
-            rejected.add(index)
-            warnings.append("visual_blank_figure_crop_rejected")
-            continue
-        clipped_uncaptioned_crop = not block.markdown.strip() and (
-            bool(metrics["adjacent_edge_ink"])
-            or (bool(metrics["edge_ink"]) and _bbox_area(block.bbox) < 40_000)
-        )
-        if clipped_uncaptioned_crop:
-            rejected.add(index)
-            warnings.append("visual_clipped_figure_crop_rejected")
-            continue
-        width = block.bbox[2] - block.bbox[0]
-        height = block.bbox[3] - block.bbox[1]
-        wide_margin_crop = (
-            not block.markdown.strip()
-            and width >= 400
-            and width >= height * 3
-            and (block.bbox[1] >= 800 or block.bbox[3] <= 200)
-        )
-        if wide_margin_crop:
-            rejected.add(index)
-            warnings.append("visual_running_matter_figure_crop_rejected")
-            continue
-        embedded_characters, longest_embedded_block = _embedded_text_evidence(
-            block.bbox,
-            embedded_blocks,
-        )
-        if (
-            (
-                float(metrics["content_fraction"]) < 0.08
-                and float(metrics["ink_fraction"]) < 0.02
-            )
-            or longest_embedded_block >= 80
-            or (embedded_characters >= 6 and not bool(metrics["long_rule"]))
-        ):
-            rejected.add(index)
-            warnings.append("visual_text_only_figure_crop_rejected")
-            continue
-        candidates.append((index, block, metrics))
+    with Image.open(page_image) as source:
+        grayscale = source.convert("L")
+        for index, block in enumerate(blocks):
+            if block.kind not in FIGURE_KINDS or not block.bbox:
+                continue
+            block.bbox = _padded_bbox(block.bbox)
+            blank, touches_edge = _figure_crop_status(grayscale, block.bbox)
+            if blank:
+                rejected.add(index)
+                warnings.append("visual_blank_figure_crop_rejected")
+                continue
+            if touches_edge:
+                block.metadata.update({
+                    "review_required": True,
+                    "review_reason": "figure_crop_touches_edge",
+                })
+                warnings.append("visual_figure_crop_may_be_clipped")
+            candidates.append((index, block))
 
-    # Prefer the largest informative box when OCR emits nested or near-identical
-    # crops for the same diagram. Distinct adjacent answer markers do not overlap
-    # and therefore remain independent figures.
-    retained: list[tuple[int, Block, dict[str, float | bool]]] = []
+    # Only near-identical boxes are duplicates. Nested boxes can represent
+    # legitimate panels, labels, or inset figures and must remain available.
+    retained: list[tuple[int, Block]] = []
     for candidate in sorted(
         candidates,
         key=lambda item: _bbox_area(item[1].bbox),
         reverse=True,
     ):
-        _, block, _ = candidate
-        if any(
-            _bbox_coverage(block.bbox, kept.bbox) >= 0.65 or _iou(block.bbox, kept.bbox) >= 0.35
-            for _, kept, _ in retained
-        ):
+        _, block = candidate
+        if any(_iou(block.bbox, kept.bbox) >= 0.90 for _, kept in retained):
             rejected.add(candidate[0])
             warnings.append("visual_duplicate_figure_crop_rejected")
             continue
@@ -1267,23 +1261,6 @@ def _canonicalize_figure_blocks(
 
     if rejected:
         blocks[:] = [block for index, block in enumerate(blocks) if index not in rejected]
-    retained_coverage = sum(_bbox_area(block.bbox) for _, block, _ in retained)
-    if original_figure_count and retained_coverage < 80_000:
-        blocks[:] = [block for block in blocks if block.kind not in FIGURE_KINDS]
-        blocks.append(
-            Block(
-                kind="figure",
-                markdown="",
-                bbox=(0.0, 0.0, 1000.0, 1000.0),
-                metadata={
-                    "alt_text": f"{page_image.stem} visual fallback",
-                    "suppress_caption": True,
-                    "review_required": True,
-                    "review_reason": "insufficient_figure_crop_coverage",
-                },
-            )
-        )
-        warnings.append("visual_full_page_figure_fallback")
     return sorted(set(warnings))
 
 
@@ -1301,97 +1278,29 @@ def _padded_bbox(
     )
 
 
-def _figure_crop_metrics(
-    page_image: Path,
+def _figure_crop_status(
+    page_image: Image.Image,
     bbox: tuple[float, float, float, float],
-) -> dict[str, float | bool]:
-    with Image.open(page_image) as source:
-        width, height = source.size
-        left, top, right, bottom = bbox
-        crop = source.convert("L").crop((
-            max(0, round(left * width / 1000)),
-            max(0, round(top * height / 1000)),
-            min(width, round(right * width / 1000)),
-            min(height, round(bottom * height / 1000)),
-        ))
+) -> tuple[bool, bool]:
+    width, height = page_image.size
+    left, top, right, bottom = bbox
+    crop = page_image.crop((
+        max(0, round(left * width / 1000)),
+        max(0, round(top * height / 1000)),
+        min(width, round(right * width / 1000)),
+        min(height, round(bottom * height / 1000)),
+    ))
     crop.thumbnail((384, 384), Image.Resampling.LANCZOS)
-    width, height = crop.size
-    pixels = crop.tobytes()
-    ink = [value < 238 for value in pixels]
-    ink_fraction = sum(ink) / max(1, len(ink))
-    longest_row = max(
-        (_longest_ink_run(ink[row * width : (row + 1) * width]) for row in range(height)),
-        default=0,
+    content = crop.point(lambda value: 255 if value < 250 else 0).getbbox()
+    if content is None:
+        return True, False
+    touches_edge = (
+        content[0] <= 1
+        or content[1] <= 1
+        or content[2] >= crop.width - 1
+        or content[3] >= crop.height - 1
     )
-    longest_column = max(
-        (_longest_ink_run(ink[column::width]) for column in range(width)),
-        default=0,
-    )
-    ink_x = [index % width for index, value in enumerate(ink) if value]
-    ink_y = [index // width for index, value in enumerate(ink) if value]
-    content_fraction = 0.0
-    edge_ink = False
-    adjacent_edge_ink = False
-    if ink_x and ink_y:
-        touched = {
-            edge
-            for edge, present in (
-                ("left", min(ink_x) <= 1),
-                ("right", max(ink_x) >= width - 2),
-                ("top", min(ink_y) <= 1),
-                ("bottom", max(ink_y) >= height - 2),
-            )
-            if present
-        }
-        edge_ink = bool(touched)
-        adjacent_edge_ink = any(
-            pair <= touched
-            for pair in (
-                {"left", "top"},
-                {"top", "right"},
-                {"right", "bottom"},
-                {"bottom", "left"},
-            )
-        )
-        content_fraction = (
-            (max(ink_x) - min(ink_x) + 1)
-            * (max(ink_y) - min(ink_y) + 1)
-            / max(1, width * height)
-        )
-    return {
-        "ink_fraction": ink_fraction,
-        "content_fraction": content_fraction,
-        "edge_ink": edge_ink,
-        "adjacent_edge_ink": adjacent_edge_ink,
-        "long_rule": max(
-            longest_row / max(1, width),
-            longest_column / max(1, height),
-        ) >= 0.35,
-    }
-
-
-def _longest_ink_run(values) -> int:
-    longest = current = 0
-    for value in values:
-        if value:
-            current += 1
-            longest = max(longest, current)
-        else:
-            current = 0
-    return longest
-
-
-def _embedded_text_evidence(
-    figure_bbox: tuple[float, float, float, float],
-    embedded_blocks: list[dict[str, Any]],
-) -> tuple[int, int]:
-    lengths = [
-        len(str(block.get("text", "")).strip())
-        for block in embedded_blocks
-        if len(block.get("bbox", ())) == 4
-        and _bbox_coverage(tuple(block["bbox"]), figure_bbox) >= 0.50
-    ]
-    return sum(lengths), max(lengths, default=0)
+    return False, touches_edge
 
 
 def _bbox_area(bbox: tuple[float, float, float, float] | None) -> float:
