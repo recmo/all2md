@@ -38,8 +38,9 @@ current attendees and identities found only in other transcripts; choosing the
 latter also adds that identity to the attendee list.
 Derived transcript attendees are an independent roster: `handle` contains the
 displayed name, while `identity` is reserved for a future unique person-document
-path and is currently empty. Identified transcript turns use that handle
-directly; only unidentified turns retain a processing-local `speaker-N` label.
+path and is currently empty. Every transcript turn uses a handle declared in
+that roster. Identified turns use the human handle directly; unidentified turns
+retain a declared processing-local `speaker-N` handle.
 Every current attendee remains assignable even when no comparable voiceprint is
 available for them.
 Anonymous speaker handles are listed beneath the attendees with their remaining

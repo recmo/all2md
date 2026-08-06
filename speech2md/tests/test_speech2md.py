@@ -776,6 +776,11 @@ def test_render_coalesces_only_same_speaker():
         source_sha256="a" * 64,
     )
     body = render_markdown(state)
+    metadata = yaml.safe_load(body.split("---", 2)[1])
+    assert metadata["attendees"] == [
+        {"handle": "speaker-1", "identity": ""},
+        {"handle": "speaker-2", "identity": ""},
+    ]
     assert (
         "**[00:00:00.00] speaker-1:** One. <!-- 1.00s --> "
         "Two. <!-- 2.00s -->"
@@ -1025,6 +1030,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert "calendar_event" not in metadata
     assert metadata["attendees"] == [
         {"handle": "Alice", "identity": ""},
+        {"handle": "speaker-1", "identity": ""},
     ]
     assert "speaker-1:** Mine" in (tmp_path / "capture.md").read_text()
     assert "Alice:** Hello" in (tmp_path / "capture.md").read_text()

@@ -122,11 +122,12 @@ meeting start/end times when supplied by Meeting Capture, an optional
 calendar-event link, and the attendee roster. `handle` is the editable
 human-readable name; `identity` is reserved for a future unique person-document
 path and is currently empty. The roster has no positional association with
-transcript speakers. Identified turns use the attendee handle directly, while
-unidentified turns retain their processing-local `speaker-N` label. Anonymous
-speakers do not create attendee entries, and attendees without turns remain in
-the roster. ReDimNet2 propagates anchored handles conservatively within the
-recording.
+transcript speakers. Every transcript run starts with a handle declared in this
+roster. Identified turns use the human handle directly; unidentified turns use
+a declared processing-local `speaker-N` handle. Those anonymous entries
+disappear when regeneration replaces all of their runs with an identified
+handle, while attendees without turns remain in the roster. ReDimNet2
+propagates anchored handles conservatively within the recording.
 
 ```yaml
 ---
@@ -140,6 +141,8 @@ attendees:
   - handle: Alice
     identity: ""
   - handle: Michał
+    identity: ""
+  - handle: speaker-1
     identity: ""
 ---
 ```
@@ -155,6 +158,8 @@ authoritative run end.
 ```markdown
 **[00:00:29.99] speaker-1:** How is everyone doing? <!-- 1.53s --> I think most of us is here. <!-- 3.69s -->
 ```
+
+A run whose label is absent from `attendees[].handle` is invalid.
 
 The NPZ contains only `handles`, a Unicode array of shape `(S,)`, and
 `embeddings`, a float32 array of shape `(S, 192)`. Each row is a robust,

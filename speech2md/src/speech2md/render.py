@@ -50,6 +50,12 @@ def render_markdown(state: TranscriptState) -> str:
             continue
         attendees.append({"handle": handle, "identity": item.get("identity", "").strip()})
         seen_attendees.add(handle)
+    for local_speaker in speaker_handles.values():
+        handle = state.speaker_names.get(local_speaker, local_speaker)
+        if handle in seen_attendees:
+            continue
+        attendees.append({"handle": handle, "identity": ""})
+        seen_attendees.add(handle)
     frontmatter = {
         "source_sha256": source_hash,
         "speech2md_version": __version__,

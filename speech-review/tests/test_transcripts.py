@@ -23,12 +23,11 @@ def transcript(
     attendee_handle: str = "",
     first_speaker: str = "speaker-1",
 ) -> Path:
-    attendees = (
-        "attendees:\n"
-        f"  - handle: {attendee_handle}\n"
-        "    identity: ''\n"
-        if attendee_handle
-        else "attendees: []\n"
+    handles = list(dict.fromkeys(
+        [value for value in (attendee_handle, first_speaker, "speaker-2") if value]
+    ))
+    attendees = "attendees:\n" + "".join(
+        f"  - handle: {handle}\n    identity: ''\n" for handle in handles
     )
     path.write_text(
         f"---\nsource_sha256: {'a' * 64}\nspeech2md_version: {'b' * 40}\n"
@@ -77,14 +76,14 @@ def test_rejects_legacy_integer_turn_timestamps(tmp_path: Path):
         parse_markdown(path)
 
 
-def test_rejects_legacy_speaker_to_attendee_mapping(tmp_path: Path):
+def test_rejects_run_handle_missing_from_frontmatter(tmp_path: Path):
     path = transcript(tmp_path / "meeting.md")
     path.write_text(path.read_text().replace(
-        "attendees: []",
-        "attendees:\n  - handle: speaker-1\n    identity: Alice",
+        "  - handle: speaker-2\n    identity: ''\n",
+        "",
     ))
 
-    with pytest.raises(ValueError, match="unsupported attendee frontmatter"):
+    with pytest.raises(ValueError, match="undeclared attendee handle.*speaker-2"):
         parse_markdown(path)
 
 

@@ -157,13 +157,17 @@ def parse_markdown(path: Path) -> dict[str, Any]:
         or not attendee["handle"].strip()
         or "\n" in attendee["handle"]
         or "\n" in attendee["identity"]
-        or re.fullmatch(r"speaker-\d+", attendee["handle"].strip()) is not None
         for attendee in attendees
     ):
         raise ValueError("transcript has unsupported attendee frontmatter")
     handles = [attendee["handle"].strip() for attendee in attendees]
     if len(handles) != len(set(handles)):
         raise ValueError("transcript attendee handles must be unique")
+    undeclared = sorted({turn["speaker"] for turn in turns} - set(handles))
+    if undeclared:
+        raise ValueError(
+            "transcript run uses undeclared attendee handle(s): " + ", ".join(undeclared)
+        )
     return {
         "title": title_match.group(1).strip() if title_match else path.stem,
         "frontmatter": frontmatter,
@@ -434,7 +438,7 @@ def candidate_identities(root: Path, selected: TranscriptFile, handle: str) -> l
                 continue
             raw_handle = attendee.get("handle")
             identity = raw_handle.strip() if isinstance(raw_handle, str) else ""
-            if not identity:
+            if not identity or re.fullmatch(r"speaker-\d+", identity):
                 continue
             vector = _voiceprint(transcript, identity)
             if vector is None:
