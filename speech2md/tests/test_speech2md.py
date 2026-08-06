@@ -524,17 +524,20 @@ def test_streaming_generation_reports_output_timestamps():
     ]
     engine = SimpleNamespace(generate=lambda *args, **kwargs: iter(updates))
     timestamps = []
+    phases = []
 
     result = _generate_with_timestamp_progress(
         engine,
         "window.wav",
         prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        phase_callback=phases.append,
         timestamp_callback=timestamps.append,
     )
 
     assert result.text == "[0][S01]Hello there[12.5][13][S02]Next[20]"
     assert result.generation_tokens == 9
     assert timestamps == [0.0, 12.5, 13.0, 20.0]
+    assert phases == ["prefill", "transcribing"]
 
 
 def test_transcribe_recovers_when_token_count_is_suspect(
@@ -591,9 +594,9 @@ def test_transcribe_recovers_when_token_count_is_suspect(
     assert ffmpeg_calls[1][ffmpeg_calls[1].index("-t") + 1] == "230.0"
     assert raw["actual_overlap_seconds"] == 30
     assert progress == [
-        (1, 1, 1, 0.0),
-        (1, 1, 2, 0.0),
-        (1, 1, 2, 300.0),
+        (1, 1, 1, 0.0, "prefill"),
+        (1, 1, 2, 0.0, "prefill"),
+        (1, 1, 2, 300.0, "transcribing"),
     ]
 
 
@@ -963,7 +966,10 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         seen_engines.append(engine)
         seen_prompts.append(prompt)
         seen_cached_generations.append(kwargs["cached_generations"])
-        kwargs["progress_callback"](1, 1, 1, kwargs["duration"])
+        kwargs["progress_callback"](1, 1, 1, 0.0, "prefill")
+        kwargs["progress_callback"](
+            1, 1, 1, kwargs["duration"], "transcribing"
+        )
         if path == microphone:
             segments = [Segment(0, 3, "Mine", "Local Mic", "microphone")]
             speaker_profiles["Local Mic"] = SpeakerProfile(
@@ -1009,7 +1015,8 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert len(progress_bars) == 1
     assert progress_bars[0].total == 20.0
     assert progress_bars[0].completed == 20.0
-    assert "participants window 1/1" in progress_bars[0].postfixes
+    assert "participants window 1/1 prefill" in progress_bars[0].postfixes
+    assert "participants window 1/1 transcribing" in progress_bars[0].postfixes
     assert sorted(path.name for path in tmp_path.iterdir()) == [
         "capture.hint.yaml",
         "capture.json",

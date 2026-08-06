@@ -57,12 +57,13 @@ minimum number of roughly equal parts targeting 30 minutes, moves each ideal
 boundary to a detected silence within one minute, and adds two seconds of audio
 overlap. The silence and window parameters are source constants, not CLI
 options. If no nearby silence exists, processing stops; there is no alternate
-windowing method. The progress bar advances whenever MOSS emits a timestamp,
-then fills trailing silence when the window completes. It remains monotonic
-across overlapping recovery passes. Generation token counts remain available
-to the in-process recovery logic; prompt and total counts are null because the
-streaming MOSS API does not expose them. Generation is capped at 16,384
-tokens because
+windowing method. The progress bar labels model prefill explicitly, switches
+to transcribing with the first generated token, advances whenever MOSS emits a
+timestamp, then fills trailing silence when the window completes. It remains
+monotonic across overlapping recovery passes. Generation token counts are
+available to the in-process recovery logic; prompt and total counts are null
+because the streaming MOSS API does not expose them. Generation is capped at
+16,384 tokens because
 local runs show the model emitting its end token around that practical horizon
 even when a larger runtime limit is supplied. Independent upstream reports
 describe the same premature ending on long audio in
