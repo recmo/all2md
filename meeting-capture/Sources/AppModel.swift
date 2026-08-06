@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 
 @MainActor
@@ -9,11 +10,11 @@ final class AppModel: ObservableObject {
         case countdown(AudioClient, remaining: Int)
         case recording(AudioClient)
         case finalizing
+        case permissionRequired
         case error(String)
     }
 
     @Published private(set) var state: State = .idle
-    @Published private(set) var screenRecordingPermissionNeeded = false
     @Published var lastManifest: URL?
     @Published var recoverableFiles: [URL] = []
     let capture = CaptureCoordinator()
@@ -21,6 +22,7 @@ final class AppModel: ObservableObject {
     private let monitor = AudioActivityMonitor()
     private var countdownTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
+    private var permissionTimer: Timer?
     private var ignoredUntil: [String: Date] = [:]
     private var started = false
 
@@ -28,7 +30,7 @@ final class AppModel: ObservableObject {
         switch state {
         case .recording: "record.circle.fill"
         case .countdown, .detecting: "mic.badge.plus"
-        case .error: "exclamationmark.triangle.fill"
+        case .permissionRequired, .error: "exclamationmark.triangle.fill"
         default: "waveform"
         }
     }
@@ -37,8 +39,11 @@ final class AppModel: ObservableObject {
         guard !started else { return }
         started = true
         recoverableFiles = capture.recoverableFiles()
-        monitor.onClientsChanged = { [weak self] clients in self?.handle(clients) }
-        monitor.start()
+        guard screenRecordingPermissionGranted(prompt: true) else {
+            requireScreenRecordingPermission()
+            return
+        }
+        startMonitoring()
     }
 
     func startNow() { if case let .countdown(client, _) = state { beginRecording(client) } }
@@ -146,17 +151,46 @@ final class AppModel: ObservableObject {
         state = .finalizing
         let resolvedMethod: TriggerMethod = method == .manual ? .manual : (client.processID > 0 ? .audioProcess : .deviceRunning)
         let trigger = CaptureTrigger(method: resolvedMethod, processID: client.processID > 0 ? client.processID : nil, bundleID: client.bundleID, applicationName: client.applicationName)
-        screenRecordingPermissionNeeded = false
         Task {
             do { try await capture.start(trigger: trigger); state = .recording(client) }
             catch {
                 if let captureError = error as? CaptureError,
                    case .screenRecordingPermissionRequired = captureError {
-                    screenRecordingPermissionNeeded = true
+                    requireScreenRecordingPermission()
+                    return
                 }
                 state = .error(error.localizedDescription)
             }
         }
+    }
+
+    private func screenRecordingPermissionGranted(prompt: Bool = false) -> Bool {
+        if CGPreflightScreenCaptureAccess() { return true }
+        return prompt && CGRequestScreenCaptureAccess()
+    }
+
+    private func requireScreenRecordingPermission() {
+        countdownTask?.cancel(); countdownTask = nil
+        stopTask?.cancel(); stopTask = nil
+        monitor.stop()
+        state = .permissionRequired
+        guard permissionTimer == nil else { return }
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard self.screenRecordingPermissionGranted() else { return }
+                self.permissionTimer?.invalidate()
+                self.permissionTimer = nil
+                self.startMonitoring()
+            }
+        }
+    }
+
+    private func startMonitoring() {
+        permissionTimer?.invalidate(); permissionTimer = nil
+        monitor.onClientsChanged = { [weak self] clients in self?.handle(clients) }
+        state = .idle
+        monitor.start()
     }
 
     private func key(_ client: AudioClient) -> String { client.bundleID ?? "name:\(client.applicationName)" }

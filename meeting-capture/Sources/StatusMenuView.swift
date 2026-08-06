@@ -35,11 +35,15 @@ struct StatusMenuView: View {
                 Button("Stop") { model.stopRecording() }.keyboardShortcut(.defaultAction)
             case .finalizing:
                 ProgressView("Preparing recording…")
+            case .permissionRequired:
+                Label("Screen & System Audio Recording permission is required", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Meeting Capture is paused until access is granted. If macOS requests it, quit and reopen the app after enabling access.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Open Screen & System Audio Settings") { model.openScreenRecordingSettings() }
             case let .error(message):
                 Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                if model.screenRecordingPermissionNeeded {
-                    Button("Open Screen & System Audio Settings") { model.openScreenRecordingSettings() }
-                }
                 Button("Dismiss") { model.dismissError() }
             }
             if model.lastManifest != nil { Button("Reveal last recording") { model.revealLastRecording() } }
