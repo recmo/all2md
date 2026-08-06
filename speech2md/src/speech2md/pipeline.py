@@ -177,10 +177,10 @@ def transcribe(
         write_cache(moss_path, metadata, generated_tracks)
     speaker_profiles, identities = _canonicalize_speakers(segments, speaker_profiles)
     apply_edits(segments, hints.edits)
-    attendee_identities = list(hints.attendees)
+    attendee_handles = list(hints.attendees)
     for identity in identities.values():
-        if identity in attendee_identities:
-            attendee_identities.remove(identity)
+        if identity not in attendee_handles:
+            attendee_handles.append(identity)
     state = TranscriptState(
         title=hints.title or resolved.title,
         started_at=hints.started_at or resolved.started_at,
@@ -189,10 +189,10 @@ def transcribe(
         source_sha256=source_hash,
         processing_seconds=time.monotonic() - started,
         segments=sorted(segments, key=lambda item: (item.start, item.end, item.source_role)),
-        attendees=[
+        attendees=[{"identity": handle} for handle in attendee_handles] + [
             {"handle": handle, "identity": identity}
             for handle, identity in identities.items()
-        ] + [{"identity": identity} for identity in attendee_identities],
+        ],
         hints_sha256=hints.sha256,
     )
     emit_progress("writing outputs", completed_seconds=total_seconds, total_seconds=total_seconds)
@@ -203,7 +203,13 @@ def transcribe(
         staged = Path(temporary)
         staged_markdown = staged / resolved.markdown_path.name
         staged_voiceprints = staged / voiceprints_path.name
-        write_voiceprints(speaker_profiles, staged_voiceprints)
+        voiceprint_profiles = {
+            profile.identity or handle: profile
+            for handle, profile in speaker_profiles.items()
+        }
+        if len(voiceprint_profiles) != len(speaker_profiles):
+            raise ValueError("speaker handles collide in rendered voiceprints")
+        write_voiceprints(voiceprint_profiles, staged_voiceprints)
         write_text(render_markdown(state), staged_markdown)
         staged_voiceprints.replace(voiceprints_path)
         staged_markdown.replace(resolved.markdown_path)

@@ -12,7 +12,7 @@ import numpy as np
 import yaml
 
 
-TURN = re.compile(r"^\*\*\[(\d{2}):(\d{2}):(\d{2}\.\d{2})\] ([^:]+):\*\*\s?(.*)$")
+TURN = re.compile(r"^\*\*\[(\d{2}):(\d{2}):(\d{2}\.\d{2})\] (.+?):\*\*\s?(.*)$")
 TIMING = re.compile(r"<!--\s*(\d+\.\d{2})s\s*-->")
 MEDIA_SUFFIXES = {".aac", ".caf", ".flac", ".m4a", ".mp3", ".mp4", ".ogg", ".wav", ".webm"}
 
@@ -148,6 +148,22 @@ def parse_markdown(path: Path) -> dict[str, Any]:
         })
     if not turns:
         raise ValueError("transcript has no supported timestamped turns")
+    attendees = frontmatter.get("attendees")
+    if not isinstance(attendees, list) or any(
+        not isinstance(attendee, dict)
+        or set(attendee) != {"handle", "identity"}
+        or not isinstance(attendee["handle"], str)
+        or not isinstance(attendee["identity"], str)
+        or not attendee["handle"].strip()
+        or "\n" in attendee["handle"]
+        or "\n" in attendee["identity"]
+        or re.fullmatch(r"speaker-\d+", attendee["handle"].strip()) is not None
+        for attendee in attendees
+    ):
+        raise ValueError("transcript has unsupported attendee frontmatter")
+    handles = [attendee["handle"].strip() for attendee in attendees]
+    if len(handles) != len(set(handles)):
+        raise ValueError("transcript attendee handles must be unique")
     return {
         "title": title_match.group(1).strip() if title_match else path.stem,
         "frontmatter": frontmatter,
@@ -157,12 +173,9 @@ def parse_markdown(path: Path) -> dict[str, Any]:
 
 def review_progress(parsed: dict[str, Any], hints: dict[str, Any]) -> dict[str, Any]:
     identified_handles = {
-        attendee.get("handle", "").strip()
-        for attendee in parsed.get("frontmatter", {}).get("attendees", [])
-        if isinstance(attendee, dict)
-        and isinstance(attendee.get("handle"), str)
-        and isinstance(attendee.get("identity"), str)
-        and attendee["identity"].strip()
+        turn["speaker"]
+        for turn in parsed.get("turns", [])
+        if re.fullmatch(r"speaker-\d+", turn["speaker"]) is None
     }
     guided_ranges = [
         value
@@ -411,13 +424,11 @@ def candidate_identities(root: Path, selected: TranscriptFile, handle: str) -> l
         for attendee in parsed["frontmatter"].get("attendees", []):
             if not isinstance(attendee, dict):
                 continue
-            raw_identity = attendee.get("identity")
             raw_handle = attendee.get("handle")
-            identity = raw_identity.strip() if isinstance(raw_identity, str) else ""
-            other_handle = raw_handle.strip() if isinstance(raw_handle, str) else ""
-            if not identity or not other_handle:
+            identity = raw_handle.strip() if isinstance(raw_handle, str) else ""
+            if not identity:
                 continue
-            vector = _voiceprint(transcript, other_handle)
+            vector = _voiceprint(transcript, identity)
             if vector is None:
                 continue
             denominator = float(np.linalg.norm(selected_vector) * np.linalg.norm(vector))

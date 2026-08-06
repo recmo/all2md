@@ -43,17 +43,14 @@ def render_markdown(state: TranscriptState) -> str:
             handle = f"speaker-{number}"
         speaker_handles[segment.speaker] = handle
     attendees = []
+    seen_attendees: set[str] = set()
     existing = {item.get("handle"): item for item in state.attendees if item.get("handle")}
-    for handle in speaker_handles.values():
-        attendees.append({
-            "handle": handle,
-            "identity": existing.get(handle, {}).get("identity", ""),
-        })
-    attendees.extend(
-        {"identity": item.get("identity", "")}
-        for item in state.attendees
-        if not item.get("handle")
-    )
+    for item in state.attendees:
+        handle = item.get("identity", "").strip()
+        if not handle or handle in seen_attendees:
+            continue
+        attendees.append({"handle": handle, "identity": ""})
+        seen_attendees.add(handle)
     frontmatter = {
         "source_sha256": source_hash,
         "speech2md_version": __version__,
@@ -79,7 +76,8 @@ def render_markdown(state: TranscriptState) -> str:
     ]
     for run in segment_runs(state.segments):
         first = run[0]
-        speaker = speaker_handles[first.speaker]
+        local_speaker = speaker_handles[first.speaker]
+        speaker = existing.get(local_speaker, {}).get("identity") or local_speaker
         visible_start = _centiseconds(first.start) / 100
         run_end = max(
             visible_start + 0.01,

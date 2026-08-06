@@ -37,7 +37,7 @@ hotwords:
   - F2Z
   - ReDimNet2
 speakers:
-  - identity: gbrain://people/alice
+  - identity: Alice
     ranges:
       - track: mixed
         start: 754.0
@@ -118,10 +118,14 @@ are ignored. The cache contains string arrays only and is loaded with
 Markdown is the readable derived output. Its flat YAML front matter contains
 the source hash, speech2md source commit, optional hint-file hash, authoritative
 meeting start/end times when supplied by Meeting Capture, an optional
-calendar-event link, and the attendee list. Speaking attendees have stable
-`speaker-N` handles; attendees without transcript turns omit `handle`. Identity
-values are empty unless a manual range anchors that voice to an identity.
-ReDimNet2 propagates anchored identities conservatively within the recording.
+calendar-event link, and the attendee roster. `handle` is the editable
+human-readable name; `identity` is reserved for a future unique person-document
+path and is currently empty. The roster has no positional association with
+transcript speakers. Identified turns use the attendee handle directly, while
+unidentified turns retain their processing-local `speaker-N` label. Anonymous
+speakers do not create attendee entries, and attendees without turns remain in
+the roster. ReDimNet2 propagates anchored handles conservatively within the
+recording.
 
 ```yaml
 ---
@@ -132,9 +136,10 @@ started_at: 2026-08-04T10:00:00+02:00
 ended_at: 2026-08-04T11:00:00+02:00
 calendar_event: https://calendar.google.com/example
 attendees:
-  - handle: speaker-1
+  - handle: Alice
     identity: ""
-  - identity: ""
+  - handle: Michał
+    identity: ""
 ---
 ```
 

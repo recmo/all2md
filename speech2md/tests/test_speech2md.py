@@ -731,8 +731,8 @@ def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path
     state.calendar_event = "https://calendar.google.com/event?id=example"
     state.hints_sha256 = "b" * 64
     state.attendees = [
-        {"handle": "speaker-1", "identity": "gbrain://people/alice"},
-        {"identity": ""},
+        {"handle": "speaker-1", "identity": "Alice"},
+        {"identity": "Michał"},
     ]
 
     rendered = render_markdown(state)
@@ -748,12 +748,12 @@ def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path
         "ended_at": "2026-08-04T11:00:00+02:00",
         "calendar_event": "https://calendar.google.com/event?id=example",
         "attendees": [
-            {"handle": "speaker-1", "identity": "gbrain://people/alice"},
-            {"identity": ""},
+            {"handle": "Alice", "identity": ""},
+            {"handle": "Michał", "identity": ""},
         ],
     }
     assert body.startswith("\n\n# Test\n\n## Transcript\n")
-    assert "**[00:00:01.00] speaker-1:** Hello <!-- 1.00s -->" in body
+    assert "**[00:00:01.00] Alice:** Hello <!-- 1.00s -->" in body
     assert "## Capture" not in body
     assert "## Processing notes" not in body
 
@@ -881,7 +881,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         "  - ProveKit\n"
         "  - F2Z\n"
         "speakers:\n"
-        "  - identity: gbrain://people/alice\n"
+        "  - identity: Alice\n"
         "    ranges:\n"
         "      - track: participants\n"
         "        start: 1\n"
@@ -1022,9 +1022,10 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert "ended_at" not in metadata
     assert "calendar_event" not in metadata
     assert metadata["attendees"] == [
-        {"handle": "speaker-1", "identity": ""},
-        {"handle": "speaker-2", "identity": "gbrain://people/alice"},
+        {"handle": "Alice", "identity": ""},
     ]
+    assert "speaker-1:** Mine" in (tmp_path / "capture.md").read_text()
+    assert "Alice:** Hello" in (tmp_path / "capture.md").read_text()
 
     (tmp_path / "capture.hint.yaml").write_text(
         (tmp_path / "capture.hint.yaml").read_text() + "title: Renamed meeting\n"
@@ -1036,7 +1037,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert all(item is not None for item in seen_cached_generations[-2:])
     with np.load(tmp_path / "capture.voiceprints.npz", allow_pickle=False) as voiceprints:
         assert voiceprints.files == ["handles", "embeddings"]
-        assert voiceprints["handles"].tolist() == ["speaker-1", "speaker-2"]
+        assert voiceprints["handles"].tolist() == ["Alice", "speaker-1"]
         assert voiceprints["embeddings"].shape == (2, 192)
     assert (tmp_path / "capture.voiceprints.npz").stat().st_mode & 0o777 == 0o600
 

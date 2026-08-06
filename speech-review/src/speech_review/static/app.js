@@ -290,7 +290,7 @@ function assignmentRange(turn) {
 }
 
 function renderedIdentity(turn) {
-  return (state.transcript.frontmatter.attendees || []).find(item => item.handle === turn.speaker)?.identity || ''
+  return /^speaker-\d+$/.test(turn.speaker) ? '' : turn.speaker
 }
 
 function speakerAssignment(turn) {

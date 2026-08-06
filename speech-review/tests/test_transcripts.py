@@ -17,24 +17,33 @@ from speech_review.transcripts import (
 )
 
 
-def transcript(path: Path, *, identity: str = "", handle: str = "speaker-1") -> Path:
-    attendee = f"  - handle: {handle}\n    identity: {identity}\n" if handle else f"  - identity: {identity}\n"
+def transcript(
+    path: Path,
+    *,
+    attendee_handle: str = "",
+    first_speaker: str = "speaker-1",
+) -> Path:
+    attendees = (
+        "attendees:\n"
+        f"  - handle: {attendee_handle}\n"
+        "    identity: ''\n"
+        if attendee_handle
+        else "attendees: []\n"
+    )
     path.write_text(
-        "---\n"
-        "source_sha256: " + "a" * 64 + "\n"
-        "speech2md_version: " + "b" * 40 + "\n"
-        "attendees:\n" + attendee +
-        "---\n\n"
+        f"---\nsource_sha256: {'a' * 64}\nspeech2md_version: {'b' * 40}\n"
+        + attendees
+        + "---\n\n"
         f"# {path.stem}\n\n"
         "## Transcript\n\n"
-        "**[00:00:05.00] speaker-1:** Hello <!-- 3.25s --> there. <!-- 7.00s -->\n\n"
+        f"**[00:00:05.00] {first_speaker}:** Hello <!-- 3.25s --> there. <!-- 7.00s -->\n\n"
         "**[00:00:12.00] speaker-2:** General Kenobi. <!-- 10.00s -->\n"
     )
     return path
 
 
 def test_discovers_and_parses_frozen_markdown(tmp_path: Path):
-    path = transcript(tmp_path / "meeting.md", identity="Alice")
+    path = transcript(tmp_path / "meeting.md", attendee_handle="Alice")
     (tmp_path / "notes.md").write_text("# Notes\n")
 
     found = discover(tmp_path)
@@ -68,6 +77,17 @@ def test_rejects_legacy_integer_turn_timestamps(tmp_path: Path):
         parse_markdown(path)
 
 
+def test_rejects_legacy_speaker_to_attendee_mapping(tmp_path: Path):
+    path = transcript(tmp_path / "meeting.md")
+    path.write_text(path.read_text().replace(
+        "attendees: []",
+        "attendees:\n  - handle: speaker-1\n    identity: Alice",
+    ))
+
+    with pytest.raises(ValueError, match="unsupported attendee frontmatter"):
+        parse_markdown(path)
+
+
 def test_rejects_content_after_the_final_timing_marker(tmp_path: Path):
     path = transcript(tmp_path / "meeting.md")
     path.write_text(path.read_text().replace(
@@ -92,8 +112,25 @@ def test_turn_end_can_overlap_the_next_turn(tmp_path: Path):
     assert parsed["turns"][1]["start"] == 12.0
 
 
+def test_attendee_roster_does_not_identify_local_speakers(tmp_path: Path):
+    parsed = parse_markdown(transcript(
+        tmp_path / "meeting.md",
+        attendee_handle="Alice",
+    ))
+
+    assert review_progress(parsed, {"speakers": []}) == {
+        "complete": False,
+        "unassignedRunCount": 2,
+        "unassignedSpeakerCount": 2,
+    }
+
+
 def test_review_progress_counts_unnamed_slices(tmp_path: Path):
-    parsed = parse_markdown(transcript(tmp_path / "meeting.md", identity="Alice"))
+    parsed = parse_markdown(transcript(
+        tmp_path / "meeting.md",
+        attendee_handle="Alice",
+        first_speaker="Alice",
+    ))
     empty = review_progress(parsed, {"speakers": []})
     assert empty == {
         "complete": False,
@@ -118,7 +155,11 @@ def test_review_progress_counts_unnamed_slices(tmp_path: Path):
 
 
 def test_review_progress_propagates_a_whole_turn_hint_to_its_handle(tmp_path: Path):
-    parsed = parse_markdown(transcript(tmp_path / "meeting.md", identity="Alice"))
+    parsed = parse_markdown(transcript(
+        tmp_path / "meeting.md",
+        attendee_handle="Alice",
+        first_speaker="Alice",
+    ))
     parsed["turns"].append({
         "index": 2,
         "start": 22,
@@ -182,7 +223,7 @@ def test_hint_writes_are_atomic_and_revision_checked(tmp_path: Path):
 
 
 def test_current_transcript_becomes_stale_when_hints_change(tmp_path: Path):
-    path = transcript(tmp_path / "meeting.md", identity="Alice")
+    path = transcript(tmp_path / "meeting.md", attendee_handle="Alice")
     item = TranscriptFile(tmp_path, path)
     assert item.status == "ready"
 
@@ -198,11 +239,15 @@ def test_current_transcript_becomes_stale_when_hints_change(tmp_path: Path):
 
 def test_voiceprint_candidates_are_ranked_across_folder(tmp_path: Path):
     selected_path = transcript(tmp_path / "selected.md")
-    alice_path = transcript(tmp_path / "alice.md", identity="Alice")
-    bob_path = transcript(tmp_path / "bob.md", identity="Bob")
+    alice_path = transcript(
+        tmp_path / "alice.md", attendee_handle="Alice", first_speaker="Alice"
+    )
+    bob_path = transcript(
+        tmp_path / "bob.md", attendee_handle="Bob", first_speaker="Bob"
+    )
     np.savez(selected_path.with_suffix(".voiceprints.npz"), handles=np.array(["speaker-1"]), embeddings=np.array([[1.0, 0.0]]))
-    np.savez(alice_path.with_suffix(".voiceprints.npz"), handles=np.array(["speaker-1"]), embeddings=np.array([[0.9, 0.1]]))
-    np.savez(bob_path.with_suffix(".voiceprints.npz"), handles=np.array(["speaker-1"]), embeddings=np.array([[0.0, 1.0]]))
+    np.savez(alice_path.with_suffix(".voiceprints.npz"), handles=np.array(["Alice"]), embeddings=np.array([[0.9, 0.1]]))
+    np.savez(bob_path.with_suffix(".voiceprints.npz"), handles=np.array(["Bob"]), embeddings=np.array([[0.0, 1.0]]))
 
     candidates = candidate_identities(tmp_path, TranscriptFile(tmp_path, selected_path), "speaker-1")
     assert [item["identity"] for item in candidates] == ["Alice", "Bob"]

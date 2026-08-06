@@ -72,7 +72,7 @@
                       "id": "yr63c",
                       "name": "Meeting Title",
                       "fill": "$ink",
-                      "content": "ProveKit weekly check-in",
+                      "content": "ProveKit Weekly Checkin",
                       "fontFamily": "$font-heading",
                       "fontSize": 22,
                       "fontWeight": "600"
@@ -82,9 +82,9 @@
                       "id": "DMW4n",
                       "name": "Meeting Metadata",
                       "fill": "$ink-secondary",
-                      "content": "4 August 2026  ·  1:14:32  ·  4 speakers",
+                      "content": "2026-07-23-provekit-weekly-checkin.mp4  ·  268 turns  ·  ready",
                       "fontFamily": "$font-mono",
-                      "fontSize": 11,
+                      "fontSize": 9,
                       "fontWeight": "normal"
                     }
                   ]
@@ -218,7 +218,7 @@
                       "id": "dt70n",
                       "name": "Transcript Count",
                       "fill": "$ink-muted",
-                      "content": "28",
+                      "content": "248",
                       "fontFamily": "$font-mono",
                       "fontSize": 10,
                       "fontWeight": "normal"
@@ -256,7 +256,7 @@
                       "id": "h98rw",
                       "name": "Search Placeholder",
                       "fill": "$ink-muted",
-                      "content": "Search meetings",
+                      "content": "Search folder",
                       "fontFamily": "$font-body",
                       "fontSize": 12,
                       "fontWeight": "normal"
@@ -276,7 +276,7 @@
                       "id": "m1Z9Yw",
                       "name": "TODAY Group Label",
                       "fill": "$ink-muted",
-                      "content": "TODAY",
+                      "content": "23 JUL",
                       "fontFamily": "$font-mono",
                       "fontSize": 9,
                       "fontWeight": "600",
@@ -306,18 +306,37 @@
                               "id": "tmEEe",
                               "name": "ProveKit weekly check-in Title",
                               "fill": "$ink",
-                              "content": "ProveKit weekly check-in",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "ProveKit Weekly Checkin",
                               "fontFamily": "$font-body",
                               "fontSize": 13,
                               "fontWeight": "600"
                             },
                             {
-                              "type": "ellipse",
-                              "id": "wgQcg",
-                              "name": "ProveKit weekly check-in Active Dot",
-                              "fill": "$accent",
-                              "width": 6,
-                              "height": 6
+                              "type": "frame",
+                              "id": "E8r3eL",
+                              "name": "ProveKit Weekly Checkin Status",
+                              "fill": "#EAF2FF",
+                              "cornerRadius": 3,
+                              "padding": [
+                                3,
+                                5
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "E1iTa",
+                                  "name": "ProveKit Weekly Checkin Status Label",
+                                  "fill": "$accent",
+                                  "content": "4 UNNAMED",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 7,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 0.4
+                                }
+                              ]
                             }
                           ]
                         },
@@ -326,9 +345,9 @@
                           "id": "U1Z2Q",
                           "name": "ProveKit weekly check-in Metadata",
                           "fill": "$ink-secondary",
-                          "content": "11:02 · 1h 14m",
+                          "content": "2026-07-23-provekit-weekly-checkin.mp4",
                           "fontFamily": "$font-mono",
-                          "fontSize": 10,
+                          "fontSize": 8,
                           "fontWeight": "normal"
                         }
                       ]
@@ -357,10 +376,37 @@
                               "id": "y2ksM",
                               "name": "Research sync Title",
                               "fill": "$ink",
-                              "content": "Research sync",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "WF all hands (weekly)",
                               "fontFamily": "$font-body",
                               "fontSize": 13,
                               "fontWeight": "450"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "Yf1ug",
+                              "name": "WF all hands (weekly) Status",
+                              "fill": "#FFF6E5",
+                              "cornerRadius": 3,
+                              "padding": [
+                                3,
+                                5
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "Der1f",
+                                  "name": "WF all hands (weekly) Status Label",
+                                  "fill": "#9A5B00",
+                                  "content": "UPDATE",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 7,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 0.4
+                                }
+                              ]
                             }
                           ]
                         },
@@ -369,9 +415,9 @@
                           "id": "Tq3hK",
                           "name": "Research sync Metadata",
                           "fill": "$ink-secondary",
-                          "content": "09:31 · 48m",
+                          "content": "2026-07-21-wf-all-hands-weekly.mp4",
                           "fontFamily": "$font-mono",
-                          "fontSize": 10,
+                          "fontSize": 8,
                           "fontWeight": "normal"
                         }
                       ]
@@ -381,7 +427,7 @@
                       "id": "IzgXz",
                       "name": "YESTERDAY Group Label",
                       "fill": "$ink-muted",
-                      "content": "YESTERDAY",
+                      "content": "21 JUL",
                       "fontFamily": "$font-mono",
                       "fontSize": 9,
                       "fontWeight": "600",
@@ -392,6 +438,7 @@
                       "id": "VCssD",
                       "name": "F2Z manuscript review Transcript",
                       "width": "fill_container",
+                      "height": 60,
                       "fill": "#FFFFFF00",
                       "cornerRadius": 6,
                       "layout": "vertical",
@@ -411,10 +458,37 @@
                               "id": "pyXvL",
                               "name": "F2Z manuscript review Title",
                               "fill": "$ink",
-                              "content": "F2Z manuscript review",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Remco x Aayush",
                               "fontFamily": "$font-body",
                               "fontSize": 13,
                               "fontWeight": "450"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "YMWhJ",
+                              "name": "Remco x Aayush Status",
+                              "fill": "#EAF7F1",
+                              "cornerRadius": 3,
+                              "padding": [
+                                3,
+                                5
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "Wv8I0",
+                                  "name": "Remco x Aayush Status Label",
+                                  "fill": "#057A55",
+                                  "content": "RUNNING 63%",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 7,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 0.4
+                                }
+                              ]
                             }
                           ]
                         },
@@ -423,10 +497,30 @@
                           "id": "gVTkk",
                           "name": "F2Z manuscript review Metadata",
                           "fill": "$ink-secondary",
-                          "content": "16:05 · 1h 02m",
+                          "content": "2026-07-17-remco-x-aayush.mp4",
                           "fontFamily": "$font-mono",
-                          "fontSize": 10,
+                          "fontSize": 8,
                           "fontWeight": "normal"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "xsXvm",
+                          "name": "Running Regeneration Progress Track",
+                          "width": "fill_container",
+                          "height": 2,
+                          "fill": "$line",
+                          "cornerRadius": 1,
+                          "children": [
+                            {
+                              "type": "rectangle",
+                              "cornerRadius": 1,
+                              "id": "QxTpB",
+                              "name": "Running Regeneration Progress Fill",
+                              "fill": "$speaker-green",
+                              "width": 126,
+                              "height": 2
+                            }
+                          ]
                         }
                       ]
                     },
@@ -454,10 +548,37 @@
                               "id": "XyWT1",
                               "name": "Piotr 1:1 Title",
                               "fill": "$ink",
-                              "content": "Piotr 1:1",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Remco / Piotr",
                               "fontFamily": "$font-body",
                               "fontSize": 13,
                               "fontWeight": "450"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "KUd9M",
+                              "name": "Remco / Piotr Status",
+                              "fill": "#EAF7F1",
+                              "cornerRadius": 3,
+                              "padding": [
+                                3,
+                                5
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "NrW9X",
+                                  "name": "Remco / Piotr Status Label",
+                                  "fill": "#057A55",
+                                  "content": "DONE",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 7,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 0.4
+                                }
+                              ]
                             }
                           ]
                         },
@@ -466,9 +587,9 @@
                           "id": "IDNaj",
                           "name": "Piotr 1:1 Metadata",
                           "fill": "$ink-secondary",
-                          "content": "10:00 · 36m",
+                          "content": "2026-07-17-remco-piotr.mp4",
                           "fontFamily": "$font-mono",
-                          "fontSize": 10,
+                          "fontSize": 8,
                           "fontWeight": "normal"
                         }
                       ]
@@ -478,7 +599,7 @@
                       "id": "S7iA8X",
                       "name": "31 JUL Group Label",
                       "fill": "$ink-muted",
-                      "content": "31 JUL",
+                      "content": "17 JUL",
                       "fontFamily": "$font-mono",
                       "fontSize": 9,
                       "fontWeight": "600",
@@ -508,10 +629,37 @@
                               "id": "nflqi",
                               "name": "Proof systems planning Title",
                               "fill": "$ink",
-                              "content": "Proof systems planning",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "ProveKit Weekly Checkin",
                               "fontFamily": "$font-body",
                               "fontSize": 13,
                               "fontWeight": "450"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "r7Q5c",
+                              "name": "ProveKit Weekly Checkin Status",
+                              "fill": "#FFF0EB",
+                              "cornerRadius": 3,
+                              "padding": [
+                                3,
+                                5
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "SHAux",
+                                  "name": "ProveKit Weekly Checkin Status Label",
+                                  "fill": "#C2410C",
+                                  "content": "FAILED",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 7,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 0.4
+                                }
+                              ]
                             }
                           ]
                         },
@@ -520,9 +668,9 @@
                           "id": "O4IaO",
                           "name": "Proof systems planning Metadata",
                           "fill": "$ink-secondary",
-                          "content": "14:18 · 52m",
+                          "content": "2026-07-16-provekit-weekly-checkin.mp4",
                           "fontFamily": "$font-mono",
-                          "fontSize": 10,
+                          "fontSize": 8,
                           "fontWeight": "normal"
                         }
                       ]
@@ -551,10 +699,37 @@
                               "id": "vRA0k",
                               "name": "Engineering stand-up Title",
                               "fill": "$ink",
-                              "content": "Engineering stand-up",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Leadership weekly",
                               "fontFamily": "$font-body",
                               "fontSize": 13,
                               "fontWeight": "450"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "cgWli",
+                              "name": "Leadership weekly Status",
+                              "fill": "#F2F2EF",
+                              "cornerRadius": 3,
+                              "padding": [
+                                3,
+                                5
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "pGTDR",
+                                  "name": "Leadership weekly Status Label",
+                                  "fill": "#666666",
+                                  "content": "QUEUE 2",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 7,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 0.4
+                                }
+                              ]
                             }
                           ]
                         },
@@ -563,9 +738,9 @@
                           "id": "loqfU",
                           "name": "Engineering stand-up Metadata",
                           "fill": "$ink-secondary",
-                          "content": "09:04 · 29m",
+                          "content": "2026-07-14-leadership-weekly.mp4",
                           "fontFamily": "$font-mono",
-                          "fontSize": 10,
+                          "fontSize": 8,
                           "fontWeight": "normal"
                         }
                       ]
@@ -575,7 +750,7 @@
                       "id": "f6rps",
                       "name": "29 JUL Group Label",
                       "fill": "$ink-muted",
-                      "content": "29 JUL",
+                      "content": "14 JUL",
                       "fontFamily": "$font-mono",
                       "fontSize": 9,
                       "fontWeight": "600",
@@ -605,10 +780,37 @@
                               "id": "E0JSBI",
                               "name": "Binius discussion Title",
                               "fill": "$ink",
-                              "content": "Binius discussion",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "ProveKit Weekly Checkin",
                               "fontFamily": "$font-body",
                               "fontSize": 13,
                               "fontWeight": "450"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "SlZLT",
+                              "name": "ProveKit Weekly Checkin Status",
+                              "fill": "#EAF7F1",
+                              "cornerRadius": 3,
+                              "padding": [
+                                3,
+                                5
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "W7S9M",
+                                  "name": "ProveKit Weekly Checkin Status Label",
+                                  "fill": "#057A55",
+                                  "content": "DONE",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 7,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 0.4
+                                }
+                              ]
                             }
                           ]
                         },
@@ -617,9 +819,9 @@
                           "id": "gJu3b",
                           "name": "Binius discussion Metadata",
                           "fill": "$ink-secondary",
-                          "content": "15:42 · 1h 21m",
+                          "content": "2026-07-09-provekit-weekly-checkin.mp4",
                           "fontFamily": "$font-mono",
-                          "fontSize": 10,
+                          "fontSize": 8,
                           "fontWeight": "normal"
                         }
                       ]
@@ -712,7 +914,7 @@
                               "id": "vCXRr",
                               "name": "Duration",
                               "fill": "$ink-muted",
-                              "content": "/ 01:14:32",
+                              "content": "/ 00:42:27",
                               "fontFamily": "$font-mono",
                               "fontSize": 11,
                               "fontWeight": "normal"
@@ -1802,15 +2004,59 @@
                           "fontWeight": "600"
                         },
                         {
-                          "type": "text",
-                          "id": "nI4Jm",
-                          "name": "Keyboard Hint",
-                          "fill": "$ink-muted",
-                          "content": "SPACE  play · ⌘S  save hints",
-                          "fontFamily": "$font-mono",
-                          "fontSize": 9,
-                          "fontWeight": "normal",
-                          "letterSpacing": 0.6
+                          "type": "frame",
+                          "id": "TTOlr",
+                          "name": "Transcript Header Actions",
+                          "gap": 14,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "SISIy",
+                              "name": "Playback Interaction Hint",
+                              "fill": "$ink-muted",
+                              "content": "DOUBLE-CLICK TURN TO PLAY  ·  SPACE PLAY/PAUSE",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 8,
+                              "fontWeight": "normal",
+                              "letterSpacing": 0.35
+                            },
+                            {
+                              "type": "frame",
+                              "id": "R6fT9",
+                              "name": "Next Unnamed Speaker Button",
+                              "fill": "$surface-selected",
+                              "cornerRadius": 4,
+                              "gap": 6,
+                              "padding": [
+                                7,
+                                10
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "hB730",
+                                  "name": "Next Unnamed Speaker Icon",
+                                  "width": 11,
+                                  "height": 11,
+                                  "icon": "scan-search",
+                                  "library": "lucide",
+                                  "fill": "$accent"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "q715P",
+                                  "name": "Next Unnamed Speaker Label",
+                                  "fill": "$accent",
+                                  "content": "Next unnamed · 4",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 8,
+                                  "fontWeight": "600"
+                                }
+                              ]
+                            }
+                          ]
                         }
                       ]
                     },
@@ -1989,9 +2235,9 @@
                               "id": "M01sZE",
                               "name": "00:18:42 Unidentified Label",
                               "fill": "$accent",
-                              "content": "speaker-2  ·  UNIDENTIFIED",
+                              "content": "speaker-2  ·  UNIDENTIFIED  ·  PROPOSED PIOTR 91%",
                               "fontFamily": "$font-mono",
-                              "fontSize": 10,
+                              "fontSize": 9,
                               "fontWeight": "600",
                               "letterSpacing": 0.4
                             },
@@ -2006,6 +2252,16 @@
                               "lineHeight": 1.45,
                               "fontFamily": "$font-body",
                               "fontSize": 15,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "o8umb",
+                              "name": "Selected Run Exact Timing",
+                              "fill": "$ink-muted",
+                              "content": "00:18:42.14 – 00:19:08.63  ·  double-click plays this run only",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 8,
                               "fontWeight": "normal"
                             }
                           ]
@@ -2311,7 +2567,7 @@
                           "id": "BwqGo",
                           "name": "Guidance Editor Filename",
                           "fill": "$ink-muted",
-                          "content": "2026-08-04-provekit-weekly.hint.yaml",
+                          "content": "2026-07-23-provekit-weekly-checkin.hint.yaml",
                           "fontFamily": "$font-mono",
                           "fontSize": 9,
                           "fontWeight": "normal"
@@ -2469,7 +2725,7 @@
                           "fill": "$ink",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "2026-08-04 11:02:18 +02:00",
+                          "content": "2026-07-23 12:03:20 +02:00",
                           "fontFamily": "$font-body",
                           "fontSize": 12,
                           "fontWeight": "500"
@@ -2522,7 +2778,7 @@
                           "fill": "$ink",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "2026-08-04 12:16:50 +02:00",
+                          "content": "2026-07-23 12:45:49 +02:00",
                           "fontFamily": "$font-body",
                           "fontSize": 12,
                           "fontWeight": "500"
@@ -2575,7 +2831,7 @@
                           "fill": "$ink",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "meet.google.com/pkv-weekly",
+                          "content": "meet.google.com/provekit-weekly",
                           "fontFamily": "$font-body",
                           "fontSize": 12,
                           "fontWeight": "500"
@@ -2731,8 +2987,8 @@
                 },
                 {
                   "type": "frame",
-                  "id": "vJgYv",
-                  "name": "Guidance with Voiceprint Suggestions",
+                  "id": "P092z",
+                  "name": "Guidance People and Speaker Ranges",
                   "width": "fill_container",
                   "height": "fill_container",
                   "fill": "$surface",
@@ -2740,10 +2996,10 @@
                   "children": [
                     {
                       "type": "frame",
-                      "id": "qYaby",
+                      "id": "FtlKl",
                       "name": "People Guidance Heading",
                       "width": "fill_container",
-                      "height": 48,
+                      "height": 44,
                       "stroke": "$line",
                       "strokeWidth": {
                         "bottom": 1
@@ -2757,38 +3013,38 @@
                       "children": [
                         {
                           "type": "frame",
-                          "id": "E2yqzC",
+                          "id": "mD6yD",
                           "name": "People Guidance Title Group",
                           "layout": "vertical",
-                          "gap": 3,
+                          "gap": 2,
                           "children": [
                             {
                               "type": "text",
-                              "id": "b3duS",
+                              "id": "iilce",
                               "name": "People Guidance Label",
-                              "fill": "$ink-muted",
-                              "content": "SPEAKERS & ATTENDEES",
+                              "fill": "$ink",
+                              "content": "ATTENDEES & SPEAKERS",
                               "fontFamily": "$font-mono",
                               "fontSize": 9,
                               "fontWeight": "600",
-                              "letterSpacing": 1.3
+                              "letterSpacing": 1
                             },
                             {
                               "type": "text",
-                              "id": "lDYGs",
-                              "name": "People Guidance Description",
+                              "id": "jrFZm",
+                              "name": "People Guidance Summary",
                               "fill": "$ink-muted",
-                              "content": "Selected run is not assigned yet",
-                              "fontFamily": "$font-body",
-                              "fontSize": 10,
+                              "content": "4 attendees · 4 anonymous speakers",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 8,
                               "fontWeight": "normal"
                             }
                           ]
                         },
                         {
                           "type": "icon",
-                          "id": "x2765",
-                          "name": "Add Person to Guidance",
+                          "id": "wtsES",
+                          "name": "Add Attendee",
                           "width": 14,
                           "height": 14,
                           "icon": "user-plus",
@@ -2799,8 +3055,8 @@
                     },
                     {
                       "type": "frame",
-                      "id": "BA86j",
-                      "name": "Selected Unidentified Run Group",
+                      "id": "mzTql",
+                      "name": "Selected Anonymous Speaker Assignment",
                       "width": "fill_container",
                       "stroke": "$line",
                       "strokeWidth": {
@@ -2810,12 +3066,12 @@
                       "children": [
                         {
                           "type": "frame",
-                          "id": "BzVdy",
-                          "name": "Selected Unidentified Run Header",
+                          "id": "iqKlo",
+                          "name": "Selected Anonymous Speaker Header",
                           "width": "fill_container",
                           "height": 38,
                           "fill": "$surface-selected",
-                          "gap": 9,
+                          "gap": 8,
                           "padding": [
                             0,
                             18
@@ -2823,44 +3079,47 @@
                           "alignItems": "center",
                           "children": [
                             {
-                              "type": "ellipse",
-                              "id": "qFxyU",
-                              "name": "Unidentified Run Dot",
-                              "fill": "$ink-muted",
-                              "width": 7,
-                              "height": 7
+                              "type": "icon",
+                              "id": "rl2Q7",
+                              "name": "Selected Anonymous Speaker Icon",
+                              "width": 12,
+                              "height": 12,
+                              "icon": "scan-search",
+                              "library": "lucide",
+                              "fill": "$accent"
                             },
                             {
                               "type": "text",
-                              "id": "sZgC4",
-                              "name": "Unidentified Run Name",
+                              "id": "y6iQt",
+                              "name": "Selected Anonymous Speaker Name",
                               "fill": "$ink",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Unidentified speaker",
+                              "content": "speaker-2  ·  Unidentified",
                               "fontFamily": "$font-body",
-                              "fontSize": 12,
+                              "fontSize": 11,
                               "fontWeight": "600"
                             },
                             {
                               "type": "text",
-                              "id": "PeI3Z",
-                              "name": "Unidentified Run Range",
-                              "fill": "$accent",
-                              "content": "00:18:42 → 00:19:08",
+                              "id": "UCVCD",
+                              "name": "Selected Anonymous Speaker Range",
+                              "fill": "$ink-secondary",
+                              "content": "18:42.14 → 19:08.63",
                               "fontFamily": "$font-mono",
-                              "fontSize": 9,
-                              "fontWeight": "500"
+                              "fontSize": 8,
+                              "fontWeight": "normal"
                             }
                           ]
                         },
                         {
                           "type": "frame",
-                          "id": "A2tSUp",
-                          "name": "Voiceprint Suggestions Panel",
+                          "id": "T8zcWg",
+                          "name": "Voiceprint Assignment Suggestions",
                           "width": "fill_container",
                           "fill": "$surface-subtle",
                           "layout": "vertical",
+                          "gap": 4,
                           "padding": [
                             8,
                             18,
@@ -2870,405 +3129,471 @@
                           "children": [
                             {
                               "type": "frame",
-                              "id": "P5YYFw",
-                              "name": "Voiceprint Suggestions Header",
+                              "id": "UgNbF",
+                              "name": "Attendee Suggestions Header",
                               "width": "fill_container",
-                              "height": 24,
+                              "height": 16,
                               "justifyContent": "space_between",
                               "alignItems": "center",
                               "children": [
                                 {
                                   "type": "text",
-                                  "id": "Jhg4Y",
-                                  "name": "Voiceprint Suggestions Label",
+                                  "id": "V8czh",
+                                  "name": "Attendee Suggestions Label",
                                   "fill": "$ink-muted",
-                                  "content": "CLOSEST VOICEPRINTS",
+                                  "content": "ATTENDEES  ·  ALWAYS AVAILABLE",
                                   "fontFamily": "$font-mono",
-                                  "fontSize": 8,
+                                  "fontSize": 7,
                                   "fontWeight": "600",
-                                  "letterSpacing": 1.1
+                                  "letterSpacing": 0.8
                                 },
                                 {
                                   "type": "text",
-                                  "id": "h2AF9",
-                                  "name": "Voiceprint Suggestions Scope",
+                                  "id": "eGqb4",
+                                  "name": "Attendee Suggestions Sort",
                                   "fill": "$ink-muted",
-                                  "content": "all transcripts",
+                                  "content": "voiceprint order",
                                   "fontFamily": "$font-mono",
-                                  "fontSize": 8,
+                                  "fontSize": 7,
                                   "fontWeight": "normal"
                                 }
                               ]
                             },
                             {
-                              "type": "text",
-                              "id": "SkNNp",
-                              "name": "Attendee Candidate Group Label",
-                              "fill": "$ink-muted",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "ATTENDEES",
-                              "textAlignVertical": "middle",
-                              "fontFamily": "$font-mono",
-                              "fontSize": 8,
-                              "fontWeight": "600",
-                              "letterSpacing": 1
-                            },
-                            {
                               "type": "frame",
-                              "id": "X1AAB8",
-                              "name": "Piotr Voiceprint Candidate",
+                              "id": "W34cr",
+                              "name": "Closest Attendee Candidates",
                               "width": "fill_container",
-                              "height": 34,
-                              "gap": 8,
-                              "padding": [
-                                0,
-                                10
-                              ],
-                              "alignItems": "center",
+                              "gap": 6,
                               "children": [
                                 {
-                                  "type": "ellipse",
-                                  "id": "r35dsn",
-                                  "name": "Piotr Candidate Dot",
-                                  "fill": "$speaker-violet",
-                                  "width": 7,
-                                  "height": 7
-                                },
-                                {
                                   "type": "frame",
-                                  "id": "Y1i010",
-                                  "name": "Piotr Candidate Identity",
+                                  "id": "zgvNZ",
+                                  "name": "Piotr Candidate",
                                   "width": "fill_container",
-                                  "layout": "vertical",
-                                  "gap": 1,
+                                  "height": 30,
+                                  "fill": "$surface",
+                                  "cornerRadius": 4,
+                                  "gap": 7,
+                                  "padding": [
+                                    0,
+                                    8
+                                  ],
+                                  "alignItems": "center",
                                   "children": [
                                     {
-                                      "type": "text",
-                                      "id": "WFysH",
-                                      "name": "Piotr Candidate Name",
-                                      "fill": "$ink",
-                                      "content": "Piotr",
-                                      "fontFamily": "$font-body",
-                                      "fontSize": 11,
-                                      "fontWeight": "600"
+                                      "type": "ellipse",
+                                      "id": "oJVKR",
+                                      "name": "Piotr Candidate Dot",
+                                      "fill": "$speaker-violet",
+                                      "width": 6,
+                                      "height": 6
+                                    },
+                                    {
+                                      "type": "frame",
+                                      "id": "phcJi",
+                                      "name": "Piotr Candidate Text",
+                                      "width": "fill_container",
+                                      "layout": "vertical",
+                                      "gap": 1,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "MqcUA",
+                                          "name": "Piotr Candidate Name",
+                                          "fill": "$ink",
+                                          "content": "Piotr",
+                                          "fontFamily": "$font-body",
+                                          "fontSize": 10,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "RPpWW",
+                                          "name": "Piotr Candidate Metadata",
+                                          "fill": "$ink-muted",
+                                          "content": "this meeting",
+                                          "fontFamily": "$font-mono",
+                                          "fontSize": 7,
+                                          "fontWeight": "normal"
+                                        }
+                                      ]
                                     },
                                     {
                                       "type": "text",
-                                      "id": "EdxJg",
-                                      "name": "Piotr Candidate Metadata",
-                                      "fill": "$ink-muted",
-                                      "content": "this meeting",
-                                      "fontFamily": "$font-mono",
-                                      "fontSize": 8,
-                                      "fontWeight": "normal"
-                                    }
-                                  ]
-                                },
-                                {
-                                  "type": "frame",
-                                  "id": "URcDw",
-                                  "name": "Piotr Similarity Badge",
-                                  "fill": "$surface-selected",
-                                  "cornerRadius": 9999,
-                                  "padding": [
-                                    4,
-                                    7
-                                  ],
-                                  "children": [
-                                    {
-                                      "type": "text",
-                                      "id": "PzN8N",
-                                      "name": "Piotr Similarity Score",
+                                      "id": "YOV2x",
+                                      "name": "Piotr Candidate Score",
                                       "fill": "$accent",
                                       "content": "91%",
                                       "fontFamily": "$font-mono",
-                                      "fontSize": 9,
+                                      "fontSize": 8,
                                       "fontWeight": "600"
                                     }
                                   ]
                                 },
                                 {
-                                  "type": "icon",
-                                  "id": "i8rwZ",
-                                  "name": "Assign Piotr",
-                                  "width": 13,
-                                  "height": 13,
-                                  "icon": "user-check",
-                                  "library": "lucide",
-                                  "fill": "$accent"
-                                }
-                              ]
-                            },
-                            {
-                              "type": "frame",
-                              "id": "w6yZk",
-                              "name": "Kobi Voiceprint Candidate",
-                              "width": "fill_container",
-                              "height": 34,
-                              "gap": 8,
-                              "padding": [
-                                0,
-                                10
-                              ],
-                              "alignItems": "center",
-                              "children": [
-                                {
-                                  "type": "ellipse",
-                                  "id": "f5vVwz",
-                                  "name": "Kobi Candidate Dot",
-                                  "fill": "$speaker-amber",
-                                  "width": 7,
-                                  "height": 7
-                                },
-                                {
                                   "type": "frame",
-                                  "id": "MfEB1",
-                                  "name": "Kobi Candidate Identity",
+                                  "id": "L0wZu",
+                                  "name": "Kobi Candidate",
                                   "width": "fill_container",
-                                  "layout": "vertical",
-                                  "gap": 1,
+                                  "height": 30,
+                                  "fill": "$surface",
+                                  "cornerRadius": 4,
+                                  "gap": 7,
+                                  "padding": [
+                                    0,
+                                    8
+                                  ],
+                                  "alignItems": "center",
                                   "children": [
                                     {
-                                      "type": "text",
-                                      "id": "thNGS",
-                                      "name": "Kobi Candidate Name",
-                                      "fill": "$ink",
-                                      "content": "Kobi",
-                                      "fontFamily": "$font-body",
-                                      "fontSize": 11,
-                                      "fontWeight": "600"
+                                      "type": "ellipse",
+                                      "id": "YRLHI",
+                                      "name": "Kobi Candidate Dot",
+                                      "fill": "$speaker-amber",
+                                      "width": 6,
+                                      "height": 6
+                                    },
+                                    {
+                                      "type": "frame",
+                                      "id": "Imngd",
+                                      "name": "Kobi Candidate Text",
+                                      "width": "fill_container",
+                                      "layout": "vertical",
+                                      "gap": 1,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "B4srJ",
+                                          "name": "Kobi Candidate Name",
+                                          "fill": "$ink",
+                                          "content": "Kobi",
+                                          "fontFamily": "$font-body",
+                                          "fontSize": 10,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "K0YNdl",
+                                          "name": "Kobi Candidate Metadata",
+                                          "fill": "$ink-muted",
+                                          "content": "this meeting",
+                                          "fontFamily": "$font-mono",
+                                          "fontSize": 7,
+                                          "fontWeight": "normal"
+                                        }
+                                      ]
                                     },
                                     {
                                       "type": "text",
-                                      "id": "uUGg8",
-                                      "name": "Kobi Candidate Metadata",
-                                      "fill": "$ink-muted",
-                                      "content": "this meeting",
-                                      "fontFamily": "$font-mono",
-                                      "fontSize": 8,
-                                      "fontWeight": "normal"
-                                    }
-                                  ]
-                                },
-                                {
-                                  "type": "frame",
-                                  "id": "d670V",
-                                  "name": "Kobi Similarity Badge",
-                                  "fill": "$surface-selected",
-                                  "cornerRadius": 9999,
-                                  "padding": [
-                                    4,
-                                    7
-                                  ],
-                                  "children": [
-                                    {
-                                      "type": "text",
-                                      "id": "gsHlU",
-                                      "name": "Kobi Similarity Score",
+                                      "id": "L5OTw",
+                                      "name": "Kobi Candidate Score",
                                       "fill": "$accent",
                                       "content": "87%",
                                       "fontFamily": "$font-mono",
-                                      "fontSize": 9,
+                                      "fontSize": 8,
                                       "fontWeight": "600"
                                     }
                                   ]
-                                },
-                                {
-                                  "type": "icon",
-                                  "id": "jcUeg",
-                                  "name": "Assign Kobi",
-                                  "width": 13,
-                                  "height": 13,
-                                  "icon": "user-check",
-                                  "library": "lucide",
-                                  "fill": "$accent"
                                 }
                               ]
                             },
                             {
-                              "type": "text",
-                              "id": "HTgB2",
-                              "name": "Other Candidate Group Label",
-                              "fill": "$ink-muted",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "OTHER TRANSCRIPTS",
-                              "textAlignVertical": "bottom",
-                              "fontFamily": "$font-mono",
-                              "fontSize": 8,
-                              "fontWeight": "600",
-                              "letterSpacing": 1
-                            },
-                            {
                               "type": "frame",
-                              "id": "vhYyS",
-                              "name": "Fares Voiceprint Candidate",
+                              "id": "NTk43",
+                              "name": "Other Attendee Candidates",
                               "width": "fill_container",
-                              "height": 34,
-                              "gap": 8,
-                              "padding": [
-                                0,
-                                10
-                              ],
-                              "alignItems": "center",
+                              "gap": 6,
                               "children": [
                                 {
-                                  "type": "ellipse",
-                                  "id": "N0wCVn",
-                                  "name": "Fares Candidate Dot",
-                                  "fill": "$speaker-green",
-                                  "width": 7,
-                                  "height": 7
-                                },
-                                {
                                   "type": "frame",
-                                  "id": "J24z8",
-                                  "name": "Fares Candidate Identity",
+                                  "id": "nd3SV",
+                                  "name": "Remco Candidate",
                                   "width": "fill_container",
-                                  "layout": "vertical",
-                                  "gap": 1,
+                                  "height": 30,
+                                  "fill": "$surface",
+                                  "cornerRadius": 4,
+                                  "gap": 7,
+                                  "padding": [
+                                    0,
+                                    8
+                                  ],
+                                  "alignItems": "center",
                                   "children": [
                                     {
-                                      "type": "text",
-                                      "id": "hvORn",
-                                      "name": "Fares Candidate Name",
-                                      "fill": "$ink",
-                                      "content": "Fares",
-                                      "fontFamily": "$font-body",
-                                      "fontSize": 11,
-                                      "fontWeight": "600"
+                                      "type": "ellipse",
+                                      "id": "gNrCA",
+                                      "name": "Remco Candidate Dot",
+                                      "fill": "$speaker-blue",
+                                      "width": 6,
+                                      "height": 6
+                                    },
+                                    {
+                                      "type": "frame",
+                                      "id": "lgvEy",
+                                      "name": "Remco Candidate Text",
+                                      "width": "fill_container",
+                                      "layout": "vertical",
+                                      "gap": 1,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "FzEFh",
+                                          "name": "Remco Candidate Name",
+                                          "fill": "$ink",
+                                          "content": "Remco",
+                                          "fontFamily": "$font-body",
+                                          "fontSize": 10,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "r4ifn",
+                                          "name": "Remco Candidate Metadata",
+                                          "fill": "$ink-muted",
+                                          "content": "no voiceprint",
+                                          "fontFamily": "$font-mono",
+                                          "fontSize": 7,
+                                          "fontWeight": "normal"
+                                        }
+                                      ]
                                     },
                                     {
                                       "type": "text",
-                                      "id": "dNcdn",
-                                      "name": "Fares Candidate Metadata",
+                                      "id": "JV3CP",
+                                      "name": "Remco Candidate Score",
                                       "fill": "$ink-muted",
-                                      "content": "12 prior transcripts",
+                                      "content": "—",
                                       "fontFamily": "$font-mono",
                                       "fontSize": 8,
-                                      "fontWeight": "normal"
+                                      "fontWeight": "600"
                                     }
                                   ]
                                 },
                                 {
                                   "type": "frame",
-                                  "id": "iIbTX",
-                                  "name": "Fares Similarity Badge",
-                                  "fill": "$surface-subtle",
-                                  "cornerRadius": 9999,
+                                  "id": "e3YCL",
+                                  "name": "Michał Candidate",
+                                  "width": "fill_container",
+                                  "height": 30,
+                                  "fill": "$surface",
+                                  "cornerRadius": 4,
+                                  "gap": 7,
                                   "padding": [
-                                    4,
-                                    7
+                                    0,
+                                    8
                                   ],
+                                  "alignItems": "center",
                                   "children": [
                                     {
+                                      "type": "ellipse",
+                                      "id": "og4Y6",
+                                      "name": "Michał Candidate Dot",
+                                      "fill": "$ink-muted",
+                                      "width": 6,
+                                      "height": 6
+                                    },
+                                    {
+                                      "type": "frame",
+                                      "id": "Izk8W",
+                                      "name": "Michał Candidate Text",
+                                      "width": "fill_container",
+                                      "layout": "vertical",
+                                      "gap": 1,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "LWQzg",
+                                          "name": "Michał Candidate Name",
+                                          "fill": "$ink",
+                                          "content": "Michał",
+                                          "fontFamily": "$font-body",
+                                          "fontSize": 10,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "pmg7c",
+                                          "name": "Michał Candidate Metadata",
+                                          "fill": "$ink-muted",
+                                          "content": "no voiceprint",
+                                          "fontFamily": "$font-mono",
+                                          "fontSize": 7,
+                                          "fontWeight": "normal"
+                                        }
+                                      ]
+                                    },
+                                    {
                                       "type": "text",
-                                      "id": "jBHGl",
-                                      "name": "Fares Similarity Score",
-                                      "fill": "$ink-secondary",
+                                      "id": "yIvor",
+                                      "name": "Michał Candidate Score",
+                                      "fill": "$ink-muted",
+                                      "content": "—",
+                                      "fontFamily": "$font-mono",
+                                      "fontSize": 8,
+                                      "fontWeight": "600"
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "zeZKA",
+                              "name": "Other Transcript Suggestions Header",
+                              "width": "fill_container",
+                              "height": 14,
+                              "alignItems": "end",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "xjN46",
+                                  "name": "Other Transcript Suggestions Label",
+                                  "fill": "$ink-muted",
+                                  "content": "OTHER TRANSCRIPTS",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 7,
+                                  "fontWeight": "600",
+                                  "letterSpacing": 0.8
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "oPDnO",
+                              "name": "External Voiceprint Candidates",
+                              "width": "fill_container",
+                              "gap": 6,
+                              "children": [
+                                {
+                                  "type": "frame",
+                                  "id": "RNG0f",
+                                  "name": "Fares Candidate",
+                                  "width": "fill_container",
+                                  "height": 30,
+                                  "fill": "$surface",
+                                  "cornerRadius": 4,
+                                  "gap": 7,
+                                  "padding": [
+                                    0,
+                                    8
+                                  ],
+                                  "alignItems": "center",
+                                  "children": [
+                                    {
+                                      "type": "ellipse",
+                                      "id": "q4QEF",
+                                      "name": "Fares Candidate Dot",
+                                      "fill": "$speaker-green",
+                                      "width": 6,
+                                      "height": 6
+                                    },
+                                    {
+                                      "type": "frame",
+                                      "id": "IzsFP",
+                                      "name": "Fares Candidate Text",
+                                      "width": "fill_container",
+                                      "layout": "vertical",
+                                      "gap": 1,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "wETHe",
+                                          "name": "Fares Candidate Name",
+                                          "fill": "$ink",
+                                          "content": "Fares",
+                                          "fontFamily": "$font-body",
+                                          "fontSize": 10,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "oJ8K8",
+                                          "name": "Fares Candidate Metadata",
+                                          "fill": "$ink-muted",
+                                          "content": "12 prior",
+                                          "fontFamily": "$font-mono",
+                                          "fontSize": 7,
+                                          "fontWeight": "normal"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "type": "text",
+                                      "id": "aK8hV",
+                                      "name": "Fares Candidate Score",
+                                      "fill": "$accent",
                                       "content": "83%",
                                       "fontFamily": "$font-mono",
-                                      "fontSize": 9,
+                                      "fontSize": 8,
                                       "fontWeight": "600"
                                     }
                                   ]
                                 },
                                 {
-                                  "type": "icon",
-                                  "id": "Yp7us",
-                                  "name": "Assign Fares",
-                                  "width": 13,
-                                  "height": 13,
-                                  "icon": "user-plus",
-                                  "library": "lucide",
-                                  "fill": "$ink-secondary"
-                                }
-                              ]
-                            },
-                            {
-                              "type": "frame",
-                              "id": "YKwjz",
-                              "name": "Ulrich Voiceprint Candidate",
-                              "width": "fill_container",
-                              "height": 34,
-                              "gap": 8,
-                              "padding": [
-                                0,
-                                10
-                              ],
-                              "alignItems": "center",
-                              "children": [
-                                {
-                                  "type": "ellipse",
-                                  "id": "F8PARD",
-                                  "name": "Ulrich Candidate Dot",
-                                  "fill": "$ink-muted",
-                                  "width": 7,
-                                  "height": 7
-                                },
-                                {
                                   "type": "frame",
-                                  "id": "Y4m2pB",
-                                  "name": "Ulrich Candidate Identity",
+                                  "id": "cIIs1",
+                                  "name": "Ulrich Candidate",
                                   "width": "fill_container",
-                                  "layout": "vertical",
-                                  "gap": 1,
+                                  "height": 30,
+                                  "fill": "$surface",
+                                  "cornerRadius": 4,
+                                  "gap": 7,
+                                  "padding": [
+                                    0,
+                                    8
+                                  ],
+                                  "alignItems": "center",
                                   "children": [
                                     {
-                                      "type": "text",
-                                      "id": "O3zUD",
-                                      "name": "Ulrich Candidate Name",
-                                      "fill": "$ink",
-                                      "content": "Ulrich",
-                                      "fontFamily": "$font-body",
-                                      "fontSize": 11,
-                                      "fontWeight": "600"
+                                      "type": "ellipse",
+                                      "id": "L8FrMH",
+                                      "name": "Ulrich Candidate Dot",
+                                      "fill": "$speaker-blue",
+                                      "width": 6,
+                                      "height": 6
+                                    },
+                                    {
+                                      "type": "frame",
+                                      "id": "bdOhJ",
+                                      "name": "Ulrich Candidate Text",
+                                      "width": "fill_container",
+                                      "layout": "vertical",
+                                      "gap": 1,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "Y1vsXH",
+                                          "name": "Ulrich Candidate Name",
+                                          "fill": "$ink",
+                                          "content": "Ulrich",
+                                          "fontFamily": "$font-body",
+                                          "fontSize": 10,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "cgsJO",
+                                          "name": "Ulrich Candidate Metadata",
+                                          "fill": "$ink-muted",
+                                          "content": "4 prior",
+                                          "fontFamily": "$font-mono",
+                                          "fontSize": 7,
+                                          "fontWeight": "normal"
+                                        }
+                                      ]
                                     },
                                     {
                                       "type": "text",
-                                      "id": "ehPEb",
-                                      "name": "Ulrich Candidate Metadata",
-                                      "fill": "$ink-muted",
-                                      "content": "4 prior transcripts",
-                                      "fontFamily": "$font-mono",
-                                      "fontSize": 8,
-                                      "fontWeight": "normal"
-                                    }
-                                  ]
-                                },
-                                {
-                                  "type": "frame",
-                                  "id": "JluSy",
-                                  "name": "Ulrich Similarity Badge",
-                                  "fill": "$surface-subtle",
-                                  "cornerRadius": 9999,
-                                  "padding": [
-                                    4,
-                                    7
-                                  ],
-                                  "children": [
-                                    {
-                                      "type": "text",
-                                      "id": "tdrEU",
-                                      "name": "Ulrich Similarity Score",
-                                      "fill": "$ink-secondary",
+                                      "id": "g0h3on",
+                                      "name": "Ulrich Candidate Score",
+                                      "fill": "$accent",
                                       "content": "78%",
                                       "fontFamily": "$font-mono",
-                                      "fontSize": 9,
+                                      "fontSize": 8,
                                       "fontWeight": "600"
                                     }
                                   ]
-                                },
-                                {
-                                  "type": "icon",
-                                  "id": "b9WPxt",
-                                  "name": "Assign Ulrich",
-                                  "width": 13,
-                                  "height": 13,
-                                  "icon": "user-plus",
-                                  "library": "lucide",
-                                  "fill": "$ink-secondary"
                                 }
                               ]
                             }
@@ -3278,13 +3603,12 @@
                     },
                     {
                       "type": "frame",
-                      "id": "PF470",
-                      "name": "Existing Attendee Guidance List",
+                      "id": "XiefK",
+                      "name": "Attendees with Nested Range Guidance",
                       "width": "fill_container",
-                      "height": "fill_container",
                       "layout": "vertical",
                       "padding": [
-                        8,
+                        6,
                         0,
                         0,
                         0
@@ -3292,10 +3616,10 @@
                       "children": [
                         {
                           "type": "frame",
-                          "id": "eVxgQ",
-                          "name": "Existing Attendee Guidance Label Row",
+                          "id": "r1HYao",
+                          "name": "Guidance Attendees Label Row",
                           "width": "fill_container",
-                          "height": 24,
+                          "height": 22,
                           "padding": [
                             0,
                             18
@@ -3305,8 +3629,8 @@
                           "children": [
                             {
                               "type": "text",
-                              "id": "D3f9NL",
-                              "name": "Existing Attendee Guidance Label",
+                              "id": "Q8bOs",
+                              "name": "Guidance Attendees Label",
                               "fill": "$ink-muted",
                               "content": "GUIDANCE FILE ATTENDEES",
                               "fontFamily": "$font-mono",
@@ -3316,8 +3640,8 @@
                             },
                             {
                               "type": "text",
-                              "id": "H2jJj",
-                              "name": "Existing Attendee Guidance Count",
+                              "id": "QfTB3",
+                              "name": "Guidance Attendees Count",
                               "fill": "$ink-muted",
                               "content": "4",
                               "fontFamily": "$font-mono",
@@ -3328,76 +3652,169 @@
                         },
                         {
                           "type": "frame",
-                          "id": "qFVkQ",
-                          "name": "Remco Collapsed Guidance Group",
+                          "id": "JWecI",
+                          "name": "Remco Expanded Attendee",
                           "width": "fill_container",
-                          "height": 36,
-                          "gap": 9,
-                          "padding": [
-                            0,
-                            18
-                          ],
-                          "alignItems": "center",
+                          "layout": "vertical",
                           "children": [
                             {
-                              "type": "icon",
-                              "id": "tH2Uy",
-                              "name": "Remco Collapsed Chevron",
-                              "width": 12,
-                              "height": 12,
-                              "icon": "chevron-right",
-                              "library": "lucide",
-                              "fill": "$ink-muted"
-                            },
-                            {
-                              "type": "ellipse",
-                              "id": "q4Bb7R",
-                              "name": "Remco Collapsed Dot",
-                              "fill": "$speaker-blue",
-                              "width": 7,
-                              "height": 7
-                            },
-                            {
-                              "type": "text",
-                              "id": "SkXFX",
-                              "name": "Remco Collapsed Name",
-                              "fill": "$ink",
-                              "textGrowth": "fixed-width",
+                              "type": "frame",
+                              "id": "f9GImX",
+                              "name": "Remco Attendee Header",
                               "width": "fill_container",
-                              "content": "Remco",
-                              "fontFamily": "$font-body",
-                              "fontSize": 11,
-                              "fontWeight": "600"
+                              "height": 32,
+                              "gap": 8,
+                              "padding": [
+                                0,
+                                18
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "vf4rr",
+                                  "name": "Remco Attendee Chevron",
+                                  "width": 11,
+                                  "height": 11,
+                                  "icon": "chevron-down",
+                                  "library": "lucide",
+                                  "fill": "$ink-muted"
+                                },
+                                {
+                                  "type": "ellipse",
+                                  "id": "Egxhu",
+                                  "name": "Remco Attendee Dot",
+                                  "fill": "$speaker-blue",
+                                  "width": 7,
+                                  "height": 7
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "vb0eS",
+                                  "name": "Remco Editable Attendee Name",
+                                  "fill": "$ink",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "Remco",
+                                  "fontFamily": "$font-body",
+                                  "fontSize": 11,
+                                  "fontWeight": "600"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "keHZi",
+                                  "name": "Remco Range Count",
+                                  "fill": "$ink-muted",
+                                  "content": "2 ranges",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 8,
+                                  "fontWeight": "normal"
+                                },
+                                {
+                                  "type": "icon",
+                                  "id": "g3g56",
+                                  "name": "Edit Remco",
+                                  "width": 11,
+                                  "height": 11,
+                                  "icon": "pencil",
+                                  "library": "lucide",
+                                  "fill": "$ink-muted"
+                                },
+                                {
+                                  "type": "icon",
+                                  "id": "O8KBw2",
+                                  "name": "Add Range for Remco",
+                                  "width": 11,
+                                  "height": 11,
+                                  "icon": "plus",
+                                  "library": "lucide",
+                                  "fill": "$ink-secondary"
+                                }
+                              ]
                             },
                             {
-                              "type": "text",
-                              "id": "WzoBt",
-                              "name": "Remco Collapsed Detail",
-                              "fill": "$ink-muted",
-                              "content": "2 ranges",
-                              "fontFamily": "$font-mono",
-                              "fontSize": 9,
-                              "fontWeight": "normal"
+                              "type": "frame",
+                              "id": "EhGDP",
+                              "name": "Remco Range One",
+                              "width": "fill_container",
+                              "height": 20,
+                              "gap": 6,
+                              "padding": [
+                                0,
+                                18,
+                                0,
+                                55
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "QPk7Y",
+                                  "name": "Remco Range One Icon",
+                                  "width": 9,
+                                  "height": 9,
+                                  "icon": "corner-down-right",
+                                  "library": "lucide",
+                                  "fill": "$ink-muted"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "ETOny",
+                                  "name": "Remco Range One Value",
+                                  "fill": "$ink-secondary",
+                                  "content": "00:13.82 → 00:29.99",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 8,
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             },
                             {
-                              "type": "icon",
-                              "id": "h83k00",
-                              "name": "Add Range for Remco Collapsed",
-                              "width": 12,
-                              "height": 12,
-                              "icon": "plus",
-                              "library": "lucide",
-                              "fill": "$ink-secondary"
+                              "type": "frame",
+                              "id": "l2rF6g",
+                              "name": "Remco Range Two",
+                              "width": "fill_container",
+                              "height": 20,
+                              "gap": 6,
+                              "padding": [
+                                0,
+                                18,
+                                0,
+                                55
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "HSVGl",
+                                  "name": "Remco Range Two Icon",
+                                  "width": 9,
+                                  "height": 9,
+                                  "icon": "corner-down-right",
+                                  "library": "lucide",
+                                  "fill": "$ink-muted"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "Z8HJYN",
+                                  "name": "Remco Range Two Value",
+                                  "fill": "$ink-secondary",
+                                  "content": "18:42.14 → 19:08.63",
+                                  "fontFamily": "$font-mono",
+                                  "fontSize": 8,
+                                  "fontWeight": "normal"
+                                }
+                              ]
                             }
                           ]
                         },
                         {
                           "type": "frame",
-                          "id": "iI5cd",
-                          "name": "Piotr Collapsed Guidance Group",
+                          "id": "Gn3RH",
+                          "name": "Piotr Attendee Header",
                           "width": "fill_container",
-                          "height": 36,
-                          "gap": 9,
+                          "height": 32,
+                          "gap": 8,
                           "padding": [
                             0,
                             18
@@ -3406,26 +3823,26 @@
                           "children": [
                             {
                               "type": "icon",
-                              "id": "qrkM6",
-                              "name": "Piotr Collapsed Chevron",
-                              "width": 12,
-                              "height": 12,
+                              "id": "EupVJ",
+                              "name": "Piotr Attendee Chevron",
+                              "width": 11,
+                              "height": 11,
                               "icon": "chevron-right",
                               "library": "lucide",
                               "fill": "$ink-muted"
                             },
                             {
                               "type": "ellipse",
-                              "id": "y2BiHS",
-                              "name": "Piotr Collapsed Dot",
+                              "id": "yqLvX",
+                              "name": "Piotr Attendee Dot",
                               "fill": "$speaker-violet",
                               "width": 7,
                               "height": 7
                             },
                             {
                               "type": "text",
-                              "id": "KiWod",
-                              "name": "Piotr Collapsed Name",
+                              "id": "Zd0S6",
+                              "name": "Piotr Editable Attendee Name",
                               "fill": "$ink",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
@@ -3436,20 +3853,30 @@
                             },
                             {
                               "type": "text",
-                              "id": "nOoJD",
-                              "name": "Piotr Collapsed Detail",
+                              "id": "c1rLLt",
+                              "name": "Piotr Range Count",
                               "fill": "$ink-muted",
                               "content": "1 range",
                               "fontFamily": "$font-mono",
-                              "fontSize": 9,
+                              "fontSize": 8,
                               "fontWeight": "normal"
                             },
                             {
                               "type": "icon",
-                              "id": "dq6zD",
-                              "name": "Add Range for Piotr Collapsed",
-                              "width": 12,
-                              "height": 12,
+                              "id": "eBOXh",
+                              "name": "Edit Piotr",
+                              "width": 11,
+                              "height": 11,
+                              "icon": "pencil",
+                              "library": "lucide",
+                              "fill": "$ink-muted"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "EYp6l",
+                              "name": "Add Range for Piotr",
+                              "width": 11,
+                              "height": 11,
                               "icon": "plus",
                               "library": "lucide",
                               "fill": "$ink-secondary"
@@ -3458,11 +3885,11 @@
                         },
                         {
                           "type": "frame",
-                          "id": "pcDHM",
-                          "name": "Kobi Collapsed Guidance Group",
+                          "id": "h6DZAn",
+                          "name": "Kobi Attendee Header",
                           "width": "fill_container",
-                          "height": 36,
-                          "gap": 9,
+                          "height": 32,
+                          "gap": 8,
                           "padding": [
                             0,
                             18
@@ -3471,26 +3898,26 @@
                           "children": [
                             {
                               "type": "icon",
-                              "id": "rIS5g",
-                              "name": "Kobi Collapsed Chevron",
-                              "width": 12,
-                              "height": 12,
+                              "id": "aEEpS",
+                              "name": "Kobi Attendee Chevron",
+                              "width": 11,
+                              "height": 11,
                               "icon": "chevron-right",
                               "library": "lucide",
                               "fill": "$ink-muted"
                             },
                             {
                               "type": "ellipse",
-                              "id": "ztr3T",
-                              "name": "Kobi Collapsed Dot",
+                              "id": "ivjk2",
+                              "name": "Kobi Attendee Dot",
                               "fill": "$speaker-amber",
                               "width": 7,
                               "height": 7
                             },
                             {
                               "type": "text",
-                              "id": "n52hL",
-                              "name": "Kobi Collapsed Name",
+                              "id": "iMiQY",
+                              "name": "Kobi Editable Attendee Name",
                               "fill": "$ink",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
@@ -3501,20 +3928,30 @@
                             },
                             {
                               "type": "text",
-                              "id": "RVf1H",
-                              "name": "Kobi Collapsed Detail",
+                              "id": "AORec",
+                              "name": "Kobi Range Count",
                               "fill": "$ink-muted",
                               "content": "1 range",
                               "fontFamily": "$font-mono",
-                              "fontSize": 9,
+                              "fontSize": 8,
                               "fontWeight": "normal"
                             },
                             {
                               "type": "icon",
-                              "id": "tADPj",
-                              "name": "Add Range for Kobi Collapsed",
-                              "width": 12,
-                              "height": 12,
+                              "id": "mdk2W",
+                              "name": "Edit Kobi",
+                              "width": 11,
+                              "height": 11,
+                              "icon": "pencil",
+                              "library": "lucide",
+                              "fill": "$ink-muted"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "tJB7F",
+                              "name": "Add Range for Kobi",
+                              "width": 11,
+                              "height": 11,
                               "icon": "plus",
                               "library": "lucide",
                               "fill": "$ink-secondary"
@@ -3523,11 +3960,11 @@
                         },
                         {
                           "type": "frame",
-                          "id": "ftEpx",
-                          "name": "Michał Collapsed Guidance Group",
+                          "id": "hGi67",
+                          "name": "Michał Attendee Header",
                           "width": "fill_container",
-                          "height": 36,
-                          "gap": 9,
+                          "height": 32,
+                          "gap": 8,
                           "padding": [
                             0,
                             18
@@ -3536,26 +3973,26 @@
                           "children": [
                             {
                               "type": "icon",
-                              "id": "KSdNm",
-                              "name": "Michał Collapsed Chevron",
-                              "width": 12,
-                              "height": 12,
+                              "id": "e4iOl",
+                              "name": "Michał Attendee Chevron",
+                              "width": 11,
+                              "height": 11,
                               "icon": "chevron-right",
                               "library": "lucide",
                               "fill": "$ink-muted"
                             },
                             {
                               "type": "ellipse",
-                              "id": "PEvTm",
-                              "name": "Michał Collapsed Dot",
+                              "id": "toOoo",
+                              "name": "Michał Attendee Dot",
                               "fill": "$ink-muted",
                               "width": 7,
                               "height": 7
                             },
                             {
                               "type": "text",
-                              "id": "VIBnh",
-                              "name": "Michał Collapsed Name",
+                              "id": "hsvou",
+                              "name": "Michał Editable Attendee Name",
                               "fill": "$ink",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
@@ -3566,25 +4003,210 @@
                             },
                             {
                               "type": "text",
-                              "id": "wYDxP",
-                              "name": "Michał Collapsed Detail",
+                              "id": "A8twI",
+                              "name": "Michał Range Count",
                               "fill": "$ink-muted",
-                              "content": "No ranges",
+                              "content": "no ranges",
                               "fontFamily": "$font-mono",
-                              "fontSize": 9,
+                              "fontSize": 8,
                               "fontWeight": "normal"
                             },
                             {
                               "type": "icon",
-                              "id": "G5uej4",
-                              "name": "Add Range for Michał Collapsed",
-                              "width": 12,
-                              "height": 12,
+                              "id": "BmdfZ",
+                              "name": "Edit Michał",
+                              "width": 11,
+                              "height": 11,
+                              "icon": "pencil",
+                              "library": "lucide",
+                              "fill": "$ink-muted"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "V7jeZQ",
+                              "name": "Add Range for Michał",
+                              "width": 11,
+                              "height": 11,
                               "icon": "plus",
                               "library": "lucide",
                               "fill": "$ink-secondary"
                             }
                           ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "e4muS",
+                      "name": "Anonymous Speakers List",
+                      "width": "fill_container",
+                      "stroke": "$line",
+                      "strokeWidth": {
+                        "top": 1
+                      },
+                      "layout": "vertical",
+                      "padding": [
+                        6,
+                        0,
+                        0,
+                        0
+                      ],
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "jSQlF",
+                          "name": "Anonymous Speakers Label Row",
+                          "width": "fill_container",
+                          "height": 22,
+                          "padding": [
+                            0,
+                            18
+                          ],
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "MjmDd",
+                              "name": "Anonymous Speakers Label",
+                              "fill": "$ink-muted",
+                              "content": "ANONYMOUS SPEAKERS",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 8,
+                              "fontWeight": "600",
+                              "letterSpacing": 1
+                            },
+                            {
+                              "type": "text",
+                              "id": "zdWpR",
+                              "name": "Anonymous Speakers Count",
+                              "fill": "$accent",
+                              "content": "4",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 8,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "Sk2vX",
+                          "name": "speaker-2 Anonymous Speaker",
+                          "width": "fill_container",
+                          "height": 30,
+                          "gap": 8,
+                          "padding": [
+                            0,
+                            18
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "QSfA5",
+                              "name": "speaker-2 Anonymous Dot",
+                              "fill": "$ink-muted",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "lWcNm",
+                              "name": "speaker-2 Anonymous Handle",
+                              "fill": "$ink",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "speaker-2",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 9,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "WtEaD",
+                              "name": "speaker-2 Anonymous Detail",
+                              "fill": "$ink-muted",
+                              "content": "3 runs",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 8,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "U41uus",
+                              "name": "Jump to speaker-2",
+                              "width": 11,
+                              "height": 11,
+                              "icon": "arrow-right",
+                              "library": "lucide",
+                              "fill": "$accent"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "UknMv",
+                          "name": "speaker-5 Anonymous Speaker",
+                          "width": "fill_container",
+                          "height": 30,
+                          "gap": 8,
+                          "padding": [
+                            0,
+                            18
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "g8puIr",
+                              "name": "speaker-5 Anonymous Dot",
+                              "fill": "$ink-muted",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "z2xCm",
+                              "name": "speaker-5 Anonymous Handle",
+                              "fill": "$ink",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "speaker-5",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 9,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "K4SNLr",
+                              "name": "speaker-5 Anonymous Detail",
+                              "fill": "$ink-muted",
+                              "content": "1 run",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 8,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "KdHCj",
+                              "name": "Jump to speaker-5",
+                              "width": 11,
+                              "height": 11,
+                              "icon": "arrow-right",
+                              "library": "lucide",
+                              "fill": "$accent"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "D09Ykw",
+                          "name": "Remaining Anonymous Speakers",
+                          "fill": "$ink-muted",
+                          "content": "+ 2 more below",
+                          "fontFamily": "$font-mono",
+                          "fontSize": 7,
+                          "fontWeight": "normal"
                         }
                       ]
                     }
