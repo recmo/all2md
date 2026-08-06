@@ -12,8 +12,10 @@ from speech2md.redimnet2 import (
     aggregate_voiceprints,
     extract_window_evidence,
     normalize_embedding,
+    reconcile_speaker_runs,
     reconcile_speakers,
     select_clean_intervals,
+    split_speaker_runs,
     write_voiceprints,
 )
 
@@ -208,6 +210,89 @@ def test_one_to_one_assignment_prevents_two_locals_sharing_a_profile():
     assert len(assigned) == 2
     assert "Speaker 1" in assigned
     assert any(item["reason"] == "one_to_one_conflict" for item in decisions)
+
+
+def test_splits_reused_moss_labels_into_contiguous_runs():
+    windows, originals = split_speaker_runs([[
+        Segment(0, 3, "a", "W01:S01", "participants"),
+        Segment(3, 6, "b", "W01:S01", "participants"),
+        Segment(6, 9, "c", "W01:S02", "participants"),
+        Segment(9, 12, "d", "W01:S01", "participants"),
+    ]])
+
+    assert [segment.speaker for segment in windows[0]] == [
+        "W01:S01:R001",
+        "W01:S01:R001",
+        "W01:S02:R002",
+        "W01:S01:R003",
+    ]
+    assert originals == {
+        "W01:S01:R001": "W01:S01",
+        "W01:S02:R002": "W01:S02",
+        "W01:S01:R003": "W01:S01",
+    }
+
+
+def test_run_reconciliation_collapses_a_false_split_without_merging_later_reuse():
+    runs = [[
+        Segment(0, 3, "Piotr", "W01:S02:R001", "participants"),
+        Segment(4, 7, "Remco", "W01:S01:R002", "participants"),
+        Segment(8, 11, "Piotr again", "W01:S05:R003", "participants"),
+        Segment(12, 15, "Remco again", "W01:S05:R004", "participants"),
+    ]]
+    originals = {
+        "W01:S02:R001": "W01:S02",
+        "W01:S01:R002": "W01:S01",
+        "W01:S05:R003": "W01:S05",
+        "W01:S05:R004": "W01:S05",
+    }
+    window_evidence = evidence(
+        **{
+            "W01:S02:R001": axis(0),
+            "W01:S01:R002": axis(1),
+            "W01:S05:R003": axis(0),
+            "W01:S05:R004": axis(1),
+        }
+    )
+
+    mapping, decisions, _ = reconcile_speaker_runs(
+        runs,
+        [window_evidence],
+        original_labels=originals,
+        role="participants",
+    )
+
+    assert mapping["W01:S05:R003"] == mapping["W01:S02:R001"]
+    assert mapping["W01:S05:R004"] == mapping["W01:S01:R002"]
+    assert mapping["W01:S05:R003"] != mapping["W01:S05:R004"]
+    assert [item["decision"] for item in decisions] == [
+        "new",
+        "new",
+        "matched",
+        "matched",
+    ]
+
+
+def test_run_without_confident_voice_evidence_falls_back_to_its_moss_label():
+    runs = [[
+        Segment(0, 3, "long", "W01:S01:R001", "participants"),
+        Segment(4, 5, "short", "W01:S01:R002", "participants"),
+    ]]
+    originals = {
+        "W01:S01:R001": "W01:S01",
+        "W01:S01:R002": "W01:S01",
+    }
+
+    mapping, decisions, _ = reconcile_speaker_runs(
+        runs,
+        [evidence(**{"W01:S01:R001": axis(0)})],
+        original_labels=originals,
+        role="participants",
+    )
+
+    assert mapping["W01:S01:R001"] == mapping["W01:S01:R002"]
+    assert decisions[-1]["decision"] == "fallback"
+    assert decisions[-1]["reason"] == "moss_label_prior"
 
 
 def test_creates_new_speaker_below_similarity_threshold():

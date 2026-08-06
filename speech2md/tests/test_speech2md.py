@@ -17,14 +17,17 @@ from speech2md.moss import (
     ENGLISH_TRANSCRIPTION_PROMPT,
     MAX_HOTWORDS,
     MAX_GENERATION_TOKENS,
+    MossGuidanceRequired,
     RECOVERY_TOKEN_THRESHOLD,
     build_transcription_prompt,
     deduplicate_boundaries,
     generation_diagnostics,
     _generate_with_timestamp_progress,
+    _speaker_decision,
     parse_moss_transcript,
     parse_silence_centers,
     parse_segments,
+    plan_speaker_forces,
     plan_windows,
     resolve_speaker_anchors,
     transcribe_track,
@@ -108,6 +111,18 @@ def test_parse_moss_uses_local_speakers_for_every_track():
             duration=10,
             role="mixed",
         )
+
+
+def test_parse_moss_clamps_centisecond_terminal_timestamp_rounding():
+    segments = parse_segments(
+        [{"start": 9.5, "end": 10.01, "speaker_id": "S01", "text": "Done"}],
+        window=1,
+        offset=100,
+        duration=10.0007,
+        role="mixed",
+    )
+
+    assert segments == [Segment(109.5, 110.0007, "Done", "W01:S01", "mixed")]
 
 
 def test_parse_moss_transcript_preserves_numeric_brackets_in_text():
@@ -222,9 +237,59 @@ def test_speaker_hint_range_resolves_exactly_one_local_speaker():
         )
 
 
-def test_speaker_hints_reject_contradictory_identities_for_one_local_speaker():
+def test_speaker_hint_ignores_tiny_adjacent_boundary_overlap():
+    segments = [
+        Segment(34.95, 36.03, "Yeah, loud and clear.", "W01:S01", "mixed"),
+        Segment(36.96, 37.56, "Wonderful.", "W01:S02", "mixed"),
+        Segment(38.61, 44.82, "How are you?", "W01:S02", "mixed"),
+    ]
+
+    assert resolve_speaker_anchors(
+        segments,
+        (
+            SpeakerHint("Ulrich", 34, 36, "mixed"),
+            SpeakerHint("Remco", 36, 46, "mixed"),
+        ),
+        role="mixed",
+    ) == {"W01:S01": "Ulrich", "W01:S02": "Remco"}
+
+
+def test_speaker_hint_uses_dominant_overlap_when_timestamps_round_together():
+    segments = [
+        Segment(1304.48, 1304.96, "Uh.", "W02:S02", "mixed"),
+        Segment(1304.97, 1305.80, "Makes sense, right?", "W02:S03", "mixed"),
+    ]
+
+    assert resolve_speaker_anchors(
+        segments,
+        (SpeakerHint("Sina", 1304, 1306, "mixed"),),
+        role="mixed",
+    ) == {"W02:S03": "Sina"}
+
+
+def test_speaker_guidance_ignores_a_neighbor_with_the_same_rounded_start():
+    segments = [
+        Segment(167.44, 169.44, "No.", "W01:S02", "mixed"),
+        Segment(262.06, 262.62, "Yeah.", "W01:S02", "mixed"),
+        Segment(262.94, 269.42, "Longer answer.", "W01:S05", "mixed"),
+    ]
+
+    forces = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Marcin", 167, 170, "mixed"),
+            SpeakerHint("Remco", 262, 269, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+
+    assert forces == []
+
+
+def test_speaker_hints_reject_identities_without_a_separating_turn_boundary():
     segments = [Segment(10, 30, "speech", "W01:S01", "mixed")]
-    with pytest.raises(ValueError, match="anchored to both"):
+    with pytest.raises(ValueError, match="cannot be separated"):
         resolve_speaker_anchors(
             segments,
             (
@@ -233,6 +298,221 @@ def test_speaker_hints_reject_contradictory_identities_for_one_local_speaker():
             ),
             role="mixed",
         )
+
+
+def test_speaker_guidance_allocates_a_fresh_label_for_a_split_identity():
+    segments = [
+        Segment(0, 5, "Cody", "W01:S01", "mixed"),
+        Segment(10, 11, "Steffen begins", "W01:S01", "mixed"),
+        Segment(11, 15, "Steffen continues", "W01:S06", "mixed"),
+    ]
+
+    forces = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Cody", 0, 5, "mixed"),
+            SpeakerHint("Steffen", 10, 15, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+
+    assert forces == [
+        {"start": 10, "speaker": "S02", "identity": "Steffen"},
+    ]
+
+
+def test_speaker_hint_can_anchor_multiple_fully_contained_local_labels():
+    segments = [
+        Segment(10, 11, "Steffen begins", "W01:S02", "mixed"),
+        Segment(11, 15, "Steffen continues", "W01:S06", "mixed"),
+    ]
+
+    assert resolve_speaker_anchors(
+        segments,
+        (SpeakerHint("Steffen", 10, 15, "mixed"),),
+        role="mixed",
+    ) == {"W01:S02": "Steffen", "W01:S06": "Steffen"}
+
+
+def test_speaker_guidance_allocates_a_new_label_for_a_true_collision():
+    segments = [
+        Segment(12, 22, "Piotr", "W01:S04", "mixed"),
+        Segment(30, 34, "Fares", "W01:S04", "mixed"),
+        Segment(40, 50, "Piotr again", "W01:S04", "mixed"),
+    ]
+
+    forces = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Piotr", 12, 22, "mixed"),
+            SpeakerHint("Fares", 30, 34, "mixed"),
+            SpeakerHint("Piotr", 40, 50, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+
+    assert forces == [
+        {"start": 30, "speaker": "S01", "identity": "Fares"},
+    ]
+
+
+def test_speaker_guidance_uses_the_next_label_free_at_the_conflict():
+    segments = [
+        Segment(13, 29, "Remco", "W01:S01", "mixed"),
+        Segment(36.72, 39.15, "Ulrich", "W01:S02", "mixed"),
+        Segment(41.86, 43.92, "Ara", "W01:S03", "mixed"),
+        Segment(159.55, 162.22, "Marcin", "W01:S02", "mixed"),
+        Segment(281.72, 288.68, "Yogesh", "W01:S04", "mixed"),
+    ]
+
+    assert plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Ulrich", 36, 39, "mixed"),
+            SpeakerHint("Marcin", 159, 163, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    ) == [{"start": 159.55, "speaker": "S04", "identity": "Marcin"}]
+
+
+def test_fresh_speaker_bias_requires_a_supported_runner_up():
+    decision, force = _speaker_decision(
+        {"S01": 0.00001, "S02": 0.8519, "S03": 0.00001, "S04": 0.14808},
+        {"S01", "S02", "S03"},
+    )
+    assert force == "S04"
+    assert decision["top_candidate"] == "S02"
+    assert decision["alternative_candidate"] == "S04"
+    assert decision["alternative_is_fresh"] is True
+
+    _, force = _speaker_decision(
+        {"S01": 0.3775, "S02": 0.0001, "S03": 0.6224, "S04": 0.00001},
+        {"S01", "S02", "S03"},
+    )
+    assert force is None
+
+
+def test_speaker_guidance_is_stable_when_identities_are_renamed():
+    segments = [
+        Segment(0, 5, "first", "W01:S01", "mixed"),
+        Segment(5, 10, "second", "W01:S01", "mixed"),
+    ]
+
+    before = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Alice", 0, 5, "mixed"),
+            SpeakerHint("Bob", 5, 10, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+    after = plan_speaker_forces(
+        segments,
+        (
+            SpeakerHint("Zoe", 0, 5, "mixed"),
+            SpeakerHint("Aaron", 5, 10, "mixed"),
+        ),
+        role="mixed",
+        offset=0,
+    )
+
+    assert [(item["start"], item["speaker"]) for item in before] == [
+        (item["start"], item["speaker"]) for item in after
+    ]
+
+
+def test_cached_collision_requests_guided_decoding(tmp_path: Path):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+
+    with pytest.raises(MossGuidanceRequired, match="needs guided decoding"):
+        transcribe_track(
+            source,
+            engine=None,
+            prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+            role="mixed",
+            duration=10,
+            cached_generations=[{
+                "text": "[0][S01]Alice[5][5][S01]Bob[10]",
+                "generation_tokens": 10,
+            }],
+            speaker_hints=(
+                SpeakerHint("Alice", 0, 5, "mixed"),
+                SpeakerHint("Bob", 5, 10, "mixed"),
+            ),
+        )
+
+
+def test_matching_guided_cache_replays_without_model(tmp_path: Path):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    base = {
+        "text": "[0][S01]Alice[5][5][S01]Bob[10]",
+        "prompt_tokens": None,
+        "generation_tokens": 10,
+        "total_tokens": None,
+    }
+    forces = [
+        {"start": 5, "speaker": "S02", "identity": "Bob"},
+    ]
+
+    segments, details, _ = transcribe_track(
+        source,
+        engine=None,
+        prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        role="mixed",
+        duration=10,
+        cached_generations=[{
+            "text": "[0][S01]Alice[5][5][S02]Bob[10]",
+            "prompt_tokens": None,
+            "generation_tokens": 10,
+            "total_tokens": None,
+            "base": base,
+            "speaker_forces": forces,
+        }],
+        speaker_hints=(
+            SpeakerHint("Alice", 0, 5, "mixed"),
+            SpeakerHint("Bob", 5, 10, "mixed"),
+        ),
+    )
+
+    assert [segment.text for segment in segments] == ["Alice", "Bob"]
+    assert details["generation_cache"][0]["base"] == base
+    assert details["generation_cache"][0]["speaker_forces"] == forces
+
+
+def test_transcribe_publishes_generation_cache_before_speaker_hint_reconciliation(
+    tmp_path: Path,
+):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    published = []
+
+    with pytest.raises(ValueError, match="multiple diarized speakers"):
+        transcribe_track(
+            source,
+            engine=None,
+            prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+            role="mixed",
+            duration=10,
+            cached_generations=[{
+                "text": "[0][S01]Alice[5][5][S02]Bob[10]",
+                "generation_tokens": 10,
+            }],
+            speaker_hints=(SpeakerHint("Alice", 4, 6, "mixed"),),
+            generation_cache_callback=published.append,
+        )
+
+    assert published == [[{
+        "text": "[0][S01]Alice[5][5][S02]Bob[10]",
+        "prompt_tokens": None,
+        "generation_tokens": 10,
+        "total_tokens": None,
+    }]]
 
 
 def test_streaming_generation_reports_output_timestamps():
@@ -451,9 +731,10 @@ def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path
     state.calendar_event = "https://calendar.google.com/event?id=example"
     state.hints_sha256 = "b" * 64
     state.attendees = [
-        {"handle": "speaker-1", "identity": "gbrain://people/alice"},
-        {"identity": ""},
+        {"handle": "Alice", "identity": "gbrain://people/alice"},
+        {"handle": "Michał", "identity": ""},
     ]
+    state.speaker_names = {"speaker-1": "Alice"}
 
     rendered = render_markdown(state)
     opening, raw_frontmatter, body = rendered.split("---", 2)
@@ -468,11 +749,12 @@ def test_render_has_minimal_flat_frontmatter_and_non_speaking_attendees(tmp_path
         "ended_at": "2026-08-04T11:00:00+02:00",
         "calendar_event": "https://calendar.google.com/event?id=example",
         "attendees": [
-            {"handle": "speaker-1", "identity": "gbrain://people/alice"},
-            {"identity": ""},
+            {"handle": "Alice", "identity": "gbrain://people/alice"},
+            {"handle": "Michał", "identity": ""},
         ],
     }
     assert body.startswith("\n\n# Test\n\n## Transcript\n")
+    assert "**[00:00:01.00] Alice:** Hello <!-- 1.00s -->" in body
     assert "## Capture" not in body
     assert "## Processing notes" not in body
 
@@ -484,7 +766,30 @@ def test_render_coalesces_only_same_speaker():
         Segment(2.1, 3, "Three.", "Speaker 2", "mixed"),
     ]
     assert [item.text for item in coalesce_segments(segments)] == ["One. Two.", "Three."]
-    assert timestamp(3661) == "01:01:01"
+    assert timestamp(3661.239) == "01:01:01.24"
+
+    state = TranscriptState(
+        title="Timed",
+        started_at=None,
+        processing_seconds=1,
+        segments=segments,
+        source_sha256="a" * 64,
+    )
+    body = render_markdown(state)
+    metadata = yaml.safe_load(body.split("---", 2)[1])
+    assert metadata["attendees"] == [
+        {"handle": "speaker-1", "identity": ""},
+        {"handle": "speaker-2", "identity": ""},
+    ]
+    assert (
+        "**[00:00:00.00] speaker-1:** One. <!-- 1.00s --> "
+        "Two. <!-- 2.00s -->"
+    ) in body
+    assert "**[00:00:02.10] speaker-2:** Three. <!-- 0.90s -->" in body
+
+    state.segments = [Segment(4, 4, "Instant.", "Speaker 1", "mixed")]
+    body = render_markdown(state)
+    assert "**[00:00:04.00] speaker-1:** Instant. <!-- 0.01s -->" in body
 
 
 def test_transcribe_refuses_to_overwrite_before_loading_model(tmp_path: Path):
@@ -493,6 +798,81 @@ def test_transcribe_refuses_to_overwrite_before_loading_model(tmp_path: Path):
     (tmp_path / "meeting.md").write_text("existing")
     with pytest.raises(FileExistsError, match="--force"):
         transcribe(media)
+
+
+def test_transcribe_can_require_a_current_moss_cache(tmp_path: Path, monkeypatch):
+    media = tmp_path / "meeting.mp4"
+    media.touch()
+    resolved = SimpleNamespace(
+        requested=media,
+        markdown_path=tmp_path / "meeting.md",
+        title=None,
+        started_at=None,
+        ended_at=None,
+        calendar_event=None,
+        sources=((media, "mixed", None),),
+    )
+    monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
+    monkeypatch.setattr(
+        pipeline,
+        "probe",
+        lambda path, *, expected_sha256, role: AudioSource(
+            str(path), role, "a" * 64, 10.0, "wav"
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_moss_engine",
+        lambda: (_ for _ in ()).throw(AssertionError("model must not load")),
+    )
+
+    with pytest.raises(pipeline.MossCacheMiss, match="cache is unavailable"):
+        transcribe(media, require_moss_cache=True)
+
+
+def test_cache_only_transcribe_reports_when_speaker_guidance_is_needed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    media = tmp_path / "meeting.mp4"
+    media.touch()
+    resolved = SimpleNamespace(
+        requested=media,
+        markdown_path=tmp_path / "meeting.md",
+        title=None,
+        started_at=None,
+        ended_at=None,
+        calendar_event=None,
+        sources=((media, "mixed", None),),
+    )
+    source = AudioSource(str(media), "mixed", "a" * 64, 10.0, "wav")
+    monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
+    monkeypatch.setattr(
+        pipeline,
+        "probe",
+        lambda path, *, expected_sha256, role: source,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_cache",
+        lambda *args, **kwargs: {pipeline.source_key(source): [{"text": "cached"}]},
+    )
+    monkeypatch.setattr(pipeline, "get_redimnet2_embedder", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "transcribe_track",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            MossGuidanceRequired("cached window needs guided decoding")
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_moss_engine",
+        lambda: (_ for _ in ()).throw(AssertionError("model must not load")),
+    )
+
+    with pytest.raises(pipeline.MossCacheMiss, match="needs guided decoding"):
+        transcribe(media, require_moss_cache=True)
 
 
 def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeypatch):
@@ -506,8 +886,9 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         "hotwords:\n"
         "  - ProveKit\n"
         "  - F2Z\n"
-        "speakers:\n"
-        "  - identity: gbrain://people/alice\n"
+        "attendees:\n"
+        "  - handle: Alice\n"
+        "    identity: ''\n"
         "    ranges:\n"
         "      - track: participants\n"
         "        start: 1\n"
@@ -531,6 +912,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     load_calls = []
     seen_engines = []
     seen_prompts = []
+    seen_cached_generations = []
     progress_bars = []
 
     class RecordingProgress:
@@ -580,6 +962,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     def fake_transcribe_track(path, *, engine, prompt, speaker_profiles, **kwargs):
         seen_engines.append(engine)
         seen_prompts.append(prompt)
+        seen_cached_generations.append(kwargs["cached_generations"])
         kwargs["progress_callback"](1, 1, 1, kwargs["duration"])
         if path == microphone:
             segments = [Segment(0, 3, "Mine", "Local Mic", "microphone")]
@@ -602,7 +985,17 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
                 samples=[sample],
                 identity=kwargs["speaker_hints"][0].identity,
             )
-        return segments, {"windows": [{}], "actual_overlap_seconds": 0.0, "warnings": []}, speaker_profiles
+        return segments, {
+            "windows": [{}],
+            "actual_overlap_seconds": 0.0,
+            "warnings": [],
+            "generation_cache": [{
+                "text": "[0][S01]cached[3]",
+                "prompt_tokens": 10,
+                "generation_tokens": 4,
+                "total_tokens": 14,
+            }],
+        }, speaker_profiles
 
     monkeypatch.setattr(pipeline, "transcribe_track", fake_transcribe_track)
     pipeline.transcribe(requested)
@@ -621,6 +1014,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         "capture.hint.yaml",
         "capture.json",
         "capture.md",
+        "capture.moss.npz",
         "capture.voiceprints.npz",
         "microphone.flac",
         "participants.flac",
@@ -635,14 +1029,51 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert "ended_at" not in metadata
     assert "calendar_event" not in metadata
     assert metadata["attendees"] == [
+        {"handle": "Alice", "identity": ""},
         {"handle": "speaker-1", "identity": ""},
-        {"handle": "speaker-2", "identity": "gbrain://people/alice"},
     ]
+    assert "speaker-1:** Mine" in (tmp_path / "capture.md").read_text()
+    assert "Alice:** Hello" in (tmp_path / "capture.md").read_text()
+
+    (tmp_path / "capture.hint.yaml").write_text(
+        (tmp_path / "capture.hint.yaml").read_text() + "title: Renamed meeting\n"
+    )
+    pipeline.transcribe(requested, force=True)
+
+    assert load_calls == [True]
+    assert seen_engines[-2:] == [None, None]
+    assert all(item is not None for item in seen_cached_generations[-2:])
     with np.load(tmp_path / "capture.voiceprints.npz", allow_pickle=False) as voiceprints:
         assert voiceprints.files == ["handles", "embeddings"]
-        assert voiceprints["handles"].tolist() == ["speaker-1", "speaker-2"]
+        assert voiceprints["handles"].tolist() == ["Alice", "speaker-1"]
         assert voiceprints["embeddings"].shape == (2, 192)
     assert (tmp_path / "capture.voiceprints.npz").stat().st_mode & 0o777 == 0o600
+
+
+def test_transcribe_track_replays_cached_moss_without_engine_or_ffmpeg(tmp_path: Path):
+    audio = tmp_path / "audio.wav"
+    audio.touch()
+
+    class FailingEngine:
+        def generate(self, *args, **kwargs):
+            raise AssertionError("MOSS engine should not run")
+
+    segments, details, _ = transcribe_track(
+        audio,
+        engine=FailingEngine(),
+        prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        role="mixed",
+        duration=10,
+        cached_generations=[{
+            "text": "[0][S01]Hello[3]",
+            "prompt_tokens": 10,
+            "generation_tokens": 4,
+            "total_tokens": 14,
+        }],
+    )
+
+    assert [(item.start, item.end, item.text) for item in segments] == [(0, 3, "Hello")]
+    assert details["generation_cache"][0]["text"] == "[0][S01]Hello[3]"
 
 
 def fixture_state(media: Path) -> TranscriptState:
