@@ -12,6 +12,7 @@ class AudioSource:
     sha256: str
     duration_seconds: float
     format: str
+    stream_index: int = 0
 
 
 @dataclass
@@ -84,4 +85,4 @@ class ResolvedInput:
     started_at: str | None
     ended_at: str | None
     calendar_event: str | None
-    sources: tuple[tuple[Path, str, str | None], ...]
+    sources: tuple[tuple[Path, str, str | None, int], ...]

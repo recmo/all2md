@@ -114,6 +114,7 @@ def extract_window_evidence(
     *,
     window: int,
     source_track: str,
+    stream_index: int = 0,
     embedder: Any,
     maximum_samples_per_speaker: int = MAX_SAMPLES_PER_SPEAKER,
 ) -> tuple[dict[str, list[EmbeddingSample]], list[dict[str, Any]]]:
@@ -127,7 +128,7 @@ def extract_window_evidence(
     for speaker, speaker_intervals in intervals.items():
         for interval in speaker_intervals:
             try:
-                vector = normalize_embedding(embedder.embed(path, interval.start, interval.end))
+                vector = normalize_embedding(embedder.embed(path, interval.start, interval.end, stream_index=stream_index))
             except Exception as error:
                 raise RuntimeError(
                     "ReDimNet2 inference failed for "
@@ -511,13 +512,13 @@ class ReDimNet2Embedder:
         self._model: Any | None = None
         self._torch: Any | None = None
 
-    def embed(self, path: Path, start: float, end: float) -> list[float]:
+    def embed(self, path: Path, start: float, end: float, *, stream_index: int = 0) -> list[float]:
         model, torch = self._load()
         duration = end - start
         process = subprocess.run(
             [
                 "ffmpeg", "-nostdin", "-v", "error", "-ss", str(start),
-                "-t", str(duration), "-i", str(path), "-map", "0:a:0",
+                "-t", str(duration), "-i", str(path), "-map", f"0:a:{stream_index}",
                 "-ac", "1", "-ar", str(REDIMNET2_SAMPLE_RATE),
                 "-f", "f32le", "pipe:1",
             ],

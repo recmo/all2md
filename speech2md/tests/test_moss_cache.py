@@ -32,6 +32,12 @@ def test_moss_cache_round_trip_and_invalidation(tmp_path: Path):
     changed_policy = copy.deepcopy(metadata)
     changed_policy["speaker_novelty"]["minimum_probability"] = 0.2
     assert load_cache(path, changed_policy) == {}
+    changed_stream = cache_metadata(
+        prompt="Prompt: F2Z",
+        hotwords=("F2Z",),
+        sources=[AudioSource("/meeting.mka", "mixed", "a" * 64, 60, "opus", stream_index=1)],
+    )
+    assert load_cache(path, changed_stream) == {}
     assert path.stat().st_mode & 0o777 == 0o600
 
 

@@ -48,8 +48,8 @@ def transcribe(
     segments = []
     speaker_profiles = {}
     sources = []
-    for path, role, expected_checksum in resolved.sources:
-        source = probe(path, expected_sha256=expected_checksum, role=role)
+    for path, role, expected_checksum, stream_index in resolved.sources:
+        source = probe(path, expected_sha256=expected_checksum, role=role, stream_index=stream_index)
         sources.append((path, role, source))
     total_seconds = sum(source.duration_seconds for _, _, source in sources)
     processed_seconds = 0.0
@@ -133,6 +133,7 @@ def transcribe(
                 "prompt": prompt,
                 "role": role,
                 "duration": source.duration_seconds,
+                "stream_index": source.stream_index,
                 "embedder": embedder,
                 "speaker_profiles": speaker_profiles,
                 "speaker_hints": hints.speakers,

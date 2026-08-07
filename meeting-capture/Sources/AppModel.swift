@@ -72,7 +72,10 @@ final class AppModel: ObservableObject {
         state = .finalizing
         Task {
             do { lastManifest = try await capture.stop(); recoverableFiles = capture.recoverableFiles(); state = .idle }
-            catch { state = .error(error.localizedDescription) }
+            catch {
+                recoverableFiles = capture.recoverableFiles()
+                state = .error(error.localizedDescription)
+            }
         }
     }
 
@@ -82,10 +85,11 @@ final class AppModel: ObservableObject {
         state = .finalizing
         Task {
             do {
-                lastManifest = try capture.recoverInterruptedRecordings()
+                lastManifest = try await capture.recoverInterruptedRecordings()
                 recoverableFiles = capture.recoverableFiles()
                 state = .idle
             } catch {
+                recoverableFiles = capture.recoverableFiles()
                 state = .error(error.localizedDescription)
             }
         }

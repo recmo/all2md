@@ -2,11 +2,11 @@
 
 Meeting Capture is a local-only macOS menu-bar recorder. It watches Core Audio
 for another process opening a microphone, offers a ten-second veto, and records
-the local microphone and that process's output as separate lossless tracks.
+the local microphone and that process's output as separate tracks.
 
-Records are written to `~/Documents/Meetings/YYYY/MM/`. FLAC audio is the
-canonical source; a versioned JSON manifest carries capture provenance for the
-future `speech2md` processor.
+Records are written to `~/Documents/Meetings/YYYY/MM/`. The canonical archive
+is one audio-only Matroska (`.mka`) file with independently selectable Opus
+streams; a versioned JSON manifest carries capture provenance for `speech2md`.
 
 ## Development
 
@@ -39,13 +39,20 @@ permissions. Accessibility is optional and only enriches metadata.
   macOS default. The active device is shown in the menu and recorded as a
   `microphoneDevice` metadata event.
 - Two seconds of sustained activity opens a ten-second, vetoable countdown.
-- The microphone is recorded as 48 kHz mono PCM CAF. If the meeting application
-  changes input devices, capture follows it by restarting the input engine while
-  keeping the same file; the short restart interval is recorded as an interruption.
-  Participant audio currently uses an
+- The microphone is captured to crash-safe PCM CAF segments in each device's
+  native format. If the meeting application changes input devices, capture
+  follows it with a new segment; the short restart interval is recorded as an
+  interruption. Participant audio uses an
   application-filtered ScreenCaptureKit stream and excludes this application.
-- Finalization converts both tracks to FLAC, records SHA-256 checksums, writes
-  the v1 manifest atomically, and only then deletes temporary CAF chunks.
+- Capture does no live transcoding. After stop, finalization aligns the native
+  segments and creates one `.mka` without a meeting mix: microphone is mono
+  Opus at 96 kb/s VBR and participants remain stereo Opus at 128 kb/s VBR.
+  Both use 48 kHz, the Opus audio application, 20 ms frames, complexity 10,
+  and no DTX.
+- Finalization probes the stream contract, decodes every stream, atomically
+  publishes the archive, records its SHA-256 in the v2 manifest, and only then
+  deletes the temporary PCM files. A failed finalization leaves the PCM files
+  available for recovery.
 - Interrupted CAF chunks are discovered at launch and can be recovered from
   the menu.
 - Generic Accessibility inspection currently contributes the focused window
@@ -58,7 +65,7 @@ manifest contract.
 
 ## Milestone 1 acceptance
 
-Schema v1 remains provisional until recordings cover at least five meetings,
+Schema v2 remains provisional until recordings cover at least five meetings,
 three hours, Zoom and two other applications. The validation pass must also
 confirm isolated participant audio, interrupted-recording recovery, false
 trigger rate, HUD behavior, and audio quality. Zoom, Brave/Google Meet,

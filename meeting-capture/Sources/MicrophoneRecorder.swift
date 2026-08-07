@@ -4,70 +4,49 @@ import CoreAudio
 import Foundation
 
 final class MicrophoneRecorder: @unchecked Sendable {
-    private final class ConverterInput: @unchecked Sendable {
-        private let buffer: AVAudioPCMBuffer
-        private var supplied = false
-
-        init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
-
-        func next(status: UnsafeMutablePointer<AVAudioConverterInputStatus>) -> AVAudioBuffer? {
-            guard !supplied else {
-                status.pointee = .noDataNow
-                return nil
-            }
-            supplied = true
-            status.pointee = .haveData
-            return buffer
-        }
-    }
-
     private let engine = AVAudioEngine()
     private var file: AVAudioFile?
-    private var converter: AVAudioConverter?
+    private var currentSegmentURL: URL?
+    private var currentSegmentStartedAt: Date?
+    private var completedSegments: [CapturedAudioSegment] = []
     private let writeLock = NSLock()
-    private let recordingFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
     private(set) var format: AVAudioFormat?
     private(set) var deviceID: AudioDeviceID?
     var onLevel: (@Sendable (Float) -> Void)?
     var onError: (@Sendable (Error) -> Void)?
 
     func start(to url: URL, deviceID: AudioDeviceID?) throws {
-        file = try AVAudioFile(
-            forWriting: url,
-            settings: recordingFormat.settings,
-            commonFormat: .pcmFormatFloat32,
-            interleaved: false
-        )
-        do {
-            try startEngine(deviceID: deviceID)
-        } catch {
-            file = nil
-            throw error
-        }
+        completedSegments = []
+        try startEngine(deviceID: deviceID, to: url)
     }
 
-    func switchDevice(to newDeviceID: AudioDeviceID) throws {
+    func switchDevice(
+        to newDeviceID: AudioDeviceID,
+        segmentURL: URL,
+        rollbackURL: URL
+    ) throws {
         guard newDeviceID != deviceID else { return }
         let previousDeviceID = deviceID
         stopEngine()
         do {
-            try startEngine(deviceID: newDeviceID)
+            try startEngine(deviceID: newDeviceID, to: segmentURL)
         } catch {
+            try? FileManager.default.removeItem(at: segmentURL)
             if let previousDeviceID {
-                try? startEngine(deviceID: previousDeviceID)
+                try? startEngine(deviceID: previousDeviceID, to: rollbackURL)
             }
             throw error
         }
     }
 
-    func stop() {
+    func stop() -> [CapturedAudioSegment] {
         stopEngine()
-        writeLock.lock()
-        file = nil
-        writeLock.unlock()
+        let result = completedSegments
+        completedSegments = []
+        return result
     }
 
-    private func startEngine(deviceID: AudioDeviceID?) throws {
+    private func startEngine(deviceID: AudioDeviceID?, to url: URL) throws {
         let input = engine.inputNode
         if let deviceID {
             guard let audioUnit = input.audioUnit else {
@@ -91,12 +70,17 @@ final class MicrophoneRecorder: @unchecked Sendable {
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw CaptureError.noMicrophone
         }
-        guard let converter = AVAudioConverter(from: inputFormat, to: recordingFormat) else {
-            throw CaptureError.deviceSelectionFailure("cannot convert \(inputFormat) to the recording format")
-        }
+        let file = try AVAudioFile(
+            forWriting: url,
+            settings: inputFormat.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
         format = inputFormat
-        self.converter = converter
+        self.file = file
         self.deviceID = deviceID
+        currentSegmentURL = url
+        currentSegmentStartedAt = Date()
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
             self?.consume(buffer)
         }
@@ -105,63 +89,37 @@ final class MicrophoneRecorder: @unchecked Sendable {
             try engine.start()
         } catch {
             input.removeTap(onBus: 0)
-            self.converter = nil
+            self.file = nil
             self.deviceID = nil
+            currentSegmentURL = nil
+            currentSegmentStartedAt = nil
+            try? FileManager.default.removeItem(at: url)
             throw error
         }
     }
 
     private func stopEngine() {
-        guard engine.isRunning || converter != nil else { return }
+        guard engine.isRunning || file != nil else { return }
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
+        let endedAt = Date()
         writeLock.lock()
-        flushConverter()
-        converter = nil
+        file = nil
         writeLock.unlock()
+        if let url = currentSegmentURL, let startedAt = currentSegmentStartedAt {
+            completedSegments.append(CapturedAudioSegment(url: url, startedAt: startedAt, endedAt: endedAt))
+        }
+        currentSegmentURL = nil
+        currentSegmentStartedAt = nil
         deviceID = nil
     }
 
-    private func flushConverter() {
-        guard let converter, let file,
-              let outputBuffer = AVAudioPCMBuffer(pcmFormat: recordingFormat, frameCapacity: 4096) else { return }
-        var conversionError: NSError?
-        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, inputStatus in
-            inputStatus.pointee = .endOfStream
-            return nil
-        }
-        if status == .error {
-            onError?(conversionError ?? CaptureError.writerFailure("could not flush microphone converter"))
-        } else if outputBuffer.frameLength > 0 {
-            do { try file.write(from: outputBuffer) }
-            catch { onError?(error) }
-        }
-    }
-
-    private func consume(_ inputBuffer: AVAudioPCMBuffer) {
-        onLevel?(Self.level(inputBuffer))
+    private func consume(_ buffer: AVAudioPCMBuffer) {
+        onLevel?(Self.level(buffer))
         writeLock.lock()
         defer { writeLock.unlock() }
-        guard let converter, let file else { return }
-
-        let scale = recordingFormat.sampleRate / inputBuffer.format.sampleRate
-        let capacity = AVAudioFrameCount(ceil(Double(inputBuffer.frameLength) * scale)) + 64
-        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: recordingFormat, frameCapacity: capacity) else { return }
-        let converterInput = ConverterInput(inputBuffer)
-        var conversionError: NSError?
-        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, inputStatus in
-            converterInput.next(status: inputStatus)
-        }
-        if status == .error {
-            onError?(conversionError ?? CaptureError.writerFailure("microphone conversion failed"))
-            return
-        }
-        guard outputBuffer.frameLength > 0 else { return }
-        do {
-            try file.write(from: outputBuffer)
-        } catch {
-            onError?(error)
-        }
+        do { try file?.write(from: buffer) }
+        catch { onError?(error) }
     }
 
     private static func level(_ buffer: AVAudioPCMBuffer) -> Float {

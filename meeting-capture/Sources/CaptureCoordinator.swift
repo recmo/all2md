@@ -18,6 +18,7 @@ final class CaptureCoordinator: ObservableObject {
     private var interruptions: [CaptureTimeRange] = []
     private var currentMicrophoneDevice: AudioInputDevice?
     private var failedMicrophoneDeviceID: AudioDeviceID?
+    private var microphoneSegmentIndex = 0
 
     func start(trigger: CaptureTrigger, microphoneDevice: AudioInputDevice?) async throws {
         let start = Date()
@@ -39,7 +40,7 @@ final class CaptureCoordinator: ObservableObject {
         }
         participants.onLevel = { [weak self] level in Task { @MainActor in self?.participantsLevel = level } }
         do {
-            try microphone.start(to: paths.microphoneTemporary, deviceID: microphoneDevice?.id)
+            try microphone.start(to: nextMicrophoneSegmentURL(), deviceID: microphoneDevice?.id)
             if let pid = trigger.processID {
                 do { try await participants.start(processID: pid, to: paths.participantsTemporary) }
                 catch { warnings.append("Participant audio unavailable: \(error.localizedDescription)") }
@@ -47,8 +48,7 @@ final class CaptureCoordinator: ObservableObject {
                 warnings.append("Participant audio unavailable for a manual recording without a selected process.")
             }
         } catch {
-            microphone.stop()
-            try? FileManager.default.removeItem(at: paths.microphoneTemporary)
+            for segment in microphone.stop() { try? FileManager.default.removeItem(at: segment.url) }
             reset()
             throw error
         }
@@ -66,7 +66,11 @@ final class CaptureCoordinator: ObservableObject {
         let previousName = activeMicrophoneName ?? "unknown microphone"
         let switchStarted = Date()
         do {
-            try microphone.switchDevice(to: nextDevice.id)
+            try microphone.switchDevice(
+                to: nextDevice.id,
+                segmentURL: nextMicrophoneSegmentURL(),
+                rollbackURL: nextMicrophoneSegmentURL()
+            )
             let switchEnded = Date()
             currentMicrophoneDevice = nextDevice
             failedMicrophoneDeviceID = nil
@@ -92,59 +96,80 @@ final class CaptureCoordinator: ObservableObject {
 
     func stop() async throws -> URL {
         guard let start = startedAt, let paths, let trigger else { throw CaptureError.writerFailure("no active recording") }
-        microphone.stop()
+        let microphoneSegments = microphone.stop()
         do { try await participants.stop() } catch { warnings.append(error.localizedDescription) }
+        let end = Date()
+        defer { reset() }
 
-        var tracks: [AudioTrack] = []
-        if FileManager.default.fileExists(atPath: paths.microphoneTemporary.path) {
-            tracks.append(try AudioFinalizer.convertToFLAC(source: paths.microphoneTemporary, destination: paths.microphoneFinal, role: .microphone))
-        }
-        if FileManager.default.fileExists(atPath: paths.participantsTemporary.path) {
-            tracks.append(try AudioFinalizer.convertToFLAC(source: paths.participantsTemporary, destination: paths.participantsFinal, role: .participants))
-        }
-        let status: CaptureManifest.Status = tracks.contains(where: { $0.role == .microphone }) && tracks.contains(where: { $0.role == .participants }) ? .complete : .incomplete
+        let participantsURL = FileManager.default.fileExists(atPath: paths.participantsTemporary.path)
+            ? paths.participantsTemporary
+            : nil
+        let participantsStartedAt = participants.firstSampleAt
+        let archive = try await Task.detached {
+            try AudioFinalizer.createArchive(
+                microphoneSegments: microphoneSegments,
+                participants: participantsURL,
+                participantsStartedAt: participantsStartedAt,
+                captureStartedAt: start,
+                captureEndedAt: end,
+                temporaryDestination: paths.archiveTemporary,
+                finalDestination: paths.archiveFinal
+            )
+        }.value
+        let status: CaptureManifest.Status = archive.tracks.contains(where: { $0.role == .microphone }) && archive.tracks.contains(where: { $0.role == .participants }) ? .complete : .incomplete
         let manifest = CaptureManifest(
-            schemaVersion: 1,
+            schemaVersion: 2,
             meetingID: UUID(),
             slug: String(paths.baseName.dropFirst(min(11, paths.baseName.count))),
             title: metadata.first(where: { $0.kind == .windowTitle })?.value,
             platform: trigger.applicationName,
             calendarEventID: nil,
             startedAt: start,
-            endedAt: Date(),
+            endedAt: end,
             timeZone: TimeZone.current.identifier,
             trigger: trigger,
-            audio: tracks,
+            container: archive.container,
+            audio: archive.tracks,
             interruptions: interruptions,
             metadataEvents: metadata,
             warnings: warnings,
             status: status
         )
         try store.write(manifest, to: paths.manifest)
-        try? FileManager.default.removeItem(at: paths.microphoneTemporary)
+        for segment in microphoneSegments { try? FileManager.default.removeItem(at: segment.url) }
         try? FileManager.default.removeItem(at: paths.participantsTemporary)
-        reset()
         return paths.manifest
     }
 
     func recoverableFiles() -> [URL] { store.interruptedRecordings() }
 
-    func recoverInterruptedRecordings() throws -> URL? {
+    func recoverInterruptedRecordings() async throws -> URL? {
         let files = store.interruptedRecordings()
         guard let first = files.first else { return nil }
         let paths = store.paths(forInterruptedFile: first)
-        var tracks: [AudioTrack] = []
-        if FileManager.default.fileExists(atPath: paths.microphoneTemporary.path) {
-            tracks.append(try AudioFinalizer.convertToFLAC(source: paths.microphoneTemporary, destination: paths.microphoneFinal, role: .microphone))
+        let relatedFiles = files.filter { store.paths(forInterruptedFile: $0).baseName == paths.baseName }
+        let datedFiles = relatedFiles.compactMap { url -> (URL, Date, Date)? in
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+            return (url, attributes[.creationDate] as? Date ?? Date(), attributes[.modificationDate] as? Date ?? Date())
         }
-        if FileManager.default.fileExists(atPath: paths.participantsTemporary.path) {
-            tracks.append(try AudioFinalizer.convertToFLAC(source: paths.participantsTemporary, destination: paths.participantsFinal, role: .participants))
-        }
-        let attributes = try? FileManager.default.attributesOfItem(atPath: first.path)
-        let started = attributes?[.creationDate] as? Date ?? Date()
-        let ended = attributes?[.modificationDate] as? Date ?? Date()
+        let started = datedFiles.map { $0.1 }.min() ?? Date()
+        let ended = max(started, datedFiles.map { $0.2 }.max() ?? Date())
+        let microphoneURLs = relatedFiles.filter { $0.lastPathComponent.contains("-microphone") }
+        let microphoneSegments = try AudioFinalizer.recoveredSegments(from: microphoneURLs, startedAt: started)
+        let participantsURL = relatedFiles.first { $0.lastPathComponent.hasSuffix("-participants.part.caf") }
+        let archive = try await Task.detached {
+            try AudioFinalizer.createArchive(
+                microphoneSegments: microphoneSegments,
+                participants: participantsURL,
+                participantsStartedAt: participantsURL == nil ? nil : started,
+                captureStartedAt: started,
+                captureEndedAt: ended,
+                temporaryDestination: paths.archiveTemporary,
+                finalDestination: paths.archiveFinal
+            )
+        }.value
         let manifest = CaptureManifest(
-            schemaVersion: 1,
+            schemaVersion: 2,
             meetingID: UUID(),
             slug: String(paths.baseName.dropFirst(min(11, paths.baseName.count))),
             title: nil,
@@ -154,14 +179,15 @@ final class CaptureCoordinator: ObservableObject {
             endedAt: max(started, ended),
             timeZone: TimeZone.current.identifier,
             trigger: CaptureTrigger(method: .deviceRunning, processID: nil, bundleID: nil, applicationName: nil),
-            audio: tracks,
+            container: archive.container,
+            audio: archive.tracks,
             interruptions: [CaptureTimeRange(startedAt: started, endedAt: ended, reason: "application interruption")],
             metadataEvents: [],
             warnings: ["Recovered from crash-safe temporary audio; capture metadata may be incomplete."],
             status: .incomplete
         )
         try store.write(manifest, to: paths.manifest)
-        for file in files where file.deletingLastPathComponent() == paths.directory && file.lastPathComponent.hasPrefix(".\(paths.baseName)-") {
+        for file in relatedFiles {
             try? FileManager.default.removeItem(at: file)
         }
         return paths.manifest
@@ -178,6 +204,7 @@ final class CaptureCoordinator: ObservableObject {
         interruptions = []
         currentMicrophoneDevice = nil
         failedMicrophoneDeviceID = nil
+        microphoneSegmentIndex = 0
         activeMicrophoneName = nil
         microphone.onError = nil
     }
@@ -185,5 +212,10 @@ final class CaptureCoordinator: ObservableObject {
     private func addWarning(_ warning: String) {
         guard !warnings.contains(warning) else { return }
         warnings.append(warning)
+    }
+
+    private func nextMicrophoneSegmentURL() -> URL {
+        microphoneSegmentIndex += 1
+        return paths!.microphoneTemporary(segment: microphoneSegmentIndex)
     }
 }
