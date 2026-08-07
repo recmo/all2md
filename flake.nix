@@ -34,8 +34,16 @@
     let
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
-      pagesProject = ./tools/pages2md;
-      speechProject = ./tools/speech2md;
+      pagesProject = ./pages2md;
+      speechProject = ./speech2md;
+      reviewProject = ./speech-review;
+      pagesVersion =
+        if self ? rev then
+          self.rev
+        else if self ? dirtyRev then
+          builtins.substring 0 40 self.dirtyRev
+        else
+          "unknown";
       mkPythonEnvironment =
         {
           name,
@@ -46,6 +54,17 @@
           workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = project; };
           overlay = workspace.mkPyprojectOverlay { sourcePreference = "wheel"; };
           buildSystemOverrides = final: prev: {
+            mlx = prev.mlx.overrideAttrs (old: {
+              nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.darwin.cctools ];
+              postFixup = (old.postFixup or "") + ''
+                for extension in "$out"/lib/python*/site-packages/mlx/core*.so; do
+                  install_name_tool \
+                    -rpath @loader_path/lib \
+                    ${final."mlx-metal"}/lib/python${pkgs.python313.pythonVersion}/site-packages/mlx/lib \
+                    "$extension"
+                done
+              '';
+            });
             mlx-vlm = prev.mlx-vlm.overrideAttrs (old: {
               nativeBuildInputs =
                 (old.nativeBuildInputs or [ ])
@@ -74,6 +93,10 @@
         name = "speech2md";
         project = speechProject;
       };
+      reviewEnvironment = mkPythonEnvironment {
+        name = "speech-review";
+        project = reviewProject;
+      };
       testPython = pkgs.python3.withPackages (
         ps: with ps; [
           beautifulsoup4
@@ -84,7 +107,7 @@
           pillow
           pymupdf
           pytest
-          jsonschema
+          tqdm
         ]
       );
       pages2md = pkgs.writeShellApplication {
@@ -94,6 +117,7 @@
           pkgs.poppler-utils
         ];
         text = ''
+          export PAGES2MD_VERSION=${pagesVersion}
           exec ${pagesEnvironment}/bin/pages2md "$@"
         '';
       };
@@ -106,15 +130,28 @@
           cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/speech2md"
           mkdir -p "$cache_root/torch"
           export TORCH_HOME="$cache_root/torch"
+          export SPEECH2MD_VERSION=${pagesVersion}
           exec ${speechEnvironment}/bin/speech2md "$@"
         '';
       };
-      meeting-capture = pkgs.callPackage ./apps/meeting-capture/package.nix { };
+      speech-review = pkgs.writeShellApplication {
+        name = "speech-review";
+        runtimeInputs = [ speech2md ];
+        text = ''
+          exec ${reviewEnvironment}/bin/speech-review "$@"
+        '';
+      };
+      meeting-capture = pkgs.callPackage ./meeting-capture/package.nix { };
     in
     {
       packages.${system} = {
         default = pages2md;
-        inherit meeting-capture pages2md speech2md;
+        inherit
+          meeting-capture
+          pages2md
+          speech-review
+          speech2md
+          ;
       };
 
       apps.${system} = {
@@ -126,24 +163,42 @@
           type = "app";
           program = "${speech2md}/bin/speech2md";
         };
+        speech-review = {
+          type = "app";
+          program = "${speech-review}/bin/speech-review";
+        };
       };
 
       checks.${system} = {
         pages2md-source =
-          pkgs.runCommand "pages2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; }
+          pkgs.runCommand "pages2md-source-check"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+              PAGES2MD_VERSION = pagesVersion;
+            }
             ''
               export PYTHONPYCACHEPREFIX="$out/pycache"
               python -m compileall -q ${pagesProject}/src
               touch "$out/passed"
             '';
-        pages2md-tests = pkgs.runCommand "pages2md-tests" { nativeBuildInputs = [ testPython ]; } ''
-          export PYTHONPATH=${pagesProject}/src
-          export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-          pytest -q ${pagesProject}/tests
-          touch "$out"
-        '';
+        pages2md-tests =
+          pkgs.runCommand "pages2md-tests"
+            {
+              nativeBuildInputs = [ testPython ];
+              PAGES2MD_VERSION = pagesVersion;
+            }
+            ''
+              export PYTHONPATH=${pagesProject}/src
+              export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+              pytest -q ${pagesProject}/tests
+              touch "$out"
+            '';
         speech2md-source =
-          pkgs.runCommand "speech2md-source-check" { nativeBuildInputs = [ pkgs.python3 ]; }
+          pkgs.runCommand "speech2md-source-check"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+              SPEECH2MD_VERSION = pagesVersion;
+            }
             ''
               export PYTHONPYCACHEPREFIX="$out/pycache"
               python -m compileall -q ${speechProject}/src
@@ -152,7 +207,15 @@
         speech2md-tests =
           pkgs.runCommand "speech2md-tests"
             {
-              nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.pytest ])) ];
+              nativeBuildInputs = [
+                (pkgs.python3.withPackages (ps: [
+                  ps.numpy
+                  ps.pytest
+                  ps.pyyaml
+                  ps.tqdm
+                ]))
+              ];
+              SPEECH2MD_VERSION = pagesVersion;
             }
             ''
               export PYTHONPATH=${speechProject}/src
@@ -160,12 +223,41 @@
               pytest -q ${speechProject}/tests
               touch "$out"
             '';
+        speech-review-source =
+          pkgs.runCommand "speech-review-source-check"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+            }
+            ''
+              export PYTHONPYCACHEPREFIX="$out/pycache"
+              python -m compileall -q ${reviewProject}/src
+              touch "$out/passed"
+            '';
+        speech-review-tests =
+          pkgs.runCommand "speech-review-tests"
+            {
+              nativeBuildInputs = [
+                (pkgs.python3.withPackages (ps: [
+                  ps.numpy
+                  ps.pytest
+                  ps.pyyaml
+                ]))
+              ];
+            }
+            ''
+              export PYTHONPATH=${reviewProject}/src
+              export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+              pytest -q ${reviewProject}/tests
+              touch "$out"
+            '';
         packaged-clis =
           pkgs.runCommand "packaged-clis"
             {
               nativeBuildInputs = [
                 pages2md
+                pkgs.darwin.cctools
                 speech2md
+                speech-review
               ];
             }
             ''
@@ -173,15 +265,20 @@
               export XDG_CACHE_HOME="$TMPDIR/cache"
               mkdir -p "$HOME" "$XDG_CACHE_HOME"
               pages2md --help > /dev/null
+              pages2md --version | grep -Eq '^pages2md [0-9a-f]{40,64}$'
+              ${pagesEnvironment}/bin/python -c 'from mlx_vlm import load'
               speech2md --help > /dev/null
+              speech2md --version | grep -Eq '^speech2md [0-9a-f]{40,64}$'
+              speech-review --help > /dev/null
+              ${reviewEnvironment}/bin/python -c 'from speech_review.server import STATIC; assert (STATIC / "index.html").is_file()'
+              for extension in \
+                ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
+                ${speechEnvironment}/lib/python*/site-packages/mlx/core*.so; do
+                otool -l "$extension" \
+                  | grep -Eq 'path /nix/store/[a-z0-9]+-mlx-metal-[^/]+/lib/python[^/]+/site-packages/mlx/lib '
+              done
               test ! -e "$XDG_CACHE_HOME/pages2md/venv"
               test ! -e "$XDG_CACHE_HOME/speech2md/venv"
-              touch "$out"
-            '';
-        meeting-capture-schema =
-          pkgs.runCommand "meeting-capture-schema-check" { nativeBuildInputs = [ testPython ]; }
-            ''
-              python -c 'import json, jsonschema; schema=json.load(open("${./schemas/meeting-capture-v1.schema.json}")); fixture=json.load(open("${./apps/meeting-capture/Tests/Fixtures/manifest-v1.json}")); jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(fixture)'
               touch "$out"
             '';
       };
@@ -195,14 +292,14 @@
             pkgs.uv
           ];
           shellHook = ''
-            echo "Run: uv sync --project tools/pages2md --extra dev --extra ocr"
+            echo "Run: uv sync --project pages2md --extra dev --extra ocr"
           '';
         };
 
         meeting-capture = pkgs.mkShell {
           packages = [ pkgs.xcodegen ];
           shellHook = ''
-            echo "Run: cd apps/meeting-capture && xcodegen generate"
+            echo "Run: cd meeting-capture && xcodegen generate"
           '';
         };
 
@@ -213,7 +310,17 @@
             pkgs.uv
           ];
           shellHook = ''
-            echo "Run: uv sync --project tools/speech2md --extra dev"
+            echo "Run: uv sync --project speech2md --extra dev"
+          '';
+        };
+
+        speech-review = pkgs.mkShell {
+          packages = [
+            pkgs.python3
+            pkgs.uv
+          ];
+          shellHook = ''
+            echo "Run: uv sync --project speech-review --extra dev"
           '';
         };
 

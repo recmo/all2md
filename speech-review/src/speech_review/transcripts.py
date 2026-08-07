@@ -1,0 +1,468 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import base64
+import hashlib
+import json
+from pathlib import Path
+import re
+from typing import Any
+
+import numpy as np
+import yaml
+
+
+TURN = re.compile(r"^\*\*\[(\d{2}):(\d{2}):(\d{2}\.\d{2})\] (.+?):\*\*\s?(.*)$")
+TIMING = re.compile(r"<!--\s*(\d+\.\d{2})s\s*-->")
+MEDIA_SUFFIXES = {".aac", ".caf", ".flac", ".m4a", ".mp3", ".mp4", ".ogg", ".wav", ".webm"}
+
+
+@dataclass(frozen=True)
+class TranscriptFile:
+    root: Path
+    markdown: Path
+    requested: Path | None = None
+
+    @property
+    def relative(self) -> Path:
+        return (self.requested or self.markdown).relative_to(self.root)
+
+    @property
+    def identifier(self) -> str:
+        return base64.urlsafe_b64encode(str(self.relative).encode()).decode().rstrip("=")
+
+    @property
+    def hint_path(self) -> Path:
+        return self.markdown.with_suffix(".hint.yaml")
+
+    @property
+    def voiceprints_path(self) -> Path:
+        return self.markdown.with_suffix(".voiceprints.npz")
+
+    @property
+    def status(self) -> str:
+        if not self.markdown.exists():
+            return "unprocessed"
+        try:
+            parsed = parse_markdown(self.markdown)
+        except ValueError:
+            return "stale"
+        _, hint_revision = load_hint_document(self.hint_path)
+        rendered_revision = parsed["frontmatter"].get("hints_sha256")
+        if rendered_revision != hint_revision and (rendered_revision is not None or hint_revision is not None):
+            return "stale"
+        return "ready"
+
+    @property
+    def stale_reason(self) -> str | None:
+        if self.status != "stale":
+            return None
+        try:
+            parse_markdown(self.markdown)
+        except ValueError:
+            return "schema"
+        return "hints"
+
+
+def discover(root: Path) -> list[TranscriptFile]:
+    root = root.expanduser().resolve()
+    found: list[TranscriptFile] = []
+    claimed_markdown: set[Path] = set()
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in MEDIA_SUFFIXES:
+            continue
+        markdown = path.with_suffix(".md")
+        found.append(TranscriptFile(root, markdown, path))
+        claimed_markdown.add(markdown)
+    for path in root.rglob("*-capture.json"):
+        markdown = path.with_name(path.name.removesuffix("-capture.json") + ".md")
+        found.append(TranscriptFile(root, markdown, path))
+        claimed_markdown.add(markdown)
+    for path in root.rglob("*.md"):
+        if path in claimed_markdown:
+            continue
+        try:
+            parse_markdown(path)
+        except ValueError:
+            continue
+        found.append(TranscriptFile(root, path))
+    return sorted(
+        found,
+        key=lambda item: (item.requested or item.markdown).stat().st_mtime,
+        reverse=True,
+    )
+
+
+def resolve_identifier(root: Path, identifier: str) -> TranscriptFile:
+    padding = "=" * (-len(identifier) % 4)
+    try:
+        relative = base64.urlsafe_b64decode(identifier + padding).decode()
+    except Exception as error:
+        raise ValueError("invalid transcript id") from error
+    root = root.expanduser().resolve()
+    requested = (root / relative).resolve()
+    if requested.parent != root and root not in requested.parents:
+        raise ValueError("transcript escapes review folder")
+    for item in discover(root):
+        if (item.requested or item.markdown) == requested:
+            return item
+    raise FileNotFoundError(requested)
+
+
+def parse_markdown(path: Path) -> dict[str, Any]:
+    text = path.read_text()
+    if not text.startswith("---\n"):
+        raise ValueError("missing YAML frontmatter")
+    try:
+        _, raw_frontmatter, body = text.split("---", 2)
+        frontmatter = yaml.safe_load(raw_frontmatter) or {}
+    except (ValueError, yaml.YAMLError) as error:
+        raise ValueError("invalid transcript frontmatter") from error
+    if not isinstance(frontmatter, dict) or "speech2md_version" not in frontmatter:
+        raise ValueError("not a speech2md transcript")
+    title_match = re.search(r"^# (.+)$", body, re.MULTILINE)
+    turns = []
+    for line in body.splitlines():
+        match = TURN.match(line)
+        if not match:
+            continue
+        hours, minutes, seconds, speaker, content = match.groups()
+        start = round(int(hours) * 3600 + int(minutes) * 60 + float(seconds), 2)
+        timing_matches = list(TIMING.finditer(content))
+        offsets = [float(match.group(1)) for match in timing_matches]
+        if not timing_matches:
+            raise ValueError("transcript turn is missing timing comments")
+        if timing_matches[-1].end() != len(content.rstrip()):
+            raise ValueError("transcript turn must end with a timing comment")
+        if offsets[0] <= 0 or any(
+            right <= left for left, right in zip(offsets, offsets[1:])
+        ):
+            raise ValueError("transcript turn timing comments must increase")
+        turns.append({
+            "index": len(turns),
+            "start": start,
+            "end": round(start + offsets[-1], 2),
+            "speaker": speaker.strip(),
+            "text": re.sub(r"\s+", " ", TIMING.sub("", content)).strip(),
+            "timestamps": [round(start + offset, 2) for offset in offsets],
+        })
+    if not turns:
+        raise ValueError("transcript has no supported timestamped turns")
+    attendees = frontmatter.get("attendees")
+    if not isinstance(attendees, list) or any(
+        not isinstance(attendee, dict)
+        or set(attendee) != {"handle", "identity"}
+        or not isinstance(attendee["handle"], str)
+        or not isinstance(attendee["identity"], str)
+        or not attendee["handle"].strip()
+        or "\n" in attendee["handle"]
+        or "\n" in attendee["identity"]
+        for attendee in attendees
+    ):
+        raise ValueError("transcript has unsupported attendee frontmatter")
+    handles = [attendee["handle"].strip() for attendee in attendees]
+    if len(handles) != len(set(handles)):
+        raise ValueError("transcript attendee handles must be unique")
+    undeclared = sorted({turn["speaker"] for turn in turns} - set(handles))
+    if undeclared:
+        raise ValueError(
+            "transcript run uses undeclared attendee handle(s): " + ", ".join(undeclared)
+        )
+    return {
+        "title": title_match.group(1).strip() if title_match else path.stem,
+        "frontmatter": frontmatter,
+        "turns": turns,
+    }
+
+
+def review_progress(parsed: dict[str, Any], hints: dict[str, Any]) -> dict[str, Any]:
+    identified_handles = {
+        turn["speaker"]
+        for turn in parsed.get("turns", [])
+        if re.fullmatch(r"speaker-\d+", turn["speaker"]) is None
+    }
+    guided_ranges = [
+        value
+        for attendee in hints.get("attendees", [])
+        if isinstance(attendee, dict)
+        for value in attendee.get("ranges", [])
+        if isinstance(value, dict)
+    ]
+    turns = parsed.get("turns", [])
+    for value in guided_ranges:
+        for turn in turns:
+            if (
+                abs(float(value.get("start", -1)) - turn["start"]) <= 0.01
+                and abs(float(value.get("end", -1)) - turn["end"]) <= 0.01
+            ):
+                identified_handles.add(turn["speaker"])
+                break
+    unassigned_runs = 0
+    anonymous_speakers = set()
+    for turn in turns:
+        if turn["speaker"] in identified_handles:
+            continue
+        intervals = sorted(
+            (
+                max(turn["start"], float(value["start"])),
+                min(turn["end"], float(value["end"])),
+            )
+            for value in guided_ranges
+            if float(value.get("end", 0)) > turn["start"]
+            and float(value.get("start", 0)) < turn["end"]
+        )
+        cursor = turn["start"]
+        turn_unassigned = 0
+        for start, end in intervals:
+            if start > cursor + 0.01:
+                turn_unassigned += 1
+            cursor = max(cursor, end)
+        if cursor < turn["end"] - 0.01:
+            turn_unassigned += 1
+        if turn_unassigned:
+            anonymous_speakers.add(turn["speaker"])
+            unassigned_runs += turn_unassigned
+    return {
+        "complete": bool(turns) and unassigned_runs == 0,
+        "unassignedRunCount": unassigned_runs,
+        "unassignedSpeakerCount": len(anonymous_speakers),
+    }
+
+
+def audio_sources(transcript: TranscriptFile) -> list[dict[str, Any]]:
+    if transcript.requested and transcript.requested.suffix.lower() in MEDIA_SUFFIXES:
+        return [{"role": "mixed", "path": transcript.requested, "name": transcript.requested.name}]
+    if transcript.requested and transcript.requested.name.endswith("-capture.json"):
+        manifest = transcript.requested
+        value = json.loads(manifest.read_text())
+        sources = []
+        for track in value.get("audio", []):
+            path = (manifest.parent / track.get("file", "")).resolve()
+            if path.is_file() and (path.parent == transcript.root or transcript.root in path.parents):
+                sources.append({"role": track.get("role", "mixed"), "path": path, "name": path.name})
+        return sources
+    direct = [
+        path for path in transcript.markdown.parent.iterdir()
+        if path.is_file()
+        and path.stem == transcript.markdown.stem
+        and path.suffix.lower() in MEDIA_SUFFIXES
+    ]
+    if direct:
+        return [{"role": "mixed", "path": direct[0], "name": direct[0].name}]
+    manifest = transcript.markdown.with_name(f"{transcript.markdown.stem}-capture.json")
+    if not manifest.is_file():
+        return []
+    value = json.loads(manifest.read_text())
+    sources = []
+    for track in value.get("audio", []):
+        path = (manifest.parent / track.get("file", "")).resolve()
+        if path.is_file() and (path.parent == transcript.root or transcript.root in path.parents):
+            sources.append({"role": track.get("role", "mixed"), "path": path, "name": path.name})
+    return sources
+
+
+def load_hint_document(path: Path) -> tuple[dict[str, Any], str | None]:
+    if not path.exists():
+        return {
+            "title": None,
+            "started_at": None,
+            "ended_at": None,
+            "calendar_event": None,
+            "hotwords": [],
+            "attendees": [],
+            "edits": [],
+        }, None
+    raw = path.read_bytes()
+    value = yaml.safe_load(raw) or {}
+    if not isinstance(value, dict):
+        raise ValueError("hint sidecar must be a mapping")
+    document = {
+        "title": value.get("title"),
+        "started_at": value.get("started_at"),
+        "ended_at": value.get("ended_at"),
+        "calendar_event": value.get("calendar_event"),
+        "hotwords": value.get("hotwords", []),
+        "attendees": value.get("attendees", []),
+        "edits": value.get("edits", []),
+    }
+    return document, hashlib.sha256(raw).hexdigest()
+
+
+def write_hint_document(path: Path, document: dict[str, Any], revision: str | None) -> str:
+    validate_hint_document(document)
+    _, current_revision = load_hint_document(path)
+    if revision != current_revision:
+        raise RuntimeError("hint sidecar changed on disk")
+    cleaned = {
+        key: document.get(key, [])
+        for key in (
+            "title", "started_at", "ended_at", "calendar_event",
+            "hotwords", "attendees", "edits",
+        )
+        if document.get(key)
+    }
+    if "attendees" in cleaned:
+        cleaned["attendees"] = [
+            {
+                "handle": attendee["handle"],
+                "identity": attendee["identity"],
+                **({"ranges": attendee["ranges"]} if attendee.get("ranges") else {}),
+            }
+            for attendee in cleaned["attendees"]
+        ]
+    raw = yaml.safe_dump(cleaned, allow_unicode=True, sort_keys=False).encode()
+    temporary = path.with_suffix(path.suffix + ".part")
+    temporary.write_bytes(raw)
+    temporary.replace(path)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def validate_hint_document(document: dict[str, Any]) -> None:
+    allowed = {
+        "title", "started_at", "ended_at", "calendar_event",
+        "hotwords", "attendees", "edits",
+    }
+    if set(document) - allowed:
+        raise ValueError("hint document has unknown fields")
+    hotwords = document.get("hotwords", [])
+    if not isinstance(hotwords, list) or not all(_line(item) for item in hotwords):
+        raise ValueError("hotwords must be a list of non-empty single-line strings")
+    for key in ("title", "started_at", "ended_at", "calendar_event"):
+        value = document.get(key)
+        if value is not None and not _line(value):
+            raise ValueError(f"{key} must be a non-empty single-line string")
+    if document.get("calendar_event") and not document["calendar_event"].startswith(("https://", "http://")):
+        raise ValueError("calendar_event must be an http(s) URL")
+    attendees = document.get("attendees", [])
+    if not isinstance(attendees, list):
+        raise ValueError("attendees must be a list")
+    attendee_handles = []
+    for attendee in attendees:
+        if (
+            not isinstance(attendee, dict)
+            or set(attendee) - {"handle", "identity", "ranges"}
+            or not {"handle", "identity"} <= set(attendee)
+            or not _line(attendee["handle"])
+            or not _empty_line(attendee["identity"])
+        ):
+            raise ValueError("each attendee must contain handle, identity, and optional ranges")
+        attendee_handles.append(attendee["handle"].strip())
+        ranges = attendee.get("ranges", [])
+        if not isinstance(ranges, list):
+            raise ValueError("attendee ranges must be a list")
+        for value in ranges:
+            _validate_range(value, {"start", "end", "track"}, "attendee range")
+    if len(attendee_handles) != len(set(attendee_handles)):
+        raise ValueError("attendee handles must be unique")
+    edits = document.get("edits", [])
+    if not isinstance(edits, list):
+        raise ValueError("edits must be a list")
+    for edit in edits:
+        _validate_range(edit, {"start", "end", "track", "before", "after"}, "edit")
+        if not _line(edit.get("before")) or not _line(edit.get("after")):
+            raise ValueError("edit before and after must be non-empty single-line strings")
+
+
+def _validate_range(value: Any, allowed: set[str], label: str) -> None:
+    if not isinstance(value, dict) or set(value) - allowed or not {"start", "end"} <= set(value):
+        raise ValueError(f"invalid {label}")
+    start, end = value["start"], value["end"]
+    if isinstance(start, bool) or isinstance(end, bool) or not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or start < 0 or end <= start:
+        raise ValueError(f"invalid {label} interval")
+    if "track" in value and not _line(value["track"]):
+        raise ValueError(f"invalid {label} track")
+
+
+def _line(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and "\n" not in value and "\r" not in value
+
+
+def _empty_line(value: Any) -> bool:
+    return isinstance(value, str) and "\n" not in value and "\r" not in value
+
+
+def transcript_payload(transcript: TranscriptFile) -> dict[str, Any]:
+    status = transcript.status
+    hints, revision = load_hint_document(transcript.hint_path)
+    try:
+        parsed = parse_markdown(transcript.markdown)
+    except (FileNotFoundError, ValueError):
+        parsed = None
+    if parsed is None:
+        return {
+            "id": transcript.identifier,
+            "name": str(transcript.relative),
+            "title": hints.get("title") or transcript.markdown.stem,
+            "status": status,
+            "staleReason": transcript.stale_reason,
+            "editable": False,
+            "frontmatter": {},
+            "turns": [],
+            "hints": hints,
+            "hintRevision": revision,
+            "audio": [
+                {"index": index, "role": source["role"], "name": source["name"]}
+                for index, source in enumerate(audio_sources(transcript))
+            ],
+        }
+    sources = audio_sources(transcript)
+    return {
+        "id": transcript.identifier,
+        "name": str(transcript.relative),
+        "title": parsed["title"],
+        "status": status,
+        "staleReason": transcript.stale_reason,
+        "editable": True,
+        "frontmatter": parsed["frontmatter"],
+        "turns": parsed["turns"],
+        "hints": hints,
+        "hintRevision": revision,
+        "audio": [
+            {"index": index, "role": source["role"], "name": source["name"]}
+            for index, source in enumerate(sources)
+        ],
+    }
+
+
+def candidate_identities(root: Path, selected: TranscriptFile, handle: str) -> list[dict[str, Any]]:
+    selected_vector = _voiceprint(selected, handle)
+    if selected_vector is None:
+        return []
+    candidates: dict[str, tuple[float, str]] = {}
+    for transcript in discover(root):
+        if transcript.status != "ready":
+            continue
+        parsed = parse_markdown(transcript.markdown)
+        for attendee in parsed["frontmatter"].get("attendees", []):
+            if not isinstance(attendee, dict):
+                continue
+            raw_handle = attendee.get("handle")
+            identity = raw_handle.strip() if isinstance(raw_handle, str) else ""
+            if not identity or re.fullmatch(r"speaker-\d+", identity):
+                continue
+            vector = _voiceprint(transcript, identity)
+            if vector is None:
+                continue
+            denominator = float(np.linalg.norm(selected_vector) * np.linalg.norm(vector))
+            similarity = float(np.dot(selected_vector, vector) / denominator) if denominator else 0.0
+            previous = candidates.get(identity)
+            if previous is None or similarity > previous[0]:
+                candidates[identity] = (similarity, str(transcript.relative))
+    return [
+        {"identity": identity, "similarity": similarity, "source": source}
+        for identity, (similarity, source) in sorted(
+            candidates.items(), key=lambda item: item[1][0], reverse=True
+        )
+    ]
+
+
+def _voiceprint(transcript: TranscriptFile, handle: str):
+    if not transcript.voiceprints_path.is_file():
+        return None
+    try:
+        with np.load(transcript.voiceprints_path, allow_pickle=False) as value:
+            handles = [str(item) for item in value["handles"]]
+            index = handles.index(handle)
+            return np.asarray(value["embeddings"][index], dtype=float)
+    except (KeyError, ValueError, OSError):
+        return None
