@@ -33,7 +33,11 @@ def severe_text_repetition(markdown: str) -> bool:
     return runaway_repetition_span(markdown) is not None
 
 
-def runaway_repetition_span(markdown: str) -> tuple[int, int] | None:
+def runaway_repetition_span(
+    markdown: str,
+    *,
+    minimum_phrase_tokens: int = 1,
+) -> tuple[int, int] | None:
     """Return the exact duplicate interval for a contiguous generation loop."""
     tokens = _repetition_tokens(markdown)
     words = [value for value, _, _ in tokens]
@@ -45,7 +49,10 @@ def runaway_repetition_span(markdown: str) -> tuple[int, int] | None:
     step = 1_000
     for offset in range(0, len(words), step):
         sample = words[offset : offset + window]
-        for size in range(1, min(36, len(sample) // 3 + 1)):
+        for size in range(
+            max(1, minimum_phrase_tokens),
+            min(36, len(sample) // 3 + 1),
+        ):
             required = 12 if size == 1 else 8 if size <= 4 else 5 if size <= 12 else 3
             for start in range(0, len(sample) - size * required + 1):
                 phrase = sample[start : start + size]
@@ -68,7 +75,7 @@ def truncate_runaway_repetition(markdown: str) -> tuple[str, bool]:
     repaired = markdown
     changed = False
     for _ in range(128):
-        span = runaway_repetition_span(repaired)
+        span = runaway_repetition_span(repaired, minimum_phrase_tokens=2)
         if span is None:
             break
         start, end = span

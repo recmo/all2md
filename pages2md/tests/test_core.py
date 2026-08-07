@@ -901,13 +901,14 @@ def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path)
     image.save(image_path)
     blocks = [
         Block("figure", "", bbox=(290, 290, 710, 710)),
-        Block("figure", "", bbox=(292, 292, 708, 708)),
+        Block("figure", "Important caption", bbox=(292, 292, 708, 708)),
         Block("figure", "", bbox=(350, 350, 650, 650)),
         Block("figure", "", bbox=(750, 750, 850, 850)),
     ]
     warnings = _canonicalize_figure_blocks(blocks, image_path)
     assert len(blocks) == 2
-    assert blocks[0].bbox == (282.0, 282.0, 718.0, 718.0)
+    assert blocks[0].bbox == (284.0, 284.0, 716.0, 716.0)
+    assert blocks[0].markdown == "Important caption"
     assert blocks[1].bbox == (342.0, 342.0, 658.0, 658.0)
     assert blocks[1].metadata["review_reason"] == "figure_crop_touches_edge"
     assert warnings == [
@@ -925,16 +926,19 @@ def test_figure_crops_retain_full_bleed_text_heavy_and_margin_images(tmp_path: P
     draw.rectangle((300, 300, 700, 600), outline="black", width=8)
     draw.text((320, 330), "A text-heavy screenshot " * 5, fill="black")
     draw.line((210, 920, 790, 920), fill="black", width=8)
+    draw.line((50, 750, 250, 750), fill=(252, 252, 252), width=8)
     image.save(image_path)
     blocks = [
         Block("figure", "", bbox=(50, 50, 250, 250)),
         Block("figure", "", bbox=(300, 300, 700, 600)),
         Block("figure", "", bbox=(200, 870, 800, 970)),
+        Block("figure", "Faint diagram", bbox=(40, 700, 260, 800)),
     ]
 
     warnings = _canonicalize_figure_blocks(blocks, image_path)
 
-    assert len(blocks) == 3
+    assert len(blocks) == 4
+    assert blocks[3].markdown == "Faint diagram"
     assert blocks[0].metadata["review_reason"] == "figure_crop_touches_edge"
     assert warnings == ["visual_figure_crop_may_be_clipped"]
 
@@ -963,11 +967,18 @@ def test_repetition_across_blocks_removes_only_the_proven_loop():
 def test_blank_figure_does_not_create_a_full_page_fallback(tmp_path: Path):
     image_path = tmp_path / "page.png"
     Image.new("RGB", (1000, 1000), "white").save(image_path)
-    blocks = [Block("figure", "", bbox=(100, 100, 200, 200))]
+    blocks = [
+        Block("figure", "", bbox=(100, 100, 200, 200)),
+        Block("figure", "Important caption", bbox=(300, 300, 400, 400)),
+    ]
 
     warnings = _canonicalize_figure_blocks(blocks, image_path)
 
-    assert blocks == []
+    assert len(blocks) == 1
+    assert blocks[0].kind == "paragraph"
+    assert blocks[0].markdown == "Important caption"
+    assert blocks[0].bbox is None
+    assert blocks[0].metadata["review_reason"] == "blank_figure_crop_caption_preserved"
     assert warnings == ["visual_blank_figure_crop_rejected"]
 
 

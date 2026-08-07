@@ -1162,7 +1162,7 @@ def _repair_runaway_repetition(blocks: list[Block]) -> list[str]:
         for _ in range(128):
             active = [index for index in indices if blocks[index].markdown]
             combined, segments = _joined_block_text(blocks, active)
-            span = runaway_repetition_span(combined)
+            span = runaway_repetition_span(combined, minimum_phrase_tokens=2)
             if span is None:
                 break
             start, end = span
@@ -1233,8 +1233,16 @@ def _canonicalize_figure_blocks(
             block.bbox = _padded_bbox(block.bbox)
             blank, touches_edge = _figure_crop_status(grayscale, block.bbox)
             if blank:
-                rejected.add(index)
                 warnings.append("visual_blank_figure_crop_rejected")
+                if block.markdown.strip():
+                    block.metadata.update({
+                        "review_required": True,
+                        "review_reason": "blank_figure_crop_caption_preserved",
+                    })
+                    block.kind = "paragraph"
+                    block.bbox = None
+                else:
+                    rejected.add(index)
                 continue
             if touches_edge:
                 block.metadata.update({
@@ -1249,7 +1257,13 @@ def _canonicalize_figure_blocks(
     retained: list[tuple[int, Block]] = []
     for candidate in sorted(
         candidates,
-        key=lambda item: _bbox_area(item[1].bbox),
+        key=lambda item: (
+            bool(item[1].markdown.strip()),
+            len(item[1].markdown.strip()),
+            len(item[1].provenance),
+            len(item[1].metadata),
+            _bbox_area(item[1].bbox),
+        ),
         reverse=True,
     ):
         _, block = candidate
@@ -1291,7 +1305,7 @@ def _figure_crop_status(
         min(height, round(bottom * height / 1000)),
     ))
     crop.thumbnail((384, 384), Image.Resampling.LANCZOS)
-    content = crop.point(lambda value: 255 if value < 250 else 0).getbbox()
+    content = crop.point(lambda value: 255 if value < 255 else 0).getbbox()
     if content is None:
         return True, False
     touches_edge = (

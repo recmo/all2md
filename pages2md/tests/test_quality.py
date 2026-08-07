@@ -36,6 +36,14 @@ def test_runaway_generation_is_truncated_after_one_cycle():
     assert "visual_text_repetition" not in output_quality_warnings(repaired)
 
 
+def test_single_token_repetition_is_review_only():
+    markdown = " ".join(["A"] * 12)
+    repaired, changed = truncate_runaway_repetition(markdown)
+    assert "visual_text_repetition" in output_quality_warnings(markdown)
+    assert changed is False
+    assert repaired == markdown
+
+
 def test_repetitive_table_is_semantically_invalid():
     rows = "".join(
         f"<tr><td>[{number}]</td><td>[{number}]</td><td>[{number}]</td></tr>"
