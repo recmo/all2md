@@ -167,6 +167,29 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: final.path))
     }
 
+    func testProcessResolverWalksFromBrowserHelperToOwningApplication() throws {
+        let browser = CaptureApplicationIdentity(processID: 100, bundleID: "com.brave.Browser", applicationName: "Brave Browser", isUserApplication: true)
+        let helper = CaptureApplicationIdentity(processID: 200, bundleID: "com.brave.Browser.helper", applicationName: "Brave Browser Helper", isUserApplication: false)
+        let resolved = ProcessApplicationResolver.resolve(
+            processID: helper.processID,
+            bundleID: helper.bundleID,
+            applications: [browser, helper],
+            parentPID: { [200: 100][$0] }
+        )
+        XCTAssertEqual(resolved, browser)
+    }
+
+    func testSystemAudioFallsBackToResolvedBundleID() {
+        let candidates = [
+            CaptureApplicationIdentity(processID: 100, bundleID: "com.brave.Browser", applicationName: "Brave Browser", isUserApplication: true),
+            CaptureApplicationIdentity(processID: 300, bundleID: "us.zoom.xos", applicationName: "zoom.us", isUserApplication: true),
+        ]
+        XCTAssertEqual(
+            SystemAudioRecorder.matchingApplicationIndex(processID: 999, bundleID: "com.brave.Browser", candidates: candidates),
+            0
+        )
+    }
+
     private func writeTone(to url: URL, sampleRate: Double, channels: AVAudioChannelCount, duration: Double) throws {
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channels))
         let file = try AVAudioFile(forWriting: url, settings: format.settings)

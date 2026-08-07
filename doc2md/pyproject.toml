@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "doc2md"
+version = "0.1.0"
+description = "Extract durable Markdown from Google Docs and Notion"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<10",
+]
+
+[project.scripts]
+doc2md = "doc2md.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doc2md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

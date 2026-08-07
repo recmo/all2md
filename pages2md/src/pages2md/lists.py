@@ -11,7 +11,7 @@ from .model import Block, PageResult
 LIST_KINDS = {"list", "list_item", "bullet", "bulleted_list", "enumeration", "ordered_list"}
 BREAK_KINDS = {
     "heading", "title", "page_title", "section_header", "table", "figure",
-    "embedded_figure", "caption", "formula", "equation", "display_formula",
+    "caption", "formula", "equation", "display_formula",
 }
 BULLETS = "•◦▪‣●○"
 BULLET = re.compile(rf"^(?P<indent>[ \t]*)(?P<marker>[{re.escape(BULLETS)}*+\-–—])\s+(?P<text>\S.*)$")

@@ -27,14 +27,19 @@ open result/Applications/MeetingCapture.app
 The Nix derivation uses the locally installed Xcode and ad-hoc signs the result
 with the capture entitlement.
 
-The first launch requests Microphone, Screen & System Audio Recording, and
-Accessibility permissions. Accessibility remains optional and only enriches
-metadata.
+At launch, Meeting Capture requests Microphone, Screen & System Audio
+Recording, and Accessibility permissions. Without screen and system-audio
+access it stays paused: it does not monitor, count down, or allow manual
+recording. The menu opens the correct System Settings pane and monitoring
+resumes only after macOS reports access granted. Automatic recording never
+falls back to a microphone-only capture when participant audio is unavailable.
+Accessibility remains optional and only enriches metadata.
 
 ## Current capture path
 
-- Core Audio process objects drive automatic detection, with default-input
-  device activity as the unattributed fallback.
+- Core Audio process objects drive automatic detection. Browser helper
+  processes are resolved to their owning application, with default-input device
+  activity as the unattributed fallback.
 - For attributed clients, the process object's input-scoped device list identifies
   the microphone selected by the meeting application, even when it is not the
   macOS default. The active device is shown in the menu and recorded as a

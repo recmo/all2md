@@ -89,6 +89,7 @@ def transcribe(
                 window_count: int,
                 attempt: int,
                 completed_seconds: float,
+                phase: str | None = None,
                 *,
                 track_role: str = role,
             ) -> None:
@@ -96,6 +97,8 @@ def transcribe(
                 status = f"{track_role} window {window}/{window_count}"
                 if attempt > 1:
                     status += f" recovery {attempt - 1}"
+                if phase:
+                    status += f" {phase}"
                 progress.set_postfix_str(status)
                 if completed_seconds:
                     progress.update(completed_seconds)

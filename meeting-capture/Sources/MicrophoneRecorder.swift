@@ -135,6 +135,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
 enum CaptureError: LocalizedError {
     case noMicrophone
     case noDisplay
+    case screenRecordingPermissionRequired
     case triggeringApplicationUnavailable
     case deviceSelectionFailure(String)
     case writerFailure(String)
@@ -143,6 +144,7 @@ enum CaptureError: LocalizedError {
         switch self {
         case .noMicrophone: "No usable microphone is available."
         case .noDisplay: "No display is available for system-audio capture."
+        case .screenRecordingPermissionRequired: "Allow Meeting Capture in Privacy & Security > Screen & System Audio Recording, then reopen the app."
         case .triggeringApplicationUnavailable: "The triggering application's audio is unavailable."
         case let .deviceSelectionFailure(message): "Could not select microphone: \(message)"
         case let .writerFailure(message): "Audio writer failed: \(message)"

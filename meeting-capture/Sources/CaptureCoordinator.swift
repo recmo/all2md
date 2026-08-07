@@ -42,8 +42,7 @@ final class CaptureCoordinator: ObservableObject {
         do {
             try microphone.start(to: nextMicrophoneSegmentURL(), deviceID: microphoneDevice?.id)
             if let pid = trigger.processID {
-                do { try await participants.start(processID: pid, to: paths.participantsTemporary) }
-                catch { warnings.append("Participant audio unavailable: \(error.localizedDescription)") }
+                try await participants.start(processID: pid, bundleID: trigger.bundleID, to: paths.participantsTemporary)
             } else {
                 warnings.append("Participant audio unavailable for a manual recording without a selected process.")
             }
@@ -63,9 +62,11 @@ final class CaptureCoordinator: ObservableObject {
             }
         } catch {
             for segment in microphone.stop() { try? FileManager.default.removeItem(at: segment.url) }
+            try? await participants.stop()
             accessibilityProbe?.stop()
             accessibilityProbe = nil
             try? FileManager.default.removeItem(at: paths.accessibilityTemporary)
+            try? FileManager.default.removeItem(at: paths.participantsTemporary)
             reset()
             throw error
         }

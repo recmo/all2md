@@ -16,7 +16,7 @@ IMAGE_LINK = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 TITLE_KINDS = {"title", "page_title", "heading", "section_header", "header"}
-FIGURE_KINDS = {"embedded_figure", "figure", "image", "picture"}
+FIGURE_KINDS = {"figure", "image", "picture"}
 BODY_BOUNDARY = re.compile(r"^(?:part|chapter)\b", re.IGNORECASE)
 FRONT_MATTER_BOUNDARY = re.compile(
     r"^(?:praise|title page|copyright|contents|table of contents|dedication|foreword|preface)\b",

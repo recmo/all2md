@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 @preconcurrency import ScreenCaptureKit
 import CoreMedia
+import CoreGraphics
 import Foundation
 
 final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
@@ -12,12 +13,33 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
     private(set) var firstSampleAt: Date?
     var onLevel: (@Sendable (Float) -> Void)?
 
-    func start(processID: pid_t, to url: URL) async throws {
+    func start(processID: pid_t, bundleID: String?, to url: URL) async throws {
         firstSampleAt = nil
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        guard let application = content.applications.first(where: { $0.processID == processID }) else {
+        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
+            throw CaptureError.screenRecordingPermissionRequired
+        }
+
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        } catch {
+            if !CGPreflightScreenCaptureAccess() || error.localizedDescription.localizedCaseInsensitiveContains("TCC") {
+                throw CaptureError.screenRecordingPermissionRequired
+            }
+            throw error
+        }
+        let identities = content.applications.map {
+            CaptureApplicationIdentity(
+                processID: $0.processID,
+                bundleID: $0.bundleIdentifier,
+                applicationName: $0.applicationName,
+                isUserApplication: true
+            )
+        }
+        guard let index = Self.matchingApplicationIndex(processID: processID, bundleID: bundleID, candidates: identities) else {
             throw CaptureError.triggeringApplicationUnavailable
         }
+        let application = content.applications[index]
         guard let display = content.displays.first else { throw CaptureError.noDisplay }
 
         let filter = SCContentFilter(display: display, including: [application], exceptingWindows: [])
@@ -53,6 +75,16 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
         self.stream = stream
         try await stream.startCapture()
+    }
+
+    static func matchingApplicationIndex(
+        processID: pid_t,
+        bundleID: String?,
+        candidates: [CaptureApplicationIdentity]
+    ) -> Int? {
+        if let exact = candidates.firstIndex(where: { $0.processID == processID }) { return exact }
+        guard let bundleID else { return nil }
+        return candidates.firstIndex(where: { $0.bundleID == bundleID })
     }
 
     func stop() async throws {

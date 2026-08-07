@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import fitz
-from PIL import Image
+from PIL import Image, ImageDraw
 import pytest
 
 from pages2md.chapters import detect_chapters
@@ -15,8 +15,8 @@ from pages2md.cli import parser
 from pages2md.compare import compare_text
 from pages2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
 from pages2md.native import parse_native_observation, reconcile_observations
-from pages2md.adapters import _link_target
-from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _convert_workspace, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, convert
+from pages2md.adapters import _link_target, detect_kind
+from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _canonicalize_figure_blocks, _convert_workspace, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, _repair_runaway_repetition, convert
 from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from pages2md.verify import verify_bundle
 
@@ -57,6 +57,28 @@ class RecoveryFixtureOcr:
         return (
             "<|det|>text [100,100,800,300]<|/det|>A truncated local sentence with recovered detail.",
             {"mode": "gundam", "finish_reason": "stop"},
+        )
+
+
+class RepeatingFixtureOcr:
+    identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
+
+    def recognize(self, image: Path):
+        return (
+            "<|det|>text [100,100,800,300]<|/det|>Useful introduction. "
+            + "repeated phrase " * 20,
+            {"mode": "multi_base", "finish_reason": "stop"},
+        )
+
+
+class LongFixtureOcr:
+    identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
+
+    def recognize(self, image: Path):
+        text = " ".join(f"token{index:05d}" for index in range(2_500))
+        return (
+            f"<|det|>text [100,100,800,300]<|/det|>{text}",
+            {"mode": "multi_base", "finish_reason": "stop"},
         )
 
 
@@ -403,36 +425,6 @@ def test_multi_page_segments_align_to_physical_page_ranges(tmp_path: Path):
     assert aligned[2][1]["merged_into"] == 2
 
 
-def test_multi_page_continuation_assets_are_preserved_but_not_rendered():
-    first = PageResult(
-        number=1,
-        image="",
-        visual_markdown="",
-        blocks=[Block(kind="table", markdown="<table><tr><td>A</td></tr></table>")],
-        embedded=EmbeddedEvidence(),
-        comparison=Comparison(),
-    )
-    continuation = PageResult(
-        number=2,
-        image="",
-        visual_markdown="![Embedded figure](assets/figures/table-slice.png)",
-        blocks=[
-            Block(
-                kind="embedded_figure",
-                markdown="![Embedded figure](assets/figures/table-slice.png)",
-                asset_id="fig-1",
-            )
-        ],
-        embedded=EmbeddedEvidence(),
-        comparison=Comparison(),
-        source_assets=[{"asset_id": "fig-1"}],
-    )
-    _merge_continued_tables([first, continuation])
-    assert continuation.blocks == []
-    assert continuation.visual_markdown == ""
-    assert continuation.source_assets == [{"asset_id": "fig-1"}]
-
-
 def test_repeated_headers_are_removed_and_cross_page_paragraphs_join():
     pages = []
     for number in range(1, 4):
@@ -538,20 +530,46 @@ def test_single_markdown_with_figures_publishes_only_final_artifacts(tmp_path: P
 
     bundle = convert(pdf, backend=FixtureOcr())
     assert bundle == tmp_path / "paper.pdf.md"
-    assert sorted(str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file()) == [
-        "figures/fig-0001.png",
-        "figures/fig-0002.png",
-        "paper.pdf.md",
-    ]
+    published = sorted(str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file())
+    assert published[-1] == "paper.pdf.md"
+    assert len(published) == 2
+    assert published[0].startswith("figures/fig-")
     markdown = (bundle / "paper.pdf.md").read_text()
     assert markdown.startswith("---\nsource_sha256: ")
     assert "\npages2md_version: " in markdown.split("---", 2)[1]
     assert "The visual text has $x^2$." in markdown
     assert "broken embedded text" not in markdown
     assert "![A useful diagram.]" in markdown
-    assert "![Embedded figure]" in markdown
+    assert "![Embedded figure]" not in markdown
     verification = verify_bundle(bundle)
     assert verification.ok, verification.errors
+
+
+def test_ocr_detected_figure_prefers_matching_embedded_pdf_image(tmp_path: Path):
+    class MatchingFigureOcr:
+        identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
+
+        def recognize(self, image: Path):
+            return (
+                "<|det|>diagram [163, 379, 409, 568]<|/det|>A matched diagram.",
+                {"finish_reason": "stop"},
+            )
+
+    pdf = tmp_path / "matched.pdf"
+    image_path = tmp_path / "source.png"
+    Image.new("RGB", (100, 100), "navy").save(image_path)
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_image(fitz.Rect(100, 300, 250, 450), filename=str(image_path))
+    document.save(pdf)
+    document.close()
+
+    bundle = convert(pdf, backend=MatchingFigureOcr())
+    figures = list((bundle / "figures").iterdir())
+    assert len(figures) == 1
+    with Image.open(figures[0]) as figure:
+        assert figure.size == (100, 100)
+    assert "![A matched diagram.]" in (bundle / "matched.pdf.md").read_text()
 
 
 def test_pdf_link_targets_accept_string_page_numbers():
@@ -837,6 +855,129 @@ def test_failed_conversion_publishes_no_intermediate_results(tmp_path: Path):
     assert verify_bundle(bundle).ok
 
 
+def test_content_quality_warning_does_not_suppress_output(tmp_path: Path, capsys):
+    pdf = tmp_path / "repetition.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "repeated phrase")
+    document.save(pdf)
+    document.close()
+
+    workspace = _convert_workspace(pdf, tmp_path / "workspace", backend=RepeatingFixtureOcr())
+    verification = verify_bundle(workspace)
+    assert verification.ok, verification.errors
+    assert "visual_text_repetition_repaired" in verification.warnings
+    assert not any("needs content review: visual_text_repetition" in warning for warning in verification.warnings)
+
+    output = convert(pdf, backend=RepeatingFixtureOcr())
+    assert output == tmp_path / "repetition.pdf.md"
+    assert output.is_file()
+    assert "Useful introduction." in output.read_text()
+    assert "repeated phrase" in output.read_text()
+    assert output.read_text().count("repeated phrase") == 1
+
+    long_pdf = tmp_path / "long.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "source text")
+    document.save(long_pdf)
+    document.close()
+    long_output = convert(long_pdf, backend=LongFixtureOcr())
+    captured = capsys.readouterr()
+    assert long_output.is_file()
+    assert "needs content review: visual_implausible_output_length" in captured.err
+
+
+def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    image = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((300, 300, 700, 700), outline="black", width=8)
+    draw.line((300, 500, 700, 500), fill="black", width=8)
+    image.save(image_path)
+    blocks = [
+        Block("figure", "", bbox=(290, 290, 710, 710)),
+        Block("figure", "Important caption", bbox=(292, 292, 708, 708)),
+        Block("figure", "", bbox=(350, 350, 650, 650)),
+        Block("figure", "", bbox=(750, 750, 850, 850)),
+    ]
+    warnings = _canonicalize_figure_blocks(blocks, image_path)
+    assert len(blocks) == 2
+    assert blocks[0].bbox == (284.0, 284.0, 716.0, 716.0)
+    assert blocks[0].markdown == "Important caption"
+    assert blocks[1].bbox == (342.0, 342.0, 658.0, 658.0)
+    assert blocks[1].metadata["review_reason"] == "figure_crop_touches_edge"
+    assert warnings == [
+        "visual_blank_figure_crop_rejected",
+        "visual_duplicate_figure_crop_rejected",
+        "visual_figure_crop_may_be_clipped",
+    ]
+
+
+def test_figure_crops_retain_full_bleed_text_heavy_and_margin_images(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    image = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((42, 42, 258, 258), fill="navy")
+    draw.rectangle((300, 300, 700, 600), outline="black", width=8)
+    draw.text((320, 330), "A text-heavy screenshot " * 5, fill="black")
+    draw.line((210, 920, 790, 920), fill="black", width=8)
+    draw.line((50, 750, 250, 750), fill=(252, 252, 252), width=8)
+    image.save(image_path)
+    blocks = [
+        Block("figure", "", bbox=(50, 50, 250, 250)),
+        Block("figure", "", bbox=(300, 300, 700, 600)),
+        Block("figure", "", bbox=(200, 870, 800, 970)),
+        Block("figure", "Faint diagram", bbox=(40, 700, 260, 800)),
+    ]
+
+    warnings = _canonicalize_figure_blocks(blocks, image_path)
+
+    assert len(blocks) == 4
+    assert blocks[3].markdown == "Faint diagram"
+    assert blocks[0].metadata["review_reason"] == "figure_crop_touches_edge"
+    assert warnings == ["visual_figure_crop_may_be_clipped"]
+
+
+def test_repetition_across_blocks_removes_only_the_proven_loop():
+    blocks = [
+        Block("paragraph", f"Answer\nUnique section {index}")
+        for index in range(5)
+    ]
+    blocks.extend(
+        Block("paragraph", "loop phrase")
+        for _ in range(20)
+    )
+    blocks.append(Block("paragraph", "Legitimate conclusion."))
+
+    warnings = _repair_runaway_repetition(blocks)
+
+    assert [block.markdown for block in blocks] == [
+        *[f"Answer\nUnique section {index}" for index in range(5)],
+        "loop phrase",
+        "Legitimate conclusion.",
+    ]
+    assert warnings == ["visual_text_repetition_repaired"]
+
+
+def test_blank_figure_does_not_create_a_full_page_fallback(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (1000, 1000), "white").save(image_path)
+    blocks = [
+        Block("figure", "", bbox=(100, 100, 200, 200)),
+        Block("figure", "Important caption", bbox=(300, 300, 400, 400)),
+    ]
+
+    warnings = _canonicalize_figure_blocks(blocks, image_path)
+
+    assert len(blocks) == 1
+    assert blocks[0].kind == "paragraph"
+    assert blocks[0].markdown == "Important caption"
+    assert blocks[0].bbox is None
+    assert blocks[0].metadata["review_reason"] == "blank_figure_crop_caption_preserved"
+    assert warnings == ["visual_blank_figure_crop_rejected"]
+
+
 def test_embedded_links_are_geometry_aware_and_idempotent():
     blocks = [
         Block("paragraph", "Foo first", bbox=(0, 0, 1000, 200)),
@@ -849,7 +990,7 @@ def test_embedded_links_are_geometry_aware_and_idempotent():
     assert blocks[1].markdown == "[Foo](https://example.com) second"
 
 
-def test_embedded_table_image_is_preserved_but_not_displayed_twice(tmp_path: Path):
+def test_embedded_table_image_does_not_create_a_figure_without_ocr_claim(tmp_path: Path):
     pdf = tmp_path / "table.pdf"
     image_path = tmp_path / "table.png"
     table_image = Image.new("RGB", (200, 200), "white")
@@ -897,8 +1038,8 @@ def test_reused_pdf_image_records_distinct_placements(tmp_path: Path):
     assert all(placement["bbox"] for placement in embedded["placements"])
 
 
-def test_pre_paginated_epub_uses_visual_page_pipeline(tmp_path: Path):
-    epub = tmp_path / "fixed.epub"
+def test_epub_is_rejected_instead_of_treated_as_cbz(tmp_path: Path):
+    epub = tmp_path / "book.epub"
     with zipfile.ZipFile(epub, "w") as archive:
         archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
         archive.writestr(
@@ -907,26 +1048,12 @@ def test_pre_paginated_epub_uses_visual_page_pipeline(tmp_path: Path):
             'version="1.0"><rootfiles><rootfile full-path="OEBPS/package.opf" '
             'media-type="application/oebps-package+xml"/></rootfiles></container>',
         )
-        archive.writestr(
-            "OEBPS/package.opf",
-            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
-            'unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
-            '<dc:identifier id="id">fixed</dc:identifier><dc:title>Fixed Book</dc:title>'
-            '<meta property="rendition:layout">pre-paginated</meta></metadata>'
-            '<manifest><item id="page" href="page.xhtml" media-type="application/xhtml+xml"/></manifest>'
-            '<spine><itemref idref="page"/></spine></package>',
-        )
-        archive.writestr(
-            "OEBPS/page.xhtml",
-            '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Page One</title></head>'
-            '<body><h1>Page One</h1><p>Visual page content.</p></body></html>',
-        )
-    bundle = _convert_workspace(
-        epub,
-        tmp_path / "out",
-        backend=FixtureOcr(),
-    )
-    metadata = json.loads((bundle / "metadata.json").read_text())
-    assert metadata["source_kind"] == "epub-fixed"
-    assert (bundle / "pages/page-0001.json").exists()
-    assert "<!-- page: 1 -->" in (bundle / "book.md").read_text()
+    with pytest.raises(ValueError, match="unsupported input format"):
+        detect_kind(epub)
+
+
+def test_cbz_remains_supported_after_epub_removal(tmp_path: Path):
+    cbz = tmp_path / "pages.cbz"
+    with zipfile.ZipFile(cbz, "w") as archive:
+        archive.writestr("001.png", b"image fixture")
+    assert detect_kind(cbz) == "cbz"

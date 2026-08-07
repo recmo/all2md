@@ -1,0 +1,22 @@
+{
+  "output": {
+    "root": "sources"
+  },
+  "notion": {
+    "enabled": true,
+    "token": {
+      "env": "NOTION_TOKEN"
+    },
+    "path_prefix": []
+  },
+  "google_docs": {
+    "enabled": true,
+    "bearer": {
+      "env": "GOOGLE_DRIVE_TOKEN"
+    },
+    "root_ids": [
+      "folder-id"
+    ],
+    "path_prefix": []
+  }
+}
