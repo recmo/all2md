@@ -57,10 +57,11 @@ Raw generations are retained in an adjacent cache as described below.
 Long recordings use one deliberately fixed policy. `speech2md` chooses the
 minimum number of roughly equal parts targeting 30 minutes, moves each ideal
 boundary to a detected silence within one minute, and adds two seconds of audio
-overlap. The silence and window parameters are source constants, not CLI
-options. If no nearby silence exists, processing stops; there is no alternate
-windowing method. The progress bar labels model prefill explicitly, switches
-to transcribing with the first generated token, advances whenever MOSS emits a
+overlap. If no qualifying silence exists, it uses the lowest-energy 100 ms
+point in the same search range and increases the overlap to six seconds. The
+silence, energy, overlap, and window parameters are source constants, not CLI
+options. The progress bar labels model prefill explicitly, switches to
+transcribing with the first streamed token, advances whenever MOSS emits a
 timestamp, then fills trailing silence when the window completes. It remains
 monotonic across overlapping recovery passes. Generation token counts are
 available to the in-process recovery logic; prompt and total counts are null
