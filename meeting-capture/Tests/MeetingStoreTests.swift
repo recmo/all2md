@@ -44,7 +44,17 @@ final class MeetingStoreTests: XCTestCase {
             timeZone: "Europe/Warsaw",
             trigger: CaptureTrigger(method: .audioProcess, processID: 42, bundleID: "us.zoom.xos", applicationName: "zoom.us"),
             audio: [AudioTrack(role: .microphone, file: "microphone.flac", format: "flac", sampleRate: 48_000, channels: 1, durationSeconds: 60, sha256: String(repeating: "a", count: 64))],
-            interruptions: [], metadataEvents: [], warnings: [], status: .incomplete
+            interruptions: [],
+            metadataEvents: [
+                MetadataEvent(
+                    timestamp: now,
+                    kind: .microphoneDevice,
+                    value: "Studio Display Microphone [AppleUSBAudioEngine:fixture]",
+                    confidence: 1
+                ),
+            ],
+            warnings: [],
+            status: .incomplete
         )
 
         try MeetingStore(root: root).write(manifest, to: url)
@@ -53,6 +63,24 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(object["slug"] as? String, "leadership-weekly")
         XCTAssertNotNil(object["trigger"])
         XCTAssertNotNil(object["audio"])
+        let metadataEvents = try XCTUnwrap(object["metadataEvents"] as? [[String: Any]])
+        XCTAssertEqual(metadataEvents.first?["kind"] as? String, "microphoneDevice")
+        XCTAssertEqual(metadataEvents.first?["value"] as? String, "Studio Display Microphone [AppleUSBAudioEngine:fixture]")
+    }
+
+    func testAudioClientSummarizesInputDevicesAndStableManifestIdentity() {
+        let device = AudioInputDevice(id: 17, uid: "fixture-device", name: "External Microphone")
+        let client = AudioClient(
+            audioObjectID: 4,
+            processID: 42,
+            bundleID: "us.zoom.xos",
+            applicationName: "zoom.us",
+            inputDevices: [device]
+        )
+
+        XCTAssertEqual(client.primaryInputDevice, device)
+        XCTAssertEqual(client.inputDeviceSummary, "External Microphone")
+        XCTAssertEqual(device.manifestValue, "External Microphone [fixture-device]")
     }
 
     func testCAFToFLACFinalizationIsLosslessAndChecksummed() throws {

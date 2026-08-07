@@ -1,9 +1,11 @@
+import CoreAudio
 import Foundation
 
 @MainActor
 final class CaptureCoordinator: ObservableObject {
     @Published private(set) var microphoneLevel: Float = 0
     @Published private(set) var participantsLevel: Float = 0
+    @Published private(set) var activeMicrophoneName: String?
     @Published private(set) var startedAt: Date?
 
     private let microphone = MicrophoneRecorder()
@@ -14,8 +16,10 @@ final class CaptureCoordinator: ObservableObject {
     private var metadata: [MetadataEvent] = []
     private var warnings: [String] = []
     private var interruptions: [CaptureTimeRange] = []
+    private var currentMicrophoneDevice: AudioInputDevice?
+    private var failedMicrophoneDeviceID: AudioDeviceID?
 
-    func start(trigger: CaptureTrigger) async throws {
+    func start(trigger: CaptureTrigger, microphoneDevice: AudioInputDevice?) async throws {
         let start = Date()
         let title = trigger.processID.flatMap { AccessibilityMetadataProvider.windowTitle(processID: $0) } ?? trigger.applicationName
         let paths = try store.paths(startedAt: start, title: title)
@@ -23,11 +27,19 @@ final class CaptureCoordinator: ObservableObject {
         self.trigger = trigger
         startedAt = start
         if let title { metadata.append(MetadataEvent(timestamp: start, kind: .windowTitle, value: title, confidence: 0.7)) }
+        currentMicrophoneDevice = microphoneDevice
+        activeMicrophoneName = microphoneDevice?.name ?? "System default microphone"
+        if let microphoneDevice {
+            metadata.append(MetadataEvent(timestamp: start, kind: .microphoneDevice, value: microphoneDevice.manifestValue, confidence: 1))
+        }
 
         microphone.onLevel = { [weak self] level in Task { @MainActor in self?.microphoneLevel = level } }
+        microphone.onError = { [weak self] error in
+            Task { @MainActor in self?.addWarning("Microphone recording error: \(error.localizedDescription)") }
+        }
         participants.onLevel = { [weak self] level in Task { @MainActor in self?.participantsLevel = level } }
         do {
-            try microphone.start(to: paths.microphoneTemporary)
+            try microphone.start(to: paths.microphoneTemporary, deviceID: microphoneDevice?.id)
             if let pid = trigger.processID {
                 do { try await participants.start(processID: pid, to: paths.participantsTemporary) }
                 catch { warnings.append("Participant audio unavailable: \(error.localizedDescription)") }
@@ -37,7 +49,44 @@ final class CaptureCoordinator: ObservableObject {
         } catch {
             microphone.stop()
             try? FileManager.default.removeItem(at: paths.microphoneTemporary)
+            reset()
             throw error
+        }
+    }
+
+    func updateMicrophoneDevices(_ devices: [AudioInputDevice]) {
+        guard startedAt != nil, !devices.isEmpty else { return }
+        if let currentMicrophoneDevice, devices.contains(where: { $0.id == currentMicrophoneDevice.id }) {
+            failedMicrophoneDeviceID = nil
+            return
+        }
+        guard let nextDevice = devices.first else { return }
+        guard nextDevice.id != failedMicrophoneDeviceID else { return }
+
+        let previousName = activeMicrophoneName ?? "unknown microphone"
+        let switchStarted = Date()
+        do {
+            try microphone.switchDevice(to: nextDevice.id)
+            let switchEnded = Date()
+            currentMicrophoneDevice = nextDevice
+            failedMicrophoneDeviceID = nil
+            activeMicrophoneName = nextDevice.name
+            metadata.append(MetadataEvent(timestamp: switchEnded, kind: .microphoneDevice, value: nextDevice.manifestValue, confidence: 1))
+            interruptions.append(CaptureTimeRange(
+                startedAt: switchStarted,
+                endedAt: switchEnded,
+                reason: "microphone device switch from \(previousName) to \(nextDevice.name)"
+            ))
+        } catch {
+            let switchEnded = Date()
+            failedMicrophoneDeviceID = nextDevice.id
+            if microphone.deviceID == nil { activeMicrophoneName = "Microphone unavailable" }
+            interruptions.append(CaptureTimeRange(
+                startedAt: switchStarted,
+                endedAt: switchEnded,
+                reason: "failed microphone device switch from \(previousName) to \(nextDevice.name)"
+            ))
+            addWarning("Could not follow microphone switch to \(nextDevice.name): \(error.localizedDescription)")
         }
     }
 
@@ -127,5 +176,14 @@ final class CaptureCoordinator: ObservableObject {
         metadata = []
         warnings = []
         interruptions = []
+        currentMicrophoneDevice = nil
+        failedMicrophoneDeviceID = nil
+        activeMicrophoneName = nil
+        microphone.onError = nil
+    }
+
+    private func addWarning(_ warning: String) {
+        guard !warnings.contains(warning) else { return }
+        warnings.append(warning)
     }
 }

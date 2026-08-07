@@ -43,7 +43,7 @@ final class AppModel: ObservableObject {
     func startNow() { if case let .countdown(client, _) = state { beginRecording(client) } }
 
     func manualStart() {
-        let client = AudioClient(audioObjectID: 0, processID: 0, bundleID: nil, applicationName: "Manual recording")
+        let client = AudioClient(audioObjectID: 0, processID: 0, bundleID: nil, applicationName: "Manual recording", inputDevices: [])
         beginRecording(client, method: .manual)
     }
 
@@ -101,11 +101,17 @@ final class AppModel: ObservableObject {
             guard let candidate = clients.first(where: { !isIgnored($0) }) else { return }
             state = .detecting(candidate, since: Date())
         case let .detecting(candidate, since):
-            guard clients.contains(where: { $0.processID == candidate.processID }) else { state = .idle; return }
-            if Date().timeIntervalSince(since) >= 2 { beginCountdown(candidate) }
+            guard let current = clients.first(where: { $0.processID == candidate.processID }) else { state = .idle; return }
+            if Date().timeIntervalSince(since) >= 2 { beginCountdown(current) }
+            else if current != candidate { state = .detecting(current, since: since) }
+        case let .countdown(candidate, remaining):
+            guard let current = clients.first(where: { $0.processID == candidate.processID }) else { state = .idle; return }
+            if current != candidate { state = .countdown(current, remaining: remaining) }
         case let .recording(candidate):
-            if clients.contains(where: { $0.processID == candidate.processID }) {
+            if let current = clients.first(where: { $0.processID == candidate.processID }) {
                 stopTask?.cancel(); stopTask = nil
+                capture.updateMicrophoneDevices(current.inputDevices)
+                if current != candidate { state = .recording(current) }
             } else if stopTask == nil {
                 stopTask = Task { @MainActor [weak self] in
                     try? await Task.sleep(for: .seconds(15))
@@ -141,7 +147,7 @@ final class AppModel: ObservableObject {
         let resolvedMethod: TriggerMethod = method == .manual ? .manual : (client.processID > 0 ? .audioProcess : .deviceRunning)
         let trigger = CaptureTrigger(method: resolvedMethod, processID: client.processID > 0 ? client.processID : nil, bundleID: client.bundleID, applicationName: client.applicationName)
         Task {
-            do { try await capture.start(trigger: trigger); state = .recording(client) }
+            do { try await capture.start(trigger: trigger, microphoneDevice: client.primaryInputDevice); state = .recording(client) }
             catch { state = .error(error.localizedDescription) }
         }
     }

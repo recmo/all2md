@@ -5,7 +5,25 @@ struct AudioClient: Identifiable, Equatable, Sendable {
     let processID: pid_t
     let bundleID: String?
     let applicationName: String
+    let inputDevices: [AudioInputDevice]
     var id: pid_t { processID }
+
+    var primaryInputDevice: AudioInputDevice? { inputDevices.first }
+
+    var inputDeviceSummary: String {
+        inputDevices.isEmpty ? "Unknown microphone" : inputDevices.map(\.name).joined(separator: ", ")
+    }
+}
+
+struct AudioInputDevice: Identifiable, Equatable, Sendable {
+    let id: UInt32
+    let uid: String?
+    let name: String
+
+    var manifestValue: String {
+        guard let uid, !uid.isEmpty else { return name }
+        return "\(name) [\(uid)]"
+    }
 }
 
 enum TriggerMethod: String, Codable, Sendable { case audioProcess, deviceRunning, manual }
@@ -35,7 +53,7 @@ struct CaptureTimeRange: Codable, Equatable, Sendable {
 }
 
 struct MetadataEvent: Codable, Equatable, Sendable {
-    enum Kind: String, Codable, Sendable { case windowTitle, participant, activeSpeaker, platform, note }
+    enum Kind: String, Codable, Sendable { case windowTitle, participant, activeSpeaker, platform, microphoneDevice, note }
     let timestamp: Date
     let kind: Kind
     let value: String

@@ -17,9 +17,11 @@ struct StatusMenuView: View {
                 Button("Start recording manually") { model.manualStart() }
             case let .detecting(client, _):
                 Label("Checking \(client.applicationName)…", systemImage: "waveform")
+                Text(client.inputDeviceSummary).font(.caption).foregroundStyle(.secondary)
             case let .countdown(client, remaining):
                 Text("\(client.applicationName) is using the microphone")
                     .font(.headline)
+                Text(client.inputDeviceSummary).font(.caption).foregroundStyle(.secondary)
                 Text("Recording in \(remaining) seconds")
                 HStack {
                     Button("Start now") { model.startNow() }.keyboardShortcut(.defaultAction)
@@ -30,7 +32,7 @@ struct StatusMenuView: View {
             case let .recording(client):
                 Label("Recording \(client.applicationName)", systemImage: "record.circle.fill").foregroundStyle(.red)
                 if let startedAt = capture.startedAt { TimelineView(.periodic(from: .now, by: 1)) { _ in Text(startedAt, style: .timer).monospacedDigit() } }
-                LevelRow(name: "Microphone", level: capture.microphoneLevel)
+                LevelRow(name: capture.activeMicrophoneName ?? client.inputDeviceSummary, level: capture.microphoneLevel)
                 LevelRow(name: "Participants", level: capture.participantsLevel)
                 Button("Stop") { model.stopRecording() }.keyboardShortcut(.defaultAction)
             case .finalizing:
@@ -55,5 +57,10 @@ struct StatusMenuView: View {
 private struct LevelRow: View {
     let name: String
     let level: Float
-    var body: some View { HStack { Text(name).frame(width: 88, alignment: .leading); ProgressView(value: level).progressViewStyle(.linear) } }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(name).font(.caption).lineLimit(1)
+            ProgressView(value: level).progressViewStyle(.linear)
+        }
+    }
 }

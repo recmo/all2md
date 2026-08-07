@@ -34,8 +34,15 @@ permissions. Accessibility is optional and only enriches metadata.
 
 - Core Audio process objects drive automatic detection, with default-input
   device activity as the unattributed fallback.
+- For attributed clients, the process object's input-scoped device list identifies
+  the microphone selected by the meeting application, even when it is not the
+  macOS default. The active device is shown in the menu and recorded as a
+  `microphoneDevice` metadata event.
 - Two seconds of sustained activity opens a ten-second, vetoable countdown.
-- The microphone is recorded as PCM CAF. Participant audio currently uses an
+- The microphone is recorded as 48 kHz mono PCM CAF. If the meeting application
+  changes input devices, capture follows it by restarting the input engine while
+  keeping the same file; the short restart interval is recorded as an interruption.
+  Participant audio currently uses an
   application-filtered ScreenCaptureKit stream and excludes this application.
 - Finalization converts both tracks to FLAC, records SHA-256 checksums, writes
   the v1 manifest atomically, and only then deletes temporary CAF chunks.
