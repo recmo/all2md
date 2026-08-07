@@ -41,6 +41,9 @@ stdenvNoCC.mkDerivation {
 
     mkdir -p "$out/Applications"
     cp -R "$TMPDIR/DerivedData/Build/Products/Release/MeetingCapture.app" "$out/Applications/"
+    install -Dm444 \
+      MeetingCapture.entitlements \
+      "$out/share/meeting-capture/MeetingCapture.entitlements"
     codesign \
       --force \
       --sign - \
