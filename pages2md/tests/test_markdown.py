@@ -349,7 +349,7 @@ def test_cover_style_front_matter_suppresses_display_titles():
         blocks=[
             Block("title", "THE GREAT CEO WITHIN", (200, 100, 800, 300)),
             Block("text", "A tactical guide."),
-            Block("embedded_figure", "![Cover](assets/figures/cover.png)", (0, 0, 1000, 1000)),
+            Block("figure", "![Cover](assets/figures/cover.png)", (0, 0, 1000, 1000)),
         ],
         embedded=EmbeddedEvidence(),
         comparison=Comparison(),

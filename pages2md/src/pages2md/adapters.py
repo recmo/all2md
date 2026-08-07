@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import html
-import json
 import re
 import shutil
 import subprocess
 import zipfile
 from pathlib import Path
-from urllib.parse import unquote
 
 import fitz
-from bs4 import BeautifulSoup
-from PIL import Image, ImageSequence
+from PIL import Image
 
 from .assets import AssetStore
 from .model import EmbeddedEvidence, Link, SourceDocument, SourcePage
@@ -43,8 +39,15 @@ def detect_kind(path: Path) -> str:
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as archive:
             names = set(archive.namelist())
-            if "META-INF/container.xml" in names or "mimetype" in names:
-                return "epub"
+            epub_mimetype = b""
+            if "mimetype" in names:
+                with archive.open("mimetype") as stream:
+                    epub_mimetype = stream.read(64).strip()
+            if "META-INF/container.xml" in names or (
+                "mimetype" in names
+                and epub_mimetype == b"application/epub+zip"
+            ):
+                raise ValueError(f"unsupported input format: {path}")
         return "cbz"
     if path.suffix.lower() in IMAGE_EXTENSIONS:
         return "image"
@@ -63,8 +66,6 @@ def open_document(
         return _open_pdf(source, work, assets, dpi=dpi)
     if kind == "djvu":
         return _open_djvu(source, work, dpi=dpi)
-    if kind == "epub":
-        return _open_epub(source, work, assets, dpi=dpi)
     if kind == "cbz":
         return _open_cbz(source, work)
     return _open_images(source, work)
@@ -288,154 +289,3 @@ def _open_cbz(source: Path, work: Path) -> SourceDocument:
             destination = extracted / f"{index:06d}{Path(member).suffix.lower()}"
             destination.write_bytes(archive.read(member))
     return _open_images(extracted, work)
-
-
-def _open_epub(
-    source: Path,
-    work: Path,
-    assets: AssetStore,
-    *,
-    dpi: int,
-) -> SourceDocument:
-    result = SourceDocument(path=source, kind="epub")
-    with zipfile.ZipFile(source) as archive:
-        container = BeautifulSoup(archive.read("META-INF/container.xml"), "xml")
-        rootfile = container.find("rootfile")
-        if not rootfile or not rootfile.get("full-path"):
-            raise ValueError("EPUB has no package document")
-        package_path = Path(unquote(rootfile["full-path"]))
-        package = BeautifulSoup(archive.read(str(package_path)), "xml")
-        package_title = package.find("dc:title") or package.find("title")
-        if package_title and package_title.get_text(" ", strip=True):
-            result.metadata["title"] = package_title.get_text(" ", strip=True)
-        rendition = package.find("meta", attrs={"property": "rendition:layout"})
-        if rendition is None:
-            rendition = package.find("meta", attrs={"name": "rendition:layout"})
-        layout = (
-            rendition.get("content", "") or rendition.get_text(" ", strip=True)
-            if rendition is not None
-            else ""
-        )
-        manifest = {item.get("id"): item for item in package.find_all("item")}
-        spine = [itemref.get("idref") for itemref in package.find_all("itemref")]
-        asset_by_member: dict[str, str] = {}
-        for identifier, item in manifest.items():
-            media_type = item.get("media-type", "")
-            if not (media_type.startswith("image/") or media_type == "image/svg+xml"):
-                continue
-            member = str((package_path.parent / unquote(item.get("href", ""))).as_posix())
-            if member not in archive.namelist():
-                continue
-            asset = assets.add_bytes(
-                archive.read(member),
-                extension=Path(member).suffix,
-                page=0,
-                bbox=None,
-                method="epub_embedded_object",
-                source_object=identifier,
-                alt_text=Path(member).stem.replace("-", " "),
-            )
-            asset_by_member[member] = asset.path
-        for identifier in spine:
-            item = manifest.get(identifier)
-            if not item:
-                continue
-            member = str((package_path.parent / unquote(item.get("href", ""))).as_posix())
-            if member not in archive.namelist():
-                continue
-            soup = BeautifulSoup(archive.read(member), "html.parser")
-            title_node = soup.find(["h1", "h2", "title"])
-            title = title_node.get_text(" ", strip=True) if title_node else f"Chapter {len(result.semantic_chapters) + 1}"
-            for image in soup.find_all("img"):
-                source_member = str((Path(member).parent / unquote(image.get("src", ""))).as_posix())
-                if source_member in asset_by_member:
-                    image.replace_with(f"\n\n![{image.get('alt') or 'Figure'}]({asset_by_member[source_member]})\n\n")
-            for link in soup.find_all("a"):
-                label = link.get_text(" ", strip=True)
-                target = link.get("href")
-                if target and label:
-                    link.replace_with(f"[{label}]({target})")
-            markdown_lines: list[str] = []
-            for node in soup.find_all(["h1", "h2", "h3", "h4", "p", "li"]):
-                text = node.get_text(" ", strip=True)
-                if not text:
-                    continue
-                if node.name.startswith("h"):
-                    markdown_lines.append(f"{'#' * int(node.name[1])} {text}")
-                elif node.name == "li":
-                    markdown_lines.append(f"- {text}")
-                else:
-                    markdown_lines.append(text)
-            result.semantic_chapters.append({"title": title, "markdown": "\n\n".join(markdown_lines), "source": member})
-    if layout.casefold() == "pre-paginated":
-        return _open_fixed_epub(source, work, result, dpi=dpi)
-    return result
-
-
-def _open_fixed_epub(
-    source: Path,
-    work: Path,
-    semantic: SourceDocument,
-    *,
-    dpi: int,
-) -> SourceDocument:
-    pages_dir = work / "rendered"
-    pages_dir.mkdir(parents=True, exist_ok=True)
-    result = SourceDocument(
-        path=source,
-        kind="epub-fixed",
-        semantic_chapters=semantic.semantic_chapters,
-        metadata=semantic.metadata,
-    )
-    with fitz.open(source) as document:
-        result.outline = [
-            {"level": level, "title": title, "page": page}
-            for level, title, page, *_ in document.get_toc(simple=False)
-            if page > 0
-        ]
-        selected = range(1, document.page_count + 1)
-        matrix = fitz.Matrix(dpi / 72, dpi / 72)
-        for page_number in selected:
-            page = document[page_number - 1]
-            image_path = pages_dir / f"page-{page_number:04d}.png"
-            page.get_pixmap(matrix=matrix, alpha=False).save(image_path)
-            blocks = []
-            for block in page.get_text("blocks", sort=True):
-                if len(block) >= 5 and str(block[4]).strip():
-                    blocks.append({
-                        "text": str(block[4]).strip(),
-                        "bbox": [
-                            block[0] * 1000 / page.rect.width,
-                            block[1] * 1000 / page.rect.height,
-                            block[2] * 1000 / page.rect.width,
-                            block[3] * 1000 / page.rect.height,
-                        ],
-                        "space": "normalized_1000",
-                    })
-            links = []
-            for link in page.get_links():
-                target = _link_target(link)
-                rect = link.get("from")
-                if target:
-                    links.append(Link(
-                        text=page.get_textbox(rect).strip() if rect else "",
-                        target=target,
-                        bbox=(
-                            rect.x0 * 1000 / page.rect.width,
-                            rect.y0 * 1000 / page.rect.height,
-                            rect.x1 * 1000 / page.rect.width,
-                            rect.y1 * 1000 / page.rect.height,
-                        ) if rect else None,
-                        external=bool(link.get("uri")),
-                    ))
-            result.pages.append(SourcePage(
-                page_number,
-                image_path,
-                EmbeddedEvidence(
-                    text="\n\n".join(block["text"] for block in blocks),
-                    blocks=blocks,
-                    links=links,
-                    extractor="pymupdf-epub-fixed",
-                ),
-            ))
-    return result

@@ -100,7 +100,6 @@
       testPython = pkgs.python3.withPackages (
         ps: with ps; [
           beautifulsoup4
-          lxml
           mdformat
           mdformat-gfm
           mlx

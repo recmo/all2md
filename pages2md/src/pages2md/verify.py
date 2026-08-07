@@ -146,7 +146,7 @@ def verify_bundle(root: Path) -> Verification:
                         for error in validate_list_node(node)
                     )
                     _verify_preserved_list_labels(block, node, page.get("number"), errors)
-            if block.get("kind") in {"figure", "embedded_figure"}:
+            if block.get("kind") == "figure":
                 asset_id = block.get("asset_id")
                 if not asset_id or asset_id not in manifest_ids:
                     warnings.append(
