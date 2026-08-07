@@ -4,8 +4,8 @@ Local-first tools that turn source material into auditable Markdown.
 
 ## Projects
 
-- [`pages2md`](pages2md/README.md) converts books, papers, scans, and
-  image archives into portable Markdown bundles with retained OCR evidence.
+- [`pages2md`](pages2md/README.md) uses OCR to convert PDFs, DjVu files, scans,
+  and image archives into portable Markdown.
 - [`Meeting Capture`](meeting-capture/README.md) records local microphone
   and meeting-participant audio into canonical, lossless meeting records.
 - [`speech2md`](speech2md/README.md) uses MOSS locally to transcribe and

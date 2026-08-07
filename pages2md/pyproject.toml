@@ -5,14 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "pages2md"
 version = "0.2.0"
-description = "Local-first ebook and document conversion to clean Markdown"
+description = "Local-first OCR conversion of paginated image sources to clean Markdown"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
   "beautifulsoup4>=4.13.0,<5",
-  "huggingface-hub>=0.34.0,<2",
-  "lxml>=5.4.0,<7",
   "mdformat==1.0.0",
   "mdformat-gfm==1.0.0",
   "pillow>=11.0.0,<13",
