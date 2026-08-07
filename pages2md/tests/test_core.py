@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import fitz
-from PIL import Image
+from PIL import Image, ImageDraw
 import pytest
 
 from pages2md.chapters import detect_chapters
@@ -16,7 +16,7 @@ from pages2md.compare import compare_text
 from pages2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
 from pages2md.native import parse_native_observation, reconcile_observations
 from pages2md.adapters import _link_target, detect_kind
-from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _convert_workspace, _is_visually_blank, _normalize_document_blocks, _ocr_groups, convert
+from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _canonicalize_figure_blocks, _convert_workspace, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, _repair_runaway_repetition, convert
 from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from pages2md.verify import verify_bundle
 
@@ -57,6 +57,28 @@ class RecoveryFixtureOcr:
         return (
             "<|det|>text [100,100,800,300]<|/det|>A truncated local sentence with recovered detail.",
             {"mode": "gundam", "finish_reason": "stop"},
+        )
+
+
+class RepeatingFixtureOcr:
+    identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
+
+    def recognize(self, image: Path):
+        return (
+            "<|det|>text [100,100,800,300]<|/det|>Useful introduction. "
+            + "repeated phrase " * 20,
+            {"mode": "multi_base", "finish_reason": "stop"},
+        )
+
+
+class LongFixtureOcr:
+    identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
+
+    def recognize(self, image: Path):
+        text = " ".join(f"token{index:05d}" for index in range(2_500))
+        return (
+            f"<|det|>text [100,100,800,300]<|/det|>{text}",
+            {"mode": "multi_base", "finish_reason": "stop"},
         )
 
 
@@ -831,6 +853,129 @@ def test_failed_conversion_publishes_no_intermediate_results(tmp_path: Path):
     bundle = convert(pdf, backend=backend)
     assert bundle == tmp_path / "interrupted.pdf.md"
     assert verify_bundle(bundle).ok
+
+
+def test_content_quality_warning_does_not_suppress_output(tmp_path: Path, capsys):
+    pdf = tmp_path / "repetition.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "repeated phrase")
+    document.save(pdf)
+    document.close()
+
+    workspace = _convert_workspace(pdf, tmp_path / "workspace", backend=RepeatingFixtureOcr())
+    verification = verify_bundle(workspace)
+    assert verification.ok, verification.errors
+    assert "visual_text_repetition_repaired" in verification.warnings
+    assert not any("needs content review: visual_text_repetition" in warning for warning in verification.warnings)
+
+    output = convert(pdf, backend=RepeatingFixtureOcr())
+    assert output == tmp_path / "repetition.pdf.md"
+    assert output.is_file()
+    assert "Useful introduction." in output.read_text()
+    assert "repeated phrase" in output.read_text()
+    assert output.read_text().count("repeated phrase") == 1
+
+    long_pdf = tmp_path / "long.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "source text")
+    document.save(long_pdf)
+    document.close()
+    long_output = convert(long_pdf, backend=LongFixtureOcr())
+    captured = capsys.readouterr()
+    assert long_output.is_file()
+    assert "needs content review: visual_implausible_output_length" in captured.err
+
+
+def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    image = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((300, 300, 700, 700), outline="black", width=8)
+    draw.line((300, 500, 700, 500), fill="black", width=8)
+    image.save(image_path)
+    blocks = [
+        Block("figure", "", bbox=(290, 290, 710, 710)),
+        Block("figure", "Important caption", bbox=(292, 292, 708, 708)),
+        Block("figure", "", bbox=(350, 350, 650, 650)),
+        Block("figure", "", bbox=(750, 750, 850, 850)),
+    ]
+    warnings = _canonicalize_figure_blocks(blocks, image_path)
+    assert len(blocks) == 2
+    assert blocks[0].bbox == (284.0, 284.0, 716.0, 716.0)
+    assert blocks[0].markdown == "Important caption"
+    assert blocks[1].bbox == (342.0, 342.0, 658.0, 658.0)
+    assert blocks[1].metadata["review_reason"] == "figure_crop_touches_edge"
+    assert warnings == [
+        "visual_blank_figure_crop_rejected",
+        "visual_duplicate_figure_crop_rejected",
+        "visual_figure_crop_may_be_clipped",
+    ]
+
+
+def test_figure_crops_retain_full_bleed_text_heavy_and_margin_images(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    image = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((42, 42, 258, 258), fill="navy")
+    draw.rectangle((300, 300, 700, 600), outline="black", width=8)
+    draw.text((320, 330), "A text-heavy screenshot " * 5, fill="black")
+    draw.line((210, 920, 790, 920), fill="black", width=8)
+    draw.line((50, 750, 250, 750), fill=(252, 252, 252), width=8)
+    image.save(image_path)
+    blocks = [
+        Block("figure", "", bbox=(50, 50, 250, 250)),
+        Block("figure", "", bbox=(300, 300, 700, 600)),
+        Block("figure", "", bbox=(200, 870, 800, 970)),
+        Block("figure", "Faint diagram", bbox=(40, 700, 260, 800)),
+    ]
+
+    warnings = _canonicalize_figure_blocks(blocks, image_path)
+
+    assert len(blocks) == 4
+    assert blocks[3].markdown == "Faint diagram"
+    assert blocks[0].metadata["review_reason"] == "figure_crop_touches_edge"
+    assert warnings == ["visual_figure_crop_may_be_clipped"]
+
+
+def test_repetition_across_blocks_removes_only_the_proven_loop():
+    blocks = [
+        Block("paragraph", f"Answer\nUnique section {index}")
+        for index in range(5)
+    ]
+    blocks.extend(
+        Block("paragraph", "loop phrase")
+        for _ in range(20)
+    )
+    blocks.append(Block("paragraph", "Legitimate conclusion."))
+
+    warnings = _repair_runaway_repetition(blocks)
+
+    assert [block.markdown for block in blocks] == [
+        *[f"Answer\nUnique section {index}" for index in range(5)],
+        "loop phrase",
+        "Legitimate conclusion.",
+    ]
+    assert warnings == ["visual_text_repetition_repaired"]
+
+
+def test_blank_figure_does_not_create_a_full_page_fallback(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (1000, 1000), "white").save(image_path)
+    blocks = [
+        Block("figure", "", bbox=(100, 100, 200, 200)),
+        Block("figure", "Important caption", bbox=(300, 300, 400, 400)),
+    ]
+
+    warnings = _canonicalize_figure_blocks(blocks, image_path)
+
+    assert len(blocks) == 1
+    assert blocks[0].kind == "paragraph"
+    assert blocks[0].markdown == "Important caption"
+    assert blocks[0].bbox is None
+    assert blocks[0].metadata["review_reason"] == "blank_figure_crop_caption_preserved"
+    assert warnings == ["visual_blank_figure_crop_rejected"]
 
 
 def test_embedded_links_are_geometry_aware_and_idempotent():

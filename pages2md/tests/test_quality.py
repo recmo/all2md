@@ -10,6 +10,7 @@ from pages2md.quality import (
     math_syntax_errors,
     output_quality_warnings,
     table_quality_errors,
+    truncate_runaway_repetition,
 )
 
 
@@ -18,6 +19,29 @@ def test_runaway_generation_is_rejected_independently_of_model_confidence():
     warnings = output_quality_warnings(markdown)
     assert "visual_text_repetition" in warnings
     assert "visual_implausible_output_length" in warnings
+
+
+def test_runaway_generation_is_truncated_after_one_cycle():
+    markdown = (
+        "".join(f"Answer\nUnique section {index}\n" for index in range(5))
+        + ("loop phrase " * 20)
+        + "\nLegitimate conclusion."
+    )
+    repaired, changed = truncate_runaway_repetition(markdown)
+    assert changed is True
+    assert repaired.startswith("Answer\nUnique section 0")
+    assert "Unique section 4" in repaired
+    assert repaired.count("loop phrase") == 1
+    assert repaired.endswith("Legitimate conclusion.")
+    assert "visual_text_repetition" not in output_quality_warnings(repaired)
+
+
+def test_single_token_repetition_is_review_only():
+    markdown = " ".join(["A"] * 12)
+    repaired, changed = truncate_runaway_repetition(markdown)
+    assert "visual_text_repetition" in output_quality_warnings(markdown)
+    assert changed is False
+    assert repaired == markdown
 
 
 def test_repetitive_table_is_semantically_invalid():
@@ -34,6 +58,14 @@ def test_dense_rectangular_table_is_not_mistaken_for_collapse():
         for number in range(150)
     )
     assert table_quality_errors(f"<table>{rows}</table>") == []
+
+
+def test_repeated_figure_markup_is_not_mistaken_for_text_repetition():
+    markdown = "\n".join(
+        f"![Figure](figures/fig-{index:04d}.png)"
+        for index in range(30)
+    )
+    assert "visual_text_repetition" not in output_quality_warnings(markdown)
 
 
 def test_math_validator_catches_local_unclosed_delimiter():
