@@ -24,6 +24,7 @@ from speech2md.moss import (
     generation_diagnostics,
     _generate_with_timestamp_progress,
     _speaker_decision,
+    find_min_energy_boundary,
     parse_moss_transcript,
     parse_silence_centers,
     parse_segments,
@@ -75,6 +76,25 @@ def test_window_plan_covers_long_recording():
         plan_windows(4582, silence_centers=[])
 
 
+def test_window_plan_uses_overlapping_hard_split_when_silence_is_missing():
+    requested = []
+
+    def hard_split(ideal):
+        requested.append(ideal)
+        return 3040
+
+    assert plan_windows(
+        4582,
+        silence_centers=[1520],
+        hard_split_boundary=hard_split,
+    ) == [
+        (0, 1521),
+        (1519, 3043),
+        (3037, 4582),
+    ]
+    assert requested == [pytest.approx(4582 * 2 / 3)]
+
+
 def test_parse_silence_centers():
     log = """
 silence_start: 10.5
@@ -83,6 +103,30 @@ silence_start: 20
 silence_end: 21 | silence_duration: 1
 """
     assert parse_silence_centers(log) == [11.5, 20.5]
+
+
+def test_find_min_energy_boundary_prefers_nearest_equal_minimum(
+    tmp_path: Path,
+    monkeypatch,
+):
+    samples = np.ones(1_200, dtype="<f4")
+    samples[300:302] = 0
+    samples[599:601] = 0
+    monkeypatch.setattr(moss, "ENERGY_SAMPLE_RATE", 10)
+    monkeypatch.setattr(moss, "ENERGY_WINDOW_SECONDS", 0.2)
+    monkeypatch.setattr(
+        moss.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=samples.tobytes()),
+    )
+
+    boundary = find_min_energy_boundary(
+        tmp_path / "meeting.wav",
+        ideal=100,
+        duration=200,
+    )
+
+    assert boundary == pytest.approx(100)
 
 
 def test_parse_moss_uses_local_speakers_for_every_track():
@@ -123,6 +167,18 @@ def test_parse_moss_clamps_centisecond_terminal_timestamp_rounding():
     )
 
     assert segments == [Segment(109.5, 110.0007, "Done", "W01:S01", "mixed")]
+
+
+def test_parse_moss_trims_subsecond_end_overshoot():
+    segments = parse_segments(
+        [{"start": 9, "end": 10.75, "speaker_id": "S01", "text": "Last words"}],
+        window=1,
+        offset=20,
+        duration=10,
+        role="mixed",
+    )
+
+    assert segments == [Segment(29, 30, "Last words", "W01:S01", "mixed")]
 
 
 def test_parse_moss_transcript_preserves_numeric_brackets_in_text():
@@ -626,6 +682,49 @@ def test_transcribe_accepts_trailing_silence_when_token_count_is_safe(
     assert [(item.start, item.end) for item in segments] == [(0, 250)]
     assert raw["windows"][0]["coverage_gap_seconds"] == 50
     assert raw["windows"][0]["requires_recovery"] is False
+
+
+def test_transcribe_uses_minimum_energy_fallback_for_missing_silence(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "meeting.wav"
+    source.touch()
+    results = iter([
+        SimpleNamespace(text="[0][S01]First half[1008]", generation_tokens=100),
+        SimpleNamespace(text="[0][S01]Second half[998]", generation_tokens=100),
+    ])
+    ffmpeg_calls = []
+    monkeypatch.setattr(moss, "detect_silence_centers", lambda path: [])
+    monkeypatch.setattr(
+        moss,
+        "find_min_energy_boundary",
+        lambda path, *, ideal, duration: 1005,
+    )
+    monkeypatch.setattr(
+        moss.subprocess,
+        "run",
+        lambda command, **kwargs: ffmpeg_calls.append(command) or SimpleNamespace(),
+    )
+
+    segments, raw, _ = transcribe_track(
+        source,
+        engine=SimpleNamespace(generate=lambda *args, **kwargs: next(results)),
+        prompt=ENGLISH_TRANSCRIPTION_PROMPT,
+        role="mixed",
+        duration=2000,
+    )
+
+    assert [(segment.start, segment.end) for segment in segments] == [
+        (0, 1008),
+        (1002, 2000),
+    ]
+    assert raw["window_strategy"] == "equal-silence-aligned-with-energy-fallback"
+    assert raw["window_boundaries"] == [1005]
+    assert raw["silence_boundaries"] == []
+    assert raw["hard_split_boundaries"] == [1005]
+    assert ffmpeg_calls[0][ffmpeg_calls[0].index("-t") + 1] == "1008.0"
+    assert ffmpeg_calls[1][ffmpeg_calls[1].index("-ss") + 1] == "1002.0"
 
 
 def test_transcribe_fails_when_recovery_makes_no_coverage_progress(
