@@ -35,6 +35,7 @@ final class AppModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        AccessibilityMetadataProvider.requestAccess()
         recoverableFiles = capture.recoverableFiles()
         monitor.onClientsChanged = { [weak self] clients in self?.handle(clients) }
         monitor.start()

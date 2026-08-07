@@ -57,7 +57,7 @@ struct MeetingStore: Sendable {
 
     private static func recordingExists(named baseName: String, in directory: URL) -> Bool {
         let manager = FileManager.default
-        if ["\(baseName)-capture.json", "\(baseName).mka", "\(baseName)-microphone.flac", "\(baseName)-participants.flac"]
+        if ["\(baseName)-capture.json", "\(baseName).mka", "\(baseName)-accessibility.jsonl", "\(baseName)-microphone.flac", "\(baseName)-participants.flac"]
             .contains(where: { manager.fileExists(atPath: directory.appending(path: $0).path) }) {
             return true
         }

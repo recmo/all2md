@@ -4,6 +4,27 @@ import XCTest
 @testable import MeetingCapture
 
 final class MeetingStoreTests: XCTestCase {
+    func testAccessibilityTreeDiffRecordsAddedRemovedAndChangedAttributes() {
+        let before = [
+            AccessibilitySnapshotNode(path: "0", attributes: ["AXRole": "AXApplication"]),
+            AccessibilitySnapshotNode(path: "0/0", attributes: ["AXTitle": "Alice", "AXValue": "idle"]),
+            AccessibilitySnapshotNode(path: "0/1", attributes: ["AXTitle": "Bob"]),
+        ]
+        let after = [
+            AccessibilitySnapshotNode(path: "0", attributes: ["AXRole": "AXApplication"]),
+            AccessibilitySnapshotNode(path: "0/0", attributes: ["AXTitle": "Alice", "AXValue": "speaking"]),
+            AccessibilitySnapshotNode(path: "0/2", attributes: ["AXTitle": "Carol"]),
+        ]
+
+        let diff = AccessibilityProbe.difference(from: before, to: after)
+
+        XCTAssertEqual(diff.added.map(\.path), ["0/2"])
+        XCTAssertEqual(diff.removed, ["0/1"])
+        XCTAssertEqual(diff.changed, [
+            AccessibilityAttributeChange(path: "0/0", attribute: "AXValue", before: "idle", after: "speaking"),
+        ])
+    }
+
     func testSlugNormalizesTitle() {
         XCTAssertEqual(MeetingStore.slug("  Leadership Wéékly / Europe  "), "leadership-weekly-europe")
         XCTAssertEqual(MeetingStore.slug("🎙️"), "meeting")
@@ -47,6 +68,7 @@ final class MeetingStoreTests: XCTestCase {
             timeZone: "Europe/Warsaw",
             trigger: CaptureTrigger(method: .audioProcess, processID: 42, bundleID: "us.zoom.xos", applicationName: "zoom.us"),
             container: AudioContainer(file: "leadership-weekly.mka", format: "matroska", sha256: String(repeating: "a", count: 64)),
+            accessibility: AccessibilityArtifact(file: "leadership-weekly-accessibility.jsonl", format: "accessibility-jsonl-v1", sha256: String(repeating: "b", count: 64)),
             audio: [AudioTrack(role: .microphone, streamIndex: 0, codec: "opus", sampleRate: 48_000, channels: 1, durationSeconds: 60, bitrate: 96_000)],
             interruptions: [],
             metadataEvents: [
@@ -67,6 +89,7 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(object["slug"] as? String, "leadership-weekly")
         XCTAssertNotNil(object["trigger"])
         XCTAssertEqual((object["container"] as? [String: Any])?["file"] as? String, "leadership-weekly.mka")
+        XCTAssertEqual((object["accessibility"] as? [String: Any])?["file"] as? String, "leadership-weekly-accessibility.jsonl")
         XCTAssertNotNil(object["audio"])
         let metadataEvents = try XCTUnwrap(object["metadataEvents"] as? [[String: Any]])
         XCTAssertEqual(metadataEvents.first?["kind"] as? String, "microphoneDevice")

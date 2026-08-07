@@ -52,6 +52,12 @@ struct AudioContainer: Codable, Equatable, Sendable {
     let sha256: String
 }
 
+struct AccessibilityArtifact: Codable, Equatable, Sendable {
+    let file: String
+    let format: String
+    let sha256: String
+}
+
 struct CapturedAudioSegment: Equatable, Sendable {
     let url: URL
     let startedAt: Date
@@ -85,6 +91,7 @@ struct CaptureManifest: Codable, Equatable, Sendable {
     let timeZone: String
     let trigger: CaptureTrigger
     let container: AudioContainer
+    let accessibility: AccessibilityArtifact?
     let audio: [AudioTrack]
     let interruptions: [CaptureTimeRange]
     let metadataEvents: [MetadataEvent]
@@ -101,5 +108,7 @@ struct RecordingPaths: Sendable {
     var participantsTemporary: URL { directory.appending(path: ".\(baseName)-participants.part.caf") }
     var archiveTemporary: URL { directory.appending(path: ".\(baseName).part.mka") }
     var archiveFinal: URL { directory.appending(path: "\(baseName).mka") }
+    var accessibilityTemporary: URL { directory.appending(path: ".\(baseName)-accessibility.part.jsonl") }
+    var accessibilityFinal: URL { directory.appending(path: "\(baseName)-accessibility.jsonl") }
     var manifest: URL { directory.appending(path: "\(baseName)-capture.json") }
 }

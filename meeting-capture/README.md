@@ -27,8 +27,9 @@ open result/Applications/MeetingCapture.app
 The Nix derivation uses the locally installed Xcode and ad-hoc signs the result
 with the capture entitlement.
 
-The first launch requests Microphone and Screen & System Audio Recording
-permissions. Accessibility is optional and only enriches metadata.
+The first launch requests Microphone, Screen & System Audio Recording, and
+Accessibility permissions. Accessibility remains optional and only enriches
+metadata.
 
 ## Current capture path
 
@@ -57,6 +58,14 @@ permissions. Accessibility is optional and only enriches metadata.
   the menu.
 - Generic Accessibility inspection currently contributes the focused window
   title when permission is available; it never gates recording.
+- Every attributed recording also starts a generic Accessibility probe for the
+  same process. Beside the `.mka` it writes a checksummed
+  `*-accessibility.jsonl` sidecar containing an initial tree snapshot, raw AX
+  notifications, attribute-level tree diffs, periodic fallback rescans, and a
+  final diff. A crash leaves the append-only `.part.jsonl` recoverable. Probe
+  logs may contain participant names, captions, and other visible interface
+  text; they never leave the Mac automatically. Missing Accessibility permission
+  becomes a manifest warning and never blocks audio capture.
 
 No countdown audio is persisted. A skipped trigger therefore leaves no audio
 on disk. A bounded in-memory pre-roll and a Core Audio process-tap-first path

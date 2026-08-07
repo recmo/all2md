@@ -10,6 +10,7 @@ final class CaptureCoordinator: ObservableObject {
 
     private let microphone = MicrophoneRecorder()
     private let participants = SystemAudioRecorder()
+    private var accessibilityProbe: AccessibilityProbe?
     private let store = MeetingStore()
     private var paths: RecordingPaths?
     private var trigger: CaptureTrigger?
@@ -33,7 +34,6 @@ final class CaptureCoordinator: ObservableObject {
         if let microphoneDevice {
             metadata.append(MetadataEvent(timestamp: start, kind: .microphoneDevice, value: microphoneDevice.manifestValue, confidence: 1))
         }
-
         microphone.onLevel = { [weak self] level in Task { @MainActor in self?.microphoneLevel = level } }
         microphone.onError = { [weak self] error in
             Task { @MainActor in self?.addWarning("Microphone recording error: \(error.localizedDescription)") }
@@ -47,8 +47,25 @@ final class CaptureCoordinator: ObservableObject {
             } else {
                 warnings.append("Participant audio unavailable for a manual recording without a selected process.")
             }
+            if let processID = trigger.processID, let applicationName = trigger.applicationName {
+                let client = AudioClient(
+                    audioObjectID: 0,
+                    processID: processID,
+                    bundleID: trigger.bundleID,
+                    applicationName: applicationName,
+                    inputDevices: []
+                )
+                do {
+                    accessibilityProbe = try AccessibilityProbe(client: client, outputURL: paths.accessibilityTemporary)
+                } catch {
+                    warnings.append("Accessibility metadata unavailable: \(error.localizedDescription)")
+                }
+            }
         } catch {
             for segment in microphone.stop() { try? FileManager.default.removeItem(at: segment.url) }
+            accessibilityProbe?.stop()
+            accessibilityProbe = nil
+            try? FileManager.default.removeItem(at: paths.accessibilityTemporary)
             reset()
             throw error
         }
@@ -100,6 +117,7 @@ final class CaptureCoordinator: ObservableObject {
         do { try await participants.stop() } catch { warnings.append(error.localizedDescription) }
         let end = Date()
         defer { reset() }
+        let accessibility = finalizeAccessibilityProbe(paths: paths)
 
         let participantsURL = FileManager.default.fileExists(atPath: paths.participantsTemporary.path)
             ? paths.participantsTemporary
@@ -129,6 +147,7 @@ final class CaptureCoordinator: ObservableObject {
             timeZone: TimeZone.current.identifier,
             trigger: trigger,
             container: archive.container,
+            accessibility: accessibility,
             audio: archive.tracks,
             interruptions: interruptions,
             metadataEvents: metadata,
@@ -157,6 +176,7 @@ final class CaptureCoordinator: ObservableObject {
         let microphoneURLs = relatedFiles.filter { $0.lastPathComponent.contains("-microphone") }
         let microphoneSegments = try AudioFinalizer.recoveredSegments(from: microphoneURLs, startedAt: started)
         let participantsURL = relatedFiles.first { $0.lastPathComponent.hasSuffix("-participants.part.caf") }
+        let accessibility = recoverAccessibilityArtifact(paths: paths)
         let archive = try await Task.detached {
             try AudioFinalizer.createArchive(
                 microphoneSegments: microphoneSegments,
@@ -180,6 +200,7 @@ final class CaptureCoordinator: ObservableObject {
             timeZone: TimeZone.current.identifier,
             trigger: CaptureTrigger(method: .deviceRunning, processID: nil, bundleID: nil, applicationName: nil),
             container: archive.container,
+            accessibility: accessibility,
             audio: archive.tracks,
             interruptions: [CaptureTimeRange(startedAt: started, endedAt: ended, reason: "application interruption")],
             metadataEvents: [],
@@ -206,6 +227,8 @@ final class CaptureCoordinator: ObservableObject {
         failedMicrophoneDeviceID = nil
         microphoneSegmentIndex = 0
         activeMicrophoneName = nil
+        accessibilityProbe?.stop()
+        accessibilityProbe = nil
         microphone.onError = nil
     }
 
@@ -217,5 +240,46 @@ final class CaptureCoordinator: ObservableObject {
     private func nextMicrophoneSegmentURL() -> URL {
         microphoneSegmentIndex += 1
         return paths!.microphoneTemporary(segment: microphoneSegmentIndex)
+    }
+
+    private func finalizeAccessibilityProbe(paths: RecordingPaths) -> AccessibilityArtifact? {
+        accessibilityProbe?.stop()
+        accessibilityProbe = nil
+        guard FileManager.default.fileExists(atPath: paths.accessibilityTemporary.path) else { return nil }
+        do {
+            if FileManager.default.fileExists(atPath: paths.accessibilityFinal.path) {
+                _ = try FileManager.default.replaceItemAt(paths.accessibilityFinal, withItemAt: paths.accessibilityTemporary)
+            } else {
+                try FileManager.default.moveItem(at: paths.accessibilityTemporary, to: paths.accessibilityFinal)
+            }
+            return AccessibilityArtifact(
+                file: paths.accessibilityFinal.lastPathComponent,
+                format: "accessibility-jsonl-v1",
+                sha256: try AudioFinalizer.sha256(paths.accessibilityFinal)
+            )
+        } catch {
+            addWarning("Accessibility metadata could not be finalized: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func recoverAccessibilityArtifact(paths: RecordingPaths) -> AccessibilityArtifact? {
+        do {
+            if FileManager.default.fileExists(atPath: paths.accessibilityTemporary.path) {
+                if FileManager.default.fileExists(atPath: paths.accessibilityFinal.path) {
+                    _ = try FileManager.default.replaceItemAt(paths.accessibilityFinal, withItemAt: paths.accessibilityTemporary)
+                } else {
+                    try FileManager.default.moveItem(at: paths.accessibilityTemporary, to: paths.accessibilityFinal)
+                }
+            }
+            guard FileManager.default.fileExists(atPath: paths.accessibilityFinal.path) else { return nil }
+            return AccessibilityArtifact(
+                file: paths.accessibilityFinal.lastPathComponent,
+                format: "accessibility-jsonl-v1",
+                sha256: try AudioFinalizer.sha256(paths.accessibilityFinal)
+            )
+        } catch {
+            return nil
+        }
     }
 }
