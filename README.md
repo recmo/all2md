@@ -4,13 +4,17 @@ Local-first tools that turn source material into auditable Markdown.
 
 ## Projects
 
-- [`pages2md`](pages2md/README.md) converts books, papers, scans, and
-  image archives into portable Markdown bundles with retained OCR evidence.
+- [`pages2md`](pages2md/README.md) uses OCR to convert PDFs, DjVu files, scans,
+  and image archives into portable Markdown.
 - [`Meeting Capture`](meeting-capture/README.md) records local microphone
   and meeting-participant audio into canonical, lossless meeting records.
 - [`speech2md`](speech2md/README.md) uses MOSS locally to transcribe and
   diarize recordings, with ReDimNet2 voice embeddings for stable speaker
   labels across processing windows.
+- [`speech-review`](speech-review/README.md) provides a local web editor for
+  playback, speaker identity hints, attendees, and localized corrections.
+- [`doc2md`](doc2md/README.md) extracts Google Docs and Notion pages into
+  durable Markdown with source metadata, assets, and synchronization safety.
 
 Each project owns its runtime and dependencies. The repository shares only
 top-level build orchestration.
@@ -24,9 +28,12 @@ only model weights and checkpoints are populated in user caches on demand.
 ```sh
 nix run github:recmo/all2md#pages2md -- --help
 nix run github:recmo/all2md#speech2md -- --help
+nix run github:recmo/all2md#doc2md -- --help
+nix run github:recmo/all2md#speech-review -- ~/Meetings
 nix build github:recmo/all2md#meeting-capture
 nix develop .#pages2md
 nix develop .#speech2md
+nix develop .#doc2md
 nix flake check
 ```
 

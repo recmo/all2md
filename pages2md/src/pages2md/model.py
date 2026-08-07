@@ -101,5 +101,4 @@ class SourceDocument:
     kind: str
     pages: list[SourcePage] = field(default_factory=list)
     outline: list[dict[str, Any]] = field(default_factory=list)
-    semantic_chapters: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)

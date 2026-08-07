@@ -53,6 +53,15 @@ class SpeakerHint:
     track: str | None = None
 
 
+@dataclass(frozen=True)
+class TranscriptEdit:
+    start: float
+    end: float
+    before: str
+    after: str
+    track: str | None = None
+
+
 @dataclass
 class TranscriptState:
     title: str | None
@@ -63,6 +72,7 @@ class TranscriptState:
     ended_at: str | None = None
     calendar_event: str | None = None
     attendees: list[dict[str, str]] = field(default_factory=list)
+    speaker_names: dict[str, str] = field(default_factory=dict)
     hints_sha256: str | None = None
 
 

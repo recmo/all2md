@@ -36,32 +36,34 @@ hotwords:
   - ProveKit
   - F2Z
   - ReDimNet2
-speakers:
-  - identity: gbrain://people/alice
+attendees:
+  - handle: Alice
+    identity: ''
     ranges:
       - track: mixed
         start: 754.0
         end: 762.0
 ```
 
-The two sections are independently optional. Unknown fields, invalid tracks,
-out-of-bounds ranges, and ranges that ambiguously cover multiple diarized
-speakers stop processing. A track may be omitted for single-track media and is
+Both fields are optional, as are `ranges` on each attendee. Unknown fields, invalid tracks,
+out-of-bounds ranges, and identities that cannot be separated at a MOSS turn
+boundary stop processing. A track may be omitted for single-track media and is
 required for multi-track captures. Hotwords are trimmed, deduplicated
 case-insensitively, and capped at 40. The hint file is never rewritten.
-Prompts and raw generations exist only in the temporary processing workspace.
+Raw generations are retained in an adjacent cache as described below.
 
 Long recordings use one deliberately fixed policy. `speech2md` chooses the
 minimum number of roughly equal parts targeting 30 minutes, moves each ideal
 boundary to a detected silence within one minute, and adds two seconds of audio
 overlap. The silence and window parameters are source constants, not CLI
 options. If no nearby silence exists, processing stops; there is no alternate
-windowing method. The progress bar advances whenever MOSS emits a timestamp,
-then fills trailing silence when the window completes. It remains monotonic
-across overlapping recovery passes. Generation token counts remain available
-to the in-process recovery logic; prompt and total counts are null because the
-streaming MOSS API does not expose them. Generation is capped at 16,384
-tokens because
+windowing method. The progress bar labels model prefill explicitly, switches
+to transcribing with the first generated token, advances whenever MOSS emits a
+timestamp, then fills trailing silence when the window completes. It remains
+monotonic across overlapping recovery passes. Generation token counts are
+available to the in-process recovery logic; prompt and total counts are null
+because the streaming MOSS API does not expose them. Generation is capped at
+16,384 tokens because
 local runs show the model emitting its end token around that practical horizon
 even when a larger runtime limit is supplied. Independent upstream reports
 describe the same premature ending on long audio in
@@ -90,20 +92,43 @@ assignment inside a window. Missing or ambiguous evidence creates a new
 anonymous speaker; it never falls back to transcript text.
 
 Audio overlap remains only for transcript boundary trimming and deduplication.
-Successful transcription publishes exactly two derived files:
+Successful transcription publishes three derived files:
 
 ```text
 meeting.md
+meeting.moss.npz
 meeting.voiceprints.npz
 ```
+
+The MOSS cache stores replayable raw generations and is accepted only when its
+schema, audio-track checksums and roles, normalized ordered hotwords, pinned
+MOSS model revision, prompt, generation limit, and window/recovery settings all match.
+Changing metadata, attendees, speaker ranges, or localized edits therefore
+normally reuses MOSS output while rerunning speaker reconciliation and rendering.
+If explicit ranges show that one window-local MOSS label was collapsed across
+two identities, `speech2md` re-decodes only that affected window with forced
+speaker labels at the conflicting turn boundaries. The cache retains the
+original unguided generation as `base` beside the guided variant and the exact
+forces used. Further relabeling is cache-only unless it changes those boundary
+forces; identity renames alone remain cache-only. `--require-moss-cache` reports
+a cache miss when new guidance is required, allowing callers to move the work
+to their normal model queue instead of blocking a fast-update path.
+Changing hotwords or audio invalidates the cache. Invalid or unreadable caches
+are ignored. The cache contains string arrays only and is loaded with
+`allow_pickle=False`.
 
 Markdown is the readable derived output. Its flat YAML front matter contains
 the source hash, speech2md source commit, optional hint-file hash, authoritative
 meeting start/end times when supplied by Meeting Capture, an optional
-calendar-event link, and the attendee list. Speaking attendees have stable
-`speaker-N` handles; attendees without transcript turns omit `handle`. Identity
-values are empty unless a manual range anchors that voice to an identity.
-ReDimNet2 propagates anchored identities conservatively within the recording.
+calendar-event link, and the attendee roster. `handle` is the editable
+human-readable name; `identity` is reserved for a future unique person-document
+path and is currently empty. The roster has no positional association with
+transcript speakers. Every transcript run starts with a handle declared in this
+roster. Identified turns use the human handle directly; unidentified turns use
+a declared processing-local `speaker-N` handle. Those anonymous entries
+disappear when regeneration replaces all of their runs with an identified
+handle, while attendees without turns remain in the roster. ReDimNet2
+propagates anchored handles conservatively within the recording.
 
 ```yaml
 ---
@@ -114,14 +139,28 @@ started_at: 2026-08-04T10:00:00+02:00
 ended_at: 2026-08-04T11:00:00+02:00
 calendar_event: https://calendar.google.com/example
 attendees:
+  - handle: Alice
+    identity: ""
+  - handle: Michał
+    identity: ""
   - handle: speaker-1
     identity: ""
-  - identity: ""
 ---
 ```
 
 Unavailable timestamps and calendar links are omitted rather than written as
 null values.
+
+Transcript run headers and invisible timing comments use the same centisecond
+precision. Comment values are offsets from the run header; comments at retained
+MOSS boundaries provide intermediate timing, and the final comment is the
+authoritative run end.
+
+```markdown
+**[00:00:29.99] speaker-1:** How is everyone doing? <!-- 1.53s --> I think most of us is here. <!-- 3.69s -->
+```
+
+A run whose label is absent from `attendees[].handle` is invalid.
 
 The NPZ contains only `handles`, a Unicode array of shape `(S,)`, and
 `embeddings`, a float32 array of shape `(S, 192)`. Each row is a robust,
@@ -130,10 +169,11 @@ handle. It is loaded with `allow_pickle=False` and written with owner-only file
 permissions. A recording without usable voice evidence gets stable empty shapes
 `(0,)` and `(0, 192)`.
 
-Raw MOSS generations, recovery records, reconciliation decisions, and individual
-embedding samples are intermediates and are not published. Failed runs publish
-nothing. Markdown is never edited in place to change speaker identities; update
-the hint file and derive it again with `--force`.
+Recovery records, reconciliation decisions, and individual embedding samples
+remain unpublished intermediates. A run that completes MOSS but fails during a
+later hint or rendering stage may still publish the reusable MOSS cache.
+Markdown is never edited in place to change speaker identities; update the hint
+file and derive it again with `--force`.
 
 The ReDimNet2 model and checkpoint load lazily on the first usable participant
 sample and are reused for the run. The first run requires network access to
