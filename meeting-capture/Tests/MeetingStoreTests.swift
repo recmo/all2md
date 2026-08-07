@@ -73,6 +73,30 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(track.channels, 1)
         XCTAssertEqual(track.durationSeconds, 0.1, accuracy: 0.001)
         XCTAssertEqual(track.sha256.count, 64)
+        XCTAssertEqual(track.sha256, try AudioFinalizer.sha256(destination))
         XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+    }
+
+    func testProcessResolverWalksFromBrowserHelperToOwningApplication() throws {
+        let browser = CaptureApplicationIdentity(processID: 100, bundleID: "com.brave.Browser", applicationName: "Brave Browser", isUserApplication: true)
+        let helper = CaptureApplicationIdentity(processID: 200, bundleID: "com.brave.Browser.helper", applicationName: "Brave Browser Helper", isUserApplication: false)
+        let resolved = ProcessApplicationResolver.resolve(
+            processID: helper.processID,
+            bundleID: helper.bundleID,
+            applications: [browser, helper],
+            parentPID: { [200: 100][$0] }
+        )
+        XCTAssertEqual(resolved, browser)
+    }
+
+    func testSystemAudioFallsBackToResolvedBundleID() {
+        let candidates = [
+            CaptureApplicationIdentity(processID: 100, bundleID: "com.brave.Browser", applicationName: "Brave Browser", isUserApplication: true),
+            CaptureApplicationIdentity(processID: 300, bundleID: "us.zoom.xos", applicationName: "zoom.us", isUserApplication: true),
+        ]
+        XCTAssertEqual(
+            SystemAudioRecorder.matchingApplicationIndex(processID: 999, bundleID: "com.brave.Browser", candidates: candidates),
+            0
+        )
     }
 }
