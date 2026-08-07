@@ -13,6 +13,8 @@ Local-first tools that turn source material into auditable Markdown.
   labels across processing windows.
 - [`speech-review`](speech-review/README.md) provides a local web editor for
   playback, speaker identity hints, attendees, and localized corrections.
+- [`doc2md`](doc2md/README.md) extracts Google Docs and Notion pages into
+  durable Markdown with source metadata, assets, and synchronization safety.
 
 Each project owns its runtime and dependencies. The repository shares only
 top-level build orchestration.
@@ -26,10 +28,12 @@ only model weights and checkpoints are populated in user caches on demand.
 ```sh
 nix run github:recmo/all2md#pages2md -- --help
 nix run github:recmo/all2md#speech2md -- --help
+nix run github:recmo/all2md#doc2md -- --help
 nix run github:recmo/all2md#speech-review -- ~/Meetings
 nix build github:recmo/all2md#meeting-capture
 nix develop .#pages2md
 nix develop .#speech2md
+nix develop .#doc2md
 nix flake check
 ```
 
