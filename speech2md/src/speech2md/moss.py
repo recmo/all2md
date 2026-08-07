@@ -285,14 +285,18 @@ def _generate_with_timestamp_progress(
     audio: str,
     *,
     prompt: str,
+    phase_callback: Callable[[str], None] | None = None,
     timestamp_callback: Callable[[float], None] | None = None,
     speaker_forces: list[dict[str, Any]] | None = None,
 ) -> Any:
+    if phase_callback is not None:
+        phase_callback("prefill")
     if speaker_forces:
         return _generate_with_speaker_forces(
             engine,
             audio,
             prompt=prompt,
+            phase_callback=phase_callback,
             timestamp_callback=timestamp_callback,
             speaker_forces=speaker_forces,
         )
@@ -301,6 +305,7 @@ def _generate_with_timestamp_progress(
             engine,
             audio,
             prompt=prompt,
+            phase_callback=phase_callback,
             timestamp_callback=timestamp_callback,
             speaker_forces=[],
         )
@@ -319,7 +324,12 @@ def _generate_with_timestamp_progress(
     text_parts = []
     timestamp_tail = ""
     generation_tokens = 0
+    generation_started = False
     for update in stream:
+        if not generation_started:
+            generation_started = True
+            if phase_callback is not None:
+                phase_callback("transcribing")
         text = str(getattr(update, "text", ""))
         text_parts.append(text)
         previous_tail_length = len(timestamp_tail)
@@ -382,6 +392,7 @@ def _generate_with_speaker_forces(
     audio: str,
     *,
     prompt: str,
+    phase_callback: Callable[[str], None] | None,
     timestamp_callback: Callable[[float], None] | None,
     speaker_forces: list[dict[str, Any]],
 ) -> Any:
@@ -477,12 +488,17 @@ def _generate_with_speaker_forces(
     text_parts = []
     timestamp_tail = ""
     generation_tokens = 0
+    generation_started = False
     for token, _ in engine.stream_generate(
         audio,
         max_tokens=MAX_GENERATION_TOKENS,
         prompt=prompt,
         logits_processors=[force_speaker],
     ):
+        if not generation_started:
+            generation_started = True
+            if phase_callback is not None:
+                phase_callback("transcribing")
         generation_tokens += 1
         text = tokenizer.decode([int(token)], skip_special_tokens=True)
         text_parts.append(text)
@@ -750,7 +766,7 @@ def transcribe_track(
     speaker_hints: tuple[SpeakerHint, ...] = (),
     cached_generations: list[dict[str, Any]] | None = None,
     generation_cache_callback: Callable[[list[dict[str, Any]]], None] | None = None,
-    progress_callback: Callable[[int, int, int, float], None] | None = None,
+    progress_callback: Callable[[int, int, int, float, str], None] | None = None,
 ) -> tuple[list[Segment], dict[str, Any], dict[str, SpeakerProfile]]:
     silence_centers = detect_silence_centers(path) if duration > TARGET_PART_SECONDS else []
     hard_split_boundaries: list[float] = []
@@ -782,14 +798,17 @@ def transcribe_track(
             previous_coverage_end: float | None = None
             while True:
                 inference_index += 1
-                if progress_callback is not None:
-                    progress_callback(
-                        planned_index,
-                        len(planned_windows),
-                        attempt,
-                        0.0,
-                    )
                 chunk = directory / f"window-{inference_index:03d}.wav"
+
+                def report_phase(phase: str) -> None:
+                    if progress_callback is not None:
+                        progress_callback(
+                            planned_index,
+                            len(planned_windows),
+                            attempt,
+                            0.0,
+                            phase,
+                        )
 
                 def report_timestamp(relative_seconds: float) -> None:
                     nonlocal reported_through
@@ -802,6 +821,7 @@ def transcribe_track(
                             len(planned_windows),
                             attempt,
                             newly_reported,
+                            "transcribing",
                         )
 
                 def extract_chunk() -> None:
@@ -821,6 +841,7 @@ def transcribe_track(
                         engine,
                         str(chunk),
                         prompt=prompt,
+                        phase_callback=report_phase,
                         timestamp_callback=report_timestamp,
                     )
                     base_fields = _generation_fields(base_result)
@@ -843,6 +864,7 @@ def transcribe_track(
                             engine,
                             str(chunk),
                             prompt=prompt,
+                            phase_callback=report_phase,
                             timestamp_callback=report_timestamp,
                             speaker_forces=speaker_forces,
                         )
@@ -890,6 +912,7 @@ def transcribe_track(
                             engine,
                             str(chunk),
                             prompt=prompt,
+                            phase_callback=report_phase,
                             timestamp_callback=report_timestamp,
                             speaker_forces=speaker_forces,
                         )
@@ -973,6 +996,7 @@ def transcribe_track(
                             len(planned_windows),
                             attempt,
                             newly_completed,
+                            "transcribing",
                         )
                     break
                 if not segments:
