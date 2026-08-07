@@ -38,9 +38,12 @@ struct MeetingStore: Sendable {
     }
 
     func paths(forInterruptedFile file: URL) -> RecordingPaths {
-        let suffixes = ["-microphone.part.caf", "-participants.part.caf"]
-        let name = file.lastPathComponent
-        let baseName = suffixes.first(where: name.hasSuffix).map { String(name.dropLast($0.count)) } ?? file.deletingPathExtension().lastPathComponent
+        var name = file.lastPathComponent
+        if name.hasPrefix(".") { name.removeFirst() }
+        let markers = ["-microphone-", "-microphone.part.caf", "-participants.part.caf"]
+        let baseName = markers.compactMap { marker in
+            name.range(of: marker, options: .backwards).map { String(name[..<$0.lowerBound]) }
+        }.first ?? file.deletingPathExtension().lastPathComponent
         return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: baseName)
     }
 
@@ -54,7 +57,11 @@ struct MeetingStore: Sendable {
 
     private static func recordingExists(named baseName: String, in directory: URL) -> Bool {
         let manager = FileManager.default
-        return ["capture.json", "microphone.flac", "participants.flac"]
-            .contains { manager.fileExists(atPath: directory.appending(path: "\(baseName)-\($0)").path) }
+        if ["\(baseName)-capture.json", "\(baseName).mka", "\(baseName)-accessibility.jsonl", "\(baseName)-microphone.flac", "\(baseName)-participants.flac"]
+            .contains(where: { manager.fileExists(atPath: directory.appending(path: $0).path) }) {
+            return true
+        }
+        guard let contents = try? manager.contentsOfDirectory(atPath: directory.path) else { return false }
+        return contents.contains { $0.hasPrefix(".\(baseName)-") || $0 == ".\(baseName).part.mka" }
     }
 }

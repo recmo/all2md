@@ -2,11 +2,11 @@
 
 Meeting Capture is a local-only macOS menu-bar recorder. It watches Core Audio
 for another process opening a microphone, offers a ten-second veto, and records
-the local microphone and that process's output as separate lossless tracks.
+the local microphone and that process's output as separate tracks.
 
-Records are written to `~/Documents/Meetings/YYYY/MM/`. FLAC audio is the
-canonical source; a versioned JSON manifest carries capture provenance for the
-future `speech2md` processor.
+Records are written to `~/Documents/Meetings/YYYY/MM/`. The canonical archive
+is one audio-only Matroska (`.mka`) file with independently selectable Opus
+streams; a versioned JSON manifest carries capture provenance for `speech2md`.
 
 ## Development
 
@@ -27,28 +27,50 @@ open result/Applications/MeetingCapture.app
 The Nix derivation uses the locally installed Xcode and ad-hoc signs the result
 with the capture entitlement.
 
-At launch, Meeting Capture requests Microphone and Screen & System Audio
-Recording permissions. Without screen and system-audio access it stays paused:
-it does not monitor, count down, or allow manual recording. The menu opens the
-correct System Settings pane and monitoring resumes only after macOS reports
-access granted. Automatic recording never falls back to a microphone-only
-capture when participant audio is unavailable. Accessibility is optional and
-only enriches metadata.
+At launch, Meeting Capture requests Microphone, Screen & System Audio
+Recording, and Accessibility permissions. Without screen and system-audio
+access it stays paused: it does not monitor, count down, or allow manual
+recording. The menu opens the correct System Settings pane and monitoring
+resumes only after macOS reports access granted. Automatic recording never
+falls back to a microphone-only capture when participant audio is unavailable.
+Accessibility remains optional and only enriches metadata.
 
 ## Current capture path
 
 - Core Audio process objects drive automatic detection. Browser helper
   processes are resolved to their owning application, with default-input device
   activity as the unattributed fallback.
+- For attributed clients, the process object's input-scoped device list identifies
+  the microphone selected by the meeting application, even when it is not the
+  macOS default. The active device is shown in the menu and recorded as a
+  `microphoneDevice` metadata event.
 - Two seconds of sustained activity opens a ten-second, vetoable countdown.
-- The microphone is recorded as PCM CAF. Participant audio currently uses an
+- The microphone is captured to crash-safe PCM CAF segments in each device's
+  native format. If the meeting application changes input devices, capture
+  follows it with a new segment; the short restart interval is recorded as an
+  interruption. Participant audio uses an
   application-filtered ScreenCaptureKit stream and excludes this application.
-- Finalization converts both tracks to FLAC, records SHA-256 checksums, writes
-  the v1 manifest atomically, and only then deletes temporary CAF chunks.
+- Capture does no live transcoding. After stop, finalization aligns the native
+  segments and creates one `.mka` without a meeting mix: microphone is mono
+  Opus at 96 kb/s VBR and participants remain stereo Opus at 128 kb/s VBR.
+  Both use 48 kHz, the Opus audio application, 20 ms frames, complexity 10,
+  and no DTX.
+- Finalization probes the stream contract, decodes every stream, atomically
+  publishes the archive, records its SHA-256 in the v2 manifest, and only then
+  deletes the temporary PCM files. A failed finalization leaves the PCM files
+  available for recovery.
 - Interrupted CAF chunks are discovered at launch and can be recovered from
   the menu.
 - Generic Accessibility inspection currently contributes the focused window
   title when permission is available; it never gates recording.
+- Every attributed recording also starts a generic Accessibility probe for the
+  same process. Beside the `.mka` it writes a checksummed
+  `*-accessibility.jsonl` sidecar containing an initial tree snapshot, raw AX
+  notifications, attribute-level tree diffs, periodic fallback rescans, and a
+  final diff. A crash leaves the append-only `.part.jsonl` recoverable. Probe
+  logs may contain participant names, captions, and other visible interface
+  text; they never leave the Mac automatically. Missing Accessibility permission
+  becomes a manifest warning and never blocks audio capture.
 
 No countdown audio is persisted. A skipped trigger therefore leaves no audio
 on disk. A bounded in-memory pre-roll and a Core Audio process-tap-first path
@@ -57,7 +79,7 @@ manifest contract.
 
 ## Milestone 1 acceptance
 
-Schema v1 remains provisional until recordings cover at least five meetings,
+Schema v2 remains provisional until recordings cover at least five meetings,
 three hours, Zoom and two other applications. The validation pass must also
 confirm isolated participant audio, interrupted-recording recovery, false
 trigger rate, HUD behavior, and audio quality. Zoom, Brave/Google Meet,

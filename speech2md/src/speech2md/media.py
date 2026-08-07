@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .model import AudioSource, ResolvedInput
 
-MEDIA_SUFFIXES = {".aac", ".caf", ".flac", ".m4a", ".mp3", ".mp4", ".ogg", ".wav", ".webm"}
+MEDIA_SUFFIXES = {".aac", ".caf", ".flac", ".m4a", ".mka", ".mp3", ".mp4", ".ogg", ".wav", ".webm"}
 
 
 def sha256(path: Path) -> str:
@@ -18,7 +18,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def probe(path: Path, *, expected_sha256: str | None = None, role: str = "mixed") -> AudioSource:
+def probe(
+    path: Path,
+    *,
+    expected_sha256: str | None = None,
+    role: str = "mixed",
+    stream_index: int = 0,
+) -> AudioSource:
     if not path.is_file():
         raise FileNotFoundError(path)
     actual = sha256(path)
@@ -26,7 +32,7 @@ def probe(path: Path, *, expected_sha256: str | None = None, role: str = "mixed"
         raise ValueError(f"checksum mismatch for {path.name}: expected {expected_sha256}, got {actual}")
     process = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "ffprobe", "-v", "error", "-select_streams", f"a:{stream_index}",
             "-show_entries", "stream=codec_name,duration:format=duration,format_name",
             "-of", "json", str(path),
         ],
@@ -45,6 +51,7 @@ def probe(path: Path, *, expected_sha256: str | None = None, role: str = "mixed"
         sha256=actual,
         duration_seconds=float(duration),
         format=streams[0].get("codec_name") or path.suffix.lstrip(".").lower(),
+        stream_index=stream_index,
     )
 
 
@@ -61,21 +68,32 @@ def resolve_input(requested: Path) -> ResolvedInput:
             started_at=None,
             ended_at=None,
             calendar_event=None,
-            sources=((requested, "mixed", None),),
+            sources=((requested, "mixed", None, 0),),
         )
 
     value = json.loads(requested.read_text())
-    if value.get("schemaVersion") != 1:
+    schema_version = value.get("schemaVersion")
+    if schema_version not in {1, 2}:
         raise ValueError("unsupported meeting capture schema version")
     required = {"meetingID", "audio", "status", "startedAt", "endedAt"}
     missing = required - value.keys()
     if missing:
         raise ValueError("capture manifest missing: " + ", ".join(sorted(missing)))
-    sources: list[tuple[Path, str, str | None]] = []
-    for track in value["audio"]:
-        if not {"file", "role", "sha256"} <= track.keys():
-            raise ValueError("capture audio track is incomplete")
-        sources.append((requested.parent / track["file"], track["role"], track["sha256"]))
+    sources: list[tuple[Path, str, str | None, int]] = []
+    if schema_version == 1:
+        for track in value["audio"]:
+            if not {"file", "role", "sha256"} <= track.keys():
+                raise ValueError("capture audio track is incomplete")
+            sources.append((requested.parent / track["file"], track["role"], track["sha256"], 0))
+    else:
+        container = value.get("container")
+        if not isinstance(container, dict) or not {"file", "sha256"} <= container.keys():
+            raise ValueError("capture container is incomplete")
+        container_path = requested.parent / container["file"]
+        for track in value["audio"]:
+            if not {"streamIndex", "role"} <= track.keys():
+                raise ValueError("capture audio track is incomplete")
+            sources.append((container_path, track["role"], container["sha256"], int(track["streamIndex"])))
     base = requested.name.removesuffix("-capture.json")
     return ResolvedInput(
         requested=requested,

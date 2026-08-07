@@ -27,7 +27,7 @@ from .moss import (
 )
 
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 CACHE_COMPATIBILITY_IGNORED_KEYS = {"speech2md_version"}
 
 
@@ -67,14 +67,17 @@ def cache_metadata(
         },
         "hotwords": list(hotwords),
         "sources": sorted(
-            ({"role": source.role, "sha256": source.sha256} for source in sources),
-            key=lambda item: (item["role"], item["sha256"]),
+            (
+                {"role": source.role, "sha256": source.sha256, "stream_index": source.stream_index}
+                for source in sources
+            ),
+            key=lambda item: (item["role"], item["sha256"], item["stream_index"]),
         ),
     }
 
 
 def source_key(source: AudioSource) -> str:
-    return f"{source.role}:{source.sha256}"
+    return f"{source.role}:{source.stream_index}:{source.sha256}"
 
 
 def load_cache(path: Path, expected_metadata: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:

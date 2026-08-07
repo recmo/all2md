@@ -22,7 +22,9 @@ uv run --project speech2md pytest speech2md/tests
 uv run --project speech2md speech2md meeting.mp4
 ```
 
-The input may be an ordinary audio/video file or a Meeting Capture v1 manifest.
+The input may be an ordinary audio/video file or a Meeting Capture manifest.
+Both legacy v1 per-file tracks and v2 Matroska containers are accepted. For v2,
+each role is read from its declared audio stream in the shared container.
 Manifest checksums are verified before inference. Canonical audio is never
 changed.
 
@@ -101,7 +103,7 @@ meeting.voiceprints.npz
 ```
 
 The MOSS cache stores replayable raw generations and is accepted only when its
-schema, audio-track checksums and roles, normalized ordered hotwords, pinned
+schema, audio-track checksums, roles and stream indexes, normalized ordered hotwords, pinned
 MOSS model revision, prompt, generation limit, and window/recovery settings all match.
 Changing metadata, attendees, speaker ranges, or localized edits therefore
 normally reuses MOSS output while rerunning speaker reconciliation and rendering.

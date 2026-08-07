@@ -5,7 +5,25 @@ struct AudioClient: Identifiable, Equatable, Sendable {
     let processID: pid_t
     let bundleID: String?
     let applicationName: String
+    let inputDevices: [AudioInputDevice]
     var id: pid_t { processID }
+
+    var primaryInputDevice: AudioInputDevice? { inputDevices.first }
+
+    var inputDeviceSummary: String {
+        inputDevices.isEmpty ? "Unknown microphone" : inputDevices.map(\.name).joined(separator: ", ")
+    }
+}
+
+struct AudioInputDevice: Identifiable, Equatable, Sendable {
+    let id: UInt32
+    let uid: String?
+    let name: String
+
+    var manifestValue: String {
+        guard let uid, !uid.isEmpty else { return name }
+        return "\(name) [\(uid)]"
+    }
 }
 
 struct CaptureApplicationIdentity: Equatable, Sendable {
@@ -27,12 +45,30 @@ struct CaptureTrigger: Codable, Equatable, Sendable {
 struct AudioTrack: Codable, Equatable, Sendable {
     enum Role: String, Codable, Sendable { case microphone, participants }
     let role: Role
-    let file: String
-    let format: String
+    let streamIndex: Int
+    let codec: String
     let sampleRate: Double
     let channels: Int
     let durationSeconds: Double
+    let bitrate: Int
+}
+
+struct AudioContainer: Codable, Equatable, Sendable {
+    let file: String
+    let format: String
     let sha256: String
+}
+
+struct AccessibilityArtifact: Codable, Equatable, Sendable {
+    let file: String
+    let format: String
+    let sha256: String
+}
+
+struct CapturedAudioSegment: Equatable, Sendable {
+    let url: URL
+    let startedAt: Date
+    let endedAt: Date
 }
 
 struct CaptureTimeRange: Codable, Equatable, Sendable {
@@ -42,7 +78,7 @@ struct CaptureTimeRange: Codable, Equatable, Sendable {
 }
 
 struct MetadataEvent: Codable, Equatable, Sendable {
-    enum Kind: String, Codable, Sendable { case windowTitle, participant, activeSpeaker, platform, note }
+    enum Kind: String, Codable, Sendable { case windowTitle, participant, activeSpeaker, platform, microphoneDevice, note }
     let timestamp: Date
     let kind: Kind
     let value: String
@@ -61,6 +97,8 @@ struct CaptureManifest: Codable, Equatable, Sendable {
     let endedAt: Date
     let timeZone: String
     let trigger: CaptureTrigger
+    let container: AudioContainer
+    let accessibility: AccessibilityArtifact?
     let audio: [AudioTrack]
     let interruptions: [CaptureTimeRange]
     let metadataEvents: [MetadataEvent]
@@ -71,9 +109,13 @@ struct CaptureManifest: Codable, Equatable, Sendable {
 struct RecordingPaths: Sendable {
     let directory: URL
     let baseName: String
-    var microphoneTemporary: URL { directory.appending(path: ".\(baseName)-microphone.part.caf") }
+    func microphoneTemporary(segment: Int) -> URL {
+        directory.appending(path: ".\(baseName)-microphone-\(String(format: "%04d", segment)).part.caf")
+    }
     var participantsTemporary: URL { directory.appending(path: ".\(baseName)-participants.part.caf") }
-    var microphoneFinal: URL { directory.appending(path: "\(baseName)-microphone.flac") }
-    var participantsFinal: URL { directory.appending(path: "\(baseName)-participants.flac") }
+    var archiveTemporary: URL { directory.appending(path: ".\(baseName).part.mka") }
+    var archiveFinal: URL { directory.appending(path: "\(baseName).mka") }
+    var accessibilityTemporary: URL { directory.appending(path: ".\(baseName)-accessibility.part.jsonl") }
+    var accessibilityFinal: URL { directory.appending(path: "\(baseName)-accessibility.jsonl") }
     var manifest: URL { directory.appending(path: "\(baseName)-capture.json") }
 }

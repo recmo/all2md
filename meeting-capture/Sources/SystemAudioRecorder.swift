@@ -10,9 +10,11 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
     private var writerInput: AVAssetWriterInput?
     private var sessionStarted = false
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
+    private(set) var firstSampleAt: Date?
     var onLevel: (@Sendable (Float) -> Void)?
 
     func start(processID: pid_t, bundleID: String?, to url: URL) async throws {
+        firstSampleAt = nil
         guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
             throw CaptureError.screenRecordingPermissionRequired
         }
@@ -105,6 +107,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         if !sessionStarted {
             writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
             sessionStarted = true
+            firstSampleAt = Date()
         }
         if writerInput.isReadyForMoreMediaData { writerInput.append(sampleBuffer) }
         onLevel?(CMSampleBufferGetNumSamples(sampleBuffer) > 0 ? 0.35 : 0)

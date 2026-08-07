@@ -401,7 +401,10 @@
             };
 
             meeting-capture = pkgs.mkShell {
-              packages = [ pkgs.xcodegen ];
+              packages = [
+                pkgs.ffmpeg
+                pkgs.xcodegen
+              ];
               shellHook = ''
                 echo "Run: cd meeting-capture && xcodegen generate"
               '';

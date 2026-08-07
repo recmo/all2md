@@ -1,5 +1,6 @@
 {
   lib,
+  ffmpeg,
   stdenvNoCC,
   xcodeenv,
   xcodegen,
@@ -41,6 +42,8 @@ stdenvNoCC.mkDerivation {
 
     mkdir -p "$out/Applications"
     cp -R "$TMPDIR/DerivedData/Build/Products/Release/MeetingCapture.app" "$out/Applications/"
+    mkdir -p "$out/Applications/MeetingCapture.app/Contents/Resources/bin"
+    cp ${ffmpeg}/bin/ffmpeg ${ffmpeg}/bin/ffprobe "$out/Applications/MeetingCapture.app/Contents/Resources/bin/"
     install -Dm444 \
       MeetingCapture.entitlements \
       "$out/share/meeting-capture/MeetingCapture.entitlements"

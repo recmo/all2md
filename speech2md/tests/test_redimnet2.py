@@ -25,7 +25,7 @@ class FakeEmbedder:
         self.vectors = vectors or {}
         self.calls: list[tuple[Path, float, float]] = []
 
-    def embed(self, path: Path, start: float, end: float) -> list[float]:
+    def embed(self, path: Path, start: float, end: float, *, stream_index: int = 0) -> list[float]:
         self.calls.append((path, start, end))
         return self.vectors.get((start, end), axis(0))
 

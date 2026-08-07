@@ -42,7 +42,7 @@ def test_resolve_media_input(tmp_path: Path):
     source = tmp_path / "meeting.mp4"
     source.touch()
     resolved = resolve_input(source)
-    assert resolved.sources == ((source, "mixed", None),)
+    assert resolved.sources == ((source, "mixed", None, 0),)
     assert resolved.markdown_path.name == "meeting.md"
 
 
@@ -63,6 +63,31 @@ def test_resolve_capture_manifest(tmp_path: Path):
     assert resolved.ended_at == "later"
     assert resolved.calendar_event == "https://calendar.google.com/event?id=example"
     assert resolved.markdown_path.name == "2026-08-02-meeting.md"
+
+
+def test_resolve_capture_manifest_v2_selects_container_streams(tmp_path: Path):
+    archive = tmp_path / "meeting.mka"
+    archive.touch()
+    manifest = tmp_path / "2026-08-02-meeting-capture.json"
+    manifest.write_text(json.dumps({
+        "schemaVersion": 2,
+        "meetingID": "id",
+        "startedAt": "now",
+        "endedAt": "later",
+        "status": "complete",
+        "container": {"file": archive.name, "format": "matroska", "sha256": "b" * 64},
+        "audio": [
+            {"streamIndex": 0, "role": "microphone"},
+            {"streamIndex": 1, "role": "participants"},
+        ],
+    }))
+
+    resolved = resolve_input(manifest)
+
+    assert resolved.sources == (
+        (archive, "microphone", "b" * 64, 0),
+        (archive, "participants", "b" * 64, 1),
+    )
 
 
 def test_window_plan_covers_long_recording():
@@ -632,6 +657,7 @@ def test_transcribe_recovers_when_token_count_is_suspect(
         prompt=ENGLISH_TRANSCRIPTION_PROMPT,
         role="microphone",
         duration=300,
+        stream_index=1,
         progress_callback=lambda *event: progress.append(event),
     )
 
@@ -648,6 +674,7 @@ def test_transcribe_recovers_when_token_count_is_suspect(
     assert raw["windows"][1]["requires_recovery"] is False
     assert ffmpeg_calls[1][ffmpeg_calls[1].index("-ss") + 1] == "70.0"
     assert ffmpeg_calls[1][ffmpeg_calls[1].index("-t") + 1] == "230.0"
+    assert all(call[call.index("-map") + 1] == "0:a:1" for call in ffmpeg_calls)
     assert raw["actual_overlap_seconds"] == 30
     assert progress == [
         (1, 1, 1, 0.0, "prefill"),
@@ -912,13 +939,13 @@ def test_transcribe_can_require_a_current_moss_cache(tmp_path: Path, monkeypatch
         started_at=None,
         ended_at=None,
         calendar_event=None,
-        sources=((media, "mixed", None),),
+        sources=((media, "mixed", None, 0),),
     )
     monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
     monkeypatch.setattr(
         pipeline,
         "probe",
-        lambda path, *, expected_sha256, role: AudioSource(
+        lambda path, *, expected_sha256, role, stream_index=0: AudioSource(
             str(path), role, "a" * 64, 10.0, "wav"
         ),
     )
@@ -945,14 +972,14 @@ def test_cache_only_transcribe_reports_when_speaker_guidance_is_needed(
         started_at=None,
         ended_at=None,
         calendar_event=None,
-        sources=((media, "mixed", None),),
+        sources=((media, "mixed", None, 0),),
     )
     source = AudioSource(str(media), "mixed", "a" * 64, 10.0, "wav")
     monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
     monkeypatch.setattr(
         pipeline,
         "probe",
-        lambda path, *, expected_sha256, role: source,
+        lambda path, *, expected_sha256, role, stream_index=0: source,
     )
     monkeypatch.setattr(
         pipeline,
@@ -1006,8 +1033,8 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         ended_at=None,
         calendar_event=None,
         sources=(
-            (microphone, "microphone", None),
-            (participants, "participants", None),
+            (microphone, "microphone", None, 0),
+            (participants, "participants", None, 0),
         ),
     )
     engine = object()
@@ -1040,7 +1067,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     monkeypatch.setattr(
         pipeline,
         "probe",
-        lambda path, *, expected_sha256, role: AudioSource(
+        lambda path, *, expected_sha256, role, stream_index=0: AudioSource(
             str(path), role, "a" * 64, 10.0, "flac"
         ),
     )

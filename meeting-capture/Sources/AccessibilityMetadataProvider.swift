@@ -2,6 +2,11 @@ import ApplicationServices
 import Foundation
 
 enum AccessibilityMetadataProvider {
+    static func requestAccess() {
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
+
     static func windowTitle(processID: pid_t, prompt: Bool = false) -> String? {
         let options = ["AXTrustedCheckOptionPrompt": prompt] as CFDictionary
         guard AXIsProcessTrustedWithOptions(options) else { return nil }
@@ -9,8 +14,9 @@ enum AccessibilityMetadataProvider {
         var windowValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString, &windowValue) == .success,
               let windowValue else { return nil }
+        guard CFGetTypeID(windowValue) == AXUIElementGetTypeID() else { return nil }
         var titleValue: CFTypeRef?
-        let window = unsafeBitCast(windowValue, to: AXUIElement.self)
+        let window = unsafeDowncast(windowValue, to: AXUIElement.self)
         guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success else { return nil }
         return titleValue as? String
     }

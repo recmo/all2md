@@ -22,6 +22,7 @@
 		9B5125CE45C59978F8237FDE /* HUDController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2501C526AE496B370359ED3D /* HUDController.swift */; };
 		B736CB6ED892BDC10F34741D /* SystemAudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2608D5C2FB518BB4AD82371 /* SystemAudioRecorder.swift */; };
 		C69865E1976D7DDD1827CDB1 /* CaptureCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 004F3D933EA6D6CF314F97D7 /* CaptureCoordinator.swift */; };
+		D9197EFC5DB36BB70A927D26 /* AccessibilityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AB53E4134566DDE24B64A51 /* AccessibilityProbe.swift */; };
 		DDE6096767048E8EE5BFFF8F /* MicrophoneRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C58BFDACDA8AEB550897A658 /* MicrophoneRecorder.swift */; };
 /* End PBXBuildFile section */
 
@@ -45,6 +46,7 @@
 		520E01FDA0F33C14B50F579C /* MeetingStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingStoreTests.swift; sourceTree = "<group>"; };
 		57DBAADC234A81C14B254516 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5A006FF91C37787A13A91D93 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		5AB53E4134566DDE24B64A51 /* AccessibilityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityProbe.swift; sourceTree = "<group>"; };
 		8E18E979B02A5E440D77924E /* AccessibilityMetadataProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityMetadataProvider.swift; sourceTree = "<group>"; };
 		995FD8FEA245DBB08333993E /* MeetingCaptureTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeetingCaptureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2608D5C2FB518BB4AD82371 /* SystemAudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioRecorder.swift; sourceTree = "<group>"; };
@@ -79,6 +81,7 @@
 			isa = PBXGroup;
 			children = (
 				8E18E979B02A5E440D77924E /* AccessibilityMetadataProvider.swift */,
+				5AB53E4134566DDE24B64A51 /* AccessibilityProbe.swift */,
 				5A006FF91C37787A13A91D93 /* AppModel.swift */,
 				0749EA236967FF20E57AD97C /* AudioActivityMonitor.swift */,
 				BD57CB2B550A57193DEDA1E0 /* AudioFinalizer.swift */,
@@ -226,6 +229,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1374A3296BCB527EEE34A8CE /* AccessibilityMetadataProvider.swift in Sources */,
+				D9197EFC5DB36BB70A927D26 /* AccessibilityProbe.swift in Sources */,
 				4881C700096CF7591E632C13 /* AppModel.swift in Sources */,
 				43A142377BBAB3FFF1CF36C7 /* AudioActivityMonitor.swift in Sources */,
 				8D2D9A51832F876CACD8ABB4 /* AudioFinalizer.swift in Sources */,

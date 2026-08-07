@@ -149,11 +149,11 @@ def plan_windows(
     ]
 
 
-def detect_silence_centers(path: Path) -> list[float]:
+def detect_silence_centers(path: Path, *, stream_index: int = 0) -> list[float]:
     result = subprocess.run(
         [
             "ffmpeg", "-nostdin", "-v", "info", "-i", str(path),
-            "-map", "0:a:0", "-af",
+            "-map", f"0:a:{stream_index}", "-af",
             f"silencedetect=noise={SILENCE_NOISE_DB}dB:d={SILENCE_MIN_SECONDS}",
             "-f", "null", "-",
         ],
@@ -176,14 +176,20 @@ def parse_silence_centers(log: str) -> list[float]:
     return centers
 
 
-def find_min_energy_boundary(path: Path, *, ideal: float, duration: float) -> float:
+def find_min_energy_boundary(
+    path: Path,
+    *,
+    ideal: float,
+    duration: float,
+    stream_index: int = 0,
+) -> float:
     search_start = max(0.0, ideal - SILENCE_SEARCH_SECONDS)
     search_end = min(duration, ideal + SILENCE_SEARCH_SECONDS)
     result = subprocess.run(
         [
             "ffmpeg", "-nostdin", "-v", "error", "-ss", str(search_start),
             "-t", str(search_end - search_start), "-i", str(path),
-            "-map", "0:a:0", "-ac", "1", "-ar", str(ENERGY_SAMPLE_RATE),
+            "-map", f"0:a:{stream_index}", "-ac", "1", "-ar", str(ENERGY_SAMPLE_RATE),
             "-f", "f32le", "pipe:1",
         ],
         check=True,
@@ -761,6 +767,7 @@ def transcribe_track(
     prompt: str,
     role: str,
     duration: float,
+    stream_index: int = 0,
     embedder: Any | None = None,
     speaker_profiles: dict[str, SpeakerProfile] | None = None,
     speaker_hints: tuple[SpeakerHint, ...] = (),
@@ -768,11 +775,24 @@ def transcribe_track(
     generation_cache_callback: Callable[[list[dict[str, Any]]], None] | None = None,
     progress_callback: Callable[[int, int, int, float, str], None] | None = None,
 ) -> tuple[list[Segment], dict[str, Any], dict[str, SpeakerProfile]]:
-    silence_centers = detect_silence_centers(path) if duration > TARGET_PART_SECONDS else []
+    silence_centers = (
+        detect_silence_centers(path, stream_index=stream_index)
+        if stream_index
+        else detect_silence_centers(path)
+    ) if duration > TARGET_PART_SECONDS else []
     hard_split_boundaries: list[float] = []
 
     def hard_split_boundary(ideal: float) -> float:
-        boundary = find_min_energy_boundary(path, ideal=ideal, duration=duration)
+        boundary = (
+            find_min_energy_boundary(
+                path,
+                ideal=ideal,
+                duration=duration,
+                stream_index=stream_index,
+            )
+            if stream_index
+            else find_min_energy_boundary(path, ideal=ideal, duration=duration)
+        )
         hard_split_boundaries.append(boundary)
         return boundary
 
@@ -829,7 +849,7 @@ def transcribe_track(
                         [
                             "ffmpeg", "-nostdin", "-v", "error", "-ss", str(start),
                             "-t", str(planned_end - start), "-i", str(path),
-                            "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-y",
+                            "-map", f"0:a:{stream_index}", "-ac", "1", "-ar", "16000", "-y",
                             str(chunk),
                         ],
                         check=True,
@@ -1042,6 +1062,7 @@ def transcribe_track(
                 segments,
                 window=index,
                 source_track=role,
+                stream_index=stream_index,
                 embedder=embedder,
                 maximum_samples_per_speaker=RUN_VOICEPRINT_SAMPLES,
             )
