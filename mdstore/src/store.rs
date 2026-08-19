@@ -156,8 +156,10 @@ impl Store {
         git::ensure_repository(&root)?;
         let git_dir = git::git_dir(&root)?;
         for _ in 0..STARTUP_SNAPSHOT_ATTEMPTS {
-            let (head, _) = Self::load_config(&root)?;
+            let head = git::head(&root)?;
+            let config = Self::load_config(&root, &head);
             if git::head(&root)? == head {
+                config?;
                 git::recover_worktree(&root)?;
                 return Ok((root, git_dir));
             }
@@ -170,36 +172,46 @@ impl Store {
         git_dir: PathBuf,
         injected_provider: Option<Arc<dyn RetrievalProvider>>,
     ) -> Result<Arc<Self>> {
+        Self::open_stable_with(root, git_dir, injected_provider, |_, _| {})
+    }
+
+    fn open_stable_with(
+        root: PathBuf,
+        git_dir: PathBuf,
+        injected_provider: Option<Arc<dyn RetrievalProvider>>,
+        mut after_capture: impl FnMut(&Path, &str),
+    ) -> Result<Arc<Self>> {
         for _ in 0..STARTUP_SNAPSHOT_ATTEMPTS {
-            let (head, config) = Self::load_config(&root)?;
-            let (provider, provider_factory) = if let Some(provider) = &injected_provider {
-                (provider.clone(), None)
-            } else {
-                let factory: fn(ProviderConfig) -> Arc<dyn RetrievalProvider> =
-                    zeroentropy_provider;
-                (zeroentropy_provider(config.provider.clone()), Some(factory))
-            };
-            let store = Self::open_inner(
-                root.clone(),
-                head.clone(),
-                config,
-                provider,
-                git_dir.clone(),
-                provider_factory,
-            )?;
+            let head = git::head(&root)?;
+            after_capture(&root, &head);
+            let result = Self::load_config(&root, &head).and_then(|config| {
+                let (provider, provider_factory) = if let Some(provider) = &injected_provider {
+                    (provider.clone(), None)
+                } else {
+                    let factory: fn(ProviderConfig) -> Arc<dyn RetrievalProvider> =
+                        zeroentropy_provider;
+                    (zeroentropy_provider(config.provider.clone()), Some(factory))
+                };
+                Self::open_inner(
+                    root.clone(),
+                    head.clone(),
+                    config,
+                    provider,
+                    git_dir.clone(),
+                    provider_factory,
+                )
+            });
             if git::head(&root)? == head {
-                return Ok(store);
+                return result;
             }
         }
         bail!("repository HEAD kept changing during startup")
     }
 
-    fn load_config(root: &Path) -> Result<(String, Config)> {
-        let head = git::head(root)?;
-        let config_text = git::read_text(root, &head, ".mdstore/config.yaml")
+    fn load_config(root: &Path, head: &str) -> Result<Config> {
+        let config_text = git::read_text(root, head, ".mdstore/config.yaml")
             .map_err(|_| anyhow!(".mdstore/config.yaml must be tracked by Git"))?;
-        let config = Config::from_yaml(&config_text)?;
-        Ok((head, config))
+        Config::from_yaml(&config_text)
     }
 
     fn open_inner(
@@ -1229,6 +1241,48 @@ mod tests {
             advanced: AtomicBool::new(false),
         });
         let store = Store::open_with_provider(root, provider).unwrap();
+        assert_eq!(store.config().documents.include, ["new.md"]);
+        assert!(store.get_page("old.md", None).is_err());
+        assert!(store.get_page("new.md", None).is_ok());
+    }
+
+    #[test]
+    fn startup_retries_a_failed_superseded_snapshot() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.name", "mdstore test"]);
+        run_git(root, &["config", "user.email", "mdstore@example.invalid"]);
+        run_git(root, &["config", "commit.gpgsign", "false"]);
+        fs::create_dir(root.join(".mdstore")).unwrap();
+        fs::write(root.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
+        fs::write(root.join(".mdstore/config.yaml"), config("old.md")).unwrap();
+        fs::write(root.join("old.md"), "---\nunterminated\n").unwrap();
+        run_git(
+            root,
+            &["add", ".gitignore", ".mdstore/config.yaml", "old.md"],
+        );
+        run_git(root, &["commit", "-q", "-m", "invalid old snapshot"]);
+
+        let (root, git_dir) = Store::prepare_repository(root).unwrap();
+        let provider = Arc::new(AdvancingProvider {
+            root: root.clone(),
+            advanced: AtomicBool::new(true),
+        });
+        let mut advanced = false;
+        let store =
+            Store::open_stable_with(root, git_dir, Some(provider), |root, _captured_head| {
+                if !advanced {
+                    fs::write(root.join(".mdstore/config.yaml"), config("new.md")).unwrap();
+                    fs::write(root.join("new.md"), "new snapshot\n").unwrap();
+                    run_git(root, &["add", ".mdstore/config.yaml", "new.md"]);
+                    run_git(root, &["commit", "-q", "-m", "valid new snapshot"]);
+                    advanced = true;
+                }
+            })
+            .unwrap();
+
+        assert!(advanced);
         assert_eq!(store.config().documents.include, ["new.md"]);
         assert!(store.get_page("old.md", None).is_err());
         assert!(store.get_page("new.md", None).is_ok());
