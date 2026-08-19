@@ -430,17 +430,22 @@ impl Store {
     }
 
     pub async fn reindex(&self) -> Result<()> {
-        let paths: Vec<String> = self.state.read().pages.keys().cloned().collect();
-        self.reindex_paths_mode(&paths, true).await
+        self.reindex_all(true).await
     }
 
     pub async fn reindex_missing(&self) -> Result<()> {
-        let paths: Vec<String> = self.state.read().pages.keys().cloned().collect();
-        self.reindex_paths_mode(&paths, false).await
+        self.reindex_all(false).await
     }
 
     pub async fn reindex_paths(&self, paths: &[String]) -> Result<()> {
         self.reindex_paths_mode(paths, true).await
+    }
+
+    async fn reindex_all(&self, force: bool) -> Result<()> {
+        let mut paths: BTreeSet<String> = self.state.read().pages.keys().cloned().collect();
+        paths.extend(orphaned_sidecar_sources(&self.root, &paths)?);
+        let paths: Vec<String> = paths.into_iter().collect();
+        self.reindex_paths_mode(&paths, force).await
     }
 
     async fn reindex_paths_mode(&self, paths: &[String], force: bool) -> Result<()> {
@@ -837,6 +842,17 @@ fn ensure_sidecars_ignored<'a>(
         })
         .collect();
     git::ensure_ignored(root, paths.iter().map(String::as_str))
+}
+
+fn orphaned_sidecar_sources(root: &Path, pages: &BTreeSet<String>) -> Result<Vec<String>> {
+    Ok(git::untracked_sidecars(root)?
+        .into_iter()
+        .filter_map(|path| {
+            path.strip_suffix(".mdstore")
+                .map(|stem| format!("{stem}.md"))
+        })
+        .filter(|path| !pages.contains(path))
+        .collect())
 }
 
 fn embedding_context(config: &Config, page: &ParsedPage) -> Vec<String> {

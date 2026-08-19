@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool {
@@ -116,6 +117,24 @@ impl Config {
         for section in &self.sections {
             if let Some(include) = &section.include {
                 let _ = compile_globs(std::slice::from_ref(include))?;
+            }
+            let minimum = section.minimum();
+            if section.maximum.is_some_and(|maximum| maximum < minimum) {
+                bail!(
+                    "section {:?} maximum must be at least its effective minimum {minimum}",
+                    section.heading
+                );
+            }
+        }
+        for wiki in &self.links.wiki {
+            let pattern =
+                Regex::new(wiki).with_context(|| format!("invalid wiki-link pattern {wiki:?}"))?;
+            if !pattern
+                .capture_names()
+                .flatten()
+                .any(|name| name == "target")
+            {
+                bail!("wiki-link pattern must define a named target capture");
             }
         }
         for pointer in self.metadata.values() {
@@ -274,13 +293,30 @@ pub struct SectionRule {
     pub maximum: Option<usize>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+impl SectionRule {
+    pub(crate) fn minimum(&self) -> usize {
+        self.minimum
+            .unwrap_or_default()
+            .max(usize::from(self.required))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkConfig {
     #[serde(default = "default_true")]
     pub markdown: bool,
     #[serde(default)]
-    pub wiki: bool,
+    pub wiki: Vec<String>,
+}
+
+impl Default for LinkConfig {
+    fn default() -> Self {
+        Self {
+            markdown: true,
+            wiki: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -540,6 +576,30 @@ mod tests {
         assert!(config("title").is_err());
         assert!(config("/bad~2escape").is_err());
         assert!(config("/trailing~").is_err());
+    }
+
+    #[test]
+    fn section_bounds_are_coherent() {
+        let config = |section: &str| {
+            Config::from_yaml(&format!(
+                "documents:\n  include: ['**/*.md']\nsections:\n  - heading: Notes\n{section}\nprovider:\n  dimensions: 2\n"
+            ))
+        };
+        assert!(config("    required: true\n    minimum: 0\n    maximum: 1").is_ok());
+        assert!(config("    minimum: 2\n    maximum: 1").is_err());
+        assert!(config("    required: true\n    maximum: 0").is_err());
+    }
+
+    #[test]
+    fn wiki_link_patterns_define_their_grammar() {
+        let config = |wiki: &str| {
+            Config::from_yaml(&format!(
+                "documents:\n  include: ['**/*.md']\nlinks:\n  wiki: [{wiki:?}]\nprovider:\n  dimensions: 2\n"
+            ))
+        };
+        assert!(config(r"\{\{(?P<target>[^}]+)\}\}").is_ok());
+        assert!(config("[").is_err());
+        assert!(config(r"\{\{([^}]+)\}\}").is_err());
     }
 
     #[test]

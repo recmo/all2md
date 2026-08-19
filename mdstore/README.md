@@ -35,7 +35,8 @@ metadata:
 
 links:
   markdown: true
-  wiki: true
+  wiki:
+    - '\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]'
 
 relations:
   - name: mentions

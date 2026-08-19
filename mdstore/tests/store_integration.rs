@@ -209,7 +209,8 @@ metadata:
   display_name: /name
 links:
   markdown: true
-  wiki: true
+  wiki:
+    - '\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]'
 relations:
   - name: mentions
     reciprocal: mentions
@@ -516,6 +517,23 @@ async fn rebuilds_adjacent_sidecars_and_searches() {
     );
 }
 
+#[tokio::test]
+async fn reindex_removes_sidecars_without_a_current_page() {
+    let repository = Repository::new();
+    let store = repository.store();
+    store.reindex().await.unwrap();
+    let sidecar = repository.root.join("alice.mdstore");
+    assert!(sidecar.is_file());
+
+    fs::remove_file(repository.root.join("alice.md")).unwrap();
+    command(&repository.root, &["add", "-A", "alice.md"]);
+    command(&repository.root, &["commit", "-q", "-m", "remove Alice"]);
+    store.push().unwrap();
+    store.reindex_missing().await.unwrap();
+
+    assert!(!sidecar.exists());
+}
+
 #[test]
 fn schemas_are_repository_configuration_not_rust_fields() {
     let first = Config::from_yaml(config_yaml()).unwrap();
@@ -680,6 +698,78 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
+}
+
+#[tokio::test]
+async fn mcp_validates_protocol_and_json_rpc_envelopes() {
+    let repository = Repository::new();
+    let app = mdstore::mcp::router(repository.store(), None);
+
+    let unsupported = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", "2099-01-01")
+                .body(Body::from(
+                    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+
+    for body in [
+        serde_json::json!({"id": 1, "method": "tools/list"}),
+        serde_json::json!({"jsonrpc": "1.0", "id": 1, "method": "tools/list"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": true, "method": "tools/list"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 1}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": true}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["code"], -32600);
+    }
+
+    let notification = app
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", "2025-06-18")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(notification.status(), StatusCode::ACCEPTED);
+    assert!(
+        notification
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

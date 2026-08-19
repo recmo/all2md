@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     extract::{Request, State},
-    http::{StatusCode, header::ORIGIN},
+    http::{HeaderMap, StatusCode, header::ORIGIN},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -14,6 +14,9 @@ use serde_json::{Value, json};
 use tower_http::trace::TraceLayer;
 
 use crate::{ApplyEditsRequest, Store};
+
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
 #[derive(Clone)]
 struct AppState {
@@ -139,24 +142,47 @@ async fn authorize(State(state): State<AppState>, request: Request, next: Next) 
     next.run(request).await
 }
 
-async fn mcp(State(state): State<AppState>, Json(request): Json<Value>) -> Response {
+async fn mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<Value>,
+) -> Response {
+    if let Some(version) = headers.get("mcp-protocol-version") {
+        let Ok(version) = version.to_str() else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        if !matches!(version, MCP_PROTOCOL_VERSION | LEGACY_MCP_PROTOCOL_VERSION) {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    }
     let Some(object) = request.as_object() else {
         return rpc_error(Value::Null, -32600, "invalid request");
     };
+    let valid_id = object
+        .get("id")
+        .is_none_or(|id| id.is_null() || id.is_string() || id.is_number());
+    let Some(method) = object.get("method").and_then(Value::as_str) else {
+        return rpc_error(Value::Null, -32600, "invalid request");
+    };
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || !valid_id
+        || object
+            .get("params")
+            .is_some_and(|params| !params.is_object() && !params.is_array())
+    {
+        return rpc_error(Value::Null, -32600, "invalid request");
+    }
+    let notification = !object.contains_key("id");
     let id = object.get("id").cloned().unwrap_or(Value::Null);
-    let method = object
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
     let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
-    if id.is_null() && method.starts_with("notifications/") {
-        return StatusCode::NO_CONTENT.into_response();
+    if notification {
+        return StatusCode::ACCEPTED.into_response();
     }
     match method {
         "initialize" => rpc_result(
             id,
             json!({
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "mdstore", "version": env!("CARGO_PKG_VERSION")}
             }),

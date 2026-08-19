@@ -86,8 +86,9 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
     let mut code_depth = 0_usize;
     let wiki = links
         .wiki
-        .then(|| Regex::new(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]"))
-        .transpose()?;
+        .iter()
+        .map(|wiki| Regex::new(wiki))
+        .collect::<Result<Vec<_>, _>>()?;
     let parser = Parser::new_ext(body, Options::all()).into_offset_iter();
     for (event, range) in parser {
         let line = body_start_line
@@ -124,27 +125,30 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
                 if let Some((_, text, _)) = &mut heading {
                     text.push_str(&value);
                 }
-                if let Some(wiki) = &wiki
-                    && code_depth == 0
-                {
+                if code_depth == 0 {
                     let raw = &body[range.clone()];
-                    for capture in wiki.captures_iter(raw) {
-                        let matched = capture.get(0).expect("full match");
-                        let absolute = range.start + matched.start();
-                        if absolute > 0 && body.as_bytes()[absolute - 1] == b'\\' {
-                            continue;
+                    for wiki in &wiki {
+                        for capture in wiki.captures_iter(raw) {
+                            let matched = capture.get(0).expect("full match");
+                            let Some(target) = capture.name("target") else {
+                                continue;
+                            };
+                            let absolute = range.start + matched.start();
+                            if absolute > 0 && body.as_bytes()[absolute - 1] == b'\\' {
+                                continue;
+                            }
+                            let line = body_start_line
+                                + body[..absolute]
+                                    .bytes()
+                                    .filter(|byte| *byte == b'\n')
+                                    .count();
+                            markdown_links.push(RawLink {
+                                target: target.as_str().trim().into(),
+                                line,
+                                syntax: LinkSyntax::Wiki,
+                                sections: heading_stack.clone(),
+                            });
                         }
-                        let line = body_start_line
-                            + body[..absolute]
-                                .bytes()
-                                .filter(|byte| *byte == b'\n')
-                                .count();
-                        markdown_links.push(RawLink {
-                            target: capture[1].trim().into(),
-                            line,
-                            syntax: LinkSyntax::Wiki,
-                            sections: heading_stack.clone(),
-                        });
                     }
                 }
             }
@@ -445,7 +449,7 @@ fn validate_sections(config: &Config, path: &str, page: &ParsedPage, findings: &
             .iter()
             .filter(|heading| heading.text == rule.heading)
             .count();
-        let minimum = rule.minimum.unwrap_or(usize::from(rule.required));
+        let minimum = rule.minimum();
         if count < minimum {
             findings.push(Finding {
                 path: path.into(),
@@ -677,10 +681,10 @@ mod tests {
     #[test]
     fn wiki_links_ignore_code_and_escaped_examples() {
         let page = parse_page(
-            "# Links\n\n[[real]]\n\n`[[inline]]`\n\n```md\n[[fenced]]\n```\n\n\\[[escaped]]\n",
+            "# Links\n\n{{real}}\n\n[[not configured]]\n\n`{{inline}}`\n\n```md\n{{fenced}}\n```\n\n\\{{escaped}}\n",
             &LinkConfig {
-                markdown: true,
-                wiki: true,
+                markdown: false,
+                wiki: vec![r"\{\{(?P<target>[^}|#]+)(?:#[^}|]+)?(?:\|[^}]+)?\}\}".into()],
             },
         )
         .unwrap();
@@ -698,7 +702,7 @@ mod tests {
         let config = Config::from_yaml(
             r#"documents:
   include: ["**/*.md"]
-links: {markdown: true, wiki: false}
+links: {markdown: true}
 relations:
   - name: friend
     reciprocal: friend
@@ -724,6 +728,28 @@ provider: {dimensions: 2}
             (edge.relation == "friend" && edge.source != "c.md" && edge.target != "c.md")
                 || (edge.relation == "source" && edge.source != "b.md" && edge.target != "b.md")
         }));
+    }
+
+    #[test]
+    fn required_sections_cannot_be_disabled_by_zero_minimum() {
+        let config = Config::from_yaml(
+            r#"documents:
+  include: ["**/*.md"]
+sections:
+  - heading: Notes
+    required: true
+    minimum: 0
+provider: {dimensions: 2}
+"#,
+        )
+        .unwrap();
+        let pages = HashMap::from([("page.md".into(), "# Other\n".into())]);
+        let findings = validate_corpus(&config, &pages, &HashMap::new()).unwrap_err();
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.message.contains("minimum is 1"))
+        );
     }
 
     #[test]

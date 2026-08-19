@@ -67,6 +67,27 @@ pub fn tracked_config_files(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+pub fn untracked_sidecars(root: &Path) -> Result<Vec<String>> {
+    let output = checked(
+        root,
+        [
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            "*.mdstore",
+        ],
+    )?;
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect())
+}
+
 pub fn is_tracked(root: &Path, path: &str) -> Result<bool> {
     validate_repo_path(path)?;
     let pathspec = literal_pathspec(path);
@@ -144,12 +165,16 @@ pub fn read_head_text(root: &Path, path: &str) -> Result<String> {
 }
 
 pub fn recover_worktree(root: &Path) -> Result<Vec<String>> {
-    let output = checked(root, ["diff", "HEAD", "--name-only", "-z"])?;
-    let modified: Vec<String> = output
+    let worktree = checked(root, ["diff", "--name-only", "-z"])?;
+    let staged = checked(root, ["diff", "--cached", "--name-only", "-z", "HEAD"])?;
+    let modified: Vec<String> = worktree
         .stdout
         .split(|byte| *byte == 0)
+        .chain(staged.stdout.split(|byte| *byte == 0))
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
     if !modified.is_empty() {
         let pathspecs: Vec<String> = modified.iter().map(|path| literal_pathspec(path)).collect();
@@ -221,10 +246,16 @@ pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Resul
         ensure_repository_path_safe(root, path)?;
         if let Some(content) = content {
             let parent = target.parent().context("target has no parent")?;
+            let permissions = fs::metadata(&target)
+                .ok()
+                .map(|metadata| metadata.permissions());
             fs::create_dir_all(parent)?;
             let mut temp = tempfile::NamedTempFile::new_in(parent)?;
             temp.write_all(content.as_bytes())?;
             temp.as_file().sync_all()?;
+            if let Some(permissions) = permissions {
+                temp.as_file().set_permissions(permissions)?;
+            }
             temp.persist(&target).map_err(|error| error.error)?;
         } else if target.exists() {
             fs::remove_file(&target)?;
@@ -600,6 +631,40 @@ mod tests {
     }
 
     #[test]
+    fn recovery_repairs_index_after_ref_publication() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        checked(root, ["init", "-b", "main"]).unwrap();
+        checked(root, ["config", "user.name", "mdstore test"]).unwrap();
+        checked(root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
+        checked(root, ["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(root.join("note.md"), "old\n").unwrap();
+        checked(root, ["add", "note.md"]).unwrap();
+        checked(root, ["commit", "-m", "initial"]).unwrap();
+        let parent = head(root).unwrap();
+        fs::write(root.join("note.md"), "new\n").unwrap();
+        let tree = stage_tree(root, &parent, &["note.md".into()])
+            .unwrap()
+            .unwrap();
+        commit_tree(root, &tree, &parent, "new content").unwrap();
+
+        assert!(
+            !checked(root, ["status", "--porcelain"])
+                .unwrap()
+                .stdout
+                .is_empty()
+        );
+        recover_worktree(root).unwrap();
+        assert!(
+            checked(root, ["status", "--porcelain"])
+                .unwrap()
+                .stdout
+                .is_empty()
+        );
+        assert_eq!(fs::read_to_string(root.join("note.md")).unwrap(), "new\n");
+    }
+
+    #[test]
     fn stage_tree_preserves_validated_bytes_despite_clean_filters_and_eol_rules() {
         let repository = tempfile::tempdir().unwrap();
         let root = repository.path();
@@ -646,7 +711,15 @@ mod tests {
         checked(root, ["add", "note?.md", "note1.md"]).unwrap();
         checked(root, ["commit", "-m", "initial"]).unwrap();
 
-        fs::write(root.join("note?.md"), "question new\n").unwrap();
+        write_changes(root, &[("note?.md".into(), Some("question new\n".into()))]).unwrap();
+        assert_ne!(
+            fs::metadata(root.join("note?.md"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
         fs::write(root.join("note1.md"), "one concurrent\n").unwrap();
         checked(root, ["add", "note1.md"]).unwrap();
         let tree = stage_tree(root, &head(root).unwrap(), &["note?.md".into()])

@@ -352,6 +352,38 @@ mod tests {
     use crate::{config::LinkConfig, markdown::parse_page};
 
     #[test]
+    fn default_chunking_matches_gbrain_300_word_50_word_fixtures() {
+        const GBRAIN_TARGET_WORDS: usize = 300;
+        const GBRAIN_OVERLAP_WORDS: usize = 50;
+        for (word_count, gbrain_chunk_count) in [(300, 1), (550, 2), (650, 3), (800, 3)] {
+            let text = std::iter::repeat_n("word", word_count)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let parsed = parse_page(&text, &LinkConfig::default()).unwrap();
+            let chunks = chunk_page(&text, &parsed, &ChunkConfig::default(), &[]);
+
+            assert_eq!(
+                chunks.len(),
+                gbrain_chunk_count,
+                "fixture with {word_count} words"
+            );
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| chunk.text.split_whitespace().count() <= GBRAIN_TARGET_WORDS + 20)
+            );
+            assert!(chunks.iter().skip(1).all(|chunk| {
+                let body_words = chunk.text.split_whitespace().count();
+                let embedding_words = chunk.embedding_text.split_whitespace().count();
+                embedding_words
+                    .saturating_sub(body_words)
+                    .abs_diff(GBRAIN_OVERLAP_WORDS)
+                    <= 5
+            }));
+        }
+    }
+
+    #[test]
     fn respects_headings_and_code_fences() {
         let text = "---\ntitle: Demo\n---\n# One\n\nParagraph.\n\n```md\n# Not a heading\nfn x() {}\n```\n\nVisible\n=======\n\nShown.\n\nHidden\n------\n\nSecret.\n\n# Two\n\nOther.\n";
         let parsed = parse_page(text, &LinkConfig::default()).unwrap();

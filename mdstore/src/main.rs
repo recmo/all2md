@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -47,9 +51,10 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let cli = Cli::parse();
+    let root = repository_root(&cli.root)?;
     match cli.command {
         Command::Serve => {
-            let store = Store::open(&cli.root)?;
+            let store = Store::open(&root)?;
             let config = store.config();
             let listen = config
                 .server
@@ -72,7 +77,7 @@ async fn main() -> Result<()> {
             mdstore::mcp::serve(store, listen, token).await?;
         }
         Command::Search { query, variants } => {
-            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
             print_json(
                 &client
                     .call_tool("search", json!({"query": query, "variants": variants}))
@@ -87,7 +92,7 @@ async fn main() -> Result<()> {
             if end_line.is_some() && start_line.is_none() {
                 bail!("--end-line requires --start-line");
             }
-            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
             let mut arguments = json!({"path": path});
             if let Some(start) = start_line {
                 arguments["start_line"] = json!(start);
@@ -97,7 +102,7 @@ async fn main() -> Result<()> {
         }
         Command::Apply { file } => {
             let request: ApplyEditsRequest = serde_json::from_slice(&std::fs::read(file)?)?;
-            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
             print_json(
                 &client
                     .call_tool("apply_edits", serde_json::to_value(request)?)
@@ -105,7 +110,7 @@ async fn main() -> Result<()> {
             )?;
         }
         Command::Validate => {
-            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
             let response = client.command("validate").await?;
             if response["valid"].as_bool() == Some(true) {
                 println!("valid");
@@ -115,19 +120,41 @@ async fn main() -> Result<()> {
             }
         }
         Command::Reindex => {
-            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
             print_json(&client.command("reindex").await?)?;
         }
         Command::Status => {
-            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
             print_json(&client.status().await?)?;
         }
         Command::Push => {
-            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
             print_json(&client.command("push").await?)?;
         }
     }
     Ok(())
+}
+
+fn repository_root(path: &Path) -> Result<PathBuf> {
+    let output = ProcessCommand::new("git")
+        .current_dir(path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .with_context(|| format!("locate Git repository for {}", path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "locate Git repository for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let root = std::str::from_utf8(&output.stdout)
+        .context("Git repository root is not UTF-8")?
+        .trim();
+    if root.is_empty() {
+        bail!("Git returned an empty repository root");
+    }
+    std::fs::canonicalize(root).with_context(|| format!("canonicalize Git repository root {root}"))
 }
 
 struct DaemonClient {
@@ -295,5 +322,19 @@ mod tests {
         let client = DaemonClient::from_repository(root, Some("http://127.0.0.1:4141/")).unwrap();
         assert_eq!(client.base_url, "http://127.0.0.1:4141");
         assert!(client.bearer_token.is_none());
+    }
+
+    #[test]
+    fn nested_root_resolves_to_the_repository_toplevel() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        git(root, &["init", "-b", "main"]);
+        let nested = root.join("notes/archive");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            repository_root(&nested).unwrap(),
+            root.canonicalize().unwrap()
+        );
     }
 }
