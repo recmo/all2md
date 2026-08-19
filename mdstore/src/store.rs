@@ -114,6 +114,8 @@ enum ReplayState {
     Partial,
 }
 
+const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PageResponse {
     pub path: String,
@@ -134,39 +136,70 @@ pub struct StatusResponse {
 
 impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Arc<Self>> {
-        let (root, head, config, git_dir) = Self::load_repository(root)?;
-        let provider = zeroentropy_provider(config.provider.clone());
-        Self::open_inner(
-            root,
-            head,
-            config,
-            provider,
-            git_dir,
-            Some(zeroentropy_provider),
-        )
+        let (root, git_dir) = Self::prepare_repository(root)?;
+        Self::open_stable(root, git_dir, None)
     }
 
     pub fn open_with_provider(
         root: impl AsRef<Path>,
         provider: Arc<dyn RetrievalProvider>,
     ) -> Result<Arc<Self>> {
-        let (root, head, config, git_dir) = Self::load_repository(root)?;
-        Self::open_inner(root, head, config, provider, git_dir, None)
+        let (root, git_dir) = Self::prepare_repository(root)?;
+        Self::open_stable(root, git_dir, Some(provider))
     }
 
-    fn load_repository(root: impl AsRef<Path>) -> Result<(PathBuf, String, Config, PathBuf)> {
+    fn prepare_repository(root: impl AsRef<Path>) -> Result<(PathBuf, PathBuf)> {
         let root = root
             .as_ref()
             .canonicalize()
             .context("resolve repository root")?;
         git::ensure_repository(&root)?;
         let git_dir = git::git_dir(&root)?;
-        let head = git::head(&root)?;
-        let config_text = git::read_text(&root, &head, ".mdstore/config.yaml")
+        for _ in 0..STARTUP_SNAPSHOT_ATTEMPTS {
+            let (head, _) = Self::load_config(&root)?;
+            if git::head(&root)? == head {
+                git::recover_worktree(&root)?;
+                return Ok((root, git_dir));
+            }
+        }
+        bail!("repository HEAD kept changing during startup")
+    }
+
+    fn open_stable(
+        root: PathBuf,
+        git_dir: PathBuf,
+        injected_provider: Option<Arc<dyn RetrievalProvider>>,
+    ) -> Result<Arc<Self>> {
+        for _ in 0..STARTUP_SNAPSHOT_ATTEMPTS {
+            let (head, config) = Self::load_config(&root)?;
+            let (provider, provider_factory) = if let Some(provider) = &injected_provider {
+                (provider.clone(), None)
+            } else {
+                let factory: fn(ProviderConfig) -> Arc<dyn RetrievalProvider> =
+                    zeroentropy_provider;
+                (zeroentropy_provider(config.provider.clone()), Some(factory))
+            };
+            let store = Self::open_inner(
+                root.clone(),
+                head.clone(),
+                config,
+                provider,
+                git_dir.clone(),
+                provider_factory,
+            )?;
+            if git::head(&root)? == head {
+                return Ok(store);
+            }
+        }
+        bail!("repository HEAD kept changing during startup")
+    }
+
+    fn load_config(root: &Path) -> Result<(String, Config)> {
+        let head = git::head(root)?;
+        let config_text = git::read_text(root, &head, ".mdstore/config.yaml")
             .map_err(|_| anyhow!(".mdstore/config.yaml must be tracked by Git"))?;
         let config = Config::from_yaml(&config_text)?;
-        git::recover_worktree(&root)?;
-        Ok((root, head, config, git_dir))
+        Ok((head, config))
     }
 
     fn open_inner(
@@ -1083,7 +1116,10 @@ fn request_digest(request: &ApplyEditsRequest) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::{
+        process::Command,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     use super::*;
 
@@ -1105,6 +1141,45 @@ mod tests {
         format!(
             "documents:\n  include: ['{document}']\nprovider:\n  dimensions: 2\ngit:\n  push: false\n"
         )
+    }
+
+    struct AdvancingProvider {
+        root: PathBuf,
+        advanced: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl RetrievalProvider for AdvancingProvider {
+        async fn embed(&self, _: InputType, _: &[String]) -> Result<Vec<Vec<f32>>> {
+            unreachable!()
+        }
+
+        async fn rerank(
+            &self,
+            _: &str,
+            _: &[String],
+            _: usize,
+        ) -> Result<Vec<crate::provider::RerankResult>> {
+            unreachable!()
+        }
+
+        fn model(&self) -> &str {
+            "advancing"
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+
+        fn embedding_provider_identity(&self) -> String {
+            if !self.advanced.swap(true, Ordering::SeqCst) {
+                fs::write(self.root.join(".mdstore/config.yaml"), config("new.md")).unwrap();
+                fs::write(self.root.join("new.md"), "new snapshot\n").unwrap();
+                run_git(&self.root, &["add", ".mdstore/config.yaml", "new.md"]);
+                run_git(&self.root, &["commit", "-q", "-m", "new snapshot"]);
+            }
+            "advancing-provider".into()
+        }
     }
 
     #[test]
@@ -1149,31 +1224,11 @@ mod tests {
         );
         run_git(root, &["commit", "-q", "-m", "old snapshot"]);
 
-        let old_head = run_git(root, &["rev-parse", "HEAD"]);
-        let old_config =
-            Config::from_yaml(&git::read_text(root, &old_head, ".mdstore/config.yaml").unwrap())
-                .unwrap();
-        let git_dir = git::git_dir(root).unwrap();
-
-        fs::write(root.join(".mdstore/config.yaml"), config("new.md")).unwrap();
-        fs::write(root.join("new.md"), "new snapshot\n").unwrap();
-        run_git(root, &["add", ".mdstore/config.yaml", "new.md"]);
-        run_git(root, &["commit", "-q", "-m", "new snapshot"]);
-
-        let store = Store::open_inner(
-            root.to_path_buf(),
-            old_head,
-            old_config.clone(),
-            zeroentropy_provider(old_config.provider),
-            git_dir,
-            None,
-        )
-        .unwrap();
-        assert_eq!(store.config().documents.include, ["old.md"]);
-        assert!(store.get_page("old.md", None).is_ok());
-        assert!(store.get_page("new.md", None).is_err());
-
-        assert!(matches!(store.push().unwrap(), PushState::Disabled));
+        let provider = Arc::new(AdvancingProvider {
+            root: root.to_path_buf(),
+            advanced: AtomicBool::new(false),
+        });
+        let store = Store::open_with_provider(root, provider).unwrap();
         assert_eq!(store.config().documents.include, ["new.md"]);
         assert!(store.get_page("old.md", None).is_err());
         assert!(store.get_page("new.md", None).is_ok());
