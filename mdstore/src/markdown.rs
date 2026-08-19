@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, ops::Range, path::Path};
 
 use anyhow::{Context, Result};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -81,6 +81,7 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
     let mut code_blocks = Vec::new();
     let mut structural_boundaries = Vec::new();
     let mut markdown_links = Vec::new();
+    let mut wiki_exclusions = Vec::new();
     let mut heading: Option<(u8, String, usize)> = None;
     let mut heading_stack = Vec::new();
     let mut code_depth = 0_usize;
@@ -102,6 +103,7 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
             }
             Event::Start(Tag::CodeBlock(_)) => {
                 code_depth += 1;
+                wiki_exclusions.push(range.clone());
                 let end_offset = range.end.saturating_sub(1);
                 code_blocks.push(SourceRange {
                     start_line: line,
@@ -125,34 +127,12 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
                 if let Some((_, text, _)) = &mut heading {
                     text.push_str(&value);
                 }
-                if code_depth == 0 {
-                    let raw = &body[range.clone()];
-                    for wiki in &wiki {
-                        for capture in wiki.captures_iter(raw) {
-                            let matched = capture.get(0).expect("full match");
-                            let Some(target) = capture.name("target") else {
-                                continue;
-                            };
-                            let absolute = range.start + matched.start();
-                            if absolute > 0 && body.as_bytes()[absolute - 1] == b'\\' {
-                                continue;
-                            }
-                            let line = body_start_line
-                                + body[..absolute]
-                                    .bytes()
-                                    .filter(|byte| *byte == b'\n')
-                                    .count();
-                            markdown_links.push(RawLink {
-                                target: target.as_str().trim().into(),
-                                line,
-                                syntax: LinkSyntax::Wiki,
-                                sections: heading_stack.clone(),
-                            });
-                        }
-                    }
+                if code_depth > 0 {
+                    wiki_exclusions.push(range.clone());
                 }
             }
             Event::Code(value) => {
+                wiki_exclusions.push(range.clone());
                 if let Some((_, text, _)) = &mut heading {
                     text.push_str(&value);
                 }
@@ -169,17 +149,38 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
                 }
             }
             Event::Start(Tag::Link { dest_url, .. }) if links.markdown => {
-                markdown_links.push(RawLink {
-                    target: dest_url.to_string(),
-                    line,
-                    syntax: LinkSyntax::Markdown,
-                    sections: heading_stack.clone(),
-                });
+                markdown_links.push((
+                    RawLink {
+                        target: dest_url.to_string(),
+                        line,
+                        syntax: LinkSyntax::Markdown,
+                        sections: heading_stack.clone(),
+                    },
+                    range.clone(),
+                ));
             }
-            Event::End(TagEnd::CodeBlock) => code_depth = code_depth.saturating_sub(1),
+            Event::Html(_) | Event::InlineHtml(_) => wiki_exclusions.push(range.clone()),
+            Event::End(TagEnd::CodeBlock) => {
+                wiki_exclusions.push(range.clone());
+                code_depth = code_depth.saturating_sub(1);
+            }
             _ => {}
         }
     }
+    let wiki_links = scan_wiki_links(body, body_start_line, &headings, &wiki, &wiki_exclusions);
+    let wiki_ranges: Vec<Range<usize>> =
+        wiki_links.iter().map(|(_, range)| range.clone()).collect();
+    let mut links: Vec<RawLink> = markdown_links
+        .into_iter()
+        .filter(|(_, markdown)| {
+            !wiki_ranges
+                .iter()
+                .any(|wiki| wiki.start <= markdown.start && wiki.end >= markdown.end)
+        })
+        .map(|(link, _)| link)
+        .collect();
+    links.extend(wiki_links.into_iter().map(|(link, _)| link));
+    links.sort_by_key(|link| link.line);
     structural_boundaries.sort_unstable();
     structural_boundaries.dedup();
     Ok(ParsedPage {
@@ -188,8 +189,74 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
         headings,
         code_blocks,
         structural_boundaries,
-        links: markdown_links,
+        links,
     })
+}
+
+fn scan_wiki_links(
+    body: &str,
+    body_start_line: usize,
+    headings: &[Heading],
+    patterns: &[Regex],
+    exclusions: &[Range<usize>],
+) -> Vec<(RawLink, Range<usize>)> {
+    let mut matches = Vec::new();
+    for pattern in patterns {
+        for capture in pattern.captures_iter(body) {
+            let matched = capture.get(0).expect("full match");
+            let range = matched.range();
+            let Some(target) = capture.name("target") else {
+                continue;
+            };
+            if is_escaped(body, range.start)
+                || exclusions
+                    .iter()
+                    .any(|excluded| excluded.start < range.end && range.start < excluded.end)
+            {
+                continue;
+            }
+            let line = body_start_line
+                + body[..range.start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count();
+            matches.push((range, target.as_str().trim().to_owned(), line));
+        }
+    }
+    matches.sort_by_key(|(range, _, _)| range.start);
+    let mut heading_index = 0;
+    let mut heading_stack = Vec::new();
+    matches
+        .into_iter()
+        .map(|(range, target, line)| {
+            while let Some(heading) = headings.get(heading_index)
+                && heading.line < line
+            {
+                heading_stack.truncate(usize::from(heading.level.saturating_sub(1)));
+                heading_stack.push(heading.text.clone());
+                heading_index += 1;
+            }
+            (
+                RawLink {
+                    target,
+                    line,
+                    syntax: LinkSyntax::Wiki,
+                    sections: heading_stack.clone(),
+                },
+                range,
+            )
+        })
+        .collect()
+}
+
+fn is_escaped(text: &str, offset: usize) -> bool {
+    text.as_bytes()[..offset]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
@@ -694,6 +761,38 @@ mod tests {
                 .map(|link| link.target.as_str())
                 .collect::<Vec<_>>(),
             ["real"]
+        );
+    }
+
+    #[test]
+    fn configured_wiki_links_take_precedence_over_markdown_parsing() {
+        let config = Config::from_yaml(
+            r#"documents:
+  include: ["**/*.md"]
+links:
+  markdown: true
+  wiki: ['\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]']
+relations:
+  - name: markdown
+    selector: {kind: markdown_links, syntax: markdown}
+  - name: wiki
+    selector: {kind: markdown_links, syntax: wiki}
+provider: {dimensions: 2}
+"#,
+        )
+        .unwrap();
+        let pages = HashMap::from([
+            ("a.md".into(), "[[b#Part|Bee]]\n".into()),
+            ("b.md".into(), "B\n".into()),
+        ]);
+        let (_, edges) = validate_corpus(&config, &pages, &HashMap::new()).unwrap();
+        assert_eq!(
+            edges,
+            [Edge {
+                source: "a.md".into(),
+                relation: "wiki".into(),
+                target: "b.md".into(),
+            }]
         );
     }
 

@@ -351,36 +351,60 @@ mod tests {
     use super::*;
     use crate::{config::LinkConfig, markdown::parse_page};
 
+    fn tokens(text: &str) -> Vec<&str> {
+        text.split_whitespace().collect()
+    }
+
     #[test]
     fn default_chunking_matches_gbrain_300_word_50_word_fixtures() {
-        const GBRAIN_TARGET_WORDS: usize = 300;
-        const GBRAIN_OVERLAP_WORDS: usize = 50;
-        for (word_count, gbrain_chunk_count) in [(300, 1), (550, 2), (650, 3), (800, 3)] {
-            let text = std::iter::repeat_n("word", word_count)
-                .collect::<Vec<_>>()
-                .join(" ");
-            let parsed = parse_page(&text, &LinkConfig::default()).unwrap();
-            let chunks = chunk_page(&text, &parsed, &ChunkConfig::default(), &[]);
-
-            assert_eq!(
-                chunks.len(),
-                gbrain_chunk_count,
-                "fixture with {word_count} words"
-            );
-            assert!(
-                chunks
-                    .iter()
-                    .all(|chunk| chunk.text.split_whitespace().count() <= GBRAIN_TARGET_WORDS + 20)
-            );
-            assert!(chunks.iter().skip(1).all(|chunk| {
-                let body_words = chunk.text.split_whitespace().count();
-                let embedding_words = chunk.embedding_text.split_whitespace().count();
-                embedding_words
-                    .saturating_sub(body_words)
-                    .abs_diff(GBRAIN_OVERLAP_WORDS)
-                    <= 5
-            }));
+        let words: Vec<String> = (0..800).map(|index| format!("w{index:03}")).collect();
+        let mut gbrain = Vec::new();
+        let mut start = 0;
+        loop {
+            let end = (start + 300).min(words.len());
+            gbrain.push(&words[start..end]);
+            if end == words.len() {
+                break;
+            }
+            start = end - 50;
         }
+        assert_eq!(
+            gbrain
+                .iter()
+                .map(|window| (
+                    window.first().unwrap().as_str(),
+                    window.last().unwrap().as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [("w000", "w299"), ("w250", "w549"), ("w500", "w799")]
+        );
+        for windows in gbrain.windows(2) {
+            assert_eq!(&windows[0][250..], &windows[1][..50]);
+        }
+
+        let text = words.join(" ");
+        let parsed = parse_page(&text, &LinkConfig::default()).unwrap();
+        let chunks = chunk_page(&text, &parsed, &ChunkConfig::default(), &[]);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| {
+                    let words = tokens(&chunk.text);
+                    (*words.first().unwrap(), *words.last().unwrap())
+                })
+                .collect::<Vec<_>>(),
+            [("w000", "w319"), ("w320", "w639"), ("w640", "w799")]
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| {
+                    let words = tokens(&chunk.embedding_text);
+                    (*words.first().unwrap(), *words.last().unwrap())
+                })
+                .collect::<Vec<_>>(),
+            [("w000", "w319"), ("w272", "w639"), ("w592", "w799")]
+        );
     }
 
     #[test]

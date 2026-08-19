@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    fs,
+    error::Error,
+    fmt, fs,
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,10 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     chunk::chunk_page,
-    config::{
-        Config, ProviderConfig, ensure_repository_path_safe, read_repository_text,
-        validate_repo_path,
-    },
+    config::{Config, ProviderConfig, ensure_repository_path_safe, validate_repo_path},
     git::{self, PushState},
     hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
     markdown::{Edge, Finding, ParsedPage, project_metadata, validate_corpus},
@@ -65,6 +63,23 @@ pub struct ApplyEditsResponse {
     pub embedding_state: String,
 }
 
+#[derive(Debug)]
+pub struct ValidationError {
+    pub findings: Vec<Finding>,
+}
+
+impl fmt::Display for ValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "validation failed")?;
+        if let Ok(findings) = serde_json::to_string_pretty(&self.findings) {
+            write!(formatter, ":\n{findings}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for ValidationError {}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyStatus {
@@ -77,7 +92,6 @@ struct PendingReceipt {
     base_head: String,
     tree: String,
     touched_paths: Vec<String>,
-    fresh_hashlines: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,11 +120,11 @@ impl Store {
             .context("resolve repository root")?;
         git::ensure_repository(&root)?;
         let git_dir = git::git_dir(&root)?;
-        if git::read_head_text(&root, ".mdstore/config.yaml").is_err() {
-            bail!(".mdstore/config.yaml must be tracked by Git");
-        }
+        let head = git::head(&root)?;
+        let config_text = git::read_text(&root, &head, ".mdstore/config.yaml")
+            .map_err(|_| anyhow!(".mdstore/config.yaml must be tracked by Git"))?;
+        let config = Config::from_yaml(&config_text)?;
         git::recover_worktree(&root)?;
-        let config = Config::load(&root)?;
         let provider = zeroentropy_provider(config.provider.clone());
         Self::open_inner(root, config, provider, git_dir, Some(zeroentropy_provider))
     }
@@ -131,14 +145,14 @@ impl Store {
         git_dir: PathBuf,
         provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     ) -> Result<Arc<Self>> {
-        let pages = load_pages(&root, &config)?;
-        let extra = load_config_files(&root)?;
+        let head = git::head(&root)?;
+        let pages = load_pages(&root, &head, &config)?;
+        let extra = load_config_files(&root, &head)?;
         let (parsed, edges) = validate_corpus(&config, &pages, &extra).map_err(|findings| {
             anyhow!(serde_json::to_string_pretty(&findings).unwrap_or_default())
         })?;
         ensure_sidecars_ignored(&root, pages.keys().map(String::as_str))?;
         let index = build_index(&root, &config, &pages, &parsed, &edges, provider.as_ref());
-        let head = git::head(&root)?;
         let blocked = read_blocked(&git_dir)?;
         Ok(Arc::new(Self {
             root,
@@ -281,8 +295,13 @@ impl Store {
         let mut originals = HashMap::new();
         for path in &paths {
             ensure_repository_path_safe(&self.root, path)?;
-            if self.root.join(path).exists() {
-                originals.insert(path.clone(), read_repository_text(&self.root, path)?);
+            let original = if path.ends_with(".md") && !path.starts_with(".mdstore/") {
+                current.pages.get(path)
+            } else {
+                current.config_files.get(path)
+            };
+            if let Some(original) = original {
+                originals.insert(path.clone(), original.clone());
             }
         }
         let applied = apply_operations_with_ranges(&originals, &request.edits)?;
@@ -319,18 +338,11 @@ impl Store {
             bail!("server configuration changes require a daemon restart");
         }
         if has_config {
-            pages = load_pages(&self.root, &config)?;
+            pages = load_pages(&self.root, &base_head, &config)?;
         }
         ensure_pages_match_config(&config, &pages)?;
-        let (parsed, edges) = match validate_corpus(&config, &pages, &extra) {
-            Ok(value) => value,
-            Err(findings) => {
-                bail!(
-                    "validation failed:\n{}",
-                    serde_json::to_string_pretty(&findings)?
-                );
-            }
-        };
+        let (parsed, edges) = validate_corpus(&config, &pages, &extra)
+            .map_err(|findings| ValidationError { findings })?;
         ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
         let provider = if config.provider != current.config.provider {
             let factory = self
@@ -350,7 +362,7 @@ impl Store {
         if let Err(error) = git::write_changes(&self.root, &ordered) {
             return Err(rollback_failure(&self.root, &path_list, error));
         }
-        let tree = match git::stage_tree(&self.root, &base_head, &path_list) {
+        let tree = match git::stage_tree(&self.root, &base_head, &ordered) {
             Ok(value) => value,
             Err(error) => {
                 return Err(rollback_failure(&self.root, &path_list, error));
@@ -362,29 +374,38 @@ impl Store {
                 base_head,
                 tree,
                 touched_paths: path_list.clone(),
-                fresh_hashlines: fresh_hashlines.clone(),
             };
             if let Err(error) = self.write_pending(&digest, &pending) {
                 return Err(rollback_failure(&self.root, &path_list, error));
             }
-            if let Err(error) = git::commit_tree(
+            let commit = match git::commit_tree(
                 &self.root,
                 &pending.tree,
                 &pending.base_head,
                 &request.edit_summary,
             ) {
-                let error = rollback_failure(&self.root, &path_list, error);
-                return match self.remove_pending(&digest) {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(anyhow!("{error}; pending cleanup also failed: {cleanup}")),
-                };
-            }
-            if let Err(error) = git::sync_index(&self.root, &path_list) {
+                Ok(commit) => commit,
+                Err(error) => {
+                    let error = rollback_failure(&self.root, &path_list, error);
+                    return match self.remove_pending(&digest) {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => {
+                            Err(anyhow!("{error}; pending cleanup also failed: {cleanup}"))
+                        }
+                    };
+                }
+            };
+            if let Err(error) = git::sync_index(&self.root, &commit, &path_list) {
                 return Err(rollback_failure(&self.root, &path_list, error));
             }
-        }
-        if committed {
-            *self.head.write() = git::head(&self.root)?;
+            *self.head.write() = commit.clone();
+            if git::head(&self.root)? != commit {
+                return Err(rollback_failure(
+                    &self.root,
+                    &path_list,
+                    anyhow!("repository HEAD advanced during edit publication; retry the request"),
+                ));
+            }
         }
         let push = if committed {
             git::push(&self.root, &config)?
@@ -514,7 +535,7 @@ impl Store {
                 provider.dimensions(),
                 &chunks,
                 &vectors,
-            );
+            )?;
             if self.state.read().generation != generation {
                 return Ok(());
             }
@@ -570,9 +591,13 @@ impl Store {
         if current == *self.head.read() {
             return Ok(());
         }
-        let config = Config::load(&self.root)?;
-        let pages = load_pages(&self.root, &config)?;
-        let extra = load_config_files(&self.root)?;
+        let config = Config::from_yaml(&git::read_text(
+            &self.root,
+            &current,
+            ".mdstore/config.yaml",
+        )?)?;
+        let pages = load_pages(&self.root, &current, &config)?;
+        let extra = load_config_files(&self.root, &current)?;
         let (parsed, edges) = match validate_corpus(&config, &pages, &extra) {
             Ok(value) => value,
             Err(findings) => {
@@ -668,14 +693,14 @@ impl Store {
         #[derive(Deserialize)]
         struct StoredReceipt {
             touched_paths: Vec<String>,
-            fresh_hashlines: HashMap<String, String>,
         }
         let stored: StoredReceipt = serde_json::from_slice(&fs::read(path)?)?;
+        let fresh_hashlines = self.current_hashlines(&stored.touched_paths);
         Ok(Some(ApplyEditsResponse {
             status: ApplyStatus::AlreadyApplied,
             push: self.current_push_state()?,
             touched_paths: stored.touched_paths,
-            fresh_hashlines: stored.fresh_hashlines,
+            fresh_hashlines,
             validation_findings: Vec::new(),
             embedding_state: "pending_or_ready".into(),
         }))
@@ -685,7 +710,6 @@ impl Store {
         let path = self.receipt_path(digest);
         let value = serde_json::json!({
             "touched_paths": response.touched_paths,
-            "fresh_hashlines": response.fresh_hashlines,
         });
         write_atomic(&path, &serde_json::to_vec(&value)?)
     }
@@ -719,14 +743,28 @@ impl Store {
         let response = ApplyEditsResponse {
             status: ApplyStatus::AlreadyApplied,
             push,
+            fresh_hashlines: self.current_hashlines(&pending.touched_paths),
             touched_paths: pending.touched_paths,
-            fresh_hashlines: pending.fresh_hashlines,
             validation_findings: Vec::new(),
             embedding_state: "pending_or_ready".into(),
         };
         self.write_receipt(digest, &response)?;
         self.remove_pending(digest)?;
         Ok(Some(response))
+    }
+
+    fn current_hashlines(&self, paths: &[String]) -> HashMap<String, String> {
+        let state = self.state.read();
+        paths
+            .iter()
+            .filter_map(|path| {
+                state
+                    .pages
+                    .get(path)
+                    .or_else(|| state.config_files.get(path))
+                    .map(|text| (path.clone(), render(text, None)))
+            })
+            .collect()
     }
 
     fn current_push_state(&self) -> Result<PushState> {
@@ -751,21 +789,21 @@ impl Store {
     }
 }
 
-fn load_pages(root: &Path, config: &Config) -> Result<HashMap<String, String>> {
-    git::tracked_markdown(root, config)?
+fn load_pages(root: &Path, revision: &str, config: &Config) -> Result<HashMap<String, String>> {
+    git::tracked_markdown(root, revision, config)?
         .into_iter()
         .map(|path| {
-            read_repository_text(root, &path)
+            git::read_text(root, revision, &path)
                 .with_context(|| format!("read tracked Markdown {path}"))
                 .map(|text| (path, text))
         })
         .collect()
 }
 
-fn load_config_files(root: &Path) -> Result<HashMap<String, String>> {
-    git::tracked_config_files(root)?
+fn load_config_files(root: &Path, revision: &str) -> Result<HashMap<String, String>> {
+    git::tracked_config_files(root, revision)?
         .into_iter()
-        .map(|path| read_repository_text(root, &path).map(|text| (path, text)))
+        .map(|path| git::read_text(root, revision, &path).map(|text| (path, text)))
         .collect()
 }
 

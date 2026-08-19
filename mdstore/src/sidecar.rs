@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::chunk::Chunk;
+use crate::{chunk::Chunk, provider::validate_vectors};
 
 const MAGIC: &[u8; 8] = b"MDSTORE\0";
 const VERSION: u16 = 2;
@@ -29,7 +29,6 @@ pub struct SidecarChunk {
 }
 
 impl Sidecar {
-    #[must_use]
     pub fn new(
         source: &str,
         provider_identity: &str,
@@ -37,7 +36,8 @@ impl Sidecar {
         dimensions: usize,
         chunks: &[Chunk],
         vectors: &[Vec<f32>],
-    ) -> Self {
+    ) -> Result<Self> {
+        validate_vectors(vectors, chunks.len(), dimensions)?;
         let chunks = chunks
             .iter()
             .zip(vectors)
@@ -52,14 +52,14 @@ impl Sidecar {
                     .collect(),
             })
             .collect();
-        Self {
+        Ok(Self {
             version: VERSION,
             source_fingerprint: fingerprint(source),
             provider_identity: provider_identity.into(),
             model: model.into(),
             dimensions,
             chunks,
-        }
+        })
     }
 
     pub fn vectors_for(
@@ -79,7 +79,8 @@ impl Sidecar {
         {
             return None;
         }
-        self.chunks
+        let vectors: Option<Vec<Vec<f32>>> = self
+            .chunks
             .iter()
             .zip(chunks)
             .map(|(stored, chunk)| {
@@ -98,7 +99,10 @@ impl Sidecar {
                         .collect(),
                 )
             })
-            .collect()
+            .collect();
+        let vectors = vectors?;
+        validate_vectors(&vectors, chunks.len(), dimensions).ok()?;
+        Some(vectors)
     }
 }
 
@@ -148,14 +152,15 @@ mod tests {
             text: "hello".into(),
             embedding_text: "Demo\n\nhello".into(),
         }];
-        let sidecar = Sidecar::new(
+        let mut sidecar = Sidecar::new(
             "hello",
             "test-provider",
             "test",
             2,
             &chunks,
             &[vec![1.0, -2.0]],
-        );
+        )
+        .unwrap();
         write_atomic(&path, &sidecar).unwrap();
         let loaded = read(&path).unwrap();
         assert_eq!(
@@ -168,6 +173,23 @@ mod tests {
             loaded
                 .vectors_for("hello", "other-provider", "test", 2, &chunks)
                 .is_none()
+        );
+        sidecar.chunks[0].vector_le_f32 = f32::NAN.to_le_bytes().to_vec();
+        assert!(
+            sidecar
+                .vectors_for("hello", "test-provider", "test", 2, &chunks)
+                .is_none()
+        );
+        assert!(
+            Sidecar::new(
+                "hello",
+                "test-provider",
+                "test",
+                2,
+                &chunks,
+                &[vec![f32::INFINITY, 0.0]],
+            )
+            .is_err()
         );
     }
 }

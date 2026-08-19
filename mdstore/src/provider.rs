@@ -25,6 +25,21 @@ pub enum InputType {
     Document,
 }
 
+pub(crate) fn validate_vectors(
+    vectors: &[Vec<f32>],
+    expected_count: usize,
+    dimensions: usize,
+) -> Result<()> {
+    if vectors.len() != expected_count
+        || vectors.iter().any(|vector| {
+            vector.len() != dimensions || vector.iter().any(|value| !value.is_finite())
+        })
+    {
+        bail!("embedding response has unexpected count, dimensions, or non-finite values");
+    }
+    Ok(())
+}
+
 impl InputType {
     fn as_str(self) -> &'static str {
         match self {
@@ -151,19 +166,13 @@ impl RetrievalProvider for ZeroEntropyProvider {
             );
         }
         let body: EmbedResponse = response.json().await.context("decode embedding response")?;
-        if body.results.len() != input.len()
-            || body
-                .results
-                .iter()
-                .any(|result| result.embedding.len() != self.config.dimensions)
-        {
-            bail!("embedding response has unexpected count or dimensions");
-        }
-        Ok(body
+        let vectors: Vec<Vec<f32>> = body
             .results
             .into_iter()
             .map(|result| result.embedding)
-            .collect())
+            .collect();
+        validate_vectors(&vectors, input.len(), self.config.dimensions)?;
+        Ok(vectors)
     }
 
     async fn rerank(
@@ -340,6 +349,13 @@ mod tests {
         assert_eq!(identity, "zeroentropy:https://example.com/v1");
         assert!(!identity.contains("secret"));
         assert!(!identity.contains("password"));
+    }
+
+    #[test]
+    fn rejects_non_finite_embedding_values() {
+        assert!(validate_vectors(&[vec![1.0, f32::NAN]], 1, 2).is_err());
+        assert!(validate_vectors(&[vec![f32::INFINITY, 0.0]], 1, 2).is_err());
+        assert!(validate_vectors(&[vec![1.0, 0.0]], 1, 2).is_ok());
     }
 
     async fn embed(

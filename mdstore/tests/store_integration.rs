@@ -306,6 +306,36 @@ fn reciprocal_links_are_caller_authored_and_atomic() {
 }
 
 #[test]
+fn delayed_idempotent_retry_returns_current_hashlines() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let first = ApplyEditsRequest {
+        edit_summary: "first Alice edit".into(),
+        edits: vec![EditOperation::Replace {
+            path: "alice.md".into(),
+            anchor: format!("6:{}", short_hash("Alice profile.")),
+            content: "Alice first.".into(),
+        }],
+    };
+    store.apply_edits(&first).unwrap();
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "second Alice edit".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice first.")),
+                content: "Alice current.".into(),
+            }],
+        })
+        .unwrap();
+
+    let replay = store.apply_edits(&first).unwrap();
+    let hashline = &replay.fresh_hashlines["alice.md"];
+    assert!(hashline.contains("Alice current."));
+    assert!(!hashline.contains("Alice first."));
+}
+
+#[test]
 fn rejects_mixed_configuration_and_content_batch() {
     let repository = Repository::new();
     let store = repository.store();
@@ -424,6 +454,51 @@ fn startup_verifies_repository_ownership_before_recovery() {
     assert_eq!(
         fs::read_to_string(root.join("unrelated.txt")).unwrap(),
         "dirty\n"
+    );
+}
+
+#[test]
+fn reopened_state_reads_canonical_blobs_not_smudged_worktree_text() {
+    let repository = Repository::new();
+    fs::write(
+        repository.root.join(".gitattributes"),
+        "*.md filter=lowercase\n",
+    )
+    .unwrap();
+    command(
+        &repository.root,
+        &["config", "filter.lowercase.clean", "tr a-z A-Z"],
+    );
+    command(
+        &repository.root,
+        &["config", "filter.lowercase.smudge", "tr A-Z a-z"],
+    );
+    command(
+        &repository.root,
+        &["config", "filter.lowercase.required", "true"],
+    );
+    command(&repository.root, &["add", ".gitattributes"]);
+    command(&repository.root, &["commit", "-q", "-m", "add filters"]);
+    let store = Store::open(&repository.root).unwrap();
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "preserve mixed case".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "MiXeD profile.".into(),
+            }],
+        })
+        .unwrap();
+    drop(store);
+
+    let reopened = Store::open(&repository.root).unwrap();
+    assert!(
+        reopened
+            .get_page("alice.md", None)
+            .unwrap()
+            .content
+            .contains("MiXeD profile.")
     );
 }
 
@@ -721,10 +796,27 @@ async fn mcp_validates_protocol_and_json_rpc_envelopes() {
         .unwrap();
     assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
 
+    let malformed = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::OK);
+    let malformed: serde_json::Value =
+        serde_json::from_slice(&malformed.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(malformed["error"]["code"], -32700);
+
     for body in [
         serde_json::json!({"id": 1, "method": "tools/list"}),
         serde_json::json!({"jsonrpc": "1.0", "id": 1, "method": "tools/list"}),
         serde_json::json!({"jsonrpc": "2.0", "id": true, "method": "tools/list"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": null, "method": "tools/list"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 1.5, "method": "tools/list"}),
         serde_json::json!({"jsonrpc": "2.0", "id": 1}),
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": true}),
     ] {
@@ -742,6 +834,35 @@ async fn mcp_validates_protocol_and_json_rpc_envelopes() {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["error"]["code"], -32600);
+    }
+
+    for requested in ["2025-03-26", "2025-06-18"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": "initialize",
+                            "method": "initialize",
+                            "params": {
+                                "protocolVersion": requested,
+                                "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1"}
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(value["result"]["protocolVersion"], requested);
     }
 
     let notification = app
@@ -769,6 +890,48 @@ async fn mcp_validates_protocol_and_json_rpc_envelopes() {
             .unwrap()
             .to_bytes()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn mcp_apply_errors_preserve_structured_validation_findings() {
+    let repository = Repository::new();
+    let app = mdstore::mcp::router(repository.store(), None);
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "apply_edits",
+            "arguments": {
+                "edit_summary": "create invalid page",
+                "edits": [{
+                    "op": "create_page",
+                    "path": "invalid.md",
+                    "content": "# Missing frontmatter\n"
+                }]
+            }
+        }
+    });
+    let response = app
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["result"]["isError"], true);
+    let findings = value["result"]["structuredContent"]["validation_findings"]
+        .as_array()
+        .unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding["path"] == "invalid.md")
     );
 }
 

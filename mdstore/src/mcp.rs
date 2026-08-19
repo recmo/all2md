@@ -3,6 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Request, State},
     http::{HeaderMap, StatusCode, header::ORIGIN},
     middleware::{self, Next},
@@ -13,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tower_http::trace::TraceLayer;
 
-use crate::{ApplyEditsRequest, Store};
+use crate::{ApplyEditsRequest, Store, store::ValidationError};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -142,11 +143,7 @@ async fn authorize(State(state): State<AppState>, request: Request, next: Next) 
     next.run(request).await
 }
 
-async fn mcp(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<Value>,
-) -> Response {
+async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     if let Some(version) = headers.get("mcp-protocol-version") {
         let Ok(version) = version.to_str() else {
             return StatusCode::BAD_REQUEST.into_response();
@@ -155,12 +152,16 @@ async fn mcp(
             return StatusCode::BAD_REQUEST.into_response();
         }
     }
+    let request: Value = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return rpc_error(Value::Null, -32700, "parse error"),
+    };
     let Some(object) = request.as_object() else {
         return rpc_error(Value::Null, -32600, "invalid request");
     };
     let valid_id = object
         .get("id")
-        .is_none_or(|id| id.is_null() || id.is_string() || id.is_number());
+        .is_none_or(|id| id.is_string() || id.as_i64().is_some() || id.as_u64().is_some());
     let Some(method) = object.get("method").and_then(Value::as_str) else {
         return rpc_error(Value::Null, -32600, "invalid request");
     };
@@ -179,19 +180,34 @@ async fn mcp(
         return StatusCode::ACCEPTED.into_response();
     }
     match method {
-        "initialize" => rpc_result(
-            id,
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "mdstore", "version": env!("CARGO_PKG_VERSION")}
-            }),
-        ),
+        "initialize" => initialize(id, &params),
         "ping" => rpc_result(id, json!({})),
         "tools/list" => rpc_result(id, json!({"tools": tools()})),
         "tools/call" => call_tool(id, &state.store, params).await,
         _ => rpc_error(id, -32601, "method not found"),
     }
+}
+
+fn initialize(id: Value, params: &Value) -> Response {
+    let Some(requested) = params.get("protocolVersion").and_then(Value::as_str) else {
+        return rpc_error(id, -32602, "initialize requires protocolVersion");
+    };
+    let negotiated = if matches!(
+        requested,
+        MCP_PROTOCOL_VERSION | LEGACY_MCP_PROTOCOL_VERSION
+    ) {
+        requested
+    } else {
+        MCP_PROTOCOL_VERSION
+    };
+    rpc_result(
+        id,
+        json!({
+            "protocolVersion": negotiated,
+            "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": {"name": "mdstore", "version": env!("CARGO_PKG_VERSION")}
+        }),
+    )
 }
 
 #[must_use]
@@ -354,13 +370,19 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                 "isError": false
             }),
         ),
-        Err(error) => rpc_result(
-            id,
-            json!({
+        Err(error) => {
+            let findings = error
+                .downcast_ref::<ValidationError>()
+                .map(|validation| validation.findings.clone());
+            let mut result = json!({
                 "content": [{"type": "text", "text": error.to_string()}],
                 "isError": true
-            }),
-        ),
+            });
+            if let Some(findings) = findings {
+                result["structuredContent"] = json!({"validation_findings": findings});
+            }
+            rpc_result(id, result)
+        }
     }
 }
 

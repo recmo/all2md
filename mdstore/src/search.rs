@@ -6,7 +6,7 @@ use crate::{
     chunk::Chunk,
     config::Config,
     markdown::{Edge, ParsedPage, project_metadata},
-    provider::{InputType, RetrievalProvider},
+    provider::{InputType, RetrievalProvider, validate_vectors},
 };
 
 #[derive(Debug, Clone)]
@@ -172,19 +172,28 @@ impl SearchIndex {
         let mut degraded = Vec::new();
         match provider.embed(InputType::Query, &formulations).await {
             Ok(query_vectors) => {
-                for (formulation_index, vector) in query_vectors.iter().enumerate() {
-                    for (rank, (index, _)) in self
-                        .vector(vector)
-                        .into_iter()
-                        .take(config.search.candidates)
-                        .enumerate()
-                    {
-                        *scores.entry(index).or_default() +=
-                            1.0 / (config.search.rrf_k + rank as f64 + 1.0);
-                        arms.entry(index)
-                            .or_default()
-                            .insert(format!("vector:{formulation_index}"));
+                match validate_vectors(
+                    &query_vectors,
+                    formulations.len(),
+                    config.provider.dimensions,
+                ) {
+                    Ok(()) => {
+                        for (formulation_index, vector) in query_vectors.iter().enumerate() {
+                            for (rank, (index, _)) in self
+                                .vector(vector)
+                                .into_iter()
+                                .take(config.search.candidates)
+                                .enumerate()
+                            {
+                                *scores.entry(index).or_default() +=
+                                    1.0 / (config.search.rrf_k + rank as f64 + 1.0);
+                                arms.entry(index)
+                                    .or_default()
+                                    .insert(format!("vector:{formulation_index}"));
+                            }
+                        }
                     }
+                    Err(error) => degraded.push(format!("embedding: {error}")),
                 }
             }
             Err(error) => degraded.push(format!("embedding: {error}")),
@@ -392,7 +401,41 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::LinkConfig, markdown::parse_page};
+    use crate::{
+        config::LinkConfig,
+        markdown::parse_page,
+        provider::{InputType, RerankResult},
+    };
+
+    struct NonFiniteProvider;
+
+    #[async_trait::async_trait]
+    impl RetrievalProvider for NonFiniteProvider {
+        async fn embed(&self, _: InputType, input: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(input.iter().map(|_| vec![f32::NAN, 0.0]).collect())
+        }
+
+        async fn rerank(
+            &self,
+            _: &str,
+            _: &[String],
+            _: usize,
+        ) -> anyhow::Result<Vec<RerankResult>> {
+            Ok(Vec::new())
+        }
+
+        fn model(&self) -> &str {
+            "invalid"
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+
+        fn embedding_provider_identity(&self) -> String {
+            "invalid".into()
+        }
+    }
 
     #[test]
     fn index_order_does_not_depend_on_hashmap_iteration() {
@@ -437,6 +480,44 @@ mod tests {
         assert_eq!(
             paths(SearchIndex::build(&config, &pages, &parsed, &[], first)),
             paths(SearchIndex::build(&config, &pages, &parsed, &[], second))
+        );
+    }
+
+    #[tokio::test]
+    async fn non_finite_query_vectors_degrade_before_ranking() {
+        let config =
+            Config::from_yaml("documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\n")
+                .unwrap();
+        let pages = HashMap::from([("a.md".into(), "alpha".into())]);
+        let parsed = HashMap::from([(
+            "a.md".into(),
+            parse_page("alpha", &LinkConfig::default()).unwrap(),
+        )]);
+        let chunks = PageChunks::from([(
+            "a.md".into(),
+            vec![(
+                Chunk {
+                    start_line: 1,
+                    end_line: 1,
+                    heading: Vec::new(),
+                    text: "alpha".into(),
+                    embedding_text: "alpha".into(),
+                },
+                Some(vec![1.0, 0.0]),
+            )],
+        )]);
+        let index = SearchIndex::build(&config, &pages, &parsed, &[], chunks);
+
+        let response = index
+            .search(&config, &NonFiniteProvider, "alpha", &[])
+            .await;
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].matched_arms, ["exact:0"]);
+        assert!(
+            response
+                .degraded
+                .iter()
+                .any(|message| message.contains("non-finite"))
         );
     }
 }
