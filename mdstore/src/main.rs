@@ -2,13 +2,16 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use mdstore::{ApplyEditsRequest, Store};
+use mdstore::{ApplyEditsRequest, Config, Store};
+use serde_json::{Value, json};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
     #[arg(long, global = true, default_value = ".")]
     root: PathBuf,
+    #[arg(long, global = true, env = "MDSTORE_URL")]
+    daemon_url: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -47,9 +50,9 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let cli = Cli::parse();
-    let store = Store::open(&cli.root)?;
     match cli.command {
         Command::Serve { listen } => {
+            let store = Store::open(&cli.root)?;
             let config = store.config();
             let listen = listen.unwrap_or(
                 config
@@ -74,7 +77,12 @@ async fn main() -> Result<()> {
             mdstore::mcp::serve(store, listen, token).await?;
         }
         Command::Search { query, variants } => {
-            print_json(&store.search(&query, &variants).await?)?;
+            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            print_json(
+                &client
+                    .call_tool("search", json!({"query": query, "variants": variants}))
+                    .await?,
+            )?;
         }
         Command::Get {
             path,
@@ -84,32 +92,158 @@ async fn main() -> Result<()> {
             if end_line.is_some() && start_line.is_none() {
                 bail!("--end-line requires --start-line");
             }
-            let window = start_line.map(|start| (start, end_line.unwrap_or(start)));
-            print_json(&store.get_page(&path, window)?)?;
+            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            let mut arguments = json!({"path": path});
+            if let Some(start) = start_line {
+                arguments["start_line"] = json!(start);
+                arguments["end_line"] = json!(end_line.unwrap_or(start));
+            }
+            print_json(&client.call_tool("get_page", arguments).await?)?;
         }
         Command::Apply { file } => {
             let request: ApplyEditsRequest = serde_json::from_slice(&std::fs::read(file)?)?;
-            let response = store.apply_edits(&request)?;
-            if let Err(error) = store.reindex_after_changes(&response.touched_paths).await {
-                tracing::warn!(%error, "post-edit embedding rebuild is degraded");
-            }
-            print_json(&response)?;
+            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            print_json(
+                &client
+                    .call_tool("apply_edits", serde_json::to_value(request)?)
+                    .await?,
+            )?;
         }
-        Command::Validate => match store.validate() {
-            Ok(()) => println!("valid"),
-            Err(findings) => {
-                print_json(&findings)?;
+        Command::Validate => {
+            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            let response = client.command("validate").await?;
+            if response["valid"].as_bool() == Some(true) {
+                println!("valid");
+            } else {
+                print_json(&response["findings"])?;
                 bail!("corpus validation failed");
             }
-        },
-        Command::Reindex => {
-            store.reindex().await?;
-            print_json(&store.status()?)?;
         }
-        Command::Status => print_json(&store.status()?)?,
-        Command::Push => print_json(&store.push()?)?,
+        Command::Reindex => {
+            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            print_json(&client.command("reindex").await?)?;
+        }
+        Command::Status => {
+            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            print_json(&client.status().await?)?;
+        }
+        Command::Push => {
+            let client = DaemonClient::from_repository(&cli.root, cli.daemon_url.as_deref())?;
+            print_json(&client.command("push").await?)?;
+        }
     }
     Ok(())
+}
+
+struct DaemonClient {
+    client: reqwest::Client,
+    base_url: String,
+    bearer_token: Option<String>,
+}
+
+impl DaemonClient {
+    fn from_repository(root: &std::path::Path, override_url: Option<&str>) -> Result<Self> {
+        let config = Config::load(root)?;
+        let base_url = match override_url {
+            Some(url) if !url.trim().is_empty() => url.trim_end_matches('/').to_owned(),
+            _ => {
+                let mut address: SocketAddr = config
+                    .server
+                    .listen
+                    .parse()
+                    .context("parse server.listen")?;
+                if address.ip().is_unspecified() {
+                    address.set_ip(if address.is_ipv4() {
+                        std::net::Ipv4Addr::LOCALHOST.into()
+                    } else {
+                        std::net::Ipv6Addr::LOCALHOST.into()
+                    });
+                }
+                format!("http://{address}")
+            }
+        };
+        let bearer_token = config
+            .server
+            .bearer_token_env
+            .as_deref()
+            .map(std::env::var)
+            .transpose()
+            .context("read configured bearer token environment variable")?;
+        Ok(Self {
+            client: reqwest::Client::new(),
+            base_url,
+            bearer_token,
+        })
+    }
+
+    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> {
+        let response = self
+            .post(
+                "/mcp",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments}
+                }),
+            )
+            .await?;
+        if let Some(error) = response.get("error") {
+            bail!("daemon RPC error: {error}");
+        }
+        let result = response
+            .get("result")
+            .context("daemon RPC response has no result")?;
+        if result["isError"].as_bool() == Some(true) {
+            let message = result["content"]
+                .as_array()
+                .and_then(|content| content.first())
+                .and_then(|item| item["text"].as_str())
+                .unwrap_or("daemon tool call failed");
+            bail!("{message}");
+        }
+        result
+            .get("structuredContent")
+            .cloned()
+            .context("daemon tool response has no structured content")
+    }
+
+    async fn command(&self, command: &str) -> Result<Value> {
+        self.post("/cli", json!({"command": command})).await
+    }
+
+    async fn status(&self) -> Result<Value> {
+        let response = self.send(self.client.get(self.url("/health"))).await?;
+        response
+            .get("store")
+            .cloned()
+            .context("daemon health response has no store status")
+    }
+
+    async fn post(&self, path: &str, body: Value) -> Result<Value> {
+        self.send(self.client.post(self.url(path)).json(&body))
+            .await
+    }
+
+    async fn send(&self, mut request: reqwest::RequestBuilder) -> Result<Value> {
+        if let Some(token) = &self.bearer_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.context("call mdstore daemon")?;
+        let status = response.status();
+        let body = response.bytes().await.context("read daemon response")?;
+        if !status.is_success() {
+            bail!(
+                "mdstore daemon returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        serde_json::from_slice(&body).context("decode daemon response")
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base_url)
+    }
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {

@@ -380,6 +380,27 @@ fn rejects_edits_to_tracked_markdown_outside_the_configured_corpus() {
     assert!(repository.root.join("excluded.md").is_file());
 }
 
+#[cfg(unix)]
+#[test]
+fn rejects_tracked_markdown_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let repository = Repository::new();
+    let external = tempfile::NamedTempFile::new().unwrap();
+    fs::write(external.path(), page("Outside")).unwrap();
+    symlink(external.path(), repository.root.join("linked.md")).unwrap();
+    command(&repository.root, &["add", "linked.md"]);
+    command(&repository.root, &["commit", "-q", "-m", "add linked page"]);
+    let config = Config::load(&repository.root).unwrap();
+    let opened = Store::open_with_provider(
+        repository.root.clone(),
+        config,
+        Arc::new(FakeProvider),
+        repository.root.join(".git"),
+    );
+    assert!(format!("{:#}", opened.err().unwrap()).contains("may not traverse a symlink"));
+}
+
 #[tokio::test]
 async fn rebuilds_adjacent_sidecars_and_searches() {
     let repository = Repository::new();
@@ -522,6 +543,47 @@ async fn non_loopback_listener_requires_a_token() {
     assert!(error.to_string().contains("bearer token"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_status_uses_the_running_daemon() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, mdstore::mcp::router(store, None))
+            .await
+            .unwrap();
+    });
+    fs::write(repository.root.join("alice.md"), "uncommitted local text\n").unwrap();
+    let root = repository.root.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_mdstore"))
+            .args([
+                "--root",
+                root.to_str().unwrap(),
+                "--daemon-url",
+                &format!("http://{address}"),
+                "status",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    server.abort();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["pages"], 2);
+    assert_eq!(
+        fs::read_to_string(repository.root.join("alice.md")).unwrap(),
+        "uncommitted local text\n"
+    );
+}
+
 #[test]
 fn valid_external_commit_is_loaded_before_the_next_write() {
     let repository = Repository::new();
@@ -555,6 +617,61 @@ fn valid_external_commit_is_loaded_before_the_next_write() {
 }
 
 #[test]
+fn live_server_configuration_changes_require_restart() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let config = fs::read_to_string(repository.root.join(".mdstore/config.yaml")).unwrap();
+    let line = config
+        .lines()
+        .position(|line| line == "  listen: 127.0.0.1:3131")
+        .unwrap()
+        + 1;
+    let error = store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "change live server address".into(),
+            edits: vec![EditOperation::Replace {
+                path: ".mdstore/config.yaml".into(),
+                anchor: format!("{line}:{}", short_hash("  listen: 127.0.0.1:3131")),
+                content: "  listen: 127.0.0.1:4141".into(),
+            }],
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("daemon restart"));
+    assert_eq!(
+        fs::read_to_string(repository.root.join(".mdstore/config.yaml")).unwrap(),
+        config
+    );
+}
+
+#[test]
+fn external_server_configuration_change_requires_restart() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let config = fs::read_to_string(repository.root.join(".mdstore/config.yaml")).unwrap();
+    fs::write(
+        repository.root.join(".mdstore/config.yaml"),
+        config.replace("127.0.0.1:3131", "127.0.0.1:4141"),
+    )
+    .unwrap();
+    command(&repository.root, &["add", ".mdstore/config.yaml"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "change server address"],
+    );
+    let error = store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "write after server change".into(),
+            edits: vec![EditOperation::Replace {
+                path: "bob.md".into(),
+                anchor: format!("6:{}", short_hash("Bob profile.")),
+                content: "Bob updated.".into(),
+            }],
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("restart required"));
+}
+
+#[test]
 fn invalid_external_commit_blocks_writes() {
     let repository = Repository::new();
     let store = repository.store();
@@ -583,6 +700,15 @@ fn invalid_external_commit_blocks_writes() {
             .unwrap()
             .contains("updated")
     );
+
+    fs::write(repository.root.join("alice.md"), page("Alice")).unwrap();
+    command(&repository.root, &["add", "alice.md"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "repair external edit"],
+    );
+    store.apply_edits(&request).unwrap();
+    assert!(store.status().unwrap().blocked.is_none());
 }
 
 #[test]

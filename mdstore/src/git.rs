@@ -8,9 +8,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::config::{Config, validate_repo_path};
+use crate::config::{Config, ensure_repository_path_safe, validate_repo_path};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PushState {
     Disabled,
@@ -155,7 +155,7 @@ pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Resul
     for (path, content) in changes {
         validate_repo_path(path)?;
         let target = root.join(path);
-        ensure_safe_target(root, &target)?;
+        ensure_repository_path_safe(root, path)?;
         if let Some(content) = content {
             let parent = target.parent().context("target has no parent")?;
             fs::create_dir_all(parent)?;
@@ -165,20 +165,6 @@ pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Resul
             temp.persist(&target).map_err(|error| error.error)?;
         } else if target.exists() {
             fs::remove_file(&target)?;
-        }
-    }
-    Ok(())
-}
-
-fn ensure_safe_target(root: &Path, target: &Path) -> Result<()> {
-    let relative = target
-        .strip_prefix(root)
-        .context("target escapes repository")?;
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        if current.exists() && fs::symlink_metadata(&current)?.file_type().is_symlink() {
-            bail!("refusing to write through symlink {}", current.display());
         }
     }
     Ok(())
@@ -326,14 +312,15 @@ pub fn push(root: &Path, config: &Config) -> Result<PushState> {
     if output.status.success() {
         return Ok(PushState::Pushed);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-    if stderr.contains("non-fast-forward")
-        || stderr.contains("fetch first")
-        || stderr.contains("rejected")
-    {
-        Ok(PushState::Diverged)
+    Ok(push_failure_state(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn push_failure_state(stderr: &str) -> PushState {
+    let stderr = stderr.to_lowercase();
+    if stderr.contains("non-fast-forward") || stderr.contains("fetch first") {
+        PushState::Diverged
     } else {
-        Ok(PushState::Queued)
+        PushState::Queued
     }
 }
 
@@ -428,5 +415,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(object.split_once("\n\n").unwrap().1, message);
+    }
+
+    #[test]
+    fn only_history_rejections_are_divergence() {
+        assert_eq!(
+            push_failure_state("! [rejected] main -> main (non-fast-forward)"),
+            PushState::Diverged
+        );
+        assert_eq!(
+            push_failure_state("! [remote rejected] main -> main (protected branch hook declined)"),
+            PushState::Queued
+        );
+    }
+
+    #[test]
+    fn commit_tree_never_replaces_an_advanced_head() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        checked(root, ["init", "-b", "main"]).unwrap();
+        checked(root, ["config", "user.name", "mdstore test"]).unwrap();
+        checked(root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
+        fs::write(root.join("note.md"), "old\n").unwrap();
+        checked(root, ["add", "note.md"]).unwrap();
+        checked(root, ["commit", "-m", "initial"]).unwrap();
+        let parent = head(root).unwrap();
+        fs::write(root.join("note.md"), "new\n").unwrap();
+        let tree = stage_tree(root, &["note.md".into()]).unwrap().unwrap();
+        checked(root, ["commit", "-m", "external commit"]).unwrap();
+        let advanced = head(root).unwrap();
+
+        assert!(commit_tree(root, &tree, &parent, "stale edit").is_err());
+        assert_eq!(head(root).unwrap(), advanced);
     }
 }

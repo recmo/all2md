@@ -29,6 +29,7 @@ pub fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
+        .route("/cli", post(cli))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -67,6 +68,42 @@ async fn health(State(state): State<AppState>) -> Response {
         )
             .into_response(),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
+enum CliCommand {
+    Validate,
+    Reindex,
+    Push,
+}
+
+async fn cli(State(state): State<AppState>, Json(command): Json<CliCommand>) -> Response {
+    match command {
+        CliCommand::Validate => match state.store.validate() {
+            Ok(()) => Json(json!({"valid": true})).into_response(),
+            Err(findings) => Json(json!({"valid": false, "findings": findings})).into_response(),
+        },
+        CliCommand::Reindex => match state.store.reindex().await {
+            Ok(()) => match state.store.status() {
+                Ok(status) => Json(json!(status)).into_response(),
+                Err(error) => internal_error(error),
+            },
+            Err(error) => internal_error(error),
+        },
+        CliCommand::Push => match state.store.push() {
+            Ok(push) => Json(json!(push)).into_response(),
+            Err(error) => internal_error(error),
+        },
+    }
+}
+
+fn internal_error(error: anyhow::Error) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": error.to_string()})),
+    )
+        .into_response()
 }
 
 async fn authenticate(State(state): State<AppState>, request: Request, next: Next) -> Response {

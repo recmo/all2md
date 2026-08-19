@@ -92,9 +92,8 @@ pub struct Config {
 
 impl Config {
     pub fn load(root: &Path) -> Result<Self> {
-        let path = root.join(".mdstore/config.yaml");
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("read required configuration {}", path.display()))?;
+        let text = read_repository_text(root, ".mdstore/config.yaml")
+            .context("read required configuration .mdstore/config.yaml")?;
         Self::from_yaml(&text)
     }
 
@@ -197,6 +196,25 @@ pub fn validate_repo_path(path: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn ensure_repository_path_safe(root: &Path, path: &str) -> Result<()> {
+    validate_repo_path(path)?;
+    let mut current = root.to_path_buf();
+    for component in Path::new(path).components() {
+        current.push(component);
+        if let Ok(metadata) = fs::symlink_metadata(&current)
+            && metadata.file_type().is_symlink()
+        {
+            bail!("repository path may not traverse a symlink: {path}");
+        }
+    }
+    Ok(())
+}
+
+pub fn read_repository_text(root: &Path, path: &str) -> Result<String> {
+    ensure_repository_path_safe(root, path)?;
+    fs::read_to_string(root.join(path)).with_context(|| format!("read repository file {path}"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,7 +433,7 @@ impl Default for GitConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_listen")]

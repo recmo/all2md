@@ -12,7 +12,14 @@ pub struct ParsedPage {
     pub frontmatter: serde_json::Value,
     pub body_start_line: usize,
     pub headings: Vec<Heading>,
+    pub code_blocks: Vec<SourceRange>,
     pub links: Vec<RawLink>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SourceRange {
+    pub start_line: usize,
+    pub end_line: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +77,7 @@ pub struct Finding {
 pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
     let (frontmatter, body_start_line, body) = parse_frontmatter(text)?;
     let mut headings = Vec::new();
+    let mut code_blocks = Vec::new();
     let mut markdown_links = Vec::new();
     let mut heading: Option<(u8, String, usize)> = None;
     let mut heading_stack = Vec::new();
@@ -89,7 +97,18 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
             Event::Start(Tag::Heading { level, .. }) => {
                 heading = Some((heading_level(level), String::new(), line));
             }
-            Event::Start(Tag::CodeBlock(_)) => code_depth += 1,
+            Event::Start(Tag::CodeBlock(_)) => {
+                code_depth += 1;
+                let end_offset = range.end.saturating_sub(1);
+                code_blocks.push(SourceRange {
+                    start_line: line,
+                    end_line: body_start_line
+                        + body[..end_offset]
+                            .bytes()
+                            .filter(|byte| *byte == b'\n')
+                            .count(),
+                });
+            }
             Event::Text(value) => {
                 if let Some((_, text, _)) = &mut heading {
                     text.push_str(&value);
@@ -150,6 +169,7 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
         frontmatter,
         body_start_line,
         headings,
+        code_blocks,
         links: markdown_links,
     })
 }

@@ -14,7 +14,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     chunk::chunk_page,
-    config::{Config, ProviderConfig, validate_repo_path},
+    config::{
+        Config, ProviderConfig, ensure_repository_path_safe, read_repository_text,
+        validate_repo_path,
+    },
     git::{self, PushState},
     hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
     markdown::{Edge, Finding, ParsedPage, project_metadata, validate_corpus},
@@ -39,7 +42,7 @@ struct StoreState {
     pages: HashMap<String, String>,
     parsed: HashMap<String, ParsedPage>,
     edges: Vec<Edge>,
-    index: SearchIndex,
+    index: Arc<SearchIndex>,
     provider: Arc<dyn RetrievalProvider>,
     generation: u64,
 }
@@ -142,7 +145,7 @@ impl Store {
                 pages,
                 parsed,
                 edges,
-                index,
+                index: Arc::new(index),
                 provider,
                 generation: 0,
             }),
@@ -195,7 +198,7 @@ impl Store {
                     || extension.eq_ignore_ascii_case("json")
             });
         if config_resource && git::is_tracked(&self.root, path)? {
-            let text = fs::read_to_string(self.root.join(path))?;
+            let text = read_repository_text(&self.root, path)?;
             return Ok(PageResponse {
                 path: path.into(),
                 content: render(&text, window),
@@ -210,10 +213,16 @@ impl Store {
         if query.trim().is_empty() {
             bail!("query must be non-empty");
         }
-        let state = self.state.read().clone();
-        Ok(state
-            .index
-            .search(&state.config, state.provider.as_ref(), query, variants)
+        let (config, index, provider) = {
+            let state = self.state.read();
+            (
+                state.config.clone(),
+                state.index.clone(),
+                state.provider.clone(),
+            )
+        };
+        Ok(index
+            .search(&config, provider.as_ref(), query, variants)
             .await)
     }
 
@@ -271,14 +280,16 @@ impl Store {
         }
 
         let current = self.state.read().clone();
+        let base_head = self.head.read().clone();
         if has_content {
             ensure_paths_match_config(&current.config, paths.iter())?;
         }
 
         let mut originals = HashMap::new();
         for path in &paths {
-            if let Ok(text) = fs::read_to_string(self.root.join(path)) {
-                originals.insert(path.clone(), text);
+            ensure_repository_path_safe(&self.root, path)?;
+            if self.root.join(path).exists() {
+                originals.insert(path.clone(), read_repository_text(&self.root, path)?);
             }
         }
         let applied = apply_operations_with_ranges(&originals, &request.edits)?;
@@ -311,6 +322,9 @@ impl Store {
         } else {
             bail!(".mdstore/config.yaml cannot be removed");
         };
+        if config.server != current.config.server {
+            bail!("server configuration changes require a daemon restart");
+        }
         if has_config {
             pages = load_pages(&self.root, &config)?;
         }
@@ -362,7 +376,7 @@ impl Store {
         let committed = tree.is_some();
         if let Some(tree) = tree {
             let pending = PendingReceipt {
-                base_head: git::head(&self.root)?,
+                base_head,
                 tree,
                 touched_paths: path_list.clone(),
                 fresh_hashlines: fresh_hashlines.clone(),
@@ -412,7 +426,7 @@ impl Store {
             pages,
             parsed,
             edges,
-            index,
+            index: Arc::new(index),
             provider,
             generation: current.generation + 1,
         };
@@ -537,7 +551,7 @@ impl Store {
         );
         let mut current = self.state.write();
         if current.generation == generation {
-            current.index = index;
+            current.index = Arc::new(index);
         }
         Ok(())
     }
@@ -589,6 +603,9 @@ impl Store {
             }
         };
         let current_state = self.state.read().clone();
+        if config.server != current_state.config.server {
+            bail!("external commit changes server configuration; restart required");
+        }
         let provider = if config.provider != current_state.config.provider {
             let Some(factory) = self.provider_factory else {
                 let reason = "external commit changes provider configuration; restart required";
@@ -612,11 +629,19 @@ impl Store {
             pages,
             parsed,
             edges,
-            index,
+            index: Arc::new(index),
             provider,
             generation: current_state.generation + 1,
         };
         *self.head.write() = current;
+        if self
+            .blocked
+            .read()
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("external commit"))
+        {
+            self.set_blocked(None)?;
+        }
         Ok(())
     }
 
@@ -727,7 +752,7 @@ fn load_pages(root: &Path, config: &Config) -> Result<HashMap<String, String>> {
     git::tracked_markdown(root, config)?
         .into_iter()
         .map(|path| {
-            fs::read_to_string(root.join(&path))
+            read_repository_text(root, &path)
                 .with_context(|| format!("read tracked Markdown {path}"))
                 .map(|text| (path, text))
         })
@@ -737,11 +762,7 @@ fn load_pages(root: &Path, config: &Config) -> Result<HashMap<String, String>> {
 fn load_config_files(root: &Path) -> Result<HashMap<String, String>> {
     git::tracked_config_files(root)?
         .into_iter()
-        .map(|path| {
-            fs::read_to_string(root.join(&path))
-                .map(|text| (path, text))
-                .map_err(Into::into)
-        })
+        .map(|path| read_repository_text(root, &path).map(|text| (path, text)))
         .collect()
 }
 

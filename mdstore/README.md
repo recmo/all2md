@@ -88,6 +88,11 @@ does not create it. A batch adding `mentions` must also contain the matching
 
 ## CLI
 
+Run `serve` first. Every other command is an HTTP client of that daemon, using
+`server.listen` and `server.bearer_token_env` from the repository configuration.
+Use global `--daemon-url` or `MDSTORE_URL` when the daemon was started at an
+overridden address.
+
 ```sh
 mdstore --root /path/to/brain validate
 mdstore --root /path/to/brain serve

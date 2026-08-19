@@ -31,18 +31,40 @@ pub fn chunk_page(
     let overlap_chars = target_chars.saturating_mul(config.overlap_percent) / 100;
     let mut current: Option<Block> = None;
     for block in blocks {
-        if block.text.chars().count() > config.max_chars {
+        let body_limit = embedding_plan(
+            context,
+            &block.heading,
+            target_chars,
+            overlap_chars,
+            config.max_chars,
+        )
+        .body_limit;
+        if block.text.chars().count() > body_limit {
             if let Some(value) = current.take() {
-                push_chunk(&mut chunks, value, context, overlap_chars, config.max_chars);
+                push_chunk(
+                    &mut chunks,
+                    value,
+                    context,
+                    target_chars,
+                    overlap_chars,
+                    config.max_chars,
+                );
             }
-            for split in split_block(block, config.max_chars) {
-                push_chunk(&mut chunks, split, context, overlap_chars, config.max_chars);
+            for split in split_block(block, body_limit) {
+                push_chunk(
+                    &mut chunks,
+                    split,
+                    context,
+                    target_chars,
+                    overlap_chars,
+                    config.max_chars,
+                );
             }
             continue;
         }
         match &mut current {
             Some(value)
-                if value.text.chars().count() + 2 + block.text.chars().count() <= target_chars
+                if value.text.chars().count() + 2 + block.text.chars().count() <= body_limit
                     && value.heading == block.heading =>
             {
                 value.text.push_str("\n\n");
@@ -55,6 +77,7 @@ pub fn chunk_page(
                     &mut chunks,
                     previous,
                     context,
+                    target_chars,
                     overlap_chars,
                     config.max_chars,
                 );
@@ -64,7 +87,14 @@ pub fn chunk_page(
         }
     }
     if let Some(value) = current {
-        push_chunk(&mut chunks, value, context, overlap_chars, config.max_chars);
+        push_chunk(
+            &mut chunks,
+            value,
+            context,
+            target_chars,
+            overlap_chars,
+            config.max_chars,
+        );
     }
     chunks
 }
@@ -86,14 +116,26 @@ fn structural_blocks(text: &str, parsed: &ParsedPage, config: &ChunkConfig) -> V
                 .then_some(heading.line + 1)
         })
         .collect();
+    let in_code_block = |line| {
+        parsed
+            .code_blocks
+            .iter()
+            .any(|range| (range.start_line..=range.end_line).contains(&line))
+    };
     let mut heading_stack: Vec<String> = Vec::new();
     let mut excluded_level: Option<usize> = None;
     let mut blocks = Vec::new();
     let mut start = parsed.body_start_line.saturating_sub(1);
     let mut buffer = Vec::new();
-    let mut in_fence = false;
+    let mut in_code = false;
     for (index, line) in lines.iter().enumerate().skip(start) {
         let line_number = index + 1;
+        let code = in_code_block(line_number);
+        if code != in_code {
+            flush_block(&mut blocks, &mut buffer, start, index, &heading_stack);
+            start = index;
+            in_code = code;
+        }
         if let Some(heading) = headings.get(&line_number) {
             flush_block(&mut blocks, &mut buffer, start, index, &heading_stack);
             let level = usize::from(heading.level);
@@ -113,14 +155,11 @@ fn structural_blocks(text: &str, parsed: &ParsedPage, config: &ChunkConfig) -> V
             start = index + 1;
             continue;
         }
-        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-            in_fence = !in_fence;
-        }
         if excluded_level.is_some() {
             start = index + 1;
             continue;
         }
-        if line.trim().is_empty() && !in_fence {
+        if line.trim().is_empty() && !in_code {
             flush_block(&mut blocks, &mut buffer, start, index, &heading_stack);
             start = index + 1;
         } else {
@@ -214,20 +253,58 @@ fn push_chunk(
     chunks: &mut Vec<Chunk>,
     block: Block,
     context: &[String],
+    target_chars: usize,
     overlap_chars: usize,
     max_chars: usize,
 ) {
+    let plan = embedding_plan(
+        context,
+        &block.heading,
+        target_chars,
+        overlap_chars,
+        max_chars,
+    );
     let overlap = chunks
         .last()
-        .map(|previous| tail(&previous.text, overlap_chars))
+        .map(|previous| tail(&previous.text, plan.overlap_chars))
         .unwrap_or_default();
-    chunks.push(to_chunk(block, context, &overlap, max_chars));
+    chunks.push(to_chunk(block, plan.prefix, &overlap, max_chars));
 }
 
-fn to_chunk(block: Block, context: &[String], overlap: &str, max_chars: usize) -> Chunk {
+struct EmbeddingPlan {
+    prefix: String,
+    overlap_chars: usize,
+    body_limit: usize,
+}
+
+fn embedding_plan(
+    context: &[String],
+    heading: &[String],
+    target_chars: usize,
+    overlap_chars: usize,
+    max_chars: usize,
+) -> EmbeddingPlan {
     let mut prefix = context.to_vec();
-    prefix.extend(block.heading.iter().cloned());
+    prefix.extend(heading.iter().cloned());
     let prefix = prefix.join(" > ");
+    let prefix_limit = max_chars.saturating_sub(3);
+    let prefix: String = prefix.chars().take(prefix_limit).collect();
+    let mut remaining = max_chars;
+    if !prefix.is_empty() {
+        remaining -= prefix.chars().count() + 2;
+    }
+    let overlap_chars = overlap_chars.min(remaining.saturating_sub(3));
+    if overlap_chars > 0 {
+        remaining -= overlap_chars + 2;
+    }
+    EmbeddingPlan {
+        prefix,
+        overlap_chars,
+        body_limit: target_chars.min(remaining).max(1),
+    }
+}
+
+fn to_chunk(block: Block, prefix: String, overlap: &str, max_chars: usize) -> Chunk {
     let mut remaining = max_chars.saturating_sub(block.text.chars().count());
     let prefix = if prefix.is_empty() || remaining <= 2 {
         String::new()
@@ -289,6 +366,46 @@ mod tests {
         assert!(chunks.iter().any(|chunk| chunk.heading == ["Visible"]));
         assert!(!chunks.iter().any(|chunk| chunk.text.contains("Secret")));
         assert!(chunks.iter().any(|chunk| chunk.heading == ["Two"]));
+    }
+
+    #[test]
+    fn commonmark_code_ranges_define_structural_boundaries() {
+        let text =
+            "# Notes\n\n````text\ninside\n~~~\n\nstill inside\n````\n\nafter one\n\nafter two\n";
+        let parsed = parse_page(text, &LinkConfig::default()).unwrap();
+        let blocks = structural_blocks(text, &parsed, &ChunkConfig::default());
+        let code = blocks
+            .iter()
+            .find(|block| block.text.starts_with("````text"))
+            .unwrap();
+        assert_eq!(code.text, "````text\ninside\n~~~\n\nstill inside\n````");
+        assert!(blocks.iter().any(|block| block.text == "after one"));
+        assert!(blocks.iter().any(|block| block.text == "after two"));
+    }
+
+    #[test]
+    fn target_size_leaves_room_for_context_and_overlap() {
+        let text = "# Notes\n\nabcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n";
+        let parsed = parse_page(text, &LinkConfig::default()).unwrap();
+        let config = ChunkConfig {
+            target_tokens: 5,
+            overlap_percent: 25,
+            max_chars: 40,
+            ..ChunkConfig::default()
+        };
+        let chunks = chunk_page(text, &parsed, &config, &["Demo".into()]);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| {
+            chunk.text.chars().count() <= config.target_tokens * 4
+                && chunk.embedding_text.chars().count() <= config.max_chars
+                && chunk.embedding_text.starts_with("Demo > Notes\n\n")
+        }));
+        assert!(
+            chunks
+                .iter()
+                .skip(1)
+                .all(|chunk| chunk.embedding_text.split("\n\n").count() == 3)
+        );
     }
 
     #[test]
