@@ -178,14 +178,8 @@ impl Repository {
     }
 
     fn store_with_provider(&self, provider: Arc<dyn RetrievalProvider>) -> Arc<Store> {
-        let config = committed_config(&self.root);
-        let git_dir = self.root.join(".git");
-        Store::open_with_provider(self.root.clone(), config, provider, git_dir).unwrap()
+        Store::open_with_provider(&self.root, provider).unwrap()
     }
-}
-
-fn committed_config(root: &Path) -> Config {
-    Config::from_yaml(&mdstore::git::read_head_text(root, ".mdstore/config.yaml").unwrap()).unwrap()
 }
 
 fn command(root: &Path, arguments: &[&str]) -> String {
@@ -337,6 +331,43 @@ fn delayed_idempotent_retry_returns_current_hashlines() {
     let hashline = &replay.fresh_hashlines["alice.md"];
     assert!(hashline.contains("Alice current."));
     assert!(!hashline.contains("Alice first."));
+}
+
+#[test]
+fn reverted_request_can_be_applied_again() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let request = ApplyEditsRequest {
+        edit_summary: "apply Alice edit".into(),
+        edits: vec![EditOperation::Replace {
+            path: "alice.md".into(),
+            anchor: format!("6:{}", short_hash("Alice profile.")),
+            content: "Alice changed.".into(),
+        }],
+    };
+    store.apply_edits(&request).unwrap();
+
+    fs::write(repository.root.join("alice.md"), page("Alice")).unwrap();
+    command(&repository.root, &["add", "alice.md"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "revert Alice edit"],
+    );
+
+    let response = store.apply_edits(&request).unwrap();
+    assert!(matches!(
+        response.status,
+        mdstore::store::ApplyStatus::Accepted
+    ));
+    assert!(
+        fs::read_to_string(repository.root.join("alice.md"))
+            .unwrap()
+            .contains("Alice changed.")
+    );
+    assert_eq!(
+        command(&repository.root, &["log", "-1", "--pretty=%B"]).trim(),
+        "apply Alice edit"
+    );
 }
 
 #[test]
@@ -506,13 +537,7 @@ fn rejects_tracked_markdown_symlinks() {
     symlink(external.path(), repository.root.join("linked.md")).unwrap();
     command(&repository.root, &["add", "linked.md"]);
     command(&repository.root, &["commit", "-q", "-m", "add linked page"]);
-    let config = committed_config(&repository.root);
-    let opened = Store::open_with_provider(
-        repository.root.clone(),
-        config,
-        Arc::new(FakeProvider),
-        repository.root.join(".git"),
-    );
+    let opened = Store::open_with_provider(&repository.root, Arc::new(FakeProvider));
     assert!(format!("{:#}", opened.err().unwrap()).contains("may not traverse a symlink"));
 }
 
@@ -596,13 +621,7 @@ fn rejects_tracked_embedding_sidecars() {
         &repository.root,
         &["commit", "-q", "-m", "track forbidden sidecar"],
     );
-    let config = committed_config(&repository.root);
-    let opened = Store::open_with_provider(
-        repository.root.clone(),
-        config,
-        Arc::new(FakeProvider),
-        repository.root.join(".git"),
-    );
+    let opened = Store::open_with_provider(&repository.root, Arc::new(FakeProvider));
     assert!(format!("{:#}", opened.err().unwrap()).contains("must be ignored and untracked"));
 }
 
@@ -783,6 +802,20 @@ fn dirty_and_staged_configuration_do_not_leak_into_the_published_state() {
             .content,
         original
     );
+}
+
+#[test]
+fn injected_provider_open_uses_committed_configuration() {
+    let repository = Repository::new();
+    fs::write(
+        repository.root.join(".mdstore/config.yaml"),
+        config_yaml().replace("dimensions: 2", "dimensions: 99"),
+    )
+    .unwrap();
+
+    let store = Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).unwrap();
+
+    assert_eq!(store.config().provider.dimensions, 2);
 }
 
 #[tokio::test]

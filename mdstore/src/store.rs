@@ -20,7 +20,10 @@ use crate::{
         validate_repo_path,
     },
     git::{self, PushState},
-    hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
+    hashline::{
+        ChangedRange, EditOperation, EffectState, apply_operations_with_ranges, effect_state,
+        render,
+    },
     markdown::{Edge, Finding, ParsedPage, project_metadata, validate_corpus},
     provider::{InputType, RetrievalProvider, ZeroEntropyProvider},
     search::{SearchIndex, SearchResponse},
@@ -117,6 +120,20 @@ pub struct StatusResponse {
 
 impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Arc<Self>> {
+        let (root, config, git_dir) = Self::load_repository(root)?;
+        let provider = zeroentropy_provider(config.provider.clone());
+        Self::open_inner(root, config, provider, git_dir, Some(zeroentropy_provider))
+    }
+
+    pub fn open_with_provider(
+        root: impl AsRef<Path>,
+        provider: Arc<dyn RetrievalProvider>,
+    ) -> Result<Arc<Self>> {
+        let (root, config, git_dir) = Self::load_repository(root)?;
+        Self::open_inner(root, config, provider, git_dir, None)
+    }
+
+    fn load_repository(root: impl AsRef<Path>) -> Result<(PathBuf, Config, PathBuf)> {
         let root = root
             .as_ref()
             .canonicalize()
@@ -128,17 +145,7 @@ impl Store {
             .map_err(|_| anyhow!(".mdstore/config.yaml must be tracked by Git"))?;
         let config = Config::from_yaml(&config_text)?;
         git::recover_worktree(&root)?;
-        let provider = zeroentropy_provider(config.provider.clone());
-        Self::open_inner(root, config, provider, git_dir, Some(zeroentropy_provider))
-    }
-
-    pub fn open_with_provider(
-        root: PathBuf,
-        config: Config,
-        provider: Arc<dyn RetrievalProvider>,
-        git_dir: PathBuf,
-    ) -> Result<Arc<Self>> {
-        Self::open_inner(root, config, provider, git_dir, None)
+        Ok((root, config, git_dir))
     }
 
     fn open_inner(
@@ -250,10 +257,10 @@ impl Store {
         let _lock = self.lock_repository()?;
         git::recover_worktree(&self.root)?;
         self.refresh_external_commit()?;
-        if let Some(response) = self.read_receipt(&digest)? {
+        if let Some(response) = self.read_receipt(&digest, request)? {
             return Ok(response);
         }
-        if let Some(response) = self.recover_pending(&digest)? {
+        if let Some(response) = self.recover_pending(&digest, request)? {
             return Ok(response);
         }
         if let Some(reason) = self.blocked.read().clone() {
@@ -411,10 +418,6 @@ impl Store {
                 ));
             }
         }
-        let push = git::push(&self.root, &config)?;
-        if matches!(push, PushState::Diverged) {
-            self.set_blocked(Some("remote history diverged".into()))?;
-        }
         let index = build_index(
             &self.root,
             &config,
@@ -433,6 +436,10 @@ impl Store {
             provider,
             generation: current.generation + 1,
         };
+        let push = git::push(&self.root, &self.state.read().config);
+        if matches!(push, PushState::Diverged) {
+            self.set_blocked(Some("remote history diverged".into()))?;
+        }
         let response = ApplyEditsResponse {
             status: if committed {
                 ApplyStatus::Accepted
@@ -577,7 +584,7 @@ impl Store {
         let _lock = self.lock_repository()?;
         git::recover_worktree(&self.root)?;
         self.refresh_external_commit()?;
-        let state = git::push(&self.root, &self.state.read().config)?;
+        let state = git::push(&self.root, &self.state.read().config);
         if matches!(state, PushState::Pushed) {
             self.set_blocked(None)?;
         } else if matches!(state, PushState::Diverged) {
@@ -685,10 +692,23 @@ impl Store {
             .join(format!("{digest}.json"))
     }
 
-    fn read_receipt(&self, digest: &str) -> Result<Option<ApplyEditsResponse>> {
+    fn read_receipt(
+        &self,
+        digest: &str,
+        request: &ApplyEditsRequest,
+    ) -> Result<Option<ApplyEditsResponse>> {
         let path = self.receipt_path(digest);
         if !path.exists() {
             return Ok(None);
+        }
+        match self.effect_state(request) {
+            EffectState::Present => {}
+            EffectState::Absent => return Ok(None),
+            EffectState::Partial => {
+                bail!(
+                    "the previously applied batch was only partially superseded; read fresh hashlines and submit a new atomic batch"
+                )
+            }
         }
         #[derive(Deserialize)]
         struct StoredReceipt {
@@ -726,7 +746,11 @@ impl Store {
         Ok(())
     }
 
-    fn recover_pending(&self, digest: &str) -> Result<Option<ApplyEditsResponse>> {
+    fn recover_pending(
+        &self,
+        digest: &str,
+        request: &ApplyEditsRequest,
+    ) -> Result<Option<ApplyEditsResponse>> {
         let path = self.pending_path(digest);
         if !path.exists() {
             return Ok(None);
@@ -736,7 +760,19 @@ impl Store {
             fs::remove_file(path)?;
             return Ok(None);
         }
-        let push = git::push(&self.root, &self.state.read().config)?;
+        match self.effect_state(request) {
+            EffectState::Present => {}
+            EffectState::Absent => {
+                fs::remove_file(path)?;
+                return Ok(None);
+            }
+            EffectState::Partial => {
+                bail!(
+                    "the previously applied batch was only partially superseded; read fresh hashlines and submit a new atomic batch"
+                )
+            }
+        }
+        let push = git::push(&self.root, &self.state.read().config);
         if matches!(push, PushState::Diverged) {
             self.set_blocked(Some("remote history diverged".into()))?;
         }
@@ -765,6 +801,23 @@ impl Store {
                     .map(|text| (path.clone(), render(text, None)))
             })
             .collect()
+    }
+
+    fn effect_state(&self, request: &ApplyEditsRequest) -> EffectState {
+        let state = self.state.read();
+        let current = request
+            .edits
+            .iter()
+            .filter_map(|edit| {
+                let path = edit.path();
+                state
+                    .pages
+                    .get(path)
+                    .or_else(|| state.config_files.get(path))
+                    .map(|text| (path.to_owned(), text.clone()))
+            })
+            .collect();
+        effect_state(&current, &request.edits)
     }
 
     fn current_push_state(&self) -> Result<PushState> {

@@ -1,4 +1,6 @@
 use std::{
+    error::Error,
+    fmt,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
@@ -106,11 +108,21 @@ async fn main() -> Result<()> {
         Command::Apply { file } => {
             let request: ApplyEditsRequest = serde_json::from_slice(&std::fs::read(file)?)?;
             let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
-            print_json(
-                &client
-                    .call_tool("apply_edits", serde_json::to_value(request)?)
-                    .await?,
-            )?;
+            match client
+                .call_tool("apply_edits", serde_json::to_value(request)?)
+                .await
+            {
+                Ok(value) => print_json(&value)?,
+                Err(error) => {
+                    if let Some(structured) = error
+                        .downcast_ref::<ToolCallError>()
+                        .and_then(|error| error.structured_content.as_ref())
+                    {
+                        print_json(structured)?;
+                    }
+                    return Err(error);
+                }
+            }
         }
         Command::Validate => {
             let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
@@ -171,6 +183,20 @@ struct McpSession {
     protocol_version: String,
     session_id: Option<String>,
 }
+
+#[derive(Debug)]
+struct ToolCallError {
+    message: String,
+    structured_content: Option<Value>,
+}
+
+impl fmt::Display for ToolCallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for ToolCallError {}
 
 impl DaemonClient {
     fn from_repository(root: &std::path::Path, override_url: Option<&str>) -> Result<Self> {
@@ -237,7 +263,11 @@ impl DaemonClient {
                 .and_then(|content| content.first())
                 .and_then(|item| item["text"].as_str())
                 .unwrap_or("daemon tool call failed");
-            bail!("{message}");
+            return Err(ToolCallError {
+                message: message.into(),
+                structured_content: result.get("structuredContent").cloned(),
+            }
+            .into());
         }
         result
             .get("structuredContent")
@@ -499,6 +529,20 @@ mod tests {
                 )
                     .into_response(),
                 "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
+                "tools/call" if body.pointer("/params/name") == Some(&json!("apply_edits")) => {
+                    Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "content": [{"type": "text", "text": "validation failed"}],
+                            "structuredContent": {
+                                "validation_findings": [{"path": "bad.md", "message": "invalid"}]
+                            },
+                            "isError": true
+                        }
+                    }))
+                    .into_response()
+                }
                 "tools/call" => Json(json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -535,12 +579,28 @@ mod tests {
             client.call_tool("search", json!({})).await.unwrap(),
             json!({"ok": true})
         );
+        let error = client
+            .call_tool("apply_edits", json!({}))
+            .await
+            .unwrap_err();
+        let tool_error = error.downcast_ref::<ToolCallError>().unwrap();
+        assert_eq!(
+            tool_error.structured_content,
+            Some(json!({
+                "validation_findings": [{"path": "bad.md", "message": "invalid"}]
+            }))
+        );
         assert_eq!(
             *requests.lock(),
             [
                 ("initialize".into(), None, None),
                 (
                     "notifications/initialized".into(),
+                    Some(MCP_PROTOCOL_VERSION.into()),
+                    Some("test-session".into())
+                ),
+                (
+                    "tools/call".into(),
                     Some(MCP_PROTOCOL_VERSION.into()),
                     Some("test-session".into())
                 ),

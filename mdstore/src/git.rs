@@ -543,27 +543,25 @@ pub fn rollback(root: &Path, paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn push(root: &Path, config: &Config) -> Result<PushState> {
+pub fn push(root: &Path, config: &Config) -> PushState {
     if !config.git.push {
-        return Ok(PushState::Disabled);
+        return PushState::Disabled;
     }
     let mut command = Command::new("git");
     command.current_dir(root).arg("push");
     if let Some(remote) = &config.git.remote {
         command.arg("--set-upstream").arg(remote).arg("HEAD");
     }
-    let Some(output) = output_with_timeout(
+    let Ok(Some(output)) = output_with_timeout(
         &mut command,
         Duration::from_secs(config.git.push_timeout_seconds),
-    )
-    .context("push mdstore commits")?
-    else {
-        return Ok(PushState::Queued);
+    ) else {
+        return PushState::Queued;
     };
     if output.status.success() {
-        return Ok(PushState::Pushed);
+        return PushState::Pushed;
     }
-    Ok(push_failure_state(&String::from_utf8_lossy(&output.stderr)))
+    push_failure_state(&String::from_utf8_lossy(&output.stderr))
 }
 
 fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Option<Output>> {
@@ -572,12 +570,12 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Optio
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr.try_clone()?));
     let mut child = command.spawn()?;
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if Instant::now() >= deadline {
+        if started.elapsed() >= timeout {
             child.kill()?;
             child.wait()?;
             return Ok(None);
@@ -897,6 +895,28 @@ mod tests {
     }
 
     #[test]
+    fn command_timeout_accepts_the_largest_duration() {
+        let mut command = Command::new("git");
+        command.arg("--version");
+        assert!(
+            output_with_timeout(&mut command, Duration::from_secs(u64::MAX))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn local_push_execution_failures_are_queued() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_owned();
+        drop(directory);
+        let config =
+            Config::from_yaml("documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\n")
+                .unwrap();
+        assert_eq!(push(&root, &config), PushState::Queued);
+    }
+
+    #[test]
     fn configured_push_establishes_upstream_and_tracks_unpushed_commits() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
@@ -916,7 +936,7 @@ mod tests {
             "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push: true\n  remote: origin\n",
         )
         .unwrap();
-        assert_eq!(push(&root, &config).unwrap(), PushState::Pushed);
+        assert_eq!(push(&root, &config), PushState::Pushed);
         let upstream = checked(&root, ["rev-parse", "--abbrev-ref", "@{upstream}"]).unwrap();
         assert_eq!(
             String::from_utf8(upstream.stdout).unwrap().trim(),
@@ -927,7 +947,7 @@ mod tests {
         fs::write(root.join("note.md"), "two\n").unwrap();
         checked(&root, ["commit", "-am", "second"]).unwrap();
         assert!(has_unpushed(&root).unwrap());
-        assert_eq!(push(&root, &config).unwrap(), PushState::Pushed);
+        assert_eq!(push(&root, &config), PushState::Pushed);
         assert!(!has_unpushed(&root).unwrap());
     }
 
