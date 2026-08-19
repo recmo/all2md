@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
     fmt, fs,
     io::Write,
@@ -20,10 +20,7 @@ use crate::{
         validate_repo_path,
     },
     git::{self, PushState},
-    hashline::{
-        ChangedRange, EditOperation, EffectState, apply_operations_with_ranges, effect_state,
-        render,
-    },
+    hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
     markdown::{Edge, Finding, ParsedPage, project_metadata, validate_corpus},
     provider::{InputType, RetrievalProvider, ZeroEntropyProvider},
     search::{SearchIndex, SearchResponse},
@@ -98,6 +95,23 @@ struct PendingReceipt {
     base_head: String,
     tree: String,
     touched_paths: Vec<String>,
+    #[serde(default)]
+    preimages: Option<Preimages>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredReceipt {
+    touched_paths: Vec<String>,
+    #[serde(default)]
+    preimages: Option<Preimages>,
+}
+
+type Preimages = BTreeMap<String, Option<String>>;
+
+enum ReplayState {
+    Applied,
+    Reverted,
+    Partial,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,20 +134,27 @@ pub struct StatusResponse {
 
 impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Arc<Self>> {
-        let (root, config, git_dir) = Self::load_repository(root)?;
+        let (root, head, config, git_dir) = Self::load_repository(root)?;
         let provider = zeroentropy_provider(config.provider.clone());
-        Self::open_inner(root, config, provider, git_dir, Some(zeroentropy_provider))
+        Self::open_inner(
+            root,
+            head,
+            config,
+            provider,
+            git_dir,
+            Some(zeroentropy_provider),
+        )
     }
 
     pub fn open_with_provider(
         root: impl AsRef<Path>,
         provider: Arc<dyn RetrievalProvider>,
     ) -> Result<Arc<Self>> {
-        let (root, config, git_dir) = Self::load_repository(root)?;
-        Self::open_inner(root, config, provider, git_dir, None)
+        let (root, head, config, git_dir) = Self::load_repository(root)?;
+        Self::open_inner(root, head, config, provider, git_dir, None)
     }
 
-    fn load_repository(root: impl AsRef<Path>) -> Result<(PathBuf, Config, PathBuf)> {
+    fn load_repository(root: impl AsRef<Path>) -> Result<(PathBuf, String, Config, PathBuf)> {
         let root = root
             .as_ref()
             .canonicalize()
@@ -145,17 +166,17 @@ impl Store {
             .map_err(|_| anyhow!(".mdstore/config.yaml must be tracked by Git"))?;
         let config = Config::from_yaml(&config_text)?;
         git::recover_worktree(&root)?;
-        Ok((root, config, git_dir))
+        Ok((root, head, config, git_dir))
     }
 
     fn open_inner(
         root: PathBuf,
+        head: String,
         config: Config,
         provider: Arc<dyn RetrievalProvider>,
         git_dir: PathBuf,
         provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     ) -> Result<Arc<Self>> {
-        let head = git::head(&root)?;
         let pages = load_pages(&root, &head, &config)?;
         let extra = load_config_files(&root, &head)?;
         let (parsed, edges) = validate_corpus(&config, &pages, &extra).map_err(|findings| {
@@ -257,10 +278,10 @@ impl Store {
         let _lock = self.lock_repository()?;
         git::recover_worktree(&self.root)?;
         self.refresh_external_commit()?;
-        if let Some(response) = self.read_receipt(&digest, request)? {
+        if let Some(response) = self.read_receipt(&digest)? {
             return Ok(response);
         }
-        if let Some(response) = self.recover_pending(&digest, request)? {
+        if let Some(response) = self.recover_pending(&digest)? {
             return Ok(response);
         }
         if let Some(reason) = self.blocked.read().clone() {
@@ -369,6 +390,7 @@ impl Store {
             .map(|path| (path.clone(), changes.get(path).cloned().flatten()))
             .collect();
         let path_list: Vec<String> = paths.iter().cloned().collect();
+        let preimages = changed_preimages(&originals, changes);
         let fresh_hashlines = fresh_windows(changes, &applied.changed_ranges);
         if let Err(error) = git::write_changes(&self.root, &ordered) {
             return Err(rollback_failure(&self.root, &path_list, error));
@@ -385,6 +407,7 @@ impl Store {
                 base_head,
                 tree,
                 touched_paths: path_list.clone(),
+                preimages: Some(preimages.clone()),
             };
             if let Err(error) = self.write_pending(&digest, &pending) {
                 return Err(rollback_failure(&self.root, &path_list, error));
@@ -452,7 +475,7 @@ impl Store {
             validation_findings: Vec::new(),
             embedding_state: "pending".into(),
         };
-        self.write_receipt(&digest, &response)?;
+        self.write_receipt(&digest, &response, Some(&preimages))?;
         self.remove_pending(&digest)?;
         Ok(response)
     }
@@ -692,29 +715,21 @@ impl Store {
             .join(format!("{digest}.json"))
     }
 
-    fn read_receipt(
-        &self,
-        digest: &str,
-        request: &ApplyEditsRequest,
-    ) -> Result<Option<ApplyEditsResponse>> {
+    fn read_receipt(&self, digest: &str) -> Result<Option<ApplyEditsResponse>> {
         let path = self.receipt_path(digest);
         if !path.exists() {
             return Ok(None);
         }
-        match self.effect_state(request) {
-            EffectState::Present => {}
-            EffectState::Absent => return Ok(None),
-            EffectState::Partial => {
+        let stored: StoredReceipt = serde_json::from_slice(&fs::read(path)?)?;
+        match self.replay_state(stored.preimages.as_ref())? {
+            ReplayState::Applied => {}
+            ReplayState::Reverted => return Ok(None),
+            ReplayState::Partial => {
                 bail!(
                     "the previously applied batch was only partially superseded; read fresh hashlines and submit a new atomic batch"
                 )
             }
         }
-        #[derive(Deserialize)]
-        struct StoredReceipt {
-            touched_paths: Vec<String>,
-        }
-        let stored: StoredReceipt = serde_json::from_slice(&fs::read(path)?)?;
         let fresh_hashlines = self.current_hashlines(&stored.touched_paths);
         Ok(Some(ApplyEditsResponse {
             status: ApplyStatus::AlreadyApplied,
@@ -726,12 +741,17 @@ impl Store {
         }))
     }
 
-    fn write_receipt(&self, digest: &str, response: &ApplyEditsResponse) -> Result<()> {
-        let path = self.receipt_path(digest);
-        let value = serde_json::json!({
-            "touched_paths": response.touched_paths,
-        });
-        write_atomic(&path, &serde_json::to_vec(&value)?)
+    fn write_receipt(
+        &self,
+        digest: &str,
+        response: &ApplyEditsResponse,
+        preimages: Option<&Preimages>,
+    ) -> Result<()> {
+        let stored = StoredReceipt {
+            touched_paths: response.touched_paths.clone(),
+            preimages: preimages.cloned(),
+        };
+        write_atomic(&self.receipt_path(digest), &serde_json::to_vec(&stored)?)
     }
 
     fn write_pending(&self, digest: &str, pending: &PendingReceipt) -> Result<()> {
@@ -746,11 +766,7 @@ impl Store {
         Ok(())
     }
 
-    fn recover_pending(
-        &self,
-        digest: &str,
-        request: &ApplyEditsRequest,
-    ) -> Result<Option<ApplyEditsResponse>> {
+    fn recover_pending(&self, digest: &str) -> Result<Option<ApplyEditsResponse>> {
         let path = self.pending_path(digest);
         if !path.exists() {
             return Ok(None);
@@ -760,13 +776,13 @@ impl Store {
             fs::remove_file(path)?;
             return Ok(None);
         }
-        match self.effect_state(request) {
-            EffectState::Present => {}
-            EffectState::Absent => {
+        match self.replay_state(pending.preimages.as_ref())? {
+            ReplayState::Applied => {}
+            ReplayState::Reverted => {
                 fs::remove_file(path)?;
                 return Ok(None);
             }
-            EffectState::Partial => {
+            ReplayState::Partial => {
                 bail!(
                     "the previously applied batch was only partially superseded; read fresh hashlines and submit a new atomic batch"
                 )
@@ -784,7 +800,7 @@ impl Store {
             validation_findings: Vec::new(),
             embedding_state: "pending_or_ready".into(),
         };
-        self.write_receipt(digest, &response)?;
+        self.write_receipt(digest, &response, pending.preimages.as_ref())?;
         self.remove_pending(digest)?;
         Ok(Some(response))
     }
@@ -803,21 +819,32 @@ impl Store {
             .collect()
     }
 
-    fn effect_state(&self, request: &ApplyEditsRequest) -> EffectState {
-        let state = self.state.read();
-        let current = request
-            .edits
-            .iter()
-            .filter_map(|edit| {
-                let path = edit.path();
-                state
-                    .pages
-                    .get(path)
-                    .or_else(|| state.config_files.get(path))
-                    .map(|text| (path.to_owned(), text.clone()))
-            })
-            .collect();
-        effect_state(&current, &request.edits)
+    fn replay_state(&self, preimages: Option<&Preimages>) -> Result<ReplayState> {
+        let Some(preimages) = preimages else {
+            return Ok(ReplayState::Applied);
+        };
+        if preimages.is_empty() {
+            return Ok(ReplayState::Applied);
+        }
+        let head = self.head.read().clone();
+        let mut reverted = 0;
+        for (path, preimage) in preimages {
+            let current = if git::is_tracked(&self.root, path)? {
+                Some(git::read_text(&self.root, &head, path)?)
+            } else {
+                None
+            };
+            if current == *preimage {
+                reverted += 1;
+            }
+        }
+        Ok(if reverted == 0 {
+            ReplayState::Applied
+        } else if reverted == preimages.len() {
+            ReplayState::Reverted
+        } else {
+            ReplayState::Partial
+        })
     }
 
     fn current_push_state(&self) -> Result<PushState> {
@@ -840,6 +867,19 @@ impl Store {
         *self.blocked.write() = reason;
         Ok(())
     }
+}
+
+fn changed_preimages(
+    originals: &HashMap<String, String>,
+    changes: &HashMap<String, Option<String>>,
+) -> Preimages {
+    changes
+        .iter()
+        .filter_map(|(path, updated)| {
+            let original = originals.get(path).cloned();
+            (original.as_ref() != updated.as_ref()).then(|| (path.clone(), original))
+        })
+        .collect()
 }
 
 fn load_pages(root: &Path, revision: &str, config: &Config) -> Result<HashMap<String, String>> {
@@ -1039,4 +1079,103 @@ fn rollback_failure(root: &Path, paths: &[String], error: anyhow::Error) -> anyh
 fn request_digest(request: &ApplyEditsRequest) -> Result<String> {
     let bytes = serde_json::to_vec(request)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::*;
+
+    fn run_git(root: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+
+    fn config(document: &str) -> String {
+        format!(
+            "documents:\n  include: ['{document}']\nprovider:\n  dimensions: 2\ngit:\n  push: false\n"
+        )
+    }
+
+    #[test]
+    fn receipt_preimages_include_only_changed_paths() {
+        let originals = HashMap::from([
+            ("changed.md".into(), "old".into()),
+            ("removed.md".into(), "removed".into()),
+            ("same.md".into(), "same".into()),
+        ]);
+        let changes = HashMap::from([
+            ("changed.md".into(), Some("new".into())),
+            ("same.md".into(), Some("same".into())),
+            ("created.md".into(), Some("created".into())),
+            ("removed.md".into(), None),
+        ]);
+
+        assert_eq!(
+            changed_preimages(&originals, &changes),
+            BTreeMap::from([
+                ("changed.md".into(), Some("old".into())),
+                ("created.md".into(), None),
+                ("removed.md".into(), Some("removed".into())),
+            ])
+        );
+    }
+
+    #[test]
+    fn startup_snapshot_never_mixes_configuration_and_corpus_commits() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.name", "mdstore test"]);
+        run_git(root, &["config", "user.email", "mdstore@example.invalid"]);
+        run_git(root, &["config", "commit.gpgsign", "false"]);
+        fs::create_dir(root.join(".mdstore")).unwrap();
+        fs::write(root.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
+        fs::write(root.join(".mdstore/config.yaml"), config("old.md")).unwrap();
+        fs::write(root.join("old.md"), "old snapshot\n").unwrap();
+        run_git(
+            root,
+            &["add", ".gitignore", ".mdstore/config.yaml", "old.md"],
+        );
+        run_git(root, &["commit", "-q", "-m", "old snapshot"]);
+
+        let old_head = run_git(root, &["rev-parse", "HEAD"]);
+        let old_config =
+            Config::from_yaml(&git::read_text(root, &old_head, ".mdstore/config.yaml").unwrap())
+                .unwrap();
+        let git_dir = git::git_dir(root).unwrap();
+
+        fs::write(root.join(".mdstore/config.yaml"), config("new.md")).unwrap();
+        fs::write(root.join("new.md"), "new snapshot\n").unwrap();
+        run_git(root, &["add", ".mdstore/config.yaml", "new.md"]);
+        run_git(root, &["commit", "-q", "-m", "new snapshot"]);
+
+        let store = Store::open_inner(
+            root.to_path_buf(),
+            old_head,
+            old_config.clone(),
+            zeroentropy_provider(old_config.provider),
+            git_dir,
+            None,
+        )
+        .unwrap();
+        assert_eq!(store.config().documents.include, ["old.md"]);
+        assert!(store.get_page("old.md", None).is_ok());
+        assert!(store.get_page("new.md", None).is_err());
+
+        assert!(matches!(store.push().unwrap(), PushState::Disabled));
+        assert_eq!(store.config().documents.include, ["new.md"]);
+        assert!(store.get_page("old.md", None).is_err());
+        assert!(store.get_page("new.md", None).is_ok());
+    }
 }

@@ -328,9 +328,82 @@ fn delayed_idempotent_retry_returns_current_hashlines() {
         .unwrap();
 
     let replay = store.apply_edits(&first).unwrap();
+    assert!(matches!(
+        replay.status,
+        mdstore::store::ApplyStatus::AlreadyApplied
+    ));
     let hashline = &replay.fresh_hashlines["alice.md"];
     assert!(hashline.contains("Alice current."));
     assert!(!hashline.contains("Alice first."));
+}
+
+#[test]
+fn far_shifted_insert_retry_stays_already_applied() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let request = ApplyEditsRequest {
+        edit_summary: "append Alice note".into(),
+        edits: vec![EditOperation::InsertAfter {
+            path: "alice.md".into(),
+            anchor: format!("6:{}", short_hash("Alice profile.")),
+            content: "Remember this.".into(),
+        }],
+    };
+    store.apply_edits(&request).unwrap();
+
+    let path = repository.root.join("alice.md");
+    let shifted = fs::read_to_string(&path).unwrap().replace(
+        "# Notes\n\n",
+        "# Notes\n\none\ntwo\nthree\nfour\nfive\nsix\n",
+    );
+    fs::write(&path, shifted).unwrap();
+    command(&repository.root, &["add", "alice.md"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "shift Alice note"],
+    );
+
+    let replay = store.apply_edits(&request).unwrap();
+    assert!(matches!(
+        replay.status,
+        mdstore::store::ApplyStatus::AlreadyApplied
+    ));
+    assert_eq!(
+        fs::read_to_string(path)
+            .unwrap()
+            .matches("Remember this.")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn recreated_page_keeps_create_receipt_applied() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let request = ApplyEditsRequest {
+        edit_summary: "create Carol".into(),
+        edits: vec![EditOperation::CreatePage {
+            path: "carol.md".into(),
+            content: page("Carol"),
+        }],
+    };
+    store.apply_edits(&request).unwrap();
+
+    fs::write(repository.root.join("carol.md"), page("Replacement")).unwrap();
+    command(&repository.root, &["add", "carol.md"]);
+    command(&repository.root, &["commit", "-q", "-m", "recreate Carol"]);
+
+    let replay = store.apply_edits(&request).unwrap();
+    assert!(matches!(
+        replay.status,
+        mdstore::store::ApplyStatus::AlreadyApplied
+    ));
+    assert!(
+        fs::read_to_string(repository.root.join("carol.md"))
+            .unwrap()
+            .contains("Replacement profile.")
+    );
 }
 
 #[test]
@@ -367,6 +440,86 @@ fn reverted_request_can_be_applied_again() {
     assert_eq!(
         command(&repository.root, &["log", "-1", "--pretty=%B"]).trim(),
         "apply Alice edit"
+    );
+}
+
+#[test]
+fn legacy_receipt_without_preimages_remains_conservative() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let request = ApplyEditsRequest {
+        edit_summary: "legacy Alice edit".into(),
+        edits: vec![EditOperation::Replace {
+            path: "alice.md".into(),
+            anchor: format!("6:{}", short_hash("Alice profile.")),
+            content: "Alice changed.".into(),
+        }],
+    };
+    store.apply_edits(&request).unwrap();
+    let receipt = fs::read_dir(repository.root.join(".git/mdstore/receipts"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut stored: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    stored.as_object_mut().unwrap().remove("preimages");
+    fs::write(receipt, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+    fs::write(repository.root.join("alice.md"), page("Alice")).unwrap();
+    command(&repository.root, &["add", "alice.md"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "revert legacy Alice edit"],
+    );
+
+    let replay = store.apply_edits(&request).unwrap();
+    assert!(matches!(
+        replay.status,
+        mdstore::store::ApplyStatus::AlreadyApplied
+    ));
+    assert!(
+        fs::read_to_string(repository.root.join("alice.md"))
+            .unwrap()
+            .contains("Alice profile.")
+    );
+}
+
+#[test]
+fn partially_reverted_batch_requires_fresh_atomic_edits() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let request = ApplyEditsRequest {
+        edit_summary: "change Alice and Bob".into(),
+        edits: vec![
+            EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "Alice changed.".into(),
+            },
+            EditOperation::Replace {
+                path: "bob.md".into(),
+                anchor: format!("6:{}", short_hash("Bob profile.")),
+                content: "Bob changed.".into(),
+            },
+        ],
+    };
+    store.apply_edits(&request).unwrap();
+
+    fs::write(repository.root.join("alice.md"), page("Alice")).unwrap();
+    command(&repository.root, &["add", "alice.md"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "revert only Alice"],
+    );
+
+    let error = store.apply_edits(&request).unwrap_err().to_string();
+    assert!(error.contains("partially superseded"));
+    assert!(
+        fs::read_to_string(repository.root.join("bob.md"))
+            .unwrap()
+            .contains("Bob changed.")
     );
 }
 

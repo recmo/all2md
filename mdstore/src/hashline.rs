@@ -119,80 +119,6 @@ pub struct AppliedOperations {
     pub changed_ranges: HashMap<String, Vec<ChangedRange>>,
 }
 
-pub(crate) enum EffectState {
-    Present,
-    Absent,
-    Partial,
-}
-
-pub(crate) fn effect_state(
-    current: &HashMap<String, String>,
-    operations: &[EditOperation],
-) -> EffectState {
-    let present: Vec<bool> = operations
-        .iter()
-        .map(|operation| match operation {
-            EditOperation::CreatePage { path, .. } => current.contains_key(path),
-            EditOperation::RemovePage { path, .. } => !current.contains_key(path),
-            EditOperation::Replace { path, anchor, .. }
-            | EditOperation::Delete { path, anchor } => current.get(path).is_some_and(|text| {
-                let lines: Vec<String> = text.lines().map(str::to_owned).collect();
-                resolve_span(anchor, &lines).is_err()
-            }),
-            EditOperation::InsertBefore {
-                path,
-                anchor,
-                content,
-            }
-            | EditOperation::InsertAfter {
-                path,
-                anchor,
-                content,
-            } => current.get(path).is_some_and(|text| {
-                let lines: Vec<String> = text.lines().map(str::to_owned).collect();
-                let after = matches!(operation, EditOperation::InsertAfter { .. });
-                let Ok(position) = resolve_insert_position(anchor, &lines, after) else {
-                    return true;
-                };
-                inserted_near_anchor(&lines, position, &split_content(content), after)
-            }),
-        })
-        .collect();
-    if present.iter().all(|value| *value) {
-        EffectState::Present
-    } else if present.iter().all(|value| !value) {
-        EffectState::Absent
-    } else {
-        EffectState::Partial
-    }
-}
-
-fn inserted_near_anchor(
-    lines: &[String],
-    position: usize,
-    inserted: &[String],
-    after: bool,
-) -> bool {
-    if inserted.len() > lines.len() {
-        return false;
-    }
-    let radius = 3;
-    let (start, end) = if after {
-        (
-            position,
-            (position + radius).min(lines.len() - inserted.len()),
-        )
-    } else {
-        (
-            position.saturating_sub(inserted.len() + radius),
-            position
-                .saturating_sub(inserted.len())
-                .min(lines.len() - inserted.len()),
-        )
-    };
-    (start..=end).any(|offset| lines[offset..offset + inserted.len()] == *inserted)
-}
-
 pub fn apply_operations(
     original: &HashMap<String, String>,
     operations: &[EditOperation],
@@ -529,42 +455,6 @@ mod tests {
             changed["note.md"].as_deref(),
             Some("prefix\nalpha\nBETA\ngamma\n")
         );
-    }
-
-    #[test]
-    fn receipt_effects_distinguish_retries_from_reverts() {
-        let anchor = format!("1:{}", short_hash("anchor"));
-        let replace = EditOperation::Replace {
-            path: "note.md".into(),
-            anchor: anchor.clone(),
-            content: "changed".into(),
-        };
-        let insert = EditOperation::InsertAfter {
-            path: "note.md".into(),
-            anchor,
-            content: "inserted".into(),
-        };
-
-        let current = HashMap::from([("note.md".into(), "changed\n".into())]);
-        assert!(matches!(
-            effect_state(&current, std::slice::from_ref(&replace)),
-            EffectState::Present
-        ));
-        let reverted = HashMap::from([("note.md".into(), "anchor\n".into())]);
-        assert!(matches!(
-            effect_state(&reverted, std::slice::from_ref(&replace)),
-            EffectState::Absent
-        ));
-
-        let current = HashMap::from([("note.md".into(), "anchor\ninserted\n".into())]);
-        assert!(matches!(
-            effect_state(&current, std::slice::from_ref(&insert)),
-            EffectState::Present
-        ));
-        assert!(matches!(
-            effect_state(&reverted, std::slice::from_ref(&insert)),
-            EffectState::Absent
-        ));
     }
 
     #[test]
