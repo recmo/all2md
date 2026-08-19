@@ -3,8 +3,9 @@ use std::{net::SocketAddr, sync::Arc};
 use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    extract::{Request, State},
+    http::StatusCode,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -21,14 +22,16 @@ struct AppState {
 }
 
 pub fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
+    let state = AppState {
+        store,
+        bearer_token,
+    };
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
+        .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState {
-            store,
-            bearer_token,
-        })
+        .with_state(state)
 }
 
 pub async fn serve(
@@ -66,13 +69,10 @@ async fn health(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn mcp(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<Value>,
-) -> Response {
+async fn authenticate(State(state): State<AppState>, request: Request, next: Next) -> Response {
     if let Some(expected) = &state.bearer_token {
-        let actual = headers
+        let actual = request
+            .headers()
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "));
@@ -84,6 +84,10 @@ async fn mcp(
                 .into_response();
         }
     }
+    next.run(request).await
+}
+
+async fn mcp(State(state): State<AppState>, Json(request): Json<Value>) -> Response {
     let Some(object) = request.as_object() else {
         return rpc_error(Value::Null, -32600, "invalid request");
     };
@@ -156,17 +160,7 @@ fn tools() -> Vec<Value> {
                     "edits": {
                         "type": "array",
                         "minItems": 1,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "op": {"enum": ["replace", "insert_before", "insert_after", "delete", "create_page", "remove_page"]},
-                                "path": {"type": "string"},
-                                "anchor": {"type": "string"},
-                                "content": {"type": "string"}
-                            },
-                            "required": ["op", "path"],
-                            "additionalProperties": false
-                        }
+                        "items": {"oneOf": edit_operation_schemas()}
                     }
                 },
                 "required": ["edit_summary", "edits"],
@@ -174,6 +168,40 @@ fn tools() -> Vec<Value> {
             }
         }),
     ]
+}
+
+fn edit_operation_schemas() -> Vec<Value> {
+    [
+        ("replace", true, true),
+        ("insert_before", true, true),
+        ("insert_after", true, true),
+        ("delete", true, false),
+        ("create_page", false, true),
+        ("remove_page", true, false),
+    ]
+    .into_iter()
+    .map(|(operation, anchor, content)| {
+        let mut properties = serde_json::Map::from_iter([
+            ("op".into(), json!({"const": operation})),
+            ("path".into(), json!({"type": "string", "minLength": 1})),
+        ]);
+        let mut required = vec!["op", "path"];
+        if anchor {
+            properties.insert("anchor".into(), json!({"type": "string", "minLength": 2}));
+            required.push("anchor");
+        }
+        if content {
+            properties.insert("content".into(), json!({"type": "string"}));
+            required.push("content");
+        }
+        json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false
+        })
+    })
+    .collect()
 }
 
 #[derive(Deserialize)]

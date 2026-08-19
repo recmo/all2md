@@ -31,26 +31,18 @@ pub fn chunk_page(
     let overlap_chars = target_chars.saturating_mul(config.overlap_percent) / 100;
     let mut current: Option<Block> = None;
     for block in blocks {
-        if block.text.len() > config.max_chars {
+        if block.text.chars().count() > config.max_chars {
             if let Some(value) = current.take() {
-                chunks.push(to_chunk(value, context));
+                push_chunk(&mut chunks, value, context, overlap_chars);
             }
-            for split in recursive_split(&block.text, config.max_chars) {
-                chunks.push(to_chunk(
-                    Block {
-                        text: split,
-                        start_line: block.start_line,
-                        end_line: block.end_line,
-                        heading: block.heading.clone(),
-                    },
-                    context,
-                ));
+            for split in split_block(block, config.max_chars) {
+                push_chunk(&mut chunks, split, context, overlap_chars);
             }
             continue;
         }
         match &mut current {
             Some(value)
-                if value.text.len() + 2 + block.text.len() <= target_chars
+                if value.text.chars().count() + 2 + block.text.chars().count() <= target_chars
                     && value.heading == block.heading =>
             {
                 value.text.push_str("\n\n");
@@ -59,21 +51,14 @@ pub fn chunk_page(
             }
             Some(_) => {
                 let previous = current.take().expect("present");
-                let overlap = tail(&previous.text, overlap_chars);
-                chunks.push(to_chunk(previous, context));
-                let mut text = String::new();
-                if !overlap.is_empty() {
-                    text.push_str(&overlap);
-                    text.push_str("\n\n");
-                }
-                text.push_str(&block.text);
-                current = Some(Block { text, ..block });
+                push_chunk(&mut chunks, previous, context, overlap_chars);
+                current = Some(block);
             }
             None => current = Some(block),
         }
     }
     if let Some(value) = current {
-        chunks.push(to_chunk(value, context));
+        push_chunk(&mut chunks, value, context, overlap_chars);
     }
     chunks
 }
@@ -146,72 +131,81 @@ fn parse_heading(line: &str) -> Option<(usize, String)> {
     Some((count, trimmed[count + 1..].trim().into()))
 }
 
-fn recursive_split(text: &str, max_chars: usize) -> Vec<String> {
-    if text.len() <= max_chars {
-        return vec![text.into()];
-    }
-    for delimiter in ["\n\n", "\n", ". ", "; ", ", ", " "] {
-        let pieces: Vec<&str> = text.split(delimiter).collect();
-        if pieces.len() <= 1 {
-            continue;
-        }
-        let mut output = Vec::new();
-        let mut current = String::new();
-        for piece in pieces {
-            let needed = usize::from(!current.is_empty()) * delimiter.len() + piece.len();
-            if !current.is_empty() && current.len() + needed > max_chars {
-                output.push(current);
-                current = String::new();
-            }
-            if !current.is_empty() {
-                current.push_str(delimiter);
-            }
-            current.push_str(piece);
-        }
-        if !current.is_empty() {
-            output.push(current);
-        }
-        return output
-            .into_iter()
-            .flat_map(|piece| recursive_split(&piece, max_chars))
-            .collect();
-    }
-    split_at_char_boundaries(text, max_chars)
-}
-
-fn split_at_char_boundaries(text: &str, max_chars: usize) -> Vec<String> {
+fn split_block(block: Block, max_chars: usize) -> Vec<Block> {
     let mut output = Vec::new();
     let mut start = 0;
-    while start < text.len() {
-        let mut end = (start + max_chars).min(text.len());
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
+    while start < block.text.len() {
+        let hard_end = block.text[start..]
+            .char_indices()
+            .nth(max_chars)
+            .map_or(block.text.len(), |(offset, _)| start + offset);
+        let mut end = hard_end;
+        if hard_end < block.text.len() {
+            let window = &block.text[start..hard_end];
+            for delimiter in ["\n\n", "\n", ". ", "; ", ", ", " "] {
+                if let Some(position) = window.rfind(delimiter) {
+                    let candidate = start + position + delimiter.len();
+                    if candidate > start {
+                        end = candidate;
+                        break;
+                    }
+                }
+            }
         }
-        output.push(text[start..end].into());
+        let start_line = block.start_line
+            + block.text.as_bytes()[..start]
+                .iter()
+                .filter(|b| **b == b'\n')
+                .count();
+        let last_byte = end.saturating_sub(1);
+        let end_line = block.start_line
+            + block.text.as_bytes()[..last_byte]
+                .iter()
+                .filter(|b| **b == b'\n')
+                .count();
+        output.push(Block {
+            start_line,
+            end_line,
+            heading: block.heading.clone(),
+            text: block.text[start..end].into(),
+        });
         start = end;
     }
     output
 }
 
-fn tail(text: &str, bytes: usize) -> String {
-    if bytes == 0 || text.is_empty() {
+fn tail(text: &str, chars: usize) -> String {
+    if chars == 0 || text.is_empty() {
         return String::new();
     }
-    let mut start = text.len().saturating_sub(bytes);
-    while start < text.len() && !text.is_char_boundary(start) {
-        start += 1;
-    }
+    let start = text
+        .char_indices()
+        .rev()
+        .nth(chars.saturating_sub(1))
+        .map_or(0, |(offset, _)| offset);
     text[start..].trim_start().into()
 }
 
-fn to_chunk(block: Block, context: &[String]) -> Chunk {
+fn push_chunk(chunks: &mut Vec<Chunk>, block: Block, context: &[String], overlap_chars: usize) {
+    let overlap = chunks
+        .last()
+        .map(|previous| tail(&previous.text, overlap_chars))
+        .unwrap_or_default();
+    chunks.push(to_chunk(block, context, &overlap));
+}
+
+fn to_chunk(block: Block, context: &[String], overlap: &str) -> Chunk {
     let mut prefix = context.to_vec();
     prefix.extend(block.heading.iter().cloned());
-    let embedding_text = if prefix.is_empty() {
-        block.text.clone()
-    } else {
-        format!("{}\n\n{}", prefix.join(" > "), block.text)
-    };
+    let mut embedding_parts = Vec::new();
+    if !prefix.is_empty() {
+        embedding_parts.push(prefix.join(" > "));
+    }
+    if !overlap.is_empty() {
+        embedding_parts.push(overlap.into());
+    }
+    embedding_parts.push(block.text.clone());
+    let embedding_text = embedding_parts.join("\n\n");
     Chunk {
         start_line: block.start_line,
         end_line: block.end_line,
@@ -234,5 +228,37 @@ mod tests {
         assert!(chunks.iter().any(|chunk| chunk.heading == ["One"]));
         assert!(chunks.iter().any(|chunk| chunk.text.contains("fn x")));
         assert!(chunks.iter().any(|chunk| chunk.heading == ["Two"]));
+    }
+
+    #[test]
+    fn split_excerpts_stay_within_their_source_ranges() {
+        let text =
+            "# Notes\n\nfirst sentence. second sentence. third sentence.\n\nnext paragraph.\n";
+        let parsed = parse_page(text, &LinkConfig::default()).unwrap();
+        let config = ChunkConfig {
+            target_tokens: 5,
+            overlap_percent: 50,
+            max_chars: 24,
+            ..ChunkConfig::default()
+        };
+        let chunks = chunk_page(text, &parsed, &config, &[]);
+        let lines: Vec<&str> = text.lines().collect();
+        for chunk in &chunks {
+            let source = lines[chunk.start_line - 1..chunk.end_line].join("\n");
+            assert!(source.contains(chunk.text.trim()));
+        }
+        assert!(chunks.iter().skip(1).any(|chunk| {
+            chunk.embedding_text.len() > chunk.text.len()
+                && !chunk.text.starts_with("first sentence")
+        }));
+
+        let text = "# 中文\n\n这是一个没有空格的长段落。\n";
+        let parsed = parse_page(text, &LinkConfig::default()).unwrap();
+        let cjk_config = ChunkConfig {
+            max_chars: 5,
+            ..config
+        };
+        let chunks = chunk_page(text, &parsed, &cjk_config, &[]);
+        assert!(chunks.iter().all(|chunk| chunk.text.chars().count() <= 5));
     }
 }

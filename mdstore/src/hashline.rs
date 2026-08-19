@@ -108,10 +108,28 @@ enum ResolvedKind {
     Delete,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ChangedRange {
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+pub struct AppliedOperations {
+    pub changes: HashMap<String, Option<String>>,
+    pub changed_ranges: HashMap<String, Vec<ChangedRange>>,
+}
+
 pub fn apply_operations(
     original: &HashMap<String, String>,
     operations: &[EditOperation],
 ) -> Result<HashMap<String, Option<String>>, HashlineError> {
+    Ok(apply_operations_with_ranges(original, operations)?.changes)
+}
+
+pub fn apply_operations_with_ranges(
+    original: &HashMap<String, String>,
+    operations: &[EditOperation],
+) -> Result<AppliedOperations, HashlineError> {
     let mut grouped: BTreeMap<&str, Vec<(usize, &EditOperation)>> = BTreeMap::new();
     for (index, operation) in operations.iter().enumerate() {
         grouped
@@ -120,12 +138,23 @@ pub fn apply_operations(
             .push((index, operation));
     }
     let mut output = HashMap::new();
+    let mut changed_ranges = HashMap::new();
     for (path, ops) in grouped {
         if let [(.., EditOperation::CreatePage { content, .. })] = ops.as_slice() {
             if original.contains_key(path) {
                 return Err(HashlineError::Incompatible(path.into()));
             }
             output.insert(path.into(), Some(content.clone()));
+            let line_count = content.lines().count();
+            if line_count > 0 {
+                changed_ranges.insert(
+                    path.into(),
+                    vec![ChangedRange {
+                        start_line: 1,
+                        end_line: line_count,
+                    }],
+                );
+            }
             continue;
         }
         let Some(text) = original.get(path) else {
@@ -158,6 +187,7 @@ pub fn apply_operations(
         }
 
         let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        let separator = if text.contains("\r\n") { "\r\n" } else { "\n" };
         let trailing_newline = text.ends_with('\n');
         let mut resolved = Vec::new();
         for (request_index, operation) in ops {
@@ -207,6 +237,32 @@ pub fn apply_operations(
             resolved.push(item);
         }
         reject_overlaps(path, &resolved)?;
+        let mut ordered_ranges: Vec<&Resolved> = resolved.iter().collect();
+        ordered_ranges.sort_by(|a, b| {
+            a.span
+                .start
+                .cmp(&b.span.start)
+                .then_with(|| a.index.cmp(&b.index))
+        });
+        let mut offset = 0_isize;
+        let mut ranges = Vec::new();
+        for edit in ordered_ranges {
+            let removed = match &edit.kind {
+                ResolvedKind::Insert(_) => 0,
+                ResolvedKind::Replace(_) | ResolvedKind::Delete => {
+                    edit.span.end - edit.span.start + 1
+                }
+            };
+            let inserted = match &edit.kind {
+                ResolvedKind::Insert(content) | ResolvedKind::Replace(content) => {
+                    split_content(content).len()
+                }
+                ResolvedKind::Delete => 0,
+            };
+            let start = (edit.span.start as isize + offset).max(0) as usize;
+            ranges.push((start, inserted));
+            offset += inserted as isize - removed as isize;
+        }
         resolved.sort_by(|a, b| {
             b.span
                 .start
@@ -226,13 +282,38 @@ pub fn apply_operations(
                 }
             }
         }
-        let mut updated = lines.join("\n");
-        if trailing_newline && !updated.is_empty() {
-            updated.push('\n');
+        let mut updated = lines.join(separator);
+        if trailing_newline || lines.last().is_some_and(String::is_empty) {
+            updated.push_str(separator);
+        }
+        let final_lines = lines.len();
+        let ranges: Vec<ChangedRange> = ranges
+            .into_iter()
+            .filter_map(|(start, inserted)| {
+                if final_lines == 0 {
+                    return None;
+                }
+                let start = start.min(final_lines - 1);
+                let end = if inserted == 0 {
+                    start
+                } else {
+                    (start + inserted - 1).min(final_lines - 1)
+                };
+                Some(ChangedRange {
+                    start_line: start + 1,
+                    end_line: end + 1,
+                })
+            })
+            .collect();
+        if !ranges.is_empty() {
+            changed_ranges.insert(path.into(), ranges);
         }
         output.insert(path.into(), Some(updated));
     }
-    Ok(output)
+    Ok(AppliedOperations {
+        changes: output,
+        changed_ranges,
+    })
 }
 
 fn resolve_insert_position(
@@ -247,9 +328,15 @@ fn resolve_insert_position(
 }
 
 fn split_content(content: &str) -> Vec<String> {
-    let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
-    if content.ends_with('\n') && lines.last().is_some_and(String::is_empty) {
+    let mut lines: Vec<String> = content
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+        .collect();
+    if content.ends_with('\n') {
         lines.pop();
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
     }
     lines
 }
@@ -410,5 +497,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(removed["empty.md"], None);
+    }
+
+    #[test]
+    fn edits_preserve_crlf_and_empty_content_is_a_line() {
+        let mut original = HashMap::new();
+        original.insert("note.md".into(), "one\r\ntwo\r\nthree\r\n".into());
+        let changed = apply_operations_with_ranges(
+            &original,
+            &[
+                EditOperation::Replace {
+                    path: "note.md".into(),
+                    anchor: format!("2:{}", short_hash("two")),
+                    content: String::new(),
+                },
+                EditOperation::InsertAfter {
+                    path: "note.md".into(),
+                    anchor: format!("3:{}", short_hash("three")),
+                    content: "\n".into(),
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            changed.changes["note.md"].as_deref(),
+            Some("one\r\n\r\nthree\r\n\r\n")
+        );
+        assert_eq!(changed.changed_ranges["note.md"].len(), 2);
+
+        let mut original = HashMap::new();
+        original.insert("one.md".into(), "one".into());
+        let blank = apply_operations(
+            &original,
+            &[EditOperation::Replace {
+                path: "one.md".into(),
+                anchor: format!("1:{}", short_hash("one")),
+                content: String::new(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(blank["one.md"].as_deref(), Some("\n"));
     }
 }

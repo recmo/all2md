@@ -1,8 +1,12 @@
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -13,9 +17,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     chunk::chunk_page,
-    config::{Config, validate_repo_path},
+    config::{Config, ProviderConfig, validate_repo_path},
     git::{self, PushState},
-    hashline::{EditOperation, apply_operations, render},
+    hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
     markdown::{Edge, Finding, ParsedPage, project_metadata, validate_corpus},
     provider::{InputType, RetrievalProvider, ZeroEntropyProvider},
     search::{SearchIndex, SearchResponse},
@@ -29,7 +33,10 @@ pub struct Store {
     parsed: RwLock<HashMap<String, ParsedPage>>,
     edges: RwLock<Vec<Edge>>,
     index: RwLock<SearchIndex>,
-    provider: Arc<dyn RetrievalProvider>,
+    provider: RwLock<Arc<dyn RetrievalProvider>>,
+    provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
+    reindex_lock: tokio::sync::Mutex<()>,
+    generation: AtomicU64,
     git_dir: PathBuf,
     head: RwLock<String>,
     blocked: RwLock<Option<String>>,
@@ -57,6 +64,14 @@ pub struct ApplyEditsResponse {
 pub enum ApplyStatus {
     Accepted,
     AlreadyApplied,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PendingReceipt {
+    base_head: String,
+    tree: String,
+    touched_paths: Vec<String>,
+    fresh_hashlines: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,8 +105,8 @@ impl Store {
             bail!(".mdstore/config.yaml must be tracked by Git");
         }
         let config = Config::load(&root)?;
-        let provider = Arc::new(ZeroEntropyProvider::new(config.provider.clone()));
-        Self::open_with_provider(root, config, provider, git_dir)
+        let provider = zeroentropy_provider(config.provider.clone());
+        Self::open_inner(root, config, provider, git_dir, Some(zeroentropy_provider))
     }
 
     pub fn open_with_provider(
@@ -100,14 +115,24 @@ impl Store {
         provider: Arc<dyn RetrievalProvider>,
         git_dir: PathBuf,
     ) -> Result<Arc<Self>> {
+        Self::open_inner(root, config, provider, git_dir, None)
+    }
+
+    fn open_inner(
+        root: PathBuf,
+        config: Config,
+        provider: Arc<dyn RetrievalProvider>,
+        git_dir: PathBuf,
+        provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
+    ) -> Result<Arc<Self>> {
         let pages = load_pages(&root, &config)?;
         let extra = load_config_files(&root)?;
-        let (parsed, edges) =
-            validate_corpus(&root, &config, &pages, &extra).map_err(|findings| {
-                anyhow!(serde_json::to_string_pretty(&findings).unwrap_or_default())
-            })?;
+        let (parsed, edges) = validate_corpus(&config, &pages, &extra).map_err(|findings| {
+            anyhow!(serde_json::to_string_pretty(&findings).unwrap_or_default())
+        })?;
         let index = build_index(&root, &config, &pages, &parsed, &edges);
         let head = git::head(&root)?;
+        let blocked = read_blocked(&git_dir)?;
         Ok(Arc::new(Self {
             root,
             config: RwLock::new(config),
@@ -115,10 +140,13 @@ impl Store {
             parsed: RwLock::new(parsed),
             edges: RwLock::new(edges),
             index: RwLock::new(index),
-            provider,
+            provider: RwLock::new(provider),
+            provider_factory,
+            reindex_lock: tokio::sync::Mutex::new(()),
+            generation: AtomicU64::new(0),
             git_dir,
             head: RwLock::new(head),
-            blocked: RwLock::new(None),
+            blocked: RwLock::new(blocked),
         }))
     }
 
@@ -136,7 +164,7 @@ impl Store {
         let config = self.config.read().clone();
         let pages = self.pages.read().clone();
         let extra = load_config_files(&self.root).unwrap_or_default();
-        validate_corpus(&self.root, &config, &pages, &extra).map(|_| ())
+        validate_corpus(&config, &pages, &extra).map(|_| ())
     }
 
     pub fn get_page(&self, path: &str, window: Option<(usize, usize)>) -> Result<PageResponse> {
@@ -184,8 +212,9 @@ impl Store {
         }
         let config = self.config.read().clone();
         let index = self.index.read().clone();
+        let provider = self.provider.read().clone();
         Ok(index
-            .search(&config, self.provider.as_ref(), query, variants)
+            .search(&config, provider.as_ref(), query, variants)
             .await)
     }
 
@@ -195,9 +224,6 @@ impl Store {
         }
         if request.edits.is_empty() {
             bail!("edits must contain at least one operation");
-        }
-        if let Some(reason) = self.blocked.read().clone() {
-            bail!("writes are blocked: {reason}");
         }
         let digest = request_digest(request)?;
         let lock_path = self.git_dir.join("mdstore/write.lock");
@@ -212,6 +238,12 @@ impl Store {
         self.refresh_external_commit()?;
         if let Some(response) = self.read_receipt(&digest)? {
             return Ok(response);
+        }
+        if let Some(response) = self.recover_pending(&digest)? {
+            return Ok(response);
+        }
+        if let Some(reason) = self.blocked.read().clone() {
+            bail!("writes are blocked: {reason}");
         }
 
         let mut paths = BTreeSet::new();
@@ -245,10 +277,11 @@ impl Store {
                 originals.insert(path.clone(), text);
             }
         }
-        let changes = apply_operations(&originals, &request.edits)?;
+        let applied = apply_operations_with_ranges(&originals, &request.edits)?;
+        let changes = &applied.changes;
         let mut pages = self.pages.read().clone();
         let mut extra = load_config_files(&self.root)?;
-        for (path, content) in &changes {
+        for (path, content) in changes {
             if path.ends_with(".md") && !path.starts_with(".mdstore/") {
                 match content {
                     Some(text) => {
@@ -278,7 +311,7 @@ impl Store {
             pages = load_pages(&self.root, &config)?;
         }
         ensure_pages_match_config(&config, &pages)?;
-        let (parsed, edges) = match validate_corpus(&self.root, &config, &pages, &extra) {
+        let (parsed, edges) = match validate_corpus(&config, &pages, &extra) {
             Ok(value) => value,
             Err(findings) => {
                 bail!(
@@ -287,21 +320,65 @@ impl Store {
                 );
             }
         };
+        let replacement_provider = if config.provider != self.config.read().provider {
+            let factory = self
+                .provider_factory
+                .context("provider configuration changes require a daemon restart")?;
+            Some(factory(config.provider.clone()))
+        } else {
+            None
+        };
 
         let ordered: Vec<(String, Option<String>)> = paths
             .iter()
             .map(|path| (path.clone(), changes.get(path).cloned().flatten()))
             .collect();
         let originally_present: Vec<String> = originals.keys().cloned().collect();
-        git::write_changes(&self.root, &ordered)?;
         let path_list: Vec<String> = paths.iter().cloned().collect();
-        let committed = match git::commit(&self.root, request.edit_summary.trim(), &path_list) {
+        let fresh_hashlines = fresh_windows(changes, &applied.changed_ranges);
+        if let Err(error) = git::write_changes(&self.root, &ordered) {
+            return Err(rollback_failure(
+                &self.root,
+                &path_list,
+                &originally_present,
+                error,
+            ));
+        }
+        let tree = match git::stage_tree(&self.root, &path_list) {
             Ok(value) => value,
             Err(error) => {
-                let _ = git::rollback(&self.root, &path_list, &originally_present);
-                return Err(error);
+                return Err(rollback_failure(
+                    &self.root,
+                    &path_list,
+                    &originally_present,
+                    error,
+                ));
             }
         };
+        let committed = tree.is_some();
+        if let Some(tree) = tree {
+            let pending = PendingReceipt {
+                base_head: git::head(&self.root)?,
+                tree,
+                touched_paths: path_list.clone(),
+                fresh_hashlines: fresh_hashlines.clone(),
+            };
+            if let Err(error) = self.write_pending(&digest, &pending) {
+                return Err(rollback_failure(
+                    &self.root,
+                    &path_list,
+                    &originally_present,
+                    error,
+                ));
+            }
+            if let Err(error) = git::commit_staged(&self.root, request.edit_summary.trim()) {
+                let error = rollback_failure(&self.root, &path_list, &originally_present, error);
+                return match self.remove_pending(&digest) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(anyhow!("{error}; pending cleanup also failed: {cleanup}")),
+                };
+            }
+        }
         if committed {
             *self.head.write() = git::head(&self.root)?;
         }
@@ -311,22 +388,18 @@ impl Store {
             PushState::Disabled
         };
         if matches!(push, PushState::Diverged) {
-            *self.blocked.write() = Some("remote history diverged".into());
+            self.set_blocked(Some("remote history diverged".into()))?;
         }
         let index = build_index(&self.root, &config, &pages, &parsed, &edges);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(provider) = replacement_provider {
+            *self.provider.write() = provider;
+        }
         *self.config.write() = config;
         *self.pages.write() = pages.clone();
         *self.parsed.write() = parsed;
         *self.edges.write() = edges;
         *self.index.write() = index;
-        let fresh_hashlines = path_list
-            .iter()
-            .filter_map(|path| {
-                pages
-                    .get(path)
-                    .map(|text| (path.clone(), compact_fresh(text)))
-            })
-            .collect();
         let response = ApplyEditsResponse {
             status: if committed {
                 ApplyStatus::Accepted
@@ -340,29 +413,46 @@ impl Store {
             embedding_state: "pending".into(),
         };
         self.write_receipt(&digest, &response)?;
+        self.remove_pending(&digest)?;
         Ok(response)
     }
 
     pub async fn reindex(&self) -> Result<()> {
         let paths: Vec<String> = self.pages.read().keys().cloned().collect();
-        self.reindex_paths(&paths).await
+        self.reindex_paths_mode(&paths, true).await
+    }
+
+    pub async fn reindex_missing(&self) -> Result<()> {
+        let paths: Vec<String> = self.pages.read().keys().cloned().collect();
+        self.reindex_paths_mode(&paths, false).await
     }
 
     pub async fn reindex_after_changes(&self, paths: &[String]) -> Result<()> {
         if paths.iter().any(|path| path.starts_with(".mdstore/")) {
             self.reindex().await
         } else {
-            self.reindex_paths(paths).await
+            self.reindex_paths_mode(paths, true).await
         }
     }
 
     pub async fn reindex_paths(&self, paths: &[String]) -> Result<()> {
+        self.reindex_paths_mode(paths, true).await
+    }
+
+    async fn reindex_paths_mode(&self, paths: &[String], force: bool) -> Result<()> {
+        let _guard = self.reindex_lock.lock().await;
+        let generation = self.generation.load(Ordering::SeqCst);
         let config = self.config.read().clone();
         let pages = self.pages.read().clone();
         let parsed = self.parsed.read().clone();
+        let edges = self.edges.read().clone();
+        let provider = self.provider.read().clone();
         for path in paths {
             let Some(text) = pages.get(path) else {
                 let path = sidecar::sidecar_path(&self.root.join(path));
+                if self.generation.load(Ordering::SeqCst) != generation {
+                    return Ok(());
+                }
                 if path.exists() {
                     fs::remove_file(path)?;
                 }
@@ -371,6 +461,16 @@ impl Store {
             let page = parsed.get(path).context("missing parsed page")?;
             let context = embedding_context(&config, page);
             let chunks = chunk_page(text, page, &config.chunking, &context);
+            let sidecar_path = sidecar::sidecar_path(&self.root.join(path));
+            if !force
+                && sidecar::read(&sidecar_path).ok().is_some_and(|stored| {
+                    stored
+                        .vectors_for(text, provider.model(), provider.dimensions(), &chunks)
+                        .is_some()
+                })
+            {
+                continue;
+            }
             let mut vectors = Vec::new();
             let batch_size = config.provider.batch_size.unwrap_or(64).max(1);
             for batch in chunks.chunks(batch_size) {
@@ -378,16 +478,18 @@ impl Store {
                     .iter()
                     .map(|chunk| chunk.embedding_text.clone())
                     .collect();
-                vectors.extend(self.provider.embed(InputType::Document, &input).await?);
+                vectors.extend(provider.embed(InputType::Document, &input).await?);
+                if self.generation.load(Ordering::SeqCst) != generation {
+                    return Ok(());
+                }
             }
             let sidecar = Sidecar::new(
                 text,
-                self.provider.model(),
-                self.provider.dimensions(),
+                provider.model(),
+                provider.dimensions(),
                 &chunks,
                 &vectors,
             );
-            let sidecar_path = sidecar::sidecar_path(&self.root.join(path));
             let relative_sidecar = sidecar_path
                 .strip_prefix(&self.root)?
                 .to_string_lossy()
@@ -395,10 +497,16 @@ impl Store {
             if !git::is_ignored(&self.root, &relative_sidecar)? {
                 bail!("embedding sidecar is not ignored by Git: {relative_sidecar}");
             }
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return Ok(());
+            }
             sidecar::write_atomic(&sidecar_path, &sidecar)?;
         }
-        let index = build_index(&self.root, &config, &pages, &parsed, &self.edges.read());
-        *self.index.write() = index;
+        let index = build_index(&self.root, &config, &pages, &parsed, &edges);
+        let mut current = self.index.write();
+        if self.generation.load(Ordering::SeqCst) == generation {
+            *current = index;
+        }
         Ok(())
     }
 
@@ -421,9 +529,9 @@ impl Store {
     pub fn push(&self) -> Result<PushState> {
         let state = git::push(&self.root, &self.config.read())?;
         if matches!(state, PushState::Pushed) {
-            *self.blocked.write() = None;
+            self.set_blocked(None)?;
         } else if matches!(state, PushState::Diverged) {
-            *self.blocked.write() = Some("remote history diverged".into());
+            self.set_blocked(Some("remote history diverged".into()))?;
         }
         Ok(state)
     }
@@ -436,18 +544,32 @@ impl Store {
         let config = Config::load(&self.root)?;
         let pages = load_pages(&self.root, &config)?;
         let extra = load_config_files(&self.root)?;
-        let (parsed, edges) = match validate_corpus(&self.root, &config, &pages, &extra) {
+        let (parsed, edges) = match validate_corpus(&config, &pages, &extra) {
             Ok(value) => value,
             Err(findings) => {
                 let reason = format!(
                     "external commit is invalid:\n{}",
                     serde_json::to_string_pretty(&findings).unwrap_or_default()
                 );
-                *self.blocked.write() = Some(reason.clone());
+                self.set_blocked(Some(reason.clone()))?;
                 bail!(reason);
             }
         };
+        let replacement_provider = if config.provider != self.config.read().provider {
+            let Some(factory) = self.provider_factory else {
+                let reason = "external commit changes provider configuration; restart required";
+                self.set_blocked(Some(reason.into()))?;
+                bail!(reason);
+            };
+            Some(factory(config.provider.clone()))
+        } else {
+            None
+        };
         let index = build_index(&self.root, &config, &pages, &parsed, &edges);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(provider) = replacement_provider {
+            *self.provider.write() = provider;
+        }
         *self.config.write() = config;
         *self.pages.write() = pages;
         *self.parsed.write() = parsed;
@@ -460,6 +582,12 @@ impl Store {
     fn receipt_path(&self, digest: &str) -> PathBuf {
         self.git_dir
             .join("mdstore/receipts")
+            .join(format!("{digest}.json"))
+    }
+
+    fn pending_path(&self, digest: &str) -> PathBuf {
+        self.git_dir
+            .join("mdstore/pending")
             .join(format!("{digest}.json"))
     }
 
@@ -476,11 +604,7 @@ impl Store {
         let stored: StoredReceipt = serde_json::from_slice(&fs::read(path)?)?;
         Ok(Some(ApplyEditsResponse {
             status: ApplyStatus::AlreadyApplied,
-            push: if git::has_unpushed(&self.root)? {
-                PushState::Queued
-            } else {
-                PushState::Pushed
-            },
+            push: self.current_push_state()?,
             touched_paths: stored.touched_paths,
             fresh_hashlines: stored.fresh_hashlines,
             validation_findings: Vec::new(),
@@ -490,12 +614,70 @@ impl Store {
 
     fn write_receipt(&self, digest: &str, response: &ApplyEditsResponse) -> Result<()> {
         let path = self.receipt_path(digest);
-        fs::create_dir_all(path.parent().expect("receipt parent"))?;
         let value = serde_json::json!({
             "touched_paths": response.touched_paths,
             "fresh_hashlines": response.fresh_hashlines,
         });
-        fs::write(path, serde_json::to_vec(&value)?)?;
+        write_atomic(&path, &serde_json::to_vec(&value)?)
+    }
+
+    fn write_pending(&self, digest: &str, pending: &PendingReceipt) -> Result<()> {
+        write_atomic(&self.pending_path(digest), &serde_json::to_vec(pending)?)
+    }
+
+    fn remove_pending(&self, digest: &str) -> Result<()> {
+        let path = self.pending_path(digest);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    fn recover_pending(&self, digest: &str) -> Result<Option<ApplyEditsResponse>> {
+        let path = self.pending_path(digest);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let pending: PendingReceipt = serde_json::from_slice(&fs::read(&path)?)?;
+        if !git::history_contains_tree(&self.root, &pending.base_head, &pending.tree)? {
+            fs::remove_file(path)?;
+            return Ok(None);
+        }
+        let push = git::push(&self.root, &self.config.read())?;
+        if matches!(push, PushState::Diverged) {
+            self.set_blocked(Some("remote history diverged".into()))?;
+        }
+        let response = ApplyEditsResponse {
+            status: ApplyStatus::AlreadyApplied,
+            push,
+            touched_paths: pending.touched_paths,
+            fresh_hashlines: pending.fresh_hashlines,
+            validation_findings: Vec::new(),
+            embedding_state: "pending_or_ready".into(),
+        };
+        self.write_receipt(digest, &response)?;
+        self.remove_pending(digest)?;
+        Ok(Some(response))
+    }
+
+    fn current_push_state(&self) -> Result<PushState> {
+        if !self.config.read().git.push {
+            Ok(PushState::Disabled)
+        } else if git::has_unpushed(&self.root)? {
+            Ok(PushState::Queued)
+        } else {
+            Ok(PushState::Pushed)
+        }
+    }
+
+    fn set_blocked(&self, reason: Option<String>) -> Result<()> {
+        let path = self.git_dir.join("mdstore/blocked");
+        if let Some(reason) = &reason {
+            write_atomic(&path, reason.as_bytes())?;
+        } else if path.exists() {
+            fs::remove_file(path)?;
+        }
+        *self.blocked.write() = reason;
         Ok(())
     }
 }
@@ -586,16 +768,84 @@ fn embedding_context(config: &Config, page: &ParsedPage) -> Vec<String> {
         .collect()
 }
 
-fn compact_fresh(text: &str) -> String {
-    let count = text.lines().count();
-    if count <= 24 {
-        render(text, None)
+fn fresh_windows(
+    changes: &HashMap<String, Option<String>>,
+    changed_ranges: &HashMap<String, Vec<ChangedRange>>,
+) -> HashMap<String, String> {
+    changes
+        .iter()
+        .filter_map(|(path, content)| {
+            let text = content.as_ref()?;
+            let line_count = text.lines().count();
+            if line_count == 0 {
+                return Some((path.clone(), String::new()));
+            }
+            let mut windows: Vec<(usize, usize)> = changed_ranges
+                .get(path)
+                .into_iter()
+                .flatten()
+                .map(|range| {
+                    (
+                        range.start_line.saturating_sub(3).max(1),
+                        (range.end_line + 3).min(line_count),
+                    )
+                })
+                .collect();
+            windows.sort_unstable();
+            let mut merged: Vec<(usize, usize)> = Vec::new();
+            for (start, end) in windows {
+                if let Some((_, previous_end)) = merged.last_mut()
+                    && start <= *previous_end + 1
+                {
+                    *previous_end = (*previous_end).max(end);
+                } else {
+                    merged.push((start, end));
+                }
+            }
+            let rendered = merged
+                .into_iter()
+                .map(|window| render(text, Some(window)))
+                .collect::<Vec<_>>()
+                .join("\n…\n");
+            Some((path.clone(), rendered))
+        })
+        .collect()
+}
+
+fn zeroentropy_provider(config: ProviderConfig) -> Arc<dyn RetrievalProvider> {
+    Arc::new(ZeroEntropyProvider::new(config))
+}
+
+fn read_blocked(git_dir: &Path) -> Result<Option<String>> {
+    let path = git_dir.join("mdstore/blocked");
+    if path.exists() {
+        Ok(Some(fs::read_to_string(path)?))
     } else {
-        format!(
-            "{}\n…\n{}",
-            render(text, Some((1, 12))),
-            render(text, Some((count - 11, count)))
-        )
+        Ok(None)
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("state file has no parent")?;
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    Ok(temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .map(|_| ())?)
+}
+
+fn rollback_failure(
+    root: &Path,
+    paths: &[String],
+    originally_present: &[String],
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match git::rollback(root, paths, originally_present) {
+        Ok(()) => error,
+        Err(rollback) => anyhow!("{error}; rollback also failed: {rollback}"),
     }
 }
 

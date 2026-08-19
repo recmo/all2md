@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -14,7 +14,7 @@ pub struct SearchIndex {
     pub chunks: Vec<IndexedChunk>,
     document_frequency: HashMap<String, usize>,
     average_length: f64,
-    graph: HashMap<String, HashSet<String>>,
+    graph: HashMap<String, BTreeSet<String>>,
     first_chunk: HashMap<String, usize>,
 }
 
@@ -68,10 +68,19 @@ impl SearchIndex {
     ) -> Self {
         let mut chunks = Vec::new();
         let mut first_chunk = HashMap::new();
-        for (path, values) in page_chunks {
+        let mut page_chunks: Vec<_> = page_chunks.into_iter().collect();
+        page_chunks.sort_by(|left, right| left.0.cmp(&right.0));
+        for (path, mut values) in page_chunks {
             let Some(page) = parsed.get(&path) else {
                 continue;
             };
+            values.sort_by(|left, right| {
+                left.0
+                    .start_line
+                    .cmp(&right.0.start_line)
+                    .then_with(|| left.0.end_line.cmp(&right.0.end_line))
+                    .then_with(|| left.0.text.cmp(&right.0.text))
+            });
             let metadata = project_metadata(config, &page.frontmatter);
             for (chunk, vector) in values {
                 let search_text = format!(
@@ -108,7 +117,7 @@ impl SearchIndex {
                 .sum::<usize>() as f64
                 / chunks.len() as f64
         };
-        let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut graph: HashMap<String, BTreeSet<String>> = HashMap::new();
         for edge in edges {
             graph
                 .entry(edge.source.clone())
@@ -182,7 +191,7 @@ impl SearchIndex {
         }
         self.add_graph_signals(config, &mut scores, &mut arms);
         let mut ranked: Vec<(usize, f64)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| self.chunk_order(a.0, b.0)));
         ranked.truncate(config.search.candidates);
 
         let documents: Vec<String> = ranked
@@ -212,6 +221,7 @@ impl SearchIndex {
                                 .unwrap_or(f64::NEG_INFINITY),
                         )
                         .then_with(|| b.1.total_cmp(&a.1))
+                        .then_with(|| self.chunk_order(a.0, b.0))
                 });
             }
             Err(error) => degraded.push(format!("rerank: {error}")),
@@ -280,7 +290,7 @@ impl SearchIndex {
                 output.push((index, score));
             }
         }
-        output.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        output.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| self.chunk_order(a.0, b.0)));
         output
     }
 
@@ -296,8 +306,18 @@ impl SearchIndex {
                     .map(|vector| (index, cosine(query, vector)))
             })
             .collect();
-        output.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        output.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| self.chunk_order(a.0, b.0)));
         output
+    }
+
+    fn chunk_order(&self, left: usize, right: usize) -> std::cmp::Ordering {
+        let left = &self.chunks[left];
+        let right = &self.chunks[right];
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.chunk.start_line.cmp(&right.chunk.start_line))
+            .then_with(|| left.chunk.end_line.cmp(&right.chunk.end_line))
+            .then_with(|| left.chunk.text.cmp(&right.chunk.text))
     }
 
     fn add_graph_signals(
@@ -366,5 +386,57 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
         0.0
     } else {
         dot / left_norm.sqrt() / right_norm.sqrt()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::LinkConfig, markdown::parse_page};
+
+    #[test]
+    fn index_order_does_not_depend_on_hashmap_iteration() {
+        let config =
+            Config::from_yaml("documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\n")
+                .unwrap();
+        let pages: HashMap<String, String> = HashMap::from([
+            ("b.md".into(), "bravo".into()),
+            ("a.md".into(), "alpha".into()),
+        ]);
+        let parsed = pages
+            .iter()
+            .map(|(path, text)| {
+                (
+                    path.clone(),
+                    parse_page(text, &LinkConfig::default()).unwrap(),
+                )
+            })
+            .collect();
+        let chunk = |text: &str| Chunk {
+            start_line: 1,
+            end_line: 1,
+            heading: Vec::new(),
+            text: text.into(),
+            embedding_text: text.into(),
+        };
+        let first = PageChunks::from([
+            ("b.md".into(), vec![(chunk("bravo"), None)]),
+            ("a.md".into(), vec![(chunk("alpha"), None)]),
+        ]);
+        let second = PageChunks::from([
+            ("a.md".into(), vec![(chunk("alpha"), None)]),
+            ("b.md".into(), vec![(chunk("bravo"), None)]),
+        ]);
+        let paths = |index: SearchIndex| {
+            index
+                .chunks
+                .into_iter()
+                .map(|chunk| chunk.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths(SearchIndex::build(&config, &pages, &parsed, &[], first)),
+            paths(SearchIndex::build(&config, &pages, &parsed, &[], second))
+        );
     }
 }

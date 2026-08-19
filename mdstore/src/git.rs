@@ -184,7 +184,7 @@ fn ensure_safe_target(root: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn commit(root: &Path, summary: &str, paths: &[String]) -> Result<bool> {
+pub fn stage_tree(root: &Path, paths: &[String]) -> Result<Option<String>> {
     let mut add = Command::new("git");
     add.current_dir(root).args(["add", "-A", "--"]).args(paths);
     let output = add.output().context("stage mdstore edit batch")?;
@@ -196,8 +196,13 @@ pub fn commit(root: &Path, summary: &str, paths: &[String]) -> Result<bool> {
     }
     let staged = run(root, ["diff", "--cached", "--quiet"])?;
     if staged.status.success() {
-        return Ok(false);
+        return Ok(None);
     }
+    let tree = checked(root, ["write-tree"])?;
+    Ok(Some(String::from_utf8(tree.stdout)?.trim().into()))
+}
+
+pub fn commit_staged(root: &Path, summary: &str) -> Result<()> {
     let output = Command::new("git")
         .current_dir(root)
         .args(["commit", "-m", summary])
@@ -209,21 +214,50 @@ pub fn commit(root: &Path, summary: &str, paths: &[String]) -> Result<bool> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    Ok(true)
+    Ok(())
+}
+
+pub fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool> {
+    let ancestor = run(root, ["merge-base", "--is-ancestor", base, "HEAD"])?;
+    if !ancestor.status.success() {
+        return Ok(false);
+    }
+    let range = format!("{base}..HEAD");
+    let output = checked(root, ["log", "--format=%T", &range])?;
+    Ok(String::from_utf8(output.stdout)?
+        .lines()
+        .any(|candidate| candidate == tree))
 }
 
 pub fn rollback(root: &Path, paths: &[String], originally_present: &[String]) -> Result<()> {
-    let mut unstage = Command::new("git");
-    unstage
+    let mut staged = Command::new("git");
+    staged
         .current_dir(root)
-        .args(["restore", "--staged", "--"])
+        .args(["diff", "--cached", "--name-only", "-z", "--"])
         .args(paths);
-    let output = unstage.output()?;
+    let output = staged.output()?;
     if !output.status.success() {
-        bail!(
-            "rollback unstage failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        bail!("inspect staged rollback paths failed");
+    }
+    let staged: Vec<String> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect();
+    if !staged.is_empty() {
+        let mut unstage = Command::new("git");
+        unstage
+            .current_dir(root)
+            .args(["restore", "--staged", "--"])
+            .args(&staged);
+        let output = unstage.output()?;
+        if !output.status.success() {
+            bail!(
+                "rollback unstage failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
     if !originally_present.is_empty() {
         let mut restore = Command::new("git");

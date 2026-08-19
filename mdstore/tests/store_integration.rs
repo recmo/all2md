@@ -2,7 +2,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::Result;
@@ -17,6 +20,7 @@ use mdstore::{
     hashline::{EditOperation, short_hash},
     provider::{InputType, RerankResult, RetrievalProvider},
 };
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 struct FakeProvider;
@@ -69,6 +73,66 @@ impl RetrievalProvider for FakeProvider {
     }
 }
 
+struct CountingProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl RetrievalProvider for CountingProvider {
+    async fn embed(&self, input_type: InputType, input: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        FakeProvider.embed(input_type, input).await
+    }
+
+    async fn rerank(
+        &self,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> Result<Vec<RerankResult>> {
+        FakeProvider.rerank(query, documents, top_n).await
+    }
+
+    fn model(&self) -> &str {
+        "fake-embed"
+    }
+
+    fn dimensions(&self) -> usize {
+        2
+    }
+}
+
+struct BlockingProvider {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl RetrievalProvider for BlockingProvider {
+    async fn embed(&self, input_type: InputType, input: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.started.notify_one();
+        self.release.notified().await;
+        FakeProvider.embed(input_type, input).await
+    }
+
+    async fn rerank(
+        &self,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> Result<Vec<RerankResult>> {
+        FakeProvider.rerank(query, documents, top_n).await
+    }
+
+    fn model(&self) -> &str {
+        "fake-embed"
+    }
+
+    fn dimensions(&self) -> usize {
+        2
+    }
+}
+
 struct Repository {
     _temporary: tempfile::TempDir,
     root: PathBuf,
@@ -96,10 +160,13 @@ impl Repository {
     }
 
     fn store(&self) -> Arc<Store> {
+        self.store_with_provider(Arc::new(FakeProvider))
+    }
+
+    fn store_with_provider(&self, provider: Arc<dyn RetrievalProvider>) -> Arc<Store> {
         let config = Config::load(&self.root).unwrap();
         let git_dir = self.root.join(".git");
-        Store::open_with_provider(self.root.clone(), config, Arc::new(FakeProvider), git_dir)
-            .unwrap()
+        Store::open_with_provider(self.root.clone(), config, provider, git_dir).unwrap()
     }
 }
 
@@ -262,9 +329,10 @@ fn configuration_activation_reselects_the_tracked_corpus() {
         }],
     };
     assert!(config.contains("include:"));
-    store.apply_edits(&request).unwrap();
+    let response = store.apply_edits(&request).unwrap();
     assert_eq!(store.status().unwrap().pages, 1);
     assert!(store.get_page("bob.md", None).is_err());
+    assert!(response.fresh_hashlines[".mdstore/config.yaml"].contains("exclude:"));
 }
 
 #[tokio::test]
@@ -340,7 +408,15 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
+    let health = app
+        .clone()
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::UNAUTHORIZED);
+
     let authorized = app
+        .clone()
         .oneshot(
             Request::post("/mcp")
                 .header("content-type", "application/json")
@@ -360,6 +436,35 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["search", "get_page", "apply_edits"]);
+    let apply = value["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "apply_edits")
+        .unwrap();
+    let variants = apply["inputSchema"]["properties"]["edits"]["items"]["oneOf"]
+        .as_array()
+        .unwrap();
+    assert_eq!(variants.len(), 6);
+    let replace = variants
+        .iter()
+        .find(|schema| schema["properties"]["op"]["const"] == "replace")
+        .unwrap();
+    assert_eq!(
+        replace["required"],
+        serde_json::json!(["op", "path", "anchor", "content"])
+    );
+
+    let health = app
+        .oneshot(
+            Request::get("/health")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -433,4 +538,208 @@ fn invalid_external_commit_blocks_writes() {
             .unwrap()
             .contains("updated")
     );
+}
+
+#[test]
+fn fresh_hashlines_cover_middle_edits() {
+    let repository = Repository::new();
+    let mut text = "---\nname: Alice\n---\n# Notes\n".to_owned();
+    for number in 1..=50 {
+        text.push_str(&format!("line {number}\n"));
+    }
+    fs::write(repository.root.join("alice.md"), &text).unwrap();
+    command(&repository.root, &["add", "alice.md"]);
+    command(&repository.root, &["commit", "-q", "-m", "long page"]);
+    let store = repository.store();
+    let line = text.lines().position(|value| value == "line 30").unwrap() + 1;
+    let response = store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "edit middle line".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("{line}:{}", short_hash("line 30")),
+                content: "changed middle".into(),
+            }],
+        })
+        .unwrap();
+    let fresh = &response.fresh_hashlines["alice.md"];
+    assert!(fresh.contains(&format!("{line}:")));
+    assert!(fresh.contains("changed middle"));
+    assert!(!fresh.lines().any(|line| line.starts_with("1:")));
+}
+
+#[test]
+fn deleting_a_referenced_schema_fails_against_the_overlay() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let schema = fs::read_to_string(repository.root.join(".mdstore/schema.json")).unwrap();
+    let count = schema.lines().count();
+    let first = schema.lines().next().unwrap();
+    let last = schema.lines().last().unwrap();
+    let request = ApplyEditsRequest {
+        edit_summary: "remove active schema".into(),
+        edits: vec![EditOperation::RemovePage {
+            path: ".mdstore/schema.json".into(),
+            anchor: format!("1:{}..{count}:{}", short_hash(first), short_hash(last)),
+        }],
+    };
+    assert!(store.apply_edits(&request).is_err());
+    assert!(repository.root.join(".mdstore/schema.json").is_file());
+}
+
+#[test]
+fn a_late_materialization_failure_rolls_back_earlier_paths() {
+    let repository = Repository::new();
+    fs::create_dir(repository.root.join("blocked.md")).unwrap();
+    let store = repository.store();
+    let request = ApplyEditsRequest {
+        edit_summary: "failing two page edit".into(),
+        edits: vec![
+            EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "Alice changed.".into(),
+            },
+            EditOperation::CreatePage {
+                path: "blocked.md".into(),
+                content: page("Blocked"),
+            },
+        ],
+    };
+    assert!(store.apply_edits(&request).is_err());
+    assert!(
+        fs::read_to_string(repository.root.join("alice.md"))
+            .unwrap()
+            .contains("Alice profile.")
+    );
+    assert!(command(&repository.root, &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn persisted_write_blocks_survive_restart() {
+    let repository = Repository::new();
+    fs::create_dir_all(repository.root.join(".git/mdstore")).unwrap();
+    fs::write(
+        repository.root.join(".git/mdstore/blocked"),
+        "remote history diverged",
+    )
+    .unwrap();
+    let store = repository.store();
+    assert_eq!(
+        store.status().unwrap().blocked.as_deref(),
+        Some("remote history diverged")
+    );
+    let request = ApplyEditsRequest {
+        edit_summary: "blocked edit".into(),
+        edits: vec![EditOperation::Replace {
+            path: "alice.md".into(),
+            anchor: format!("6:{}", short_hash("Alice profile.")),
+            content: "Alice changed.".into(),
+        }],
+    };
+    assert!(store.apply_edits(&request).is_err());
+}
+
+#[test]
+fn pending_tree_receipts_recover_committed_requests() {
+    let repository = Repository::new();
+    let request = ApplyEditsRequest {
+        edit_summary: "recover committed edit".into(),
+        edits: vec![EditOperation::Replace {
+            path: "bob.md".into(),
+            anchor: format!("6:{}", short_hash("Bob profile.")),
+            content: "Bob recovered.".into(),
+        }],
+    };
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&request).unwrap())
+    );
+    let base = command(&repository.root, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    fs::write(
+        repository.root.join("bob.md"),
+        page("Bob").replace("Bob profile.", "Bob recovered."),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "bob.md"]);
+    let tree = command(&repository.root, &["write-tree"]).trim().to_owned();
+    let pending = repository
+        .root
+        .join(".git/mdstore/pending")
+        .join(format!("{digest}.json"));
+    fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    fs::write(
+        pending,
+        serde_json::to_vec(&serde_json::json!({
+            "base_head": base,
+            "tree": tree,
+            "touched_paths": ["bob.md"],
+            "fresh_hashlines": {"bob.md": "6:00|Bob recovered."}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "recover committed edit"],
+    );
+    let store = repository.store();
+    let response = store.apply_edits(&request).unwrap();
+    assert!(matches!(
+        response.status,
+        mdstore::store::ApplyStatus::AlreadyApplied
+    ));
+    assert!(
+        !repository
+            .root
+            .join(".git/mdstore/pending")
+            .join(format!("{digest}.json"))
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn startup_reindex_reuses_valid_sidecars() {
+    let repository = Repository::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = repository.store_with_provider(Arc::new(CountingProvider {
+        calls: calls.clone(),
+    }));
+    store.reindex_missing().await.unwrap();
+    let first = calls.load(Ordering::SeqCst);
+    assert!(first > 0);
+    store.reindex_missing().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), first);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_reindex_work_is_discarded_after_an_edit() {
+    let repository = Repository::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let store = repository.store_with_provider(Arc::new(BlockingProvider {
+        started: started.clone(),
+        release: release.clone(),
+    }));
+    let reindex = {
+        let store = store.clone();
+        tokio::spawn(async move { store.reindex().await })
+    };
+    started.notified().await;
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "edit during reindex".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "Alice changed.".into(),
+            }],
+        })
+        .unwrap();
+    release.notify_waiters();
+    reindex.await.unwrap().unwrap();
+    assert_eq!(store.status().unwrap().vectors_ready, 0);
+    assert!(!repository.root.join("alice.mdstore").exists());
 }

@@ -42,6 +42,9 @@ relations:
     reciprocal: mentioned_by
     selector:
       kind: markdown_links
+      include: "people/**/*.md"
+      section: Mentions
+      syntax: markdown
   - name: mentioned_by
     reciprocal: mentions
     selector:
@@ -122,5 +125,7 @@ All anchors in a request resolve against the same pre-edit snapshot. Stale,
 ambiguous, or overlapping edits fail before any worktree file changes.
 
 The MCP endpoint is `/mcp`; health and indexing coverage are available from
-`/health`. Listening beyond loopback is refused unless the configured bearer
-token environment variable is present.
+`/health`. A configured bearer token protects both endpoints, and listening
+beyond loopback is refused without one. Startup reuses valid sidecars and
+rebuilds only missing or stale vectors; the explicit `reindex` command forces a
+complete rebuild.

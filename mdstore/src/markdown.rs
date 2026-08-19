@@ -5,7 +5,7 @@ use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use serde::Serialize;
 
-use crate::config::{Config, RelationSelector};
+use crate::config::{Config, RelationLinkSyntax, RelationSelector};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ParsedPage {
@@ -27,6 +27,7 @@ pub struct RawLink {
     pub target: String,
     pub line: usize,
     pub syntax: LinkSyntax,
+    pub sections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -34,6 +35,21 @@ pub struct RawLink {
 pub enum LinkSyntax {
     Markdown,
     Wiki,
+}
+
+impl RelationLinkSyntax {
+    fn matches(self, syntax: LinkSyntax) -> bool {
+        matches!(
+            (self, syntax),
+            (Self::Markdown, LinkSyntax::Markdown) | (Self::Wiki, LinkSyntax::Wiki)
+        )
+    }
+}
+
+struct ResolvedLink {
+    target: String,
+    syntax: LinkSyntax,
+    sections: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -56,6 +72,12 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
     let mut headings = Vec::new();
     let mut markdown_links = Vec::new();
     let mut heading: Option<(u8, String, usize)> = None;
+    let mut heading_stack = Vec::new();
+    let mut code_depth = 0_usize;
+    let wiki = links
+        .wiki
+        .then(|| Regex::new(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]"))
+        .transpose()?;
     let parser = Parser::new_ext(body, Options::all()).into_offset_iter();
     for (event, range) in parser {
         let line = body_start_line
@@ -67,13 +89,44 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
             Event::Start(Tag::Heading { level, .. }) => {
                 heading = Some((heading_level(level), String::new(), line));
             }
-            Event::Text(value) | Event::Code(value) => {
+            Event::Start(Tag::CodeBlock(_)) => code_depth += 1,
+            Event::Text(value) => {
+                if let Some((_, text, _)) = &mut heading {
+                    text.push_str(&value);
+                }
+                if let Some(wiki) = &wiki
+                    && code_depth == 0
+                {
+                    let raw = &body[range.clone()];
+                    for capture in wiki.captures_iter(raw) {
+                        let matched = capture.get(0).expect("full match");
+                        let absolute = range.start + matched.start();
+                        if absolute > 0 && body.as_bytes()[absolute - 1] == b'\\' {
+                            continue;
+                        }
+                        let line = body_start_line
+                            + body[..absolute]
+                                .bytes()
+                                .filter(|byte| *byte == b'\n')
+                                .count();
+                        markdown_links.push(RawLink {
+                            target: capture[1].trim().into(),
+                            line,
+                            syntax: LinkSyntax::Wiki,
+                            sections: heading_stack.clone(),
+                        });
+                    }
+                }
+            }
+            Event::Code(value) => {
                 if let Some((_, text, _)) = &mut heading {
                     text.push_str(&value);
                 }
             }
             Event::End(TagEnd::Heading(_)) => {
                 if let Some((level, text, line)) = heading.take() {
+                    heading_stack.truncate(usize::from(level.saturating_sub(1)));
+                    heading_stack.push(text.trim().into());
                     headings.push(Heading {
                         level,
                         text: text.trim().into(),
@@ -86,25 +139,11 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
                     target: dest_url.to_string(),
                     line,
                     syntax: LinkSyntax::Markdown,
+                    sections: heading_stack.clone(),
                 });
             }
+            Event::End(TagEnd::CodeBlock) => code_depth = code_depth.saturating_sub(1),
             _ => {}
-        }
-    }
-    if links.wiki {
-        let wiki = Regex::new(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")?;
-        for capture in wiki.captures_iter(body) {
-            let matched = capture.get(0).expect("full match");
-            let line = body_start_line
-                + body[..matched.start()]
-                    .bytes()
-                    .filter(|byte| *byte == b'\n')
-                    .count();
-            markdown_links.push(RawLink {
-                target: capture[1].trim().into(),
-                line,
-                syntax: LinkSyntax::Wiki,
-            });
         }
     }
     Ok(ParsedPage {
@@ -152,7 +191,6 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
 pub type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
 
 pub fn validate_corpus(
-    root: &Path,
     config: &Config,
     pages: &HashMap<String, String>,
     extra_files: &HashMap<String, String>,
@@ -162,14 +200,7 @@ pub fn validate_corpus(
     for (path, text) in pages {
         match parse_page(text, &config.links) {
             Ok(page) => {
-                validate_schema(
-                    root,
-                    config,
-                    path,
-                    &page.frontmatter,
-                    extra_files,
-                    &mut findings,
-                );
+                validate_schema(config, path, &page.frontmatter, extra_files, &mut findings);
                 validate_sections(config, path, &page, &mut findings);
                 parsed.insert(path.clone(), page);
             }
@@ -181,14 +212,20 @@ pub fn validate_corpus(
         }
     }
     let resolver = TargetResolver::new(pages.keys());
-    let mut resolved_links: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+    let mut resolved_links: HashMap<String, Vec<ResolvedLink>> = HashMap::new();
     for (path, page) in &parsed {
         for link in &page.links {
             match resolver.resolve(path, &link.target, link.syntax) {
-                Ok(Some(target)) => resolved_links
-                    .entry(path.clone())
-                    .or_default()
-                    .push((target, link.line)),
+                Ok(Some(target)) => {
+                    resolved_links
+                        .entry(path.clone())
+                        .or_default()
+                        .push(ResolvedLink {
+                            target,
+                            syntax: link.syntax,
+                            sections: link.sections.clone(),
+                        })
+                }
                 Ok(None) => {}
                 Err(message) => findings.push(Finding {
                     path: path.clone(),
@@ -201,13 +238,31 @@ pub fn validate_corpus(
     let mut edges = Vec::new();
     for rule in &config.relations {
         match &rule.selector {
-            RelationSelector::MarkdownLinks => {
+            RelationSelector::MarkdownLinks {
+                include,
+                section,
+                syntax,
+            } => {
                 for (source, links) in &resolved_links {
-                    for (target, _) in links {
+                    let included = include.as_ref().is_none_or(|pattern| {
+                        globset::Glob::new(pattern)
+                            .is_ok_and(|glob| glob.compile_matcher().is_match(source))
+                    });
+                    if !included {
+                        continue;
+                    }
+                    for link in links {
+                        if section
+                            .as_ref()
+                            .is_some_and(|section| !link.sections.contains(section))
+                            || syntax.is_some_and(|syntax| !syntax.matches(link.syntax))
+                        {
+                            continue;
+                        }
                         edges.push(Edge {
                             source: source.clone(),
                             relation: rule.name.clone(),
-                            target: target.clone(),
+                            target: link.target.clone(),
                         });
                     }
                 }
@@ -271,7 +326,6 @@ pub fn validate_corpus(
 }
 
 fn validate_schema(
-    root: &Path,
     config: &Config,
     path: &str,
     frontmatter: &serde_json::Value,
@@ -285,10 +339,7 @@ fn validate_schema(
         if !glob.is_match(path) {
             continue;
         }
-        let schema_text = extra_files
-            .get(&rule.schema)
-            .cloned()
-            .or_else(|| std::fs::read_to_string(root.join(&rule.schema)).ok());
+        let schema_text = extra_files.get(&rule.schema).cloned();
         let Some(schema_text) = schema_text else {
             findings.push(Finding {
                 path: path.into(),
@@ -485,4 +536,62 @@ pub fn project_metadata(config: &Config, frontmatter: &serde_json::Value) -> ser
         }
     }
     serde_json::Value::Object(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LinkConfig;
+
+    #[test]
+    fn wiki_links_ignore_code_and_escaped_examples() {
+        let page = parse_page(
+            "# Links\n\n[[real]]\n\n`[[inline]]`\n\n```md\n[[fenced]]\n```\n\n\\[[escaped]]\n",
+            &LinkConfig {
+                markdown: true,
+                wiki: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            page.links
+                .iter()
+                .map(|link| link.target.as_str())
+                .collect::<Vec<_>>(),
+            ["real"]
+        );
+    }
+
+    #[test]
+    fn markdown_relation_selectors_keep_types_separate() {
+        let config = Config::from_yaml(
+            r#"documents:
+  include: ["**/*.md"]
+links: {markdown: true, wiki: false}
+relations:
+  - name: friend
+    reciprocal: friend
+    selector: {kind: markdown_links, section: Friends}
+  - name: source
+    reciprocal: source
+    selector: {kind: markdown_links, section: Sources}
+provider: {dimensions: 2}
+"#,
+        )
+        .unwrap();
+        let pages = HashMap::from([
+            (
+                "a.md".into(),
+                "# Friends\n\n[B](b.md)\n\n# Sources\n\n[C](c.md)\n".into(),
+            ),
+            ("b.md".into(), "# Friends\n\n[A](a.md)\n".into()),
+            ("c.md".into(), "# Sources\n\n[A](a.md)\n".into()),
+        ]);
+        let (_, edges) = validate_corpus(&config, &pages, &HashMap::new()).unwrap();
+        assert_eq!(edges.len(), 4);
+        assert!(edges.iter().all(|edge| {
+            (edge.relation == "friend" && edge.source != "c.md" && edge.target != "c.md")
+                || (edge.relation == "source" && edge.source != "b.md" && edge.target != "b.md")
+        }));
+    }
 }

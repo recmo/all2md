@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -122,11 +126,25 @@ impl Config {
         if self.provider.dimensions == 0 {
             bail!("provider.dimensions must be non-zero");
         }
+        let mut relation_names = HashSet::new();
         for relation in &self.relations {
             if relation.name.trim().is_empty() {
                 bail!("relation names must be non-empty");
             }
+            if !relation_names.insert(relation.name.as_str()) {
+                bail!("duplicate relation name: {}", relation.name);
+            }
             relation.selector.validate()?;
+        }
+        for relation in &self.relations {
+            if let Some(reciprocal) = &relation.reciprocal
+                && !relation_names.contains(reciprocal.as_str())
+            {
+                bail!(
+                    "relation {} references unknown reciprocal relation {reciprocal}",
+                    relation.name
+                );
+            }
         }
         Ok(())
     }
@@ -149,12 +167,16 @@ fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
 
 pub fn validate_repo_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
-    if candidate.is_absolute()
-        || candidate
-            .components()
-            .any(|part| matches!(part, std::path::Component::ParentDir))
-    {
+    if path.is_empty() || candidate.is_absolute() {
         bail!("path must stay within the repository: {path}");
+    }
+    for component in candidate.components() {
+        let std::path::Component::Normal(value) = component else {
+            bail!("path must contain only normal repository components: {path}");
+        };
+        if value == ".git" {
+            bail!("path may not enter Git metadata: {path}");
+        }
     }
     Ok(())
 }
@@ -207,7 +229,14 @@ pub struct RelationRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RelationSelector {
-    MarkdownLinks,
+    MarkdownLinks {
+        #[serde(default)]
+        include: Option<String>,
+        #[serde(default)]
+        section: Option<String>,
+        #[serde(default)]
+        syntax: Option<RelationLinkSyntax>,
+    },
     Frontmatter {
         array_pointer: String,
         target_pointer: String,
@@ -220,31 +249,44 @@ pub enum RelationSelector {
 
 impl RelationSelector {
     fn validate(&self) -> Result<()> {
-        if let Self::Frontmatter {
-            array_pointer,
-            target_pointer,
-            type_pointer,
-            type_value,
-        } = self
-        {
-            for pointer in [
-                Some(array_pointer),
-                Some(target_pointer),
-                type_pointer.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if !pointer.starts_with('/') && !pointer.is_empty() {
-                    bail!("relation JSON pointer must be empty or start with '/': {pointer}");
+        match self {
+            Self::MarkdownLinks { include, .. } => {
+                if let Some(include) = include {
+                    let _ = compile_globs(std::slice::from_ref(include))?;
                 }
             }
-            if type_value.is_some() != type_pointer.is_some() {
-                bail!("frontmatter relation type_pointer and type_value must be set together");
+            Self::Frontmatter {
+                array_pointer,
+                target_pointer,
+                type_pointer,
+                type_value,
+            } => {
+                for pointer in [
+                    Some(array_pointer),
+                    Some(target_pointer),
+                    type_pointer.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !pointer.starts_with('/') && !pointer.is_empty() {
+                        bail!("relation JSON pointer must be empty or start with '/': {pointer}");
+                    }
+                }
+                if type_value.is_some() != type_pointer.is_some() {
+                    bail!("frontmatter relation type_pointer and type_value must be set together");
+                }
             }
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationLinkSyntax {
+    Markdown,
+    Wiki,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,7 +344,7 @@ impl Default for SearchConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     #[serde(default = "default_base_url")]
@@ -365,5 +407,42 @@ impl Default for ServerConfig {
             listen: default_listen(),
             bearer_token_env: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_relations(relations: &str) -> String {
+        format!(
+            "documents:\n  include: ['**/*.md']\nrelations:\n{relations}\nprovider:\n  dimensions: 2\n"
+        )
+    }
+
+    #[test]
+    fn rejects_git_metadata_and_non_normal_paths() {
+        for path in [
+            "",
+            ".",
+            "../note.md",
+            ".git/hooks/note.md",
+            "a/.git/note.md",
+        ] {
+            assert!(validate_repo_path(path).is_err(), "accepted {path:?}");
+        }
+        assert!(validate_repo_path("notes/page.md").is_ok());
+    }
+
+    #[test]
+    fn relation_names_and_reciprocals_are_closed() {
+        let duplicate = config_with_relations(
+            "  - name: related\n    selector: {kind: markdown_links}\n  - name: related\n    selector: {kind: markdown_links}",
+        );
+        assert!(Config::from_yaml(&duplicate).is_err());
+        let unknown = config_with_relations(
+            "  - name: parent\n    reciprocal: child\n    selector: {kind: markdown_links}",
+        );
+        assert!(Config::from_yaml(&unknown).is_err());
     }
 }
