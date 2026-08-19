@@ -3,10 +3,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -28,18 +25,23 @@ use crate::{
 
 pub struct Store {
     root: PathBuf,
-    config: RwLock<Config>,
-    pages: RwLock<HashMap<String, String>>,
-    parsed: RwLock<HashMap<String, ParsedPage>>,
-    edges: RwLock<Vec<Edge>>,
-    index: RwLock<SearchIndex>,
-    provider: RwLock<Arc<dyn RetrievalProvider>>,
+    state: RwLock<StoreState>,
     provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     reindex_lock: tokio::sync::Mutex<()>,
-    generation: AtomicU64,
     git_dir: PathBuf,
     head: RwLock<String>,
     blocked: RwLock<Option<String>>,
+}
+
+#[derive(Clone)]
+struct StoreState {
+    config: Config,
+    pages: HashMap<String, String>,
+    parsed: HashMap<String, ParsedPage>,
+    edges: Vec<Edge>,
+    index: SearchIndex,
+    provider: Arc<dyn RetrievalProvider>,
+    generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,20 +132,22 @@ impl Store {
         let (parsed, edges) = validate_corpus(&config, &pages, &extra).map_err(|findings| {
             anyhow!(serde_json::to_string_pretty(&findings).unwrap_or_default())
         })?;
-        let index = build_index(&root, &config, &pages, &parsed, &edges);
+        let index = build_index(&root, &config, &pages, &parsed, &edges, provider.as_ref());
         let head = git::head(&root)?;
         let blocked = read_blocked(&git_dir)?;
         Ok(Arc::new(Self {
             root,
-            config: RwLock::new(config),
-            pages: RwLock::new(pages),
-            parsed: RwLock::new(parsed),
-            edges: RwLock::new(edges),
-            index: RwLock::new(index),
-            provider: RwLock::new(provider),
+            state: RwLock::new(StoreState {
+                config,
+                pages,
+                parsed,
+                edges,
+                index,
+                provider,
+                generation: 0,
+            }),
             provider_factory,
             reindex_lock: tokio::sync::Mutex::new(()),
-            generation: AtomicU64::new(0),
             git_dir,
             head: RwLock::new(head),
             blocked: RwLock::new(blocked),
@@ -157,37 +161,33 @@ impl Store {
 
     #[must_use]
     pub fn config(&self) -> Config {
-        self.config.read().clone()
+        self.state.read().config.clone()
     }
 
     pub fn validate(&self) -> std::result::Result<(), Vec<Finding>> {
-        let config = self.config.read().clone();
-        let pages = self.pages.read().clone();
+        let state = self.state.read();
         let extra = load_config_files(&self.root).unwrap_or_default();
-        validate_corpus(&config, &pages, &extra).map(|_| ())
+        validate_corpus(&state.config, &state.pages, &extra).map(|_| ())
     }
 
     pub fn get_page(&self, path: &str, window: Option<(usize, usize)>) -> Result<PageResponse> {
         validate_repo_path(path)?;
-        let pages = self.pages.read();
-        if let Some(text) = pages.get(path) {
-            let parsed = self.parsed.read();
-            let page = parsed.get(path).context("page was not parsed")?;
-            let config = self.config.read();
+        let state = self.state.read();
+        if let Some(text) = state.pages.get(path) {
+            let page = state.parsed.get(path).context("page was not parsed")?;
             return Ok(PageResponse {
                 path: path.into(),
                 content: render(text, window),
-                metadata: project_metadata(&config, &page.frontmatter),
-                relations: self
+                metadata: project_metadata(&state.config, &page.frontmatter),
+                relations: state
                     .edges
-                    .read()
                     .iter()
                     .filter(|edge| edge.source == path || edge.target == path)
                     .cloned()
                     .collect(),
             });
         }
-        drop(pages);
+        drop(state);
         let config_resource = path.starts_with(".mdstore/")
             && Path::new(path).extension().is_some_and(|extension| {
                 extension.eq_ignore_ascii_case("yaml")
@@ -210,11 +210,10 @@ impl Store {
         if query.trim().is_empty() {
             bail!("query must be non-empty");
         }
-        let config = self.config.read().clone();
-        let index = self.index.read().clone();
-        let provider = self.provider.read().clone();
-        Ok(index
-            .search(&config, provider.as_ref(), query, variants)
+        let state = self.state.read().clone();
+        Ok(state
+            .index
+            .search(&state.config, state.provider.as_ref(), query, variants)
             .await)
     }
 
@@ -271,6 +270,11 @@ impl Store {
             bail!("configuration and Markdown edits must be separate batches");
         }
 
+        let current = self.state.read().clone();
+        if has_content {
+            ensure_paths_match_config(&current.config, paths.iter())?;
+        }
+
         let mut originals = HashMap::new();
         for path in &paths {
             if let Ok(text) = fs::read_to_string(self.root.join(path)) {
@@ -279,7 +283,7 @@ impl Store {
         }
         let applied = apply_operations_with_ranges(&originals, &request.edits)?;
         let changes = &applied.changes;
-        let mut pages = self.pages.read().clone();
+        let mut pages = current.pages.clone();
         let mut extra = load_config_files(&self.root)?;
         for (path, content) in changes {
             if path.ends_with(".md") && !path.starts_with(".mdstore/") {
@@ -320,13 +324,13 @@ impl Store {
                 );
             }
         };
-        let replacement_provider = if config.provider != self.config.read().provider {
+        let provider = if config.provider != current.config.provider {
             let factory = self
                 .provider_factory
                 .context("provider configuration changes require a daemon restart")?;
-            Some(factory(config.provider.clone()))
+            factory(config.provider.clone())
         } else {
-            None
+            current.provider.clone()
         };
 
         let ordered: Vec<(String, Option<String>)> = paths
@@ -371,7 +375,12 @@ impl Store {
                     error,
                 ));
             }
-            if let Err(error) = git::commit_staged(&self.root, request.edit_summary.trim()) {
+            if let Err(error) = git::commit_tree(
+                &self.root,
+                &pending.tree,
+                &pending.base_head,
+                &request.edit_summary,
+            ) {
                 let error = rollback_failure(&self.root, &path_list, &originally_present, error);
                 return match self.remove_pending(&digest) {
                     Ok(()) => Err(error),
@@ -390,16 +399,23 @@ impl Store {
         if matches!(push, PushState::Diverged) {
             self.set_blocked(Some("remote history diverged".into()))?;
         }
-        let index = build_index(&self.root, &config, &pages, &parsed, &edges);
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Some(provider) = replacement_provider {
-            *self.provider.write() = provider;
-        }
-        *self.config.write() = config;
-        *self.pages.write() = pages.clone();
-        *self.parsed.write() = parsed;
-        *self.edges.write() = edges;
-        *self.index.write() = index;
+        let index = build_index(
+            &self.root,
+            &config,
+            &pages,
+            &parsed,
+            &edges,
+            provider.as_ref(),
+        );
+        *self.state.write() = StoreState {
+            config,
+            pages,
+            parsed,
+            edges,
+            index,
+            provider,
+            generation: current.generation + 1,
+        };
         let response = ApplyEditsResponse {
             status: if committed {
                 ApplyStatus::Accepted
@@ -418,20 +434,20 @@ impl Store {
     }
 
     pub async fn reindex(&self) -> Result<()> {
-        let paths: Vec<String> = self.pages.read().keys().cloned().collect();
+        let paths: Vec<String> = self.state.read().pages.keys().cloned().collect();
         self.reindex_paths_mode(&paths, true).await
     }
 
     pub async fn reindex_missing(&self) -> Result<()> {
-        let paths: Vec<String> = self.pages.read().keys().cloned().collect();
+        let paths: Vec<String> = self.state.read().pages.keys().cloned().collect();
         self.reindex_paths_mode(&paths, false).await
     }
 
     pub async fn reindex_after_changes(&self, paths: &[String]) -> Result<()> {
         if paths.iter().any(|path| path.starts_with(".mdstore/")) {
-            self.reindex().await
+            self.reindex_missing().await
         } else {
-            self.reindex_paths_mode(paths, true).await
+            self.reindex_paths_mode(paths, false).await
         }
     }
 
@@ -441,16 +457,18 @@ impl Store {
 
     async fn reindex_paths_mode(&self, paths: &[String], force: bool) -> Result<()> {
         let _guard = self.reindex_lock.lock().await;
-        let generation = self.generation.load(Ordering::SeqCst);
-        let config = self.config.read().clone();
-        let pages = self.pages.read().clone();
-        let parsed = self.parsed.read().clone();
-        let edges = self.edges.read().clone();
-        let provider = self.provider.read().clone();
+        let snapshot = self.state.read().clone();
+        let generation = snapshot.generation;
+        let config = snapshot.config;
+        let pages = snapshot.pages;
+        let parsed = snapshot.parsed;
+        let edges = snapshot.edges;
+        let provider = snapshot.provider;
+        let provider_identity = provider.embedding_provider_identity();
         for path in paths {
             let Some(text) = pages.get(path) else {
                 let path = sidecar::sidecar_path(&self.root.join(path));
-                if self.generation.load(Ordering::SeqCst) != generation {
+                if self.state.read().generation != generation {
                     return Ok(());
                 }
                 if path.exists() {
@@ -465,7 +483,13 @@ impl Store {
             if !force
                 && sidecar::read(&sidecar_path).ok().is_some_and(|stored| {
                     stored
-                        .vectors_for(text, provider.model(), provider.dimensions(), &chunks)
+                        .vectors_for(
+                            text,
+                            &provider_identity,
+                            provider.model(),
+                            provider.dimensions(),
+                            &chunks,
+                        )
                         .is_some()
                 })
             {
@@ -479,12 +503,13 @@ impl Store {
                     .map(|chunk| chunk.embedding_text.clone())
                     .collect();
                 vectors.extend(provider.embed(InputType::Document, &input).await?);
-                if self.generation.load(Ordering::SeqCst) != generation {
+                if self.state.read().generation != generation {
                     return Ok(());
                 }
             }
             let sidecar = Sidecar::new(
                 text,
+                &provider_identity,
                 provider.model(),
                 provider.dimensions(),
                 &chunks,
@@ -497,37 +522,45 @@ impl Store {
             if !git::is_ignored(&self.root, &relative_sidecar)? {
                 bail!("embedding sidecar is not ignored by Git: {relative_sidecar}");
             }
-            if self.generation.load(Ordering::SeqCst) != generation {
+            if self.state.read().generation != generation {
                 return Ok(());
             }
             sidecar::write_atomic(&sidecar_path, &sidecar)?;
         }
-        let index = build_index(&self.root, &config, &pages, &parsed, &edges);
-        let mut current = self.index.write();
-        if self.generation.load(Ordering::SeqCst) == generation {
-            *current = index;
+        let index = build_index(
+            &self.root,
+            &config,
+            &pages,
+            &parsed,
+            &edges,
+            provider.as_ref(),
+        );
+        let mut current = self.state.write();
+        if current.generation == generation {
+            current.index = index;
         }
         Ok(())
     }
 
     pub fn status(&self) -> Result<StatusResponse> {
-        let index = self.index.read();
+        let state = self.state.read();
         Ok(StatusResponse {
-            pages: self.pages.read().len(),
-            chunks: index.chunks.len(),
-            vectors_ready: index
+            pages: state.pages.len(),
+            chunks: state.index.chunks.len(),
+            vectors_ready: state
+                .index
                 .chunks
                 .iter()
                 .filter(|chunk| chunk.vector.is_some())
                 .count(),
-            vectors_total: index.chunks.len(),
+            vectors_total: state.index.chunks.len(),
             unpushed: git::has_unpushed(&self.root)?,
             blocked: self.blocked.read().clone(),
         })
     }
 
     pub fn push(&self) -> Result<PushState> {
-        let state = git::push(&self.root, &self.config.read())?;
+        let state = git::push(&self.root, &self.state.read().config)?;
         if matches!(state, PushState::Pushed) {
             self.set_blocked(None)?;
         } else if matches!(state, PushState::Diverged) {
@@ -555,26 +588,34 @@ impl Store {
                 bail!(reason);
             }
         };
-        let replacement_provider = if config.provider != self.config.read().provider {
+        let current_state = self.state.read().clone();
+        let provider = if config.provider != current_state.config.provider {
             let Some(factory) = self.provider_factory else {
                 let reason = "external commit changes provider configuration; restart required";
                 self.set_blocked(Some(reason.into()))?;
                 bail!(reason);
             };
-            Some(factory(config.provider.clone()))
+            factory(config.provider.clone())
         } else {
-            None
+            current_state.provider.clone()
         };
-        let index = build_index(&self.root, &config, &pages, &parsed, &edges);
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Some(provider) = replacement_provider {
-            *self.provider.write() = provider;
-        }
-        *self.config.write() = config;
-        *self.pages.write() = pages;
-        *self.parsed.write() = parsed;
-        *self.edges.write() = edges;
-        *self.index.write() = index;
+        let index = build_index(
+            &self.root,
+            &config,
+            &pages,
+            &parsed,
+            &edges,
+            provider.as_ref(),
+        );
+        *self.state.write() = StoreState {
+            config,
+            pages,
+            parsed,
+            edges,
+            index,
+            provider,
+            generation: current_state.generation + 1,
+        };
         *self.head.write() = current;
         Ok(())
     }
@@ -643,7 +684,7 @@ impl Store {
             fs::remove_file(path)?;
             return Ok(None);
         }
-        let push = git::push(&self.root, &self.config.read())?;
+        let push = git::push(&self.root, &self.state.read().config)?;
         if matches!(push, PushState::Diverged) {
             self.set_blocked(Some("remote history diverged".into()))?;
         }
@@ -661,7 +702,7 @@ impl Store {
     }
 
     fn current_push_state(&self) -> Result<PushState> {
-        if !self.config.read().git.push {
+        if !self.state.read().config.git.push {
             Ok(PushState::Disabled)
         } else if git::has_unpushed(&self.root)? {
             Ok(PushState::Queued)
@@ -705,8 +746,15 @@ fn load_config_files(root: &Path) -> Result<HashMap<String, String>> {
 }
 
 fn ensure_pages_match_config(config: &Config, pages: &HashMap<String, String>) -> Result<()> {
+    ensure_paths_match_config(config, pages.keys())
+}
+
+fn ensure_paths_match_config<'a>(
+    config: &Config,
+    paths: impl IntoIterator<Item = &'a String>,
+) -> Result<()> {
     let (include, exclude) = config.document_globs()?;
-    for path in pages.keys() {
+    for path in paths {
         if !include.is_match(path) || exclude.is_match(path) {
             bail!("edited page is outside configured document globs: {path}");
         }
@@ -720,8 +768,10 @@ fn build_index(
     pages: &HashMap<String, String>,
     parsed: &HashMap<String, ParsedPage>,
     edges: &[Edge],
+    provider: &dyn RetrievalProvider,
 ) -> SearchIndex {
     let mut all_chunks = HashMap::new();
+    let provider_identity = provider.embedding_provider_identity();
     for (path, text) in pages {
         let Some(page) = parsed.get(path) else {
             continue;
@@ -733,8 +783,9 @@ fn build_index(
             .and_then(|stored| {
                 stored.vectors_for(
                     text,
-                    &config.provider.embedding_model,
-                    config.provider.dimensions,
+                    &provider_identity,
+                    provider.model(),
+                    provider.dimensions(),
                     &chunks,
                 )
             });

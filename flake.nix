@@ -251,8 +251,10 @@
         systemPkgs.mkShell {
           packages = [
             systemPkgs.cargo
+            systemPkgs.clippy
             systemPkgs.git
             systemPkgs.rustc
+            systemPkgs.rustfmt
           ];
           shellHook = ''
             echo "Run: cargo test --manifest-path mdstore/Cargo.toml"

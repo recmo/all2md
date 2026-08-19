@@ -2,7 +2,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
@@ -202,19 +202,48 @@ pub fn stage_tree(root: &Path, paths: &[String]) -> Result<Option<String>> {
     Ok(Some(String::from_utf8(tree.stdout)?.trim().into()))
 }
 
-pub fn commit_staged(root: &Path, summary: &str) -> Result<()> {
-    let output = Command::new("git")
+pub fn commit_tree(root: &Path, tree: &str, parent: &str, summary: &str) -> Result<String> {
+    let reference = checked(root, ["symbolic-ref", "-q", "HEAD"])?;
+    let reference = String::from_utf8(reference.stdout)?.trim().to_owned();
+    let mut child = Command::new("git")
         .current_dir(root)
-        .args(["commit", "-m", summary])
-        .output()
-        .context("commit mdstore edit batch")?;
+        .args(["commit-tree", tree, "-p", parent, "-F", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("create mdstore commit from validated tree")?;
+    child
+        .stdin
+        .take()
+        .context("open git commit message input")?
+        .write_all(summary.as_bytes())?;
+    let output = child.wait_with_output()?;
     if !output.status.success() {
         bail!(
-            "git commit failed: {}",
+            "git commit-tree failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    Ok(())
+    let commit = String::from_utf8(output.stdout)?.trim().to_owned();
+    let output = run(
+        root,
+        [
+            "update-ref",
+            "-m",
+            "mdstore commit",
+            &reference,
+            &commit,
+            parent,
+        ],
+    )?;
+    if !output.status.success() {
+        bail!(
+            "git update-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(commit)
 }
 
 pub fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool> {
@@ -341,4 +370,63 @@ where
         );
     }
     Ok(output)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[test]
+    fn commit_tree_preserves_tree_and_message_without_running_hooks() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        checked(root, ["init", "-b", "main"]).unwrap();
+        checked(root, ["config", "user.name", "mdstore test"]).unwrap();
+        checked(root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
+        fs::write(root.join("note.md"), "old\n").unwrap();
+        checked(root, ["add", "note.md"]).unwrap();
+        checked(root, ["commit", "-m", "initial"]).unwrap();
+        let parent = head(root).unwrap();
+
+        fs::write(root.join("note.md"), "new\n").unwrap();
+        let tree = stage_tree(root, &["note.md".into()]).unwrap().unwrap();
+        let hook = git_dir(root).unwrap().join("hooks/commit-msg");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut permissions = fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).unwrap();
+
+        let message = " exact summary \n\nsecond line";
+        let commit = commit_tree(root, &tree, &parent, message).unwrap();
+        assert_eq!(head(root).unwrap(), commit);
+        assert_eq!(
+            String::from_utf8(
+                checked(root, ["show", "-s", "--format=%T", &commit])
+                    .unwrap()
+                    .stdout
+            )
+            .unwrap()
+            .trim(),
+            tree
+        );
+        assert_eq!(
+            String::from_utf8(
+                checked(root, ["show", "-s", "--format=%P", &commit])
+                    .unwrap()
+                    .stdout
+            )
+            .unwrap()
+            .trim(),
+            parent
+        );
+        let object = String::from_utf8(
+            checked(root, ["cat-file", "commit", &commit])
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(object.split_once("\n\n").unwrap().1, message);
+    }
 }

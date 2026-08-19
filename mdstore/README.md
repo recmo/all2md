@@ -72,6 +72,7 @@ provider:
   rerank_model: zerank-2
   dimensions: 1280
   batch_size: 64
+  request_timeout_seconds: 30
 
 git:
   push: true

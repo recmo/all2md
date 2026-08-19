@@ -33,10 +33,10 @@ pub fn chunk_page(
     for block in blocks {
         if block.text.chars().count() > config.max_chars {
             if let Some(value) = current.take() {
-                push_chunk(&mut chunks, value, context, overlap_chars);
+                push_chunk(&mut chunks, value, context, overlap_chars, config.max_chars);
             }
             for split in split_block(block, config.max_chars) {
-                push_chunk(&mut chunks, split, context, overlap_chars);
+                push_chunk(&mut chunks, split, context, overlap_chars, config.max_chars);
             }
             continue;
         }
@@ -51,20 +51,41 @@ pub fn chunk_page(
             }
             Some(_) => {
                 let previous = current.take().expect("present");
-                push_chunk(&mut chunks, previous, context, overlap_chars);
+                push_chunk(
+                    &mut chunks,
+                    previous,
+                    context,
+                    overlap_chars,
+                    config.max_chars,
+                );
                 current = Some(block);
             }
             None => current = Some(block),
         }
     }
     if let Some(value) = current {
-        push_chunk(&mut chunks, value, context, overlap_chars);
+        push_chunk(&mut chunks, value, context, overlap_chars, config.max_chars);
     }
     chunks
 }
 
 fn structural_blocks(text: &str, parsed: &ParsedPage, config: &ChunkConfig) -> Vec<Block> {
     let lines: Vec<&str> = text.lines().collect();
+    let headings: std::collections::HashMap<usize, _> = parsed
+        .headings
+        .iter()
+        .map(|heading| (heading.line, heading))
+        .collect();
+    let setext_markers: std::collections::HashSet<usize> = parsed
+        .headings
+        .iter()
+        .filter_map(|heading| {
+            lines
+                .get(heading.line)
+                .is_some_and(|line| is_setext_underline(line))
+                .then_some(heading.line + 1)
+        })
+        .collect();
     let mut heading_stack: Vec<String> = Vec::new();
     let mut excluded_level: Option<usize> = None;
     let mut blocks = Vec::new();
@@ -72,17 +93,23 @@ fn structural_blocks(text: &str, parsed: &ParsedPage, config: &ChunkConfig) -> V
     let mut buffer = Vec::new();
     let mut in_fence = false;
     for (index, line) in lines.iter().enumerate().skip(start) {
-        if let Some((level, title)) = parse_heading(line) {
+        let line_number = index + 1;
+        if let Some(heading) = headings.get(&line_number) {
             flush_block(&mut blocks, &mut buffer, start, index, &heading_stack);
+            let level = usize::from(heading.level);
             heading_stack.truncate(level.saturating_sub(1));
-            heading_stack.push(title.clone());
-            excluded_level = if config.exclude_sections.contains(&title) {
+            heading_stack.push(heading.text.clone());
+            excluded_level = if config.exclude_sections.contains(&heading.text) {
                 Some(level)
             } else if excluded_level.is_some_and(|excluded| level <= excluded) {
                 None
             } else {
                 excluded_level
             };
+            start = index + 1;
+            continue;
+        }
+        if setext_markers.contains(&line_number) {
             start = index + 1;
             continue;
         }
@@ -122,13 +149,10 @@ fn flush_block(
     });
 }
 
-fn parse_heading(line: &str) -> Option<(usize, String)> {
-    let trimmed = line.trim_start();
-    let count = trimmed.bytes().take_while(|byte| *byte == b'#').count();
-    if !(1..=6).contains(&count) || trimmed.as_bytes().get(count) != Some(&b' ') {
-        return None;
-    }
-    Some((count, trimmed[count + 1..].trim().into()))
+fn is_setext_underline(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && (trimmed.bytes().all(|byte| byte == b'=') || trimmed.bytes().all(|byte| byte == b'-'))
 }
 
 fn split_block(block: Block, max_chars: usize) -> Vec<Block> {
@@ -186,23 +210,43 @@ fn tail(text: &str, chars: usize) -> String {
     text[start..].trim_start().into()
 }
 
-fn push_chunk(chunks: &mut Vec<Chunk>, block: Block, context: &[String], overlap_chars: usize) {
+fn push_chunk(
+    chunks: &mut Vec<Chunk>,
+    block: Block,
+    context: &[String],
+    overlap_chars: usize,
+    max_chars: usize,
+) {
     let overlap = chunks
         .last()
         .map(|previous| tail(&previous.text, overlap_chars))
         .unwrap_or_default();
-    chunks.push(to_chunk(block, context, &overlap));
+    chunks.push(to_chunk(block, context, &overlap, max_chars));
 }
 
-fn to_chunk(block: Block, context: &[String], overlap: &str) -> Chunk {
+fn to_chunk(block: Block, context: &[String], overlap: &str, max_chars: usize) -> Chunk {
     let mut prefix = context.to_vec();
     prefix.extend(block.heading.iter().cloned());
+    let prefix = prefix.join(" > ");
+    let mut remaining = max_chars.saturating_sub(block.text.chars().count());
+    let prefix = if prefix.is_empty() || remaining <= 2 {
+        String::new()
+    } else {
+        let prefix: String = prefix.chars().take(remaining - 2).collect();
+        remaining -= prefix.chars().count() + 2;
+        prefix
+    };
+    let overlap = if overlap.is_empty() || remaining <= 2 {
+        String::new()
+    } else {
+        tail(overlap, remaining - 2)
+    };
     let mut embedding_parts = Vec::new();
     if !prefix.is_empty() {
-        embedding_parts.push(prefix.join(" > "));
+        embedding_parts.push(prefix);
     }
     if !overlap.is_empty() {
-        embedding_parts.push(overlap.into());
+        embedding_parts.push(overlap);
     }
     embedding_parts.push(block.text.clone());
     let embedding_text = embedding_parts.join("\n\n");
@@ -222,11 +266,28 @@ mod tests {
 
     #[test]
     fn respects_headings_and_code_fences() {
-        let text = "---\ntitle: Demo\n---\n# One\n\nParagraph.\n\n```rs\nfn x() {}\n```\n\n# Two\n\nOther.\n";
+        let text = "---\ntitle: Demo\n---\n# One\n\nParagraph.\n\n```md\n# Not a heading\nfn x() {}\n```\n\nVisible\n=======\n\nShown.\n\nHidden\n------\n\nSecret.\n\n# Two\n\nOther.\n";
         let parsed = parse_page(text, &LinkConfig::default()).unwrap();
-        let chunks = chunk_page(text, &parsed, &ChunkConfig::default(), &["Demo".into()]);
+        let config = ChunkConfig {
+            exclude_sections: vec!["Hidden".into()],
+            ..ChunkConfig::default()
+        };
+        let chunks = chunk_page(text, &parsed, &config, &["Demo".into()]);
         assert!(chunks.iter().any(|chunk| chunk.heading == ["One"]));
         assert!(chunks.iter().any(|chunk| chunk.text.contains("fn x")));
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("# Not a heading"))
+        );
+        assert!(!chunks.iter().any(|chunk| {
+            chunk
+                .heading
+                .iter()
+                .any(|heading| heading == "Not a heading")
+        }));
+        assert!(chunks.iter().any(|chunk| chunk.heading == ["Visible"]));
+        assert!(!chunks.iter().any(|chunk| chunk.text.contains("Secret")));
         assert!(chunks.iter().any(|chunk| chunk.heading == ["Two"]));
     }
 
@@ -241,7 +302,12 @@ mod tests {
             max_chars: 24,
             ..ChunkConfig::default()
         };
-        let chunks = chunk_page(text, &parsed, &config, &[]);
+        let chunks = chunk_page(
+            text,
+            &parsed,
+            &config,
+            &["A deliberately long title".into()],
+        );
         let lines: Vec<&str> = text.lines().collect();
         for chunk in &chunks {
             let source = lines[chunk.start_line - 1..chunk.end_line].join("\n");
@@ -251,6 +317,11 @@ mod tests {
             chunk.embedding_text.len() > chunk.text.len()
                 && !chunk.text.starts_with("first sentence")
         }));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.embedding_text.chars().count() <= config.max_chars)
+        );
 
         let text = "# 中文\n\n这是一个没有空格的长段落。\n";
         let parsed = parse_page(text, &LinkConfig::default()).unwrap();
@@ -258,7 +329,12 @@ mod tests {
             max_chars: 5,
             ..config
         };
-        let chunks = chunk_page(text, &parsed, &cjk_config, &[]);
+        let chunks = chunk_page(text, &parsed, &cjk_config, &["很长的标题".into()]);
         assert!(chunks.iter().all(|chunk| chunk.text.chars().count() <= 5));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.embedding_text.chars().count() <= 5)
+        );
     }
 }

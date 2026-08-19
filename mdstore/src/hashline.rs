@@ -403,13 +403,20 @@ fn resolve_line(anchor: &str, lines: &[String]) -> Result<usize, HashlineError> 
     if matches.len() == 1 {
         return Ok(matches[0]);
     }
-    let nearby: Vec<usize> = matches
+    let nearby: Vec<(usize, usize)> = matches
         .iter()
         .copied()
-        .filter(|index| index.abs_diff(number - 1) <= 3)
+        .map(|index| (index, index.abs_diff(number - 1)))
+        .filter(|(_, distance)| *distance <= 3)
         .collect();
-    if nearby.len() == 1 {
-        return Ok(nearby[0]);
+    if let Some(minimum) = nearby.iter().map(|(_, distance)| *distance).min() {
+        let closest: Vec<usize> = nearby
+            .iter()
+            .filter_map(|(index, distance)| (*distance == minimum).then_some(*index))
+            .collect();
+        if closest.len() == 1 {
+            return Ok(closest[0]);
+        }
     }
     if !matches.is_empty() {
         return Err(HashlineError::AmbiguousAnchor {
@@ -537,5 +544,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(blank["one.md"].as_deref(), Some("\n"));
+    }
+
+    #[test]
+    fn shifted_anchor_uses_unique_closest_match() {
+        let repeated = "same";
+        let lines = vec!["zero", repeated, "two", "three", "four", repeated, "six"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let anchor = format!("3:{}", short_hash(repeated));
+        assert_eq!(resolve_line(&anchor, &lines).unwrap(), 1);
+
+        let tied = format!("4:{}", short_hash(repeated));
+        assert!(matches!(
+            resolve_line(&tied, &lines),
+            Err(HashlineError::AmbiguousAnchor { .. })
+        ));
     }
 }

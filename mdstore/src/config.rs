@@ -44,6 +44,10 @@ fn default_api_key_env() -> String {
     "ZEROENTROPY_API_KEY".into()
 }
 
+fn default_request_timeout_seconds() -> u64 {
+    30
+}
+
 fn default_limit() -> usize {
     10
 }
@@ -109,6 +113,11 @@ impl Config {
             let _ = compile_globs(std::slice::from_ref(&schema.include))?;
             validate_repo_path(&schema.schema)?;
         }
+        for section in &self.sections {
+            if let Some(include) = &section.include {
+                let _ = compile_globs(std::slice::from_ref(include))?;
+            }
+        }
         for pointer in self.metadata.values() {
             if !pointer.starts_with('/') && !pointer.is_empty() {
                 bail!("metadata JSON pointer must be empty or start with '/': {pointer}");
@@ -123,8 +132,17 @@ impl Config {
         if self.search.limit == 0 || self.search.candidates < self.search.limit {
             bail!("search.candidates must be at least search.limit, both non-zero");
         }
+        if !self.search.rrf_k.is_finite() || self.search.rrf_k <= 0.0 {
+            bail!("search.rrf_k must be finite and greater than zero");
+        }
+        if !self.search.graph_weight.is_finite() || self.search.graph_weight < 0.0 {
+            bail!("search.graph_weight must be finite and non-negative");
+        }
         if self.provider.dimensions == 0 {
             bail!("provider.dimensions must be non-zero");
+        }
+        if self.provider.request_timeout_seconds == 0 {
+            bail!("provider.request_timeout_seconds must be non-zero");
         }
         let mut relation_names = HashSet::new();
         for relation in &self.relations {
@@ -174,7 +192,7 @@ pub fn validate_repo_path(path: &str) -> Result<()> {
         let std::path::Component::Normal(value) = component else {
             bail!("path must contain only normal repository components: {path}");
         };
-        if value == ".git" {
+        if value.to_string_lossy().eq_ignore_ascii_case(".git") {
             bail!("path may not enter Git metadata: {path}");
         }
     }
@@ -199,6 +217,8 @@ pub struct SchemaRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SectionRule {
+    #[serde(default)]
+    pub include: Option<String>,
     pub heading: String,
     #[serde(default)]
     pub required: bool,
@@ -359,6 +379,8 @@ pub struct ProviderConfig {
     pub dimensions: usize,
     #[serde(default)]
     pub batch_size: Option<usize>,
+    #[serde(default = "default_request_timeout_seconds")]
+    pub request_timeout_seconds: u64,
 }
 
 impl Default for ProviderConfig {
@@ -370,6 +392,7 @@ impl Default for ProviderConfig {
             rerank_model: default_rerank_model(),
             dimensions: default_dimensions(),
             batch_size: Some(64),
+            request_timeout_seconds: default_request_timeout_seconds(),
         }
     }
 }
@@ -427,6 +450,7 @@ mod tests {
             ".",
             "../note.md",
             ".git/hooks/note.md",
+            ".GIT/hooks/note.md",
             "a/.git/note.md",
         ] {
             assert!(validate_repo_path(path).is_err(), "accepted {path:?}");
@@ -444,5 +468,19 @@ mod tests {
             "  - name: parent\n    reciprocal: child\n    selector: {kind: markdown_links}",
         );
         assert!(Config::from_yaml(&unknown).is_err());
+    }
+
+    #[test]
+    fn search_weights_are_finite_and_non_negative() {
+        let config = |search: &str| {
+            Config::from_yaml(&format!(
+                "documents:\n  include: ['**/*.md']\nsearch:\n{search}\nprovider:\n  dimensions: 2\n"
+            ))
+        };
+        assert!(config("  rrf_k: 0").is_err());
+        assert!(config("  rrf_k: .inf").is_err());
+        assert!(config("  graph_weight: -0.1").is_err());
+        assert!(config("  graph_weight: .nan").is_err());
+        assert!(config("  rrf_k: 60\n  graph_weight: 0").is_ok());
     }
 }

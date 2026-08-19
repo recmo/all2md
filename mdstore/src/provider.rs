@@ -16,6 +16,7 @@ pub trait RetrievalProvider: Send + Sync {
     ) -> Result<Vec<RerankResult>>;
     fn model(&self) -> &str;
     fn dimensions(&self) -> usize;
+    fn embedding_provider_identity(&self) -> String;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,7 +54,12 @@ impl ZeroEntropyProvider {
             .ok()
             .filter(|value| !value.is_empty());
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(
+                    config.request_timeout_seconds,
+                ))
+                .build()
+                .expect("build ZeroEntropy HTTP client"),
             config,
             api_key,
         }
@@ -214,6 +220,20 @@ impl RetrievalProvider for ZeroEntropyProvider {
     fn dimensions(&self) -> usize {
         self.config.dimensions
     }
+
+    fn embedding_provider_identity(&self) -> String {
+        let endpoint = reqwest::Url::parse(&self.config.base_url).map_or_else(
+            |_| self.config.base_url.trim_end_matches('/').to_owned(),
+            |mut endpoint| {
+                let _ = endpoint.set_username("");
+                let _ = endpoint.set_password(None);
+                endpoint.set_query(None);
+                endpoint.set_fragment(None);
+                endpoint.to_string().trim_end_matches('/').to_owned()
+            },
+        );
+        format!("zeroentropy:{endpoint}")
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +242,7 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::{Duration, Instant};
 
     use axum::{
         Json, Router,
@@ -252,6 +273,7 @@ mod tests {
                 rerank_model: "zerank-2".into(),
                 dimensions: 2,
                 batch_size: Some(2),
+                request_timeout_seconds: 30,
             },
             api_key: Some("test-token".into()),
         };
@@ -266,6 +288,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ranked[0].index, 1);
+    }
+
+    #[tokio::test]
+    async fn zeroentropy_requests_have_a_finite_timeout() {
+        let app = Router::new().route(
+            "/v1/models/embed",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Json(json!({"results": [{"embedding": [1.0, 0.0]}]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = ZeroEntropyProvider::new(ProviderConfig {
+            base_url: format!("http://{address}/v1"),
+            api_key_env: "PATH".into(),
+            embedding_model: "zembed-1".into(),
+            rerank_model: "zerank-2".into(),
+            dimensions: 2,
+            batch_size: Some(2),
+            request_timeout_seconds: 1,
+        });
+        let start = Instant::now();
+        assert!(
+            provider
+                .embed(InputType::Document, &["one".into()])
+                .await
+                .is_err()
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn provider_identity_includes_endpoint_but_not_credentials() {
+        let provider = ZeroEntropyProvider {
+            client: reqwest::Client::new(),
+            config: ProviderConfig {
+                base_url: "https://user:password@example.com/v1/?token=secret#fragment".into(),
+                api_key_env: "SECRET_ENV_NAME".into(),
+                embedding_model: "zembed-1".into(),
+                rerank_model: "zerank-2".into(),
+                dimensions: 2,
+                batch_size: Some(2),
+                request_timeout_seconds: 30,
+            },
+            api_key: Some("api-secret".into()),
+        };
+        let identity = provider.embedding_provider_identity();
+        assert_eq!(identity, "zeroentropy:https://example.com/v1");
+        assert!(!identity.contains("secret"));
+        assert!(!identity.contains("password"));
     }
 
     async fn embed(

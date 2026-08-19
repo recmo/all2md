@@ -7,12 +7,13 @@ use sha2::{Digest, Sha256};
 use crate::chunk::Chunk;
 
 const MAGIC: &[u8; 8] = b"MDSTORE\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sidecar {
     pub version: u16,
     pub source_fingerprint: Vec<u8>,
+    pub provider_identity: String,
     pub model: String,
     pub dimensions: usize,
     pub chunks: Vec<SidecarChunk>,
@@ -31,6 +32,7 @@ impl Sidecar {
     #[must_use]
     pub fn new(
         source: &str,
+        provider_identity: &str,
         model: &str,
         dimensions: usize,
         chunks: &[Chunk],
@@ -53,6 +55,7 @@ impl Sidecar {
         Self {
             version: VERSION,
             source_fingerprint: fingerprint(source),
+            provider_identity: provider_identity.into(),
             model: model.into(),
             dimensions,
             chunks,
@@ -62,12 +65,14 @@ impl Sidecar {
     pub fn vectors_for(
         &self,
         source: &str,
+        provider_identity: &str,
         model: &str,
         dimensions: usize,
         chunks: &[Chunk],
     ) -> Option<Vec<Vec<f32>>> {
         if self.version != VERSION
             || self.source_fingerprint != fingerprint(source)
+            || self.provider_identity != provider_identity
             || self.model != model
             || self.dimensions != dimensions
             || self.chunks.len() != chunks.len()
@@ -143,12 +148,26 @@ mod tests {
             text: "hello".into(),
             embedding_text: "Demo\n\nhello".into(),
         }];
-        let sidecar = Sidecar::new("hello", "test", 2, &chunks, &[vec![1.0, -2.0]]);
+        let sidecar = Sidecar::new(
+            "hello",
+            "test-provider",
+            "test",
+            2,
+            &chunks,
+            &[vec![1.0, -2.0]],
+        );
         write_atomic(&path, &sidecar).unwrap();
         let loaded = read(&path).unwrap();
         assert_eq!(
-            loaded.vectors_for("hello", "test", 2, &chunks).unwrap(),
+            loaded
+                .vectors_for("hello", "test-provider", "test", 2, &chunks)
+                .unwrap(),
             [vec![1.0, -2.0]]
+        );
+        assert!(
+            loaded
+                .vectors_for("hello", "other-provider", "test", 2, &chunks)
+                .is_none()
         );
     }
 }

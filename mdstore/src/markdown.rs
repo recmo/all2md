@@ -382,6 +382,14 @@ fn validate_schema(
 
 fn validate_sections(config: &Config, path: &str, page: &ParsedPage, findings: &mut Vec<Finding>) {
     for rule in &config.sections {
+        if rule.include.as_ref().is_some_and(|pattern| {
+            !globset::Glob::new(pattern)
+                .expect("section glob was validated")
+                .compile_matcher()
+                .is_match(path)
+        }) {
+            continue;
+        }
         let count = page
             .headings
             .iter()
@@ -474,16 +482,20 @@ impl TargetResolver {
         raw: &str,
         syntax: LinkSyntax,
     ) -> Result<Option<String>, String> {
-        let raw = raw.split('#').next().unwrap_or_default();
+        let raw = raw.split(['#', '?']).next().unwrap_or_default();
         if raw.is_empty() {
             return Ok(None);
         }
-        if matches!(syntax, LinkSyntax::Markdown)
-            && (raw.starts_with("http://")
-                || raw.starts_with("https://")
-                || raw.starts_with("mailto:"))
-        {
-            return Ok(None);
+        if matches!(syntax, LinkSyntax::Markdown) {
+            if raw.starts_with("//") || has_uri_scheme(raw) {
+                return Ok(None);
+            }
+            if Path::new(raw)
+                .extension()
+                .is_some_and(|extension| !extension.eq_ignore_ascii_case("md"))
+            {
+                return Ok(None);
+            }
         }
         if raw.starts_with('/') {
             return Err(format!("absolute internal link is not allowed: {raw}"));
@@ -509,6 +521,19 @@ impl TargetResolver {
             None => Err(format!("dangling internal target {raw:?}")),
         }
     }
+}
+
+fn has_uri_scheme(target: &str) -> bool {
+    let Some((scheme, _)) = target.split_once(':') else {
+        return false;
+    };
+    scheme
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic())
+        && scheme.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
 }
 
 fn normalize_path(path: &Path) -> Result<String, String> {
@@ -593,5 +618,58 @@ provider: {dimensions: 2}
             (edge.relation == "friend" && edge.source != "c.md" && edge.target != "c.md")
                 || (edge.relation == "source" && edge.source != "b.md" && edge.target != "b.md")
         }));
+    }
+
+    #[test]
+    fn section_rules_select_heterogeneous_page_types() {
+        let config = Config::from_yaml(
+            r#"documents:
+  include: ["**/*.md"]
+sections:
+  - include: "people/**"
+    heading: Biography
+    required: true
+  - include: "tasks/**"
+    heading: Status
+    required: true
+provider: {dimensions: 2}
+"#,
+        )
+        .unwrap();
+        let pages = HashMap::from([
+            ("people/alice.md".into(), "# Biography\n\nPerson.\n".into()),
+            ("tasks/one.md".into(), "# Status\n\nOpen.\n".into()),
+        ]);
+        assert!(validate_corpus(&config, &pages, &HashMap::new()).is_ok());
+
+        let invalid = HashMap::from([
+            ("people/alice.md".into(), "# Status\n\nActive.\n".into()),
+            ("tasks/one.md".into(), "# Status\n\nOpen.\n".into()),
+        ]);
+        let findings = validate_corpus(&config, &invalid, &HashMap::new()).unwrap_err();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].path, "people/alice.md");
+    }
+
+    #[test]
+    fn non_page_markdown_destinations_are_not_internal_links() {
+        let paths = ["notes/page.md".to_owned(), "notes/other.md".to_owned()];
+        let resolver = TargetResolver::new(paths.iter());
+        for target in [
+            "../assets/paper.pdf",
+            "ftp://example.com/file",
+            "urn:isbn:9780140328721",
+            "//cdn.example.com/file",
+        ] {
+            assert_eq!(
+                resolver.resolve("notes/page.md", target, LinkSyntax::Markdown),
+                Ok(None),
+                "resolved {target:?} as a page"
+            );
+        }
+        assert_eq!(
+            resolver.resolve("notes/page.md", "other.md?view=1", LinkSyntax::Markdown),
+            Ok(Some("notes/other.md".into()))
+        );
     }
 }

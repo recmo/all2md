@@ -71,6 +71,10 @@ impl RetrievalProvider for FakeProvider {
     fn dimensions(&self) -> usize {
         2
     }
+
+    fn embedding_provider_identity(&self) -> String {
+        "fake-provider".into()
+    }
 }
 
 struct CountingProvider {
@@ -99,6 +103,10 @@ impl RetrievalProvider for CountingProvider {
 
     fn dimensions(&self) -> usize {
         2
+    }
+
+    fn embedding_provider_identity(&self) -> String {
+        "fake-provider".into()
     }
 }
 
@@ -130,6 +138,10 @@ impl RetrievalProvider for BlockingProvider {
 
     fn dimensions(&self) -> usize {
         2
+    }
+
+    fn embedding_provider_identity(&self) -> String {
+        "fake-provider".into()
     }
 }
 
@@ -333,6 +345,39 @@ fn configuration_activation_reselects_the_tracked_corpus() {
     assert_eq!(store.status().unwrap().pages, 1);
     assert!(store.get_page("bob.md", None).is_err());
     assert!(response.fresh_hashlines[".mdstore/config.yaml"].contains("exclude:"));
+}
+
+#[test]
+fn rejects_edits_to_tracked_markdown_outside_the_configured_corpus() {
+    let repository = Repository::new();
+    fs::write(repository.root.join("excluded.md"), "private\n").unwrap();
+    let config = fs::read_to_string(repository.root.join(".mdstore/config.yaml"))
+        .unwrap()
+        .replace(
+            "  include: [\"**/*.md\"]",
+            "  include: [\"**/*.md\"]\n  exclude: [\"excluded.md\"]",
+        );
+    fs::write(repository.root.join(".mdstore/config.yaml"), config).unwrap();
+    command(
+        &repository.root,
+        &["add", ".mdstore/config.yaml", "excluded.md"],
+    );
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "add excluded markdown"],
+    );
+    let store = repository.store();
+    let request = ApplyEditsRequest {
+        edit_summary: "remove excluded file".into(),
+        edits: vec![EditOperation::RemovePage {
+            path: "excluded.md".into(),
+            anchor: format!("1:{}", short_hash("private")),
+        }],
+    };
+
+    let error = store.apply_edits(&request).unwrap_err().to_string();
+    assert!(error.contains("outside configured document globs"));
+    assert!(repository.root.join("excluded.md").is_file());
 }
 
 #[tokio::test]
@@ -712,6 +757,31 @@ async fn startup_reindex_reuses_valid_sidecars() {
     assert!(first > 0);
     store.reindex_missing().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), first);
+}
+
+#[tokio::test]
+async fn post_edit_reindex_reuses_still_valid_sidecars() {
+    let repository = Repository::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = repository.store_with_provider(Arc::new(CountingProvider {
+        calls: calls.clone(),
+    }));
+    store.reindex_missing().await.unwrap();
+    let embedded = calls.load(Ordering::SeqCst);
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "add unrelated configuration".into(),
+            edits: vec![EditOperation::CreatePage {
+                path: ".mdstore/unused.json".into(),
+                content: "{}\n".into(),
+            }],
+        })
+        .unwrap();
+    store
+        .reindex_after_changes(&[".mdstore/unused.json".into()])
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), embedded);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
