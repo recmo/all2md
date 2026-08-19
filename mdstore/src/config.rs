@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
+    net::SocketAddr,
     path::Path,
 };
 
@@ -118,9 +119,10 @@ impl Config {
             }
         }
         for pointer in self.metadata.values() {
-            if !pointer.starts_with('/') && !pointer.is_empty() {
-                bail!("metadata JSON pointer must be empty or start with '/': {pointer}");
-            }
+            validate_json_pointer(pointer, "metadata")?;
+        }
+        for pointer in &self.chunking.context_pointers {
+            validate_json_pointer(pointer, "chunking context")?;
         }
         if self.chunking.target_tokens == 0 || self.chunking.max_chars == 0 {
             bail!("chunking limits must be greater than zero");
@@ -142,6 +144,14 @@ impl Config {
         }
         if self.provider.request_timeout_seconds == 0 {
             bail!("provider.request_timeout_seconds must be non-zero");
+        }
+        let listen: SocketAddr = self
+            .server
+            .listen
+            .parse()
+            .context("server.listen must be an IP socket address")?;
+        if listen.port() == 0 {
+            bail!("server.listen port must be non-zero");
         }
         let mut relation_names = HashSet::new();
         for relation in &self.relations {
@@ -180,6 +190,24 @@ fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
         builder.add(Glob::new(pattern).with_context(|| format!("invalid glob {pattern:?}"))?);
     }
     builder.build().context("compile glob set")
+}
+
+fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
+    if pointer.is_empty() {
+        return Ok(());
+    }
+    if !pointer.starts_with('/') {
+        bail!("{kind} JSON pointer must be empty or start with '/': {pointer}");
+    }
+    if pointer.split('/').skip(1).any(|segment| {
+        segment
+            .split('~')
+            .skip(1)
+            .any(|suffix| !suffix.starts_with(['0', '1']))
+    }) {
+        bail!("{kind} JSON pointer contains an invalid escape: {pointer}");
+    }
+    Ok(())
 }
 
 pub fn validate_repo_path(path: &str) -> Result<()> {
@@ -307,9 +335,7 @@ impl RelationSelector {
                 .into_iter()
                 .flatten()
                 {
-                    if !pointer.starts_with('/') && !pointer.is_empty() {
-                        bail!("relation JSON pointer must be empty or start with '/': {pointer}");
-                    }
+                    validate_json_pointer(pointer, "relation")?;
                 }
                 if type_value.is_some() != type_pointer.is_some() {
                     bail!("frontmatter relation type_pointer and type_value must be set together");
@@ -500,5 +526,32 @@ mod tests {
         assert!(config("  graph_weight: -0.1").is_err());
         assert!(config("  graph_weight: .nan").is_err());
         assert!(config("  rrf_k: 60\n  graph_weight: 0").is_ok());
+    }
+
+    #[test]
+    fn chunk_context_pointers_are_validated() {
+        let config = |pointer: &str| {
+            Config::from_yaml(&format!(
+                "documents:\n  include: ['**/*.md']\nchunking:\n  context_pointers: [{pointer:?}]\nprovider:\n  dimensions: 2\n"
+            ))
+        };
+        assert!(config("/title").is_ok());
+        assert!(config("/escaped~0name/~1path").is_ok());
+        assert!(config("title").is_err());
+        assert!(config("/bad~2escape").is_err());
+        assert!(config("/trailing~").is_err());
+    }
+
+    #[test]
+    fn server_listener_is_a_fixed_socket_address() {
+        let config = |listen: &str| {
+            Config::from_yaml(&format!(
+                "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\nserver:\n  listen: {listen}\n"
+            ))
+        };
+        assert!(config("127.0.0.1:3131").is_ok());
+        assert!(config("'[::1]:3131'").is_ok());
+        assert!(config("127.0.0.1:0").is_err());
+        assert!(config("localhost:3131").is_err());
     }
 }

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     extract::{Request, State},
-    http::StatusCode,
+    http::{StatusCode, header::ORIGIN},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -30,7 +30,7 @@ pub fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
         .route("/health", get(health))
         .route("/mcp", post(mcp))
         .route("/cli", post(cli))
-        .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -92,7 +92,15 @@ async fn cli(State(state): State<AppState>, Json(command): Json<CliCommand>) -> 
             Err(error) => internal_error(error),
         },
         CliCommand::Push => match state.store.push() {
-            Ok(push) => Json(json!(push)).into_response(),
+            Ok(push) => {
+                let background = state.store.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = background.reindex_missing().await {
+                        tracing::warn!(%error, "post-refresh embedding rebuild is degraded");
+                    }
+                });
+                Json(json!(push)).into_response()
+            }
             Err(error) => internal_error(error),
         },
     }
@@ -106,7 +114,14 @@ fn internal_error(error: anyhow::Error) -> Response {
         .into_response()
 }
 
-async fn authenticate(State(state): State<AppState>, request: Request, next: Next) -> Response {
+async fn authorize(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if request.headers().contains_key(ORIGIN) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "browser origins are not allowed"})),
+        )
+            .into_response();
+    }
     if let Some(expected) = &state.bearer_token {
         let actual = request
             .headers()
@@ -290,10 +305,9 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
         "apply_edits" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
             Ok(arguments) => match store.apply_edits(&arguments) {
                 Ok(value) => {
-                    let paths = value.touched_paths.clone();
                     let background = Arc::clone(store);
                     tokio::spawn(async move {
-                        if let Err(error) = background.reindex_after_changes(&paths).await {
+                        if let Err(error) = background.reindex_missing().await {
                             tracing::warn!(%error, "post-edit embedding rebuild is degraded");
                         }
                     });

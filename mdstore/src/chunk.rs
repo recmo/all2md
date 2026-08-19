@@ -122,6 +122,8 @@ fn structural_blocks(text: &str, parsed: &ParsedPage, config: &ChunkConfig) -> V
             .iter()
             .any(|range| (range.start_line..=range.end_line).contains(&line))
     };
+    let structural_boundaries: std::collections::HashSet<usize> =
+        parsed.structural_boundaries.iter().copied().collect();
     let mut heading_stack: Vec<String> = Vec::new();
     let mut excluded_level: Option<usize> = None;
     let mut blocks = Vec::new();
@@ -130,6 +132,10 @@ fn structural_blocks(text: &str, parsed: &ParsedPage, config: &ChunkConfig) -> V
     let mut in_code = false;
     for (index, line) in lines.iter().enumerate().skip(start) {
         let line_number = index + 1;
+        if structural_boundaries.contains(&line_number) {
+            flush_block(&mut blocks, &mut buffer, start, index, &heading_stack);
+            start = index;
+        }
         let code = in_code_block(line_number);
         if code != in_code {
             flush_block(&mut blocks, &mut buffer, start, index, &heading_stack);
@@ -385,6 +391,19 @@ mod tests {
         assert_eq!(code.text, "````text\ninside\n~~~\n\nstill inside\n````");
         assert!(blocks.iter().any(|block| block.text == "after one"));
         assert!(blocks.iter().any(|block| block.text == "after two"));
+    }
+
+    #[test]
+    fn list_and_table_ast_boundaries_split_adjacent_blocks() {
+        let text = "# Notes\n\nintro\n- one\n- two\n\n| A |\n| - |\n| x |\n\noutro\n";
+        let parsed = parse_page(text, &LinkConfig::default()).unwrap();
+        assert_eq!(parsed.structural_boundaries, [4, 7, 10]);
+        let blocks = structural_blocks(text, &parsed, &ChunkConfig::default());
+        let texts: Vec<&str> = blocks.iter().map(|block| block.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["intro", "- one\n- two", "| A |\n| - |\n| x |", "outro"]
+        );
     }
 
     #[test]

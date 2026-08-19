@@ -106,10 +106,10 @@ impl Store {
             .context("resolve repository root")?;
         git::ensure_repository(&root)?;
         let git_dir = git::git_dir(&root)?;
-        git::recover_worktree(&root)?;
-        if !git::is_tracked(&root, ".mdstore/config.yaml")? {
+        if git::read_head_text(&root, ".mdstore/config.yaml").is_err() {
             bail!(".mdstore/config.yaml must be tracked by Git");
         }
+        git::recover_worktree(&root)?;
         let config = Config::load(&root)?;
         let provider = zeroentropy_provider(config.provider.clone());
         Self::open_inner(root, config, provider, git_dir, Some(zeroentropy_provider))
@@ -350,7 +350,7 @@ impl Store {
         if let Err(error) = git::write_changes(&self.root, &ordered) {
             return Err(rollback_failure(&self.root, &path_list, error));
         }
-        let tree = match git::stage_tree(&self.root, &path_list) {
+        let tree = match git::stage_tree(&self.root, &base_head, &path_list) {
             Ok(value) => value,
             Err(error) => {
                 return Err(rollback_failure(&self.root, &path_list, error));
@@ -378,6 +378,9 @@ impl Store {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(anyhow!("{error}; pending cleanup also failed: {cleanup}")),
                 };
+            }
+            if let Err(error) = git::sync_index(&self.root, &path_list) {
+                return Err(rollback_failure(&self.root, &path_list, error));
             }
         }
         if committed {
@@ -434,14 +437,6 @@ impl Store {
     pub async fn reindex_missing(&self) -> Result<()> {
         let paths: Vec<String> = self.state.read().pages.keys().cloned().collect();
         self.reindex_paths_mode(&paths, false).await
-    }
-
-    pub async fn reindex_after_changes(&self, paths: &[String]) -> Result<()> {
-        if paths.iter().any(|path| path.starts_with(".mdstore/")) {
-            self.reindex_missing().await
-        } else {
-            self.reindex_paths_mode(paths, false).await
-        }
     }
 
     pub async fn reindex_paths(&self, paths: &[String]) -> Result<()> {

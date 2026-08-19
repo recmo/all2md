@@ -233,7 +233,12 @@ pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Resul
     Ok(())
 }
 
-pub fn stage_tree(root: &Path, paths: &[String]) -> Result<Option<String>> {
+pub fn stage_tree(root: &Path, base: &str, paths: &[String]) -> Result<Option<String>> {
+    let temporary = tempfile::tempdir_in(git_dir(root)?)?;
+    let index = temporary.path().join("index");
+    checked_with_index(root, &index, ["read-tree", base])?;
+    let base_tree = checked(root, ["rev-parse", &format!("{base}^{{tree}}")])?;
+    let base_tree = String::from_utf8(base_tree.stdout)?.trim().to_owned();
     for path in paths {
         validate_repo_path(path)?;
         let target = root.join(path);
@@ -260,8 +265,25 @@ pub fn stage_tree(root: &Path, paths: &[String]) -> Result<Option<String>> {
                     );
                 }
                 let object = String::from_utf8(output.stdout)?.trim().to_owned();
-                let cacheinfo = format!("100644,{object},{path}");
-                let output = run(root, ["update-index", "--add", "--cacheinfo", &cacheinfo])?;
+                let pathspec = literal_pathspec(path);
+                let existing = checked_with_index(
+                    root,
+                    &index,
+                    ["ls-files", "--stage", "-z", "--", &pathspec],
+                )?;
+                let mode = existing
+                    .stdout
+                    .split(|byte| *byte == b' ')
+                    .next()
+                    .filter(|mode| !mode.is_empty())
+                    .map(String::from_utf8_lossy)
+                    .unwrap_or_else(|| "100644".into());
+                let cacheinfo = format!("{mode},{object},{path}");
+                let output = run_with_index(
+                    root,
+                    &index,
+                    ["update-index", "--add", "--cacheinfo", &cacheinfo],
+                )?;
                 if !output.status.success() {
                     bail!(
                         "git update-index failed for {path}: {}",
@@ -270,7 +292,12 @@ pub fn stage_tree(root: &Path, paths: &[String]) -> Result<Option<String>> {
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let output = run(root, ["update-index", "--force-remove", "--", path])?;
+                let pathspec = literal_pathspec(path);
+                let output = run_with_index(
+                    root,
+                    &index,
+                    ["update-index", "--force-remove", "--", &pathspec],
+                )?;
                 if !output.status.success() {
                     bail!(
                         "git update-index failed for {path}: {}",
@@ -281,12 +308,12 @@ pub fn stage_tree(root: &Path, paths: &[String]) -> Result<Option<String>> {
             Err(error) => return Err(error).with_context(|| format!("read edited file {path}")),
         }
     }
-    let staged = run(root, ["diff", "--cached", "--quiet"])?;
-    if staged.status.success() {
+    let tree = checked_with_index(root, &index, ["write-tree"])?;
+    let tree = String::from_utf8(tree.stdout)?.trim().to_owned();
+    if tree == base_tree {
         return Ok(None);
     }
-    let tree = checked(root, ["write-tree"])?;
-    Ok(Some(String::from_utf8(tree.stdout)?.trim().into()))
+    Ok(Some(tree))
 }
 
 pub fn commit_tree(root: &Path, tree: &str, parent: &str, summary: &str) -> Result<String> {
@@ -331,6 +358,25 @@ pub fn commit_tree(root: &Path, tree: &str, parent: &str, summary: &str) -> Resu
         );
     }
     Ok(commit)
+}
+
+pub fn sync_index(root: &Path, paths: &[String]) -> Result<()> {
+    let pathspecs: Vec<String> = paths.iter().map(|path| literal_pathspec(path)).collect();
+    let mut command = Command::new("git");
+    command
+        .current_dir(root)
+        .args(["reset", "-q", "HEAD", "--"])
+        .args(&pathspecs);
+    let output = command
+        .output()
+        .context("synchronize committed index entries")?;
+    if !output.status.success() {
+        bail!(
+            "git reset failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
 }
 
 pub fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool> {
@@ -449,6 +495,34 @@ where
         .context("run git")
 }
 
+fn run_with_index<I, S>(root: &Path, index: &Path, args: I) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    Command::new("git")
+        .current_dir(root)
+        .env("GIT_INDEX_FILE", index)
+        .args(args)
+        .output()
+        .context("run git with temporary index")
+}
+
+fn checked_with_index<I, S>(root: &Path, index: &Path, args: I) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = run_with_index(root, index, args)?;
+    if !output.status.success() {
+        bail!(
+            "git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output)
+}
+
 fn checked<I, S>(root: &Path, args: I) -> Result<Output>
 where
     I: IntoIterator<Item = S>,
@@ -484,7 +558,9 @@ mod tests {
         let parent = head(root).unwrap();
 
         fs::write(root.join("note.md"), "new\n").unwrap();
-        let tree = stage_tree(root, &["note.md".into()]).unwrap().unwrap();
+        let tree = stage_tree(root, &parent, &["note.md".into()])
+            .unwrap()
+            .unwrap();
         let hook = git_dir(root).unwrap().join("hooks/commit-msg");
         fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
         let mut permissions = fs::metadata(&hook).unwrap().permissions();
@@ -547,7 +623,9 @@ mod tests {
 
         let validated = b"exact lowercase bytes\n";
         fs::write(root.join("note.md"), validated).unwrap();
-        let tree = stage_tree(root, &["note.md".into()]).unwrap().unwrap();
+        let tree = stage_tree(root, &head(root).unwrap(), &["note.md".into()])
+            .unwrap()
+            .unwrap();
         let committed = checked(root, ["show", &format!("{tree}:note.md")]).unwrap();
         assert_eq!(committed.stdout, validated);
     }
@@ -561,13 +639,19 @@ mod tests {
         checked(root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
         checked(root, ["config", "commit.gpgsign", "false"]).unwrap();
         fs::write(root.join("note?.md"), "question old\n").unwrap();
+        let mut permissions = fs::metadata(root.join("note?.md")).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(root.join("note?.md"), permissions).unwrap();
         fs::write(root.join("note1.md"), "one old\n").unwrap();
         checked(root, ["add", "note?.md", "note1.md"]).unwrap();
         checked(root, ["commit", "-m", "initial"]).unwrap();
 
         fs::write(root.join("note?.md"), "question new\n").unwrap();
         fs::write(root.join("note1.md"), "one concurrent\n").unwrap();
-        let tree = stage_tree(root, &["note?.md".into()]).unwrap().unwrap();
+        checked(root, ["add", "note1.md"]).unwrap();
+        let tree = stage_tree(root, &head(root).unwrap(), &["note?.md".into()])
+            .unwrap()
+            .unwrap();
         assert_eq!(
             checked(root, ["show", &format!("{tree}:note?.md")])
                 .unwrap()
@@ -579,6 +663,14 @@ mod tests {
                 .unwrap()
                 .stdout,
             b"one old\n"
+        );
+        assert!(
+            String::from_utf8_lossy(
+                &checked(root, ["ls-tree", &tree, "--", ":(literal)note?.md"])
+                    .unwrap()
+                    .stdout
+            )
+            .starts_with("100755 ")
         );
         assert!(is_tracked(root, "note?.md").unwrap());
         assert!(!is_tracked(root, "missing?.md").unwrap());
@@ -738,7 +830,10 @@ mod tests {
         checked(root, ["commit", "-m", "initial"]).unwrap();
         let parent = head(root).unwrap();
         fs::write(root.join("note.md"), "new\n").unwrap();
-        let tree = stage_tree(root, &["note.md".into()]).unwrap().unwrap();
+        let tree = stage_tree(root, &parent, &["note.md".into()])
+            .unwrap()
+            .unwrap();
+        checked(root, ["add", "note.md"]).unwrap();
         checked(root, ["commit", "-m", "external commit"]).unwrap();
         let advanced = head(root).unwrap();
 
@@ -762,20 +857,8 @@ mod tests {
         fs::write(root.join("existing.md"), "daemon edit\n").unwrap();
         fs::write(root.join("new.md"), "daemon new\n").unwrap();
         let paths = vec!["existing.md".into(), "new.md".into()];
-        let tree = stage_tree(root, &paths).unwrap().unwrap();
-        checked(
-            root,
-            [
-                "restore",
-                "--source=HEAD",
-                "--staged",
-                "--worktree",
-                "--",
-                "existing.md",
-                "new.md",
-            ],
-        )
-        .unwrap();
+        let tree = stage_tree(root, &parent, &paths).unwrap().unwrap();
+        rollback(root, &paths).unwrap();
 
         fs::remove_file(root.join("existing.md")).unwrap();
         fs::write(root.join("new.md"), "external winner\n").unwrap();

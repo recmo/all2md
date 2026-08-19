@@ -295,6 +295,7 @@ fn reciprocal_links_are_caller_authored_and_atomic() {
         command(&repository.root, &["log", "-1", "--pretty=%B"]).trim(),
         "link Alice and Bob"
     );
+    assert!(command(&repository.root, &["status", "--porcelain"]).is_empty());
 
     let replay = store.apply_edits(&request).unwrap();
     assert!(matches!(
@@ -401,6 +402,28 @@ fn rejects_tracked_markdown_symlinks() {
         repository.root.join(".git"),
     );
     assert!(format!("{:#}", opened.err().unwrap()).contains("may not traverse a symlink"));
+}
+
+#[test]
+fn startup_verifies_repository_ownership_before_recovery() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    command(root, &["init", "-q", "-b", "main"]);
+    command(root, &["config", "user.name", "mdstore test"]);
+    command(root, &["config", "user.email", "mdstore@example.invalid"]);
+    command(root, &["config", "commit.gpgsign", "false"]);
+    fs::write(root.join("unrelated.txt"), "committed\n").unwrap();
+    command(root, &["add", "unrelated.txt"]);
+    command(root, &["commit", "-q", "-m", "initial"]);
+    fs::write(root.join("unrelated.txt"), "dirty\n").unwrap();
+
+    let error = Store::open(root).err().unwrap().to_string();
+
+    assert!(error.contains(".mdstore/config.yaml must be tracked"));
+    assert_eq!(
+        fs::read_to_string(root.join("unrelated.txt")).unwrap(),
+        "dirty\n"
+    );
 }
 
 #[test]
@@ -564,7 +587,7 @@ fn dirty_and_staged_configuration_do_not_leak_into_the_published_state() {
 async fn mcp_lists_only_three_tools_and_enforces_authentication() {
     let repository = Repository::new();
     let store = repository.store();
-    let app = mdstore::mcp::router(store, Some("secret".into()));
+    let app = mdstore::mcp::router(store.clone(), Some("secret".into()));
     let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
     let unauthorized = app
         .clone()
@@ -635,6 +658,28 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
+
+    let loopback = mdstore::mcp::router(store, None);
+    for (path, body) in [
+        (
+            "/mcp",
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        ),
+        ("/cli", serde_json::json!({"command": "validate"})),
+    ] {
+        let response = loopback
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .header("origin", "https://attacker.example")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
 }
 
 #[tokio::test]
@@ -1115,10 +1160,7 @@ async fn post_edit_reindex_reuses_still_valid_sidecars() {
             }],
         })
         .unwrap();
-    store
-        .reindex_after_changes(&[".mdstore/unused.json".into()])
-        .await
-        .unwrap();
+    store.reindex_missing().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), embedded);
 }
 

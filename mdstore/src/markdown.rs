@@ -13,6 +13,7 @@ pub struct ParsedPage {
     pub body_start_line: usize,
     pub headings: Vec<Heading>,
     pub code_blocks: Vec<SourceRange>,
+    pub structural_boundaries: Vec<usize>,
     pub links: Vec<RawLink>,
 }
 
@@ -78,6 +79,7 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
     let (frontmatter, body_start_line, body) = parse_frontmatter(text)?;
     let mut headings = Vec::new();
     let mut code_blocks = Vec::new();
+    let mut structural_boundaries = Vec::new();
     let mut markdown_links = Vec::new();
     let mut heading: Option<(u8, String, usize)> = None;
     let mut heading_stack = Vec::new();
@@ -108,6 +110,15 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
                             .filter(|byte| *byte == b'\n')
                             .count(),
                 });
+            }
+            Event::Start(Tag::List(_) | Tag::Table(_)) => {
+                let end_offset = range.end.saturating_sub(1);
+                let end_line = body_start_line
+                    + body.as_bytes()[..end_offset]
+                        .iter()
+                        .filter(|byte| **byte == b'\n')
+                        .count();
+                structural_boundaries.extend([line, end_line + 1]);
             }
             Event::Text(value) => {
                 if let Some((_, text, _)) = &mut heading {
@@ -165,11 +176,14 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
             _ => {}
         }
     }
+    structural_boundaries.sort_unstable();
+    structural_boundaries.dedup();
     Ok(ParsedPage {
         frontmatter,
         body_start_line,
         headings,
         code_blocks,
+        structural_boundaries,
         links: markdown_links,
     })
 }
