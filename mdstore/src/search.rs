@@ -6,7 +6,7 @@ use crate::{
     chunk::Chunk,
     config::Config,
     markdown::{Edge, ParsedPage, project_metadata},
-    provider::{InputType, RetrievalProvider, validate_vectors},
+    provider::{InputType, RetrievalProvider, validate_rerank_results, validate_vectors},
 };
 
 #[derive(Debug, Clone)]
@@ -213,25 +213,29 @@ impl SearchIndex {
             .await
         {
             Ok(results) => {
-                for result in results {
-                    if let Some((chunk_index, _)) = ranked.get(result.index) {
-                        rerank_scores.insert(*chunk_index, result.relevance_score);
-                    }
-                }
-                ranked.sort_by(|a, b| {
-                    rerank_scores
-                        .get(&b.0)
-                        .copied()
-                        .unwrap_or(f64::NEG_INFINITY)
-                        .total_cmp(
-                            &rerank_scores
-                                .get(&a.0)
+                match validate_rerank_results(&results, documents.len(), config.search.limit) {
+                    Ok(()) => {
+                        for result in results {
+                            let chunk_index = ranked[result.index].0;
+                            rerank_scores.insert(chunk_index, result.relevance_score);
+                        }
+                        ranked.sort_by(|a, b| {
+                            rerank_scores
+                                .get(&b.0)
                                 .copied()
-                                .unwrap_or(f64::NEG_INFINITY),
-                        )
-                        .then_with(|| b.1.total_cmp(&a.1))
-                        .then_with(|| self.chunk_order(a.0, b.0))
-                });
+                                .unwrap_or(f64::NEG_INFINITY)
+                                .total_cmp(
+                                    &rerank_scores
+                                        .get(&a.0)
+                                        .copied()
+                                        .unwrap_or(f64::NEG_INFINITY),
+                                )
+                                .then_with(|| b.1.total_cmp(&a.1))
+                                .then_with(|| self.chunk_order(a.0, b.0))
+                        });
+                    }
+                    Err(error) => degraded.push(format!("rerank: {error}")),
+                }
             }
             Err(error) => degraded.push(format!("rerank: {error}")),
         }
@@ -409,6 +413,113 @@ mod tests {
 
     struct NonFiniteProvider;
 
+    enum RerankMode {
+        Preserve,
+        Reverse,
+        Fail,
+    }
+
+    struct MatrixProvider {
+        vectors: HashMap<String, Vec<f32>>,
+        embed_fails: bool,
+        rerank: RerankMode,
+    }
+
+    #[async_trait::async_trait]
+    impl RetrievalProvider for MatrixProvider {
+        async fn embed(&self, _: InputType, input: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            if self.embed_fails {
+                anyhow::bail!("embedding unavailable");
+            }
+            input
+                .iter()
+                .map(|query| {
+                    self.vectors
+                        .get(query)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("missing test vector for {query:?}"))
+                })
+                .collect()
+        }
+
+        async fn rerank(
+            &self,
+            _: &str,
+            documents: &[String],
+            top_n: usize,
+        ) -> anyhow::Result<Vec<RerankResult>> {
+            if matches!(self.rerank, RerankMode::Fail) {
+                anyhow::bail!("rerank unavailable");
+            }
+            let count = documents.len().min(top_n);
+            Ok((0..count)
+                .map(|index| RerankResult {
+                    index,
+                    relevance_score: match self.rerank {
+                        RerankMode::Preserve => (count - index) as f64,
+                        RerankMode::Reverse => index as f64,
+                        RerankMode::Fail => unreachable!(),
+                    },
+                })
+                .collect())
+        }
+
+        fn model(&self) -> &str {
+            "matrix"
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+
+        fn embedding_provider_identity(&self) -> String {
+            "matrix".into()
+        }
+    }
+
+    fn matrix_index(
+        entries: &[(&str, &str, Option<[f32; 2]>)],
+        edges: &[Edge],
+    ) -> (Config, SearchIndex) {
+        let config = Config::from_yaml(
+            "documents:\n  include: ['**/*.md']\nsearch:\n  limit: 10\n  candidates: 10\n  graph_weight: 0.5\nprovider:\n  dimensions: 2\n",
+        )
+        .unwrap();
+        let pages: HashMap<String, String> = entries
+            .iter()
+            .map(|(path, text, _)| ((*path).into(), (*text).into()))
+            .collect();
+        let parsed = pages
+            .iter()
+            .map(|(path, text)| {
+                (
+                    path.clone(),
+                    parse_page(text, &LinkConfig::default()).unwrap(),
+                )
+            })
+            .collect();
+        let chunks = entries
+            .iter()
+            .map(|(path, text, vector)| {
+                (
+                    (*path).into(),
+                    vec![(
+                        Chunk {
+                            start_line: 1,
+                            end_line: 1,
+                            heading: Vec::new(),
+                            text: (*text).into(),
+                            embedding_text: (*text).into(),
+                        },
+                        vector.map(Vec::from),
+                    )],
+                )
+            })
+            .collect();
+        let index = SearchIndex::build(&config, &pages, &parsed, edges, chunks);
+        (config, index)
+    }
+
     #[async_trait::async_trait]
     impl RetrievalProvider for NonFiniteProvider {
         async fn embed(&self, _: InputType, input: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
@@ -518,6 +629,153 @@ mod tests {
                 .degraded
                 .iter()
                 .any(|message| message.contains("non-finite"))
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_only_search_and_fusion_are_stable() {
+        let (config, index) = matrix_index(
+            &[
+                ("b.md", "shared phrase", None),
+                ("a.md", "shared phrase", None),
+            ],
+            &[],
+        );
+        let provider = MatrixProvider {
+            vectors: HashMap::new(),
+            embed_fails: true,
+            rerank: RerankMode::Fail,
+        };
+
+        let first = index.search(&config, &provider, "shared phrase", &[]).await;
+        let second = index.search(&config, &provider, "shared phrase", &[]).await;
+        let summary = |response: &SearchResponse| {
+            response
+                .results
+                .iter()
+                .map(|result| {
+                    (
+                        result.path.clone(),
+                        result.matched_arms.clone(),
+                        result.fused_score,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(summary(&first), summary(&second));
+        assert_eq!(first.results[0].path, "a.md");
+        assert!(
+            first
+                .results
+                .iter()
+                .all(|result| result.matched_arms == ["exact:0"])
+        );
+    }
+
+    #[tokio::test]
+    async fn vector_and_variant_arms_retrieve_independently() {
+        let (config, index) = matrix_index(
+            &[
+                ("a.md", "ordinary text", Some([0.0, 1.0])),
+                ("b.md", "needle text", Some([1.0, 0.0])),
+            ],
+            &[],
+        );
+        let provider = MatrixProvider {
+            vectors: HashMap::from([
+                ("semantic".into(), vec![1.0, 0.0]),
+                ("missing".into(), vec![0.0, 1.0]),
+                ("needle".into(), vec![1.0, 0.0]),
+            ]),
+            embed_fails: false,
+            rerank: RerankMode::Preserve,
+        };
+
+        let vector_only = index.search(&config, &provider, "semantic", &[]).await;
+        assert_eq!(vector_only.results[0].path, "b.md");
+        assert_eq!(vector_only.results[0].matched_arms, ["vector:0"]);
+
+        let variant = index
+            .search(&config, &provider, "missing", &["needle".into()])
+            .await;
+        let target = variant
+            .results
+            .iter()
+            .find(|result| result.path == "b.md")
+            .unwrap();
+        assert!(target.matched_arms.contains(&"exact:1".into()));
+        assert!(target.matched_arms.contains(&"vector:1".into()));
+    }
+
+    #[tokio::test]
+    async fn graph_assist_adds_authored_neighbors() {
+        let edge = Edge {
+            source: "seed.md".into(),
+            relation: "related".into(),
+            target: "neighbor.md".into(),
+        };
+        let (config, index) = matrix_index(
+            &[
+                ("seed.md", "origin keyword", None),
+                ("neighbor.md", "otherwise unrelated", None),
+            ],
+            &[edge],
+        );
+        let provider = MatrixProvider {
+            vectors: HashMap::new(),
+            embed_fails: true,
+            rerank: RerankMode::Fail,
+        };
+
+        let response = index
+            .search(&config, &provider, "origin keyword", &[])
+            .await;
+        let neighbor = response
+            .results
+            .iter()
+            .find(|result| result.path == "neighbor.md")
+            .unwrap();
+        assert_eq!(neighbor.matched_arms, ["graph"]);
+    }
+
+    #[tokio::test]
+    async fn rerank_overrides_fusion_and_failure_preserves_it() {
+        let (config, index) = matrix_index(
+            &[
+                ("a.md", "shared phrase", None),
+                ("b.md", "shared phrase", None),
+            ],
+            &[],
+        );
+        let reranked = MatrixProvider {
+            vectors: HashMap::new(),
+            embed_fails: true,
+            rerank: RerankMode::Reverse,
+        };
+        let fallback = MatrixProvider {
+            vectors: HashMap::new(),
+            embed_fails: true,
+            rerank: RerankMode::Fail,
+        };
+
+        let response = index.search(&config, &reranked, "shared", &[]).await;
+        assert_eq!(response.results[0].path, "b.md");
+        assert!(response.results[0].rerank_score.is_some());
+
+        let response = index.search(&config, &fallback, "shared", &[]).await;
+        assert_eq!(response.results[0].path, "a.md");
+        assert!(
+            response
+                .results
+                .iter()
+                .all(|result| result.rerank_score.is_none())
+        );
+        assert!(
+            response
+                .degraded
+                .iter()
+                .any(|message| message.contains("rerank unavailable"))
         );
     }
 }

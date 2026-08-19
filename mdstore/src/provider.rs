@@ -40,6 +40,36 @@ pub(crate) fn validate_vectors(
     Ok(())
 }
 
+pub(crate) fn validate_rerank_results(
+    results: &[RerankResult],
+    document_count: usize,
+    top_n: usize,
+) -> Result<()> {
+    let expected = document_count.min(top_n);
+    if results.len() != expected {
+        bail!(
+            "rerank response has {} results; expected {expected}",
+            results.len()
+        );
+    }
+    let mut seen = vec![false; document_count];
+    for result in results {
+        if result.index >= document_count {
+            bail!(
+                "rerank response index {} is outside {document_count} documents",
+                result.index
+            );
+        }
+        if !result.relevance_score.is_finite() {
+            bail!("rerank response contains a non-finite score");
+        }
+        if std::mem::replace(&mut seen[result.index], true) {
+            bail!("rerank response contains duplicate index {}", result.index);
+        }
+    }
+    Ok(())
+}
+
 impl InputType {
     fn as_str(self) -> &'static str {
         match self {
@@ -356,6 +386,24 @@ mod tests {
         assert!(validate_vectors(&[vec![1.0, f32::NAN]], 1, 2).is_err());
         assert!(validate_vectors(&[vec![f32::INFINITY, 0.0]], 1, 2).is_err());
         assert!(validate_vectors(&[vec![1.0, 0.0]], 1, 2).is_ok());
+    }
+
+    #[test]
+    fn rerank_results_are_complete_unique_finite_and_in_range() {
+        let result = |index, relevance_score| RerankResult {
+            index,
+            relevance_score,
+        };
+        let valid = [result(1, 0.9), result(0, 0.4)];
+        assert!(validate_rerank_results(&valid, 3, 2).is_ok());
+        for invalid in [
+            vec![result(1, 0.9)],
+            vec![result(1, 0.9), result(1, 0.4)],
+            vec![result(3, 0.9), result(0, 0.4)],
+            vec![result(1, f64::NAN), result(0, 0.4)],
+        ] {
+            assert!(validate_rerank_results(&invalid, 3, 2).is_err());
+        }
     }
 
     async fn embed(

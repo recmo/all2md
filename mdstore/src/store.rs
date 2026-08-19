@@ -15,7 +15,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     chunk::chunk_page,
-    config::{Config, ProviderConfig, ensure_repository_path_safe, validate_repo_path},
+    config::{
+        Config, ProviderConfig, ensure_repository_path_safe, is_config_resource_path,
+        validate_repo_path,
+    },
     git::{self, PushState},
     hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
     markdown::{Edge, Finding, ParsedPage, project_metadata, validate_corpus},
@@ -206,13 +209,9 @@ impl Store {
                     .collect(),
             });
         }
-        let config_resource = path.starts_with(".mdstore/")
-            && Path::new(path).extension().is_some_and(|extension| {
-                extension.eq_ignore_ascii_case("yaml")
-                    || extension.eq_ignore_ascii_case("yml")
-                    || extension.eq_ignore_ascii_case("json")
-            });
-        if config_resource && let Some(text) = state.config_files.get(path) {
+        if is_config_resource_path(path)
+            && let Some(text) = state.config_files.get(path)
+        {
             return Ok(PageResponse {
                 path: path.into(),
                 content: render(text, window),
@@ -272,7 +271,7 @@ impl Store {
             }
             if path.starts_with(".mdstore/") {
                 has_config = true;
-                if !(path.ends_with(".yaml") || path.ends_with(".yml") || path.ends_with(".json")) {
+                if !is_config_resource_path(path) {
                     bail!("configuration edits are limited to YAML and JSON files");
                 }
             } else if path.ends_with(".md") {
@@ -302,6 +301,11 @@ impl Store {
             };
             if let Some(original) = original {
                 originals.insert(path.clone(), original.clone());
+            }
+        }
+        for path in &paths {
+            if !originals.contains_key(path) && fs::symlink_metadata(self.root.join(path)).is_ok() {
+                bail!("untracked repository path already exists: {path}");
             }
         }
         let applied = apply_operations_with_ranges(&originals, &request.edits)?;
@@ -407,11 +411,7 @@ impl Store {
                 ));
             }
         }
-        let push = if committed {
-            git::push(&self.root, &config)?
-        } else {
-            PushState::Disabled
-        };
+        let push = git::push(&self.root, &config)?;
         if matches!(push, PushState::Diverged) {
             self.set_blocked(Some("remote history diverged".into()))?;
         }

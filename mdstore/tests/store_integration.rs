@@ -178,10 +178,14 @@ impl Repository {
     }
 
     fn store_with_provider(&self, provider: Arc<dyn RetrievalProvider>) -> Arc<Store> {
-        let config = Config::load(&self.root).unwrap();
+        let config = committed_config(&self.root);
         let git_dir = self.root.join(".git");
         Store::open_with_provider(self.root.clone(), config, provider, git_dir).unwrap()
     }
+}
+
+fn committed_config(root: &Path) -> Config {
+    Config::from_yaml(&mdstore::git::read_head_text(root, ".mdstore/config.yaml").unwrap()).unwrap()
 }
 
 fn command(root: &Path, arguments: &[&str]) -> String {
@@ -336,6 +340,60 @@ fn delayed_idempotent_retry_returns_current_hashlines() {
 }
 
 #[test]
+fn no_op_edit_retries_queued_pushes() {
+    let repository = Repository::new();
+    let config_path = repository.root.join(".mdstore/config.yaml");
+    let config = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("  push: false", "  push: true");
+    fs::write(&config_path, config).unwrap();
+    command(&repository.root, &["add", ".mdstore/config.yaml"]);
+    command(&repository.root, &["commit", "-q", "-m", "enable pushing"]);
+    let remote = repository.root.join("remote.git");
+    command(
+        &repository.root,
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    command(
+        &repository.root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    command(&repository.root, &["push", "-u", "origin", "HEAD"]);
+    let store = repository.store();
+    command(
+        &repository.root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "queued external commit",
+        ],
+    );
+
+    let response = store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "retry queued push".into(),
+            edits: vec![EditOperation::Replace {
+                path: "bob.md".into(),
+                anchor: format!("6:{}", short_hash("Bob profile.")),
+                content: "Bob profile.".into(),
+            }],
+        })
+        .unwrap();
+
+    assert!(matches!(
+        response.status,
+        mdstore::store::ApplyStatus::AlreadyApplied
+    ));
+    assert_eq!(response.push, mdstore::git::PushState::Pushed);
+    assert_eq!(
+        command(&repository.root, &["rev-parse", "HEAD"]).trim(),
+        command(&remote, &["rev-parse", "HEAD"]).trim()
+    );
+}
+
+#[test]
 fn rejects_mixed_configuration_and_content_batch() {
     let repository = Repository::new();
     let store = repository.store();
@@ -358,6 +416,29 @@ fn rejects_mixed_configuration_and_content_batch() {
         command(&repository.root, &["rev-list", "--count", "HEAD"]).trim(),
         "1"
     );
+}
+
+#[test]
+fn create_page_never_overwrites_an_untracked_config_resource() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let path = repository.root.join(".mdstore/local.json");
+    fs::write(&path, "local untracked bytes\n").unwrap();
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+
+    let error = store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "create config resource".into(),
+            edits: vec![EditOperation::CreatePage {
+                path: ".mdstore/local.json".into(),
+                content: "{}\n".into(),
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("untracked repository path"));
+    assert_eq!(fs::read_to_string(path).unwrap(), "local untracked bytes\n");
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
 }
 
 #[test]
@@ -425,7 +506,7 @@ fn rejects_tracked_markdown_symlinks() {
     symlink(external.path(), repository.root.join("linked.md")).unwrap();
     command(&repository.root, &["add", "linked.md"]);
     command(&repository.root, &["commit", "-q", "-m", "add linked page"]);
-    let config = Config::load(&repository.root).unwrap();
+    let config = committed_config(&repository.root);
     let opened = Store::open_with_provider(
         repository.root.clone(),
         config,
@@ -515,7 +596,7 @@ fn rejects_tracked_embedding_sidecars() {
         &repository.root,
         &["commit", "-q", "-m", "track forbidden sidecar"],
     );
-    let config = Config::load(&repository.root).unwrap();
+    let config = committed_config(&repository.root);
     let opened = Store::open_with_provider(
         repository.root.clone(),
         config,
@@ -633,6 +714,16 @@ fn mcp_allowlist_is_exact() {
 #[test]
 fn configuration_resources_are_hashline_readable() {
     let repository = Repository::new();
+    fs::write(
+        repository.root.join(".mdstore/UPPER.JSON"),
+        "{\"value\":\"old\"}\n",
+    )
+    .unwrap();
+    command(&repository.root, &["add", ".mdstore/UPPER.JSON"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "add uppercase config resource"],
+    );
     let store = repository.store();
     let response = store
         .get_page(".mdstore/config.yaml", Some((1, 2)))
@@ -640,6 +731,24 @@ fn configuration_resources_are_hashline_readable() {
     assert!(response.content.contains("1:"));
     assert!(response.content.contains("documents:"));
     assert_eq!(response.metadata, serde_json::json!({}));
+
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "edit uppercase config resource".into(),
+            edits: vec![EditOperation::Replace {
+                path: ".mdstore/UPPER.JSON".into(),
+                anchor: format!("1:{}", short_hash("{\"value\":\"old\"}")),
+                content: "{\"value\":\"new\"}".into(),
+            }],
+        })
+        .unwrap();
+    assert!(
+        store
+            .get_page(".mdstore/UPPER.JSON", None)
+            .unwrap()
+            .content
+            .contains("{\"value\":\"new\"}")
+    );
 }
 
 #[test]

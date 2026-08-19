@@ -16,8 +16,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::{ApplyEditsRequest, Store, store::ValidationError};
 
-const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
 #[derive(Clone)]
 struct AppState {

@@ -50,6 +50,10 @@ fn default_request_timeout_seconds() -> u64 {
     30
 }
 
+fn default_push_timeout_seconds() -> u64 {
+    30
+}
+
 fn default_limit() -> usize {
     10
 }
@@ -93,12 +97,6 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(root: &Path) -> Result<Self> {
-        let text = read_repository_text(root, ".mdstore/config.yaml")
-            .context("read required configuration .mdstore/config.yaml")?;
-        Self::from_yaml(&text)
-    }
-
     pub fn from_yaml(text: &str) -> Result<Self> {
         let value: Self = serde_yaml::from_str(text).context("parse .mdstore/config.yaml")?;
         value.validate()?;
@@ -163,6 +161,9 @@ impl Config {
         }
         if self.provider.request_timeout_seconds == 0 {
             bail!("provider.request_timeout_seconds must be non-zero");
+        }
+        if self.git.push_timeout_seconds == 0 {
+            bail!("git.push_timeout_seconds must be non-zero");
         }
         let listen: SocketAddr = self
             .server
@@ -245,6 +246,15 @@ pub fn validate_repo_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn is_config_resource_path(path: &str) -> bool {
+    path.starts_with(".mdstore/")
+        && Path::new(path).extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("yaml")
+                || extension.eq_ignore_ascii_case("yml")
+                || extension.eq_ignore_ascii_case("json")
+        })
+}
+
 pub fn ensure_repository_path_safe(root: &Path, path: &str) -> Result<()> {
     validate_repo_path(path)?;
     let mut current = root.to_path_buf();
@@ -257,11 +267,6 @@ pub fn ensure_repository_path_safe(root: &Path, path: &str) -> Result<()> {
         }
     }
     Ok(())
-}
-
-pub fn read_repository_text(root: &Path, path: &str) -> Result<String> {
-    ensure_repository_path_safe(root, path)?;
-    fs::read_to_string(root.join(path)).with_context(|| format!("read repository file {path}"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -484,6 +489,8 @@ pub struct GitConfig {
     pub push: bool,
     #[serde(default)]
     pub remote: Option<String>,
+    #[serde(default = "default_push_timeout_seconds")]
+    pub push_timeout_seconds: u64,
 }
 
 impl Default for GitConfig {
@@ -491,6 +498,7 @@ impl Default for GitConfig {
         Self {
             push: true,
             remote: None,
+            push_timeout_seconds: default_push_timeout_seconds(),
         }
     }
 }
@@ -562,6 +570,15 @@ mod tests {
         assert!(config("  graph_weight: -0.1").is_err());
         assert!(config("  graph_weight: .nan").is_err());
         assert!(config("  rrf_k: 60\n  graph_weight: 0").is_ok());
+    }
+
+    #[test]
+    fn git_push_timeout_must_be_nonzero() {
+        let error = Config::from_yaml(
+            "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push_timeout_seconds: 0\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("git.push_timeout_seconds"));
     }
 
     #[test]

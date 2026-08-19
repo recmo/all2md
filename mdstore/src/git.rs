@@ -1,15 +1,19 @@
 use std::{
     collections::BTreeSet,
     fs,
-    io::Write,
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::config::{Config, ensure_repository_path_safe, validate_repo_path};
+use crate::config::{
+    Config, ensure_repository_path_safe, is_config_resource_path, validate_repo_path,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,14 +62,7 @@ pub fn tracked_config_files(root: &Path, revision: &str) -> Result<Vec<String>> 
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).into_owned())
-        .filter(|path| path.starts_with(".mdstore/"))
-        .filter(|path| {
-            Path::new(path).extension().is_some_and(|extension| {
-                extension.eq_ignore_ascii_case("yaml")
-                    || extension.eq_ignore_ascii_case("yml")
-                    || extension.eq_ignore_ascii_case("json")
-            })
-        })
+        .filter(|path| is_config_resource_path(path))
         .collect())
 }
 
@@ -555,11 +552,46 @@ pub fn push(root: &Path, config: &Config) -> Result<PushState> {
     if let Some(remote) = &config.git.remote {
         command.arg("--set-upstream").arg(remote).arg("HEAD");
     }
-    let output = command.output().context("push mdstore commits")?;
+    let Some(output) = output_with_timeout(
+        &mut command,
+        Duration::from_secs(config.git.push_timeout_seconds),
+    )
+    .context("push mdstore commits")?
+    else {
+        return Ok(PushState::Queued);
+    };
     if output.status.success() {
         return Ok(PushState::Pushed);
     }
     Ok(push_failure_state(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Option<Output>> {
+    let mut stderr = tempfile::tempfile()?;
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr.try_clone()?));
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    stderr.rewind()?;
+    let mut error = Vec::new();
+    stderr.read_to_end(&mut error)?;
+    Ok(Some(Output {
+        status,
+        stdout: Vec::new(),
+        stderr: error,
+    }))
 }
 
 fn push_failure_state(stderr: &str) -> PushState {
@@ -848,6 +880,19 @@ mod tests {
         assert_eq!(
             push_failure_state("! [remote rejected] main -> main (protected branch hook declined)"),
             PushState::Queued
+        );
+    }
+
+    #[test]
+    fn command_timeout_terminates_a_stalled_push_process() {
+        let mut command = Command::new("git");
+        command
+            .args(["hash-object", "--stdin"])
+            .stdin(Stdio::piped());
+        assert!(
+            output_with_timeout(&mut command, Duration::from_millis(20))
+                .unwrap()
+                .is_none()
         );
     }
 

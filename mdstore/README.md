@@ -77,6 +77,7 @@ provider:
 
 git:
   push: true
+  push_timeout_seconds: 30
 
 server:
   listen: 127.0.0.1:3131

@@ -148,7 +148,7 @@ fn structural_blocks(text: &str, parsed: &ParsedPage, config: &ChunkConfig) -> V
             heading_stack.truncate(level.saturating_sub(1));
             heading_stack.push(heading.text.clone());
             excluded_level = if config.exclude_sections.contains(&heading.text) {
-                Some(level)
+                Some(excluded_level.map_or(level, |excluded| excluded.min(level)))
             } else if excluded_level.is_some_and(|excluded| level <= excluded) {
                 None
             } else {
@@ -432,6 +432,25 @@ mod tests {
         assert!(chunks.iter().any(|chunk| chunk.heading == ["Visible"]));
         assert!(!chunks.iter().any(|chunk| chunk.text.contains("Secret")));
         assert!(chunks.iter().any(|chunk| chunk.heading == ["Two"]));
+    }
+
+    #[test]
+    fn nested_repeated_exclusion_keeps_the_outer_section_hidden() {
+        let text = "# Notes\n\n## Private\n\nouter secret\n\n### Private\n\nnested secret\n\n### Other\n\nstill secret\n\n## Public\n\nvisible\n";
+        let parsed = parse_page(text, &LinkConfig::default()).unwrap();
+        let config = ChunkConfig {
+            exclude_sections: vec!["Private".into()],
+            ..ChunkConfig::default()
+        };
+        let chunks = chunk_page(text, &parsed, &config, &[]);
+        let searchable = chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!searchable.contains("secret"));
+        assert!(searchable.contains("visible"));
     }
 
     #[test]
