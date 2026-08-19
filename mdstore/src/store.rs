@@ -136,7 +136,7 @@ impl Store {
         let (parsed, edges) = validate_corpus(&config, &pages, &extra).map_err(|findings| {
             anyhow!(serde_json::to_string_pretty(&findings).unwrap_or_default())
         })?;
-        let index = build_index(&root, &config, &pages, &parsed, &edges, provider.as_ref());
+        let index = build_index(&root, &config, &pages, &parsed, &edges, provider.as_ref())?;
         let head = git::head(&root)?;
         let blocked = read_blocked(&git_dir)?;
         Ok(Arc::new(Self {
@@ -343,26 +343,15 @@ impl Store {
             .iter()
             .map(|path| (path.clone(), changes.get(path).cloned().flatten()))
             .collect();
-        let originally_present: Vec<String> = originals.keys().cloned().collect();
         let path_list: Vec<String> = paths.iter().cloned().collect();
         let fresh_hashlines = fresh_windows(changes, &applied.changed_ranges);
         if let Err(error) = git::write_changes(&self.root, &ordered) {
-            return Err(rollback_failure(
-                &self.root,
-                &path_list,
-                &originally_present,
-                error,
-            ));
+            return Err(rollback_failure(&self.root, &path_list, error));
         }
         let tree = match git::stage_tree(&self.root, &path_list) {
             Ok(value) => value,
             Err(error) => {
-                return Err(rollback_failure(
-                    &self.root,
-                    &path_list,
-                    &originally_present,
-                    error,
-                ));
+                return Err(rollback_failure(&self.root, &path_list, error));
             }
         };
         let committed = tree.is_some();
@@ -374,12 +363,7 @@ impl Store {
                 fresh_hashlines: fresh_hashlines.clone(),
             };
             if let Err(error) = self.write_pending(&digest, &pending) {
-                return Err(rollback_failure(
-                    &self.root,
-                    &path_list,
-                    &originally_present,
-                    error,
-                ));
+                return Err(rollback_failure(&self.root, &path_list, error));
             }
             if let Err(error) = git::commit_tree(
                 &self.root,
@@ -387,7 +371,7 @@ impl Store {
                 &pending.base_head,
                 &request.edit_summary,
             ) {
-                let error = rollback_failure(&self.root, &path_list, &originally_present, error);
+                let error = rollback_failure(&self.root, &path_list, error);
                 return match self.remove_pending(&digest) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(anyhow!("{error}; pending cleanup also failed: {cleanup}")),
@@ -412,7 +396,7 @@ impl Store {
             &parsed,
             &edges,
             provider.as_ref(),
-        );
+        )?;
         *self.state.write() = StoreState {
             config,
             config_files: extra,
@@ -472,6 +456,7 @@ impl Store {
         let edges = snapshot.edges;
         let provider = snapshot.provider;
         let provider_identity = provider.embedding_provider_identity();
+        ensure_sidecars_ignored(&self.root, paths.iter().map(String::as_str))?;
         for path in paths {
             let Some(text) = pages.get(path) else {
                 let path = sidecar::sidecar_path(&self.root.join(path));
@@ -522,13 +507,6 @@ impl Store {
                 &chunks,
                 &vectors,
             );
-            let relative_sidecar = sidecar_path
-                .strip_prefix(&self.root)?
-                .to_string_lossy()
-                .replace('\\', "/");
-            if !git::is_ignored(&self.root, &relative_sidecar)? {
-                bail!("embedding sidecar is not ignored by Git: {relative_sidecar}");
-            }
             if self.state.read().generation != generation {
                 return Ok(());
             }
@@ -541,7 +519,7 @@ impl Store {
             &parsed,
             &edges,
             provider.as_ref(),
-        );
+        )?;
         let mut current = self.state.write();
         if current.generation == generation {
             current.index = Arc::new(index);
@@ -619,7 +597,7 @@ impl Store {
             &parsed,
             &edges,
             provider.as_ref(),
-        );
+        )?;
         *self.state.write() = StoreState {
             config,
             config_files: extra,
@@ -806,7 +784,8 @@ fn build_index(
     parsed: &HashMap<String, ParsedPage>,
     edges: &[Edge],
     provider: &dyn RetrievalProvider,
-) -> SearchIndex {
+) -> Result<SearchIndex> {
+    ensure_sidecars_ignored(root, pages.keys().map(String::as_str))?;
     let mut all_chunks = HashMap::new();
     let provider_identity = provider.embedding_provider_identity();
     for (path, text) in pages {
@@ -839,7 +818,22 @@ fn build_index(
             .collect();
         all_chunks.insert(path.clone(), values);
     }
-    SearchIndex::build(config, pages, parsed, edges, all_chunks)
+    Ok(SearchIndex::build(config, pages, parsed, edges, all_chunks))
+}
+
+fn ensure_sidecars_ignored<'a>(
+    root: &Path,
+    pages: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let paths: Vec<String> = pages
+        .into_iter()
+        .map(|path| {
+            sidecar::sidecar_path(Path::new(path))
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    git::ensure_ignored(root, paths.iter().map(String::as_str))
 }
 
 fn embedding_context(config: &Config, page: &ParsedPage) -> Vec<String> {
@@ -925,13 +919,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .map(|_| ())?)
 }
 
-fn rollback_failure(
-    root: &Path,
-    paths: &[String],
-    originally_present: &[String],
-    error: anyhow::Error,
-) -> anyhow::Error {
-    match git::rollback(root, paths, originally_present) {
+fn rollback_failure(root: &Path, paths: &[String], error: anyhow::Error) -> anyhow::Error {
+    match git::rollback(root, paths) {
         Ok(()) => error,
         Err(rollback) => anyhow!("{error}; rollback also failed: {rollback}"),
     }

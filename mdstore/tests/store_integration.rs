@@ -158,6 +158,7 @@ impl Repository {
         command(&root, &["init", "-q"]);
         command(&root, &["config", "user.name", "mdstore tests"]);
         command(&root, &["config", "user.email", "mdstore@example.invalid"]);
+        command(&root, &["config", "commit.gpgsign", "false"]);
         fs::create_dir_all(root.join(".mdstore")).unwrap();
         fs::write(root.join(".mdstore/config.yaml"), config_yaml()).unwrap();
         fs::write(root.join(".mdstore/schema.json"), schema()).unwrap();
@@ -400,6 +401,42 @@ fn rejects_tracked_markdown_symlinks() {
         repository.root.join(".git"),
     );
     assert!(format!("{:#}", opened.err().unwrap()).contains("may not traverse a symlink"));
+}
+
+#[test]
+fn rejects_tracked_embedding_sidecars() {
+    let repository = Repository::new();
+    fs::write(
+        repository.root.join("alice.mdstore"),
+        b"tracked derived state",
+    )
+    .unwrap();
+    command(&repository.root, &["add", "-f", "alice.mdstore"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "track forbidden sidecar"],
+    );
+    let config = Config::load(&repository.root).unwrap();
+    let opened = Store::open_with_provider(
+        repository.root.clone(),
+        config,
+        Arc::new(FakeProvider),
+        repository.root.join(".git"),
+    );
+    assert!(format!("{:#}", opened.err().unwrap()).contains("must be ignored and untracked"));
+}
+
+#[tokio::test]
+async fn reindex_checks_sidecar_ignore_rules_before_provider_calls() {
+    let repository = Repository::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = repository.store_with_provider(Arc::new(CountingProvider {
+        calls: calls.clone(),
+    }));
+    fs::write(repository.root.join(".gitignore"), "!.mdstore/\n").unwrap();
+
+    assert!(store.reindex_missing().await.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

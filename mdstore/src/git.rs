@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -78,6 +79,56 @@ pub fn is_ignored(root: &Path, path: &str) -> Result<bool> {
         .success())
 }
 
+pub fn ensure_ignored<'a>(root: &Path, paths: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    let paths: BTreeSet<&str> = paths.into_iter().collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    for path in &paths {
+        validate_repo_path(path)?;
+    }
+    let mut input = Vec::new();
+    for path in &paths {
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+    }
+    let mut child = Command::new("git")
+        .current_dir(root)
+        .args(["check-ignore", "--stdin", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("check derived paths against Git ignore rules")?;
+    let mut stdin = child.stdin.take().context("open git check-ignore input")?;
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child.wait_with_output()?;
+    let write_result = writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("git check-ignore input writer panicked"))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        bail!(
+            "git check-ignore failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    write_result.context("write git check-ignore input")?;
+    let ignored: BTreeSet<String> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8(part.to_vec()))
+        .collect::<std::result::Result<_, _>>()?;
+    let missing: Vec<&str> = paths
+        .into_iter()
+        .filter(|path| !ignored.contains(*path))
+        .collect();
+    if !missing.is_empty() {
+        bail!("derived paths must be ignored and untracked: {missing:?}");
+    }
+    Ok(())
+}
+
 pub fn head(root: &Path) -> Result<String> {
     let output = checked(root, ["rev-parse", "HEAD"])?;
     Ok(String::from_utf8(output.stdout)?.trim().into())
@@ -139,12 +190,7 @@ fn quarantine_untracked_markdown(root: &Path) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
-    let quarantine = git_dir(root)?.join("mdstore/quarantine").join(format!(
-        "{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-    ));
+    let quarantine = create_quarantine_directory(root)?;
     for path in paths {
         validate_repo_path(&path)?;
         let source = root.join(&path);
@@ -156,6 +202,23 @@ fn quarantine_untracked_markdown(root: &Path) -> Result<()> {
             .with_context(|| format!("quarantine untracked Markdown {path}"))?;
     }
     Ok(())
+}
+
+fn create_quarantine_directory(root: &Path) -> Result<PathBuf> {
+    let parent = git_dir(root)?.join("mdstore/quarantine");
+    fs::create_dir_all(&parent)?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    for suffix in 0_u64.. {
+        let candidate = parent.join(format!("{timestamp}-{suffix}"));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!()
 }
 
 pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Result<()> {
@@ -251,42 +314,23 @@ pub fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool
         .any(|candidate| candidate == tree))
 }
 
-pub fn rollback(root: &Path, paths: &[String], originally_present: &[String]) -> Result<()> {
-    let mut staged = Command::new("git");
-    staged
-        .current_dir(root)
-        .args(["diff", "--cached", "--name-only", "-z", "--"])
-        .args(paths);
-    let output = staged.output()?;
-    if !output.status.success() {
-        bail!("inspect staged rollback paths failed");
-    }
-    let staged: Vec<String> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .map(|part| String::from_utf8_lossy(part).into_owned())
-        .collect();
-    if !staged.is_empty() {
-        let mut unstage = Command::new("git");
-        unstage
-            .current_dir(root)
-            .args(["restore", "--staged", "--"])
-            .args(&staged);
-        let output = unstage.output()?;
-        if !output.status.success() {
-            bail!(
-                "rollback unstage failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+pub fn rollback(root: &Path, paths: &[String]) -> Result<()> {
+    let mut present = Vec::new();
+    let mut absent = Vec::new();
+    for path in paths {
+        let output = checked(root, ["ls-tree", "-z", "HEAD", "--", path])?;
+        if output.stdout.is_empty() {
+            absent.push(path.clone());
+        } else {
+            present.push(path.clone());
         }
     }
-    if !originally_present.is_empty() {
+    if !present.is_empty() {
         let mut restore = Command::new("git");
         restore
             .current_dir(root)
-            .args(["restore", "--worktree", "--"])
-            .args(originally_present);
+            .args(["restore", "--source=HEAD", "--staged", "--worktree", "--"])
+            .args(&present);
         let output = restore.output()?;
         if !output.status.success() {
             bail!(
@@ -295,10 +339,22 @@ pub fn rollback(root: &Path, paths: &[String], originally_present: &[String]) ->
             );
         }
     }
-    for path in paths {
-        if !originally_present.contains(path) {
+    if !absent.is_empty() {
+        let mut reset = Command::new("git");
+        reset
+            .current_dir(root)
+            .args(["reset", "-q", "HEAD", "--"])
+            .args(&absent);
+        let output = reset.output()?;
+        if !output.status.success() {
+            bail!(
+                "rollback reset failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        for path in absent {
             let target = root.join(path);
-            if target.is_file() {
+            if fs::symlink_metadata(&target).is_ok_and(|metadata| !metadata.is_dir()) {
                 fs::remove_file(target)?;
             }
         }
@@ -382,6 +438,7 @@ mod tests {
         checked(root, ["init", "-b", "main"]).unwrap();
         checked(root, ["config", "user.name", "mdstore test"]).unwrap();
         checked(root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
+        checked(root, ["config", "commit.gpgsign", "false"]).unwrap();
         fs::write(root.join("note.md"), "old\n").unwrap();
         checked(root, ["add", "note.md"]).unwrap();
         checked(root, ["commit", "-m", "initial"]).unwrap();
@@ -475,12 +532,83 @@ mod tests {
     }
 
     #[test]
+    fn ignored_paths_are_checked_in_one_batch_and_must_be_untracked() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        checked(root, ["init", "-b", "main"]).unwrap();
+        fs::write(root.join(".gitignore"), "*.mdstore\n").unwrap();
+        checked(root, ["add", ".gitignore"]).unwrap();
+        checked(
+            root,
+            [
+                "-c",
+                "user.name=mdstore test",
+                "-c",
+                "user.email=mdstore@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "ignore sidecars",
+            ],
+        )
+        .unwrap();
+        fs::write(root.join("one.mdstore"), "derived").unwrap();
+        fs::write(root.join("two.mdstore"), "derived").unwrap();
+        ensure_ignored(root, ["one.mdstore", "two.mdstore"]).unwrap();
+        let many: Vec<String> = (0..2_000)
+            .map(|index| format!("derived/{index:04}-{}.mdstore", "x".repeat(80)))
+            .collect();
+        ensure_ignored(root, many.iter().map(String::as_str)).unwrap();
+        assert!(ensure_ignored(root, ["one.mdstore", "not-ignored.bin"]).is_err());
+
+        checked(root, ["add", "-f", "one.mdstore"]).unwrap();
+        assert!(ensure_ignored(root, ["one.mdstore"]).is_err());
+    }
+
+    #[test]
+    fn repeated_quarantines_never_replace_an_earlier_copy() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        checked(root, ["init", "-b", "main"]).unwrap();
+        checked(
+            root,
+            [
+                "-c",
+                "user.name=mdstore test",
+                "-c",
+                "user.email=mdstore@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+        fs::write(root.join("note.md"), "first").unwrap();
+        recover_worktree(root).unwrap();
+        fs::write(root.join("note.md"), "second").unwrap();
+        recover_worktree(root).unwrap();
+
+        let quarantine = git_dir(root).unwrap().join("mdstore/quarantine");
+        let mut copies: Vec<String> = fs::read_dir(quarantine)
+            .unwrap()
+            .map(|entry| fs::read_to_string(entry.unwrap().path().join("note.md")).unwrap())
+            .collect();
+        copies.sort();
+        assert_eq!(copies, ["first", "second"]);
+    }
+
+    #[test]
     fn commit_tree_never_replaces_an_advanced_head() {
         let repository = tempfile::tempdir().unwrap();
         let root = repository.path();
         checked(root, ["init", "-b", "main"]).unwrap();
         checked(root, ["config", "user.name", "mdstore test"]).unwrap();
         checked(root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
+        checked(root, ["config", "commit.gpgsign", "false"]).unwrap();
         fs::write(root.join("note.md"), "old\n").unwrap();
         checked(root, ["add", "note.md"]).unwrap();
         checked(root, ["commit", "-m", "initial"]).unwrap();
@@ -492,5 +620,62 @@ mod tests {
 
         assert!(commit_tree(root, &tree, &parent, "stale edit").is_err());
         assert_eq!(head(root).unwrap(), advanced);
+    }
+
+    #[test]
+    fn rollback_after_lost_cas_restores_the_winning_head() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        checked(root, ["init", "-b", "main"]).unwrap();
+        checked(root, ["config", "user.name", "mdstore test"]).unwrap();
+        checked(root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
+        checked(root, ["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(root.join("existing.md"), "original\n").unwrap();
+        checked(root, ["add", "existing.md"]).unwrap();
+        checked(root, ["commit", "-m", "initial"]).unwrap();
+        let parent = head(root).unwrap();
+
+        fs::write(root.join("existing.md"), "daemon edit\n").unwrap();
+        fs::write(root.join("new.md"), "daemon new\n").unwrap();
+        let paths = vec!["existing.md".into(), "new.md".into()];
+        let tree = stage_tree(root, &paths).unwrap().unwrap();
+        checked(
+            root,
+            [
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                "existing.md",
+                "new.md",
+            ],
+        )
+        .unwrap();
+
+        fs::remove_file(root.join("existing.md")).unwrap();
+        fs::write(root.join("new.md"), "external winner\n").unwrap();
+        checked(root, ["add", "-A", "--", "existing.md", "new.md"]).unwrap();
+        checked(root, ["commit", "-m", "external winner"]).unwrap();
+        let winner = head(root).unwrap();
+
+        fs::write(root.join("existing.md"), "daemon edit\n").unwrap();
+        fs::write(root.join("new.md"), "daemon new\n").unwrap();
+        checked(root, ["add", "-A", "--", "existing.md", "new.md"]).unwrap();
+        assert!(commit_tree(root, &tree, &parent, "losing edit").is_err());
+        rollback(root, &paths).unwrap();
+
+        assert_eq!(head(root).unwrap(), winner);
+        assert!(!root.join("existing.md").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("new.md")).unwrap(),
+            "external winner\n"
+        );
+        assert!(
+            checked(root, ["status", "--porcelain"])
+                .unwrap()
+                .stdout
+                .is_empty()
+        );
     }
 }

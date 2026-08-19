@@ -18,10 +18,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Serve {
-        #[arg(long)]
-        listen: Option<SocketAddr>,
-    },
+    Serve,
     Search {
         query: String,
         #[arg(long = "variant")]
@@ -51,16 +48,14 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve { listen } => {
+        Command::Serve => {
             let store = Store::open(&cli.root)?;
             let config = store.config();
-            let listen = listen.unwrap_or(
-                config
-                    .server
-                    .listen
-                    .parse()
-                    .context("parse server.listen")?,
-            );
+            let listen = config
+                .server
+                .listen
+                .parse()
+                .context("parse server.listen")?;
             let token = config
                 .server
                 .bearer_token_env

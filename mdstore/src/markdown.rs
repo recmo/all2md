@@ -210,17 +210,23 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
 
 pub type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
 
+struct CompiledSchema {
+    matcher: globset::GlobMatcher,
+    validator: jsonschema::Validator,
+}
+
 pub fn validate_corpus(
     config: &Config,
     pages: &HashMap<String, String>,
     extra_files: &HashMap<String, String>,
 ) -> CorpusValidation {
     let mut findings = Vec::new();
+    let schemas = compile_schemas(config, extra_files, &mut findings);
     let mut parsed = HashMap::new();
     for (path, text) in pages {
         match parse_page(text, &config.links) {
             Ok(page) => {
-                validate_schema(config, path, &page.frontmatter, extra_files, &mut findings);
+                validate_schema(&schemas, path, &page.frontmatter, &mut findings);
                 validate_sections(config, path, &page, &mut findings);
                 parsed.insert(path.clone(), page);
             }
@@ -345,30 +351,25 @@ pub fn validate_corpus(
     }
 }
 
-fn validate_schema(
+fn compile_schemas(
     config: &Config,
-    path: &str,
-    frontmatter: &serde_json::Value,
     extra_files: &HashMap<String, String>,
     findings: &mut Vec<Finding>,
-) {
+) -> Vec<CompiledSchema> {
+    let mut compiled = Vec::new();
     for rule in &config.schemas {
-        let Ok(glob) = globset::Glob::new(&rule.include).map(|glob| glob.compile_matcher()) else {
-            continue;
-        };
-        if !glob.is_match(path) {
-            continue;
-        }
-        let schema_text = extra_files.get(&rule.schema).cloned();
-        let Some(schema_text) = schema_text else {
+        let matcher = globset::Glob::new(&rule.include)
+            .expect("schema glob was validated")
+            .compile_matcher();
+        let Some(schema_text) = extra_files.get(&rule.schema) else {
             findings.push(Finding {
-                path: path.into(),
+                path: rule.schema.clone(),
                 message: format!("schema file not found: {}", rule.schema),
                 line: None,
             });
             continue;
         };
-        let schema: serde_json::Value = match serde_json::from_str(&schema_text) {
+        let schema: serde_json::Value = match serde_json::from_str(schema_text) {
             Ok(value) => value,
             Err(error) => {
                 findings.push(Finding {
@@ -390,7 +391,22 @@ fn validate_schema(
                 continue;
             }
         };
-        for error in validator.iter_errors(frontmatter) {
+        compiled.push(CompiledSchema { matcher, validator });
+    }
+    compiled
+}
+
+fn validate_schema(
+    schemas: &[CompiledSchema],
+    path: &str,
+    frontmatter: &serde_json::Value,
+    findings: &mut Vec<Finding>,
+) {
+    for schema in schemas {
+        if !schema.matcher.is_match(path) {
+            continue;
+        }
+        for error in schema.validator.iter_errors(frontmatter) {
             findings.push(Finding {
                 path: path.into(),
                 message: format!("frontmatter{}: {error}", error.instance_path),
@@ -506,25 +522,30 @@ impl TargetResolver {
         if raw.is_empty() {
             return Ok(None);
         }
-        if matches!(syntax, LinkSyntax::Markdown) {
+        let decoded;
+        let target = if matches!(syntax, LinkSyntax::Markdown) {
             if raw.starts_with("//") || has_uri_scheme(raw) {
                 return Ok(None);
             }
-            if Path::new(raw)
+            decoded = decode_markdown_path(raw)?;
+            if Path::new(&decoded)
                 .extension()
                 .is_some_and(|extension| !extension.eq_ignore_ascii_case("md"))
             {
                 return Ok(None);
             }
-        }
-        if raw.starts_with('/') {
-            return Err(format!("absolute internal link is not allowed: {raw}"));
+            decoded.as_str()
+        } else {
+            raw
+        };
+        if target.starts_with('/') {
+            return Err(format!("absolute internal link is not allowed: {target}"));
         }
         let candidate = if matches!(syntax, LinkSyntax::Markdown) {
             let parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
-            normalize_path(&parent.join(raw))?
+            normalize_path(&parent.join(target))?
         } else {
-            normalize_path(Path::new(raw))?
+            normalize_path(Path::new(target))?
         };
         let with_extension = if candidate.ends_with(".md") {
             candidate.clone()
@@ -540,6 +561,56 @@ impl TargetResolver {
             Some(many) => Err(format!("ambiguous internal target {raw:?}: {many:?}")),
             None => Err(format!("dangling internal target {raw:?}")),
         }
+    }
+}
+
+fn decode_markdown_path(path: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(path.len());
+    for (index, component) in path.split('/').enumerate() {
+        if index > 0 {
+            output.push('/');
+        }
+        let bytes = component.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if bytes[cursor] != b'%' {
+                decoded.push(bytes[cursor]);
+                cursor += 1;
+                continue;
+            }
+            let Some(pair) = bytes.get(cursor + 1..cursor + 3) else {
+                return Err(format!("invalid percent escape in Markdown link {path:?}"));
+            };
+            let Some(high) = hex_value(pair[0]) else {
+                return Err(format!("invalid percent escape in Markdown link {path:?}"));
+            };
+            let Some(low) = hex_value(pair[1]) else {
+                return Err(format!("invalid percent escape in Markdown link {path:?}"));
+            };
+            let value = high << 4 | low;
+            if matches!(value, 0 | b'/' | b'\\') {
+                return Err(format!(
+                    "encoded path separator or NUL in Markdown link {path:?}"
+                ));
+            }
+            decoded.push(value);
+            cursor += 3;
+        }
+        output.push_str(
+            std::str::from_utf8(&decoded)
+                .map_err(|_| format!("invalid UTF-8 in Markdown link {path:?}"))?,
+        );
+    }
+    Ok(output)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -673,7 +744,14 @@ provider: {dimensions: 2}
 
     #[test]
     fn non_page_markdown_destinations_are_not_internal_links() {
-        let paths = ["notes/page.md".to_owned(), "notes/other.md".to_owned()];
+        let paths = [
+            "notes/page.md".to_owned(),
+            "notes/other.md".to_owned(),
+            "notes/other note.md".to_owned(),
+            "notes/café.md".to_owned(),
+            "notes/hash#tag.md".to_owned(),
+            "notes/wiki%20name.md".to_owned(),
+        ];
         let resolver = TargetResolver::new(paths.iter());
         for target in [
             "../assets/paper.pdf",
@@ -691,5 +769,83 @@ provider: {dimensions: 2}
             resolver.resolve("notes/page.md", "other.md?view=1", LinkSyntax::Markdown),
             Ok(Some("notes/other.md".into()))
         );
+        assert_eq!(
+            resolver.resolve(
+                "notes/page.md",
+                "other%20note.md?view=1#details",
+                LinkSyntax::Markdown
+            ),
+            Ok(Some("notes/other note.md".into()))
+        );
+        assert_eq!(
+            resolver.resolve("notes/page.md", "caf%C3%A9.md", LinkSyntax::Markdown),
+            Ok(Some("notes/café.md".into()))
+        );
+        assert_eq!(
+            resolver.resolve("notes/page.md", "hash%23tag.md", LinkSyntax::Markdown),
+            Ok(Some("notes/hash#tag.md".into()))
+        );
+        assert_eq!(
+            resolver.resolve("notes/page.md", "wiki%20name", LinkSyntax::Wiki),
+            Ok(Some("notes/wiki%20name.md".into()))
+        );
+
+        let config =
+            Config::from_yaml("documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\n")
+                .unwrap();
+        let pages = HashMap::from([
+            (
+                "notes/page.md".into(),
+                "[Other](other%20note.md?view=1#details)\n".into(),
+            ),
+            ("notes/other note.md".into(), "Other.\n".into()),
+        ]);
+        assert!(validate_corpus(&config, &pages, &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn markdown_link_decoding_rejects_invalid_or_escaping_paths() {
+        let paths = ["notes/page.md".to_owned()];
+        let resolver = TargetResolver::new(paths.iter());
+        for target in [
+            "bad%.md",
+            "bad%GG.md",
+            "bad%00.md",
+            "bad%2Fname.md",
+            "bad%5Cname.md",
+            "bad%FF.md",
+            "%2e%2e/%2e%2e/outside.md",
+        ] {
+            assert!(
+                resolver
+                    .resolve("notes/page.md", target, LinkSyntax::Markdown)
+                    .is_err(),
+                "accepted {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_resources_are_compiled_once_per_validation() {
+        let config = Config::from_yaml(
+            "documents:\n  include: ['**/*.md']\nschemas:\n  - include: '**/*.md'\n    schema: .mdstore/schemas/page.json\nprovider:\n  dimensions: 2\n",
+        )
+        .unwrap();
+        let pages = HashMap::from([
+            ("one.md".into(), "---\nvalue: one\n---\n".into()),
+            ("two.md".into(), "---\nvalue: two\n---\n".into()),
+        ]);
+        let missing = validate_corpus(&config, &pages, &HashMap::new()).unwrap_err();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].path, ".mdstore/schemas/page.json");
+
+        let extra = HashMap::from([(
+            ".mdstore/schemas/page.json".into(),
+            r#"{"type":"object","required":["required"]}"#.into(),
+        )]);
+        let invalid_pages = validate_corpus(&config, &pages, &extra).unwrap_err();
+        assert_eq!(invalid_pages.len(), 2);
+        assert!(invalid_pages.iter().any(|finding| finding.path == "one.md"));
+        assert!(invalid_pages.iter().any(|finding| finding.path == "two.md"));
     }
 }
