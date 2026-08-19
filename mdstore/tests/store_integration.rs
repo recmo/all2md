@@ -14,6 +14,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use fs2::FileExt;
 use http_body_util::BodyExt;
 use mdstore::{
     ApplyEditsRequest, Config, Store,
@@ -456,6 +457,40 @@ fn configuration_resources_are_hashline_readable() {
     assert_eq!(response.metadata, serde_json::json!({}));
 }
 
+#[test]
+fn dirty_and_staged_configuration_do_not_leak_into_the_published_state() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let original = store
+        .get_page(".mdstore/schema.json", None)
+        .unwrap()
+        .content;
+
+    fs::write(
+        repository.root.join(".mdstore/schema.json"),
+        "not valid JSON\n",
+    )
+    .unwrap();
+    assert!(store.validate().is_ok());
+    assert_eq!(
+        store
+            .get_page(".mdstore/schema.json", None)
+            .unwrap()
+            .content,
+        original
+    );
+
+    command(&repository.root, &["add", ".mdstore/schema.json"]);
+    assert!(store.validate().is_ok());
+    assert_eq!(
+        store
+            .get_page(".mdstore/schema.json", None)
+            .unwrap()
+            .content,
+        original
+    );
+}
+
 #[tokio::test]
 async fn mcp_lists_only_three_tools_and_enforces_authentication() {
     let repository = Repository::new();
@@ -672,6 +707,66 @@ fn external_server_configuration_change_requires_restart() {
 }
 
 #[test]
+fn manual_push_uses_the_repository_write_lock() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let lock_path = repository.root.join(".git/mdstore/write.lock");
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || sender.send(store.push()).unwrap());
+    assert!(
+        receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err()
+    );
+    FileExt::unlock(&lock).unwrap();
+    assert!(matches!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+        mdstore::git::PushState::Disabled
+    ));
+    handle.join().unwrap();
+}
+
+#[test]
+fn manual_push_refreshes_external_configuration_before_selecting_push_settings() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let schema = format!("\n{}", schema());
+    fs::write(repository.root.join(".mdstore/schema.json"), &schema).unwrap();
+    command(&repository.root, &["add", ".mdstore/schema.json"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "external schema formatting"],
+    );
+
+    assert!(matches!(
+        store.push().unwrap(),
+        mdstore::git::PushState::Disabled
+    ));
+    assert!(
+        store
+            .get_page(".mdstore/schema.json", None)
+            .unwrap()
+            .content
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with('|')
+    );
+}
+
+#[test]
 fn invalid_external_commit_blocks_writes() {
     let repository = Repository::new();
     let store = repository.store();
@@ -709,6 +804,54 @@ fn invalid_external_commit_blocks_writes() {
     );
     store.apply_edits(&request).unwrap();
     assert!(store.status().unwrap().blocked.is_none());
+}
+
+#[test]
+fn external_failures_never_replace_a_divergence_block() {
+    let repository = Repository::new();
+    fs::create_dir_all(repository.root.join(".git/mdstore")).unwrap();
+    fs::write(
+        repository.root.join(".git/mdstore/blocked"),
+        "remote history diverged",
+    )
+    .unwrap();
+    let store = repository.store();
+    fs::write(
+        repository.root.join("alice.md"),
+        "# Missing configured metadata\n",
+    )
+    .unwrap();
+    command(&repository.root, &["add", "alice.md"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "external invalid edit"],
+    );
+    let request = ApplyEditsRequest {
+        edit_summary: "attempt write".into(),
+        edits: vec![EditOperation::Replace {
+            path: "bob.md".into(),
+            anchor: format!("6:{}", short_hash("Bob profile.")),
+            content: "Bob updated.".into(),
+        }],
+    };
+    assert!(store.apply_edits(&request).is_err());
+    assert_eq!(
+        store.status().unwrap().blocked.as_deref(),
+        Some("remote history diverged")
+    );
+
+    fs::write(repository.root.join("alice.md"), page("Alice")).unwrap();
+    command(&repository.root, &["add", "alice.md"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "repair external edit"],
+    );
+    let error = store.apply_edits(&request).unwrap_err();
+    assert!(error.to_string().contains("remote history diverged"));
+    assert_eq!(
+        store.status().unwrap().blocked.as_deref(),
+        Some("remote history diverged")
+    );
 }
 
 #[test]

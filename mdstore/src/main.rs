@@ -143,7 +143,8 @@ struct DaemonClient {
 
 impl DaemonClient {
     fn from_repository(root: &std::path::Path, override_url: Option<&str>) -> Result<Self> {
-        let config = Config::load(root)?;
+        let config =
+            Config::from_yaml(&mdstore::git::read_head_text(root, ".mdstore/config.yaml")?)?;
         let base_url = match override_url {
             Some(url) if !url.trim().is_empty() => url.trim_end_matches('/').to_owned(),
             _ => {
@@ -249,4 +250,55 @@ impl DaemonClient {
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, process::Command};
+
+    use super::*;
+
+    fn git(root: &std::path::Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn daemon_discovery_ignores_uncommitted_config_and_credentials() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "mdstore test"]);
+        git(root, &["config", "user.email", "mdstore@example.invalid"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        fs::create_dir(root.join(".mdstore")).unwrap();
+        let committed = "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push: false\nserver:\n  listen: 127.0.0.1:3131\n";
+        fs::write(root.join(".mdstore/config.yaml"), committed).unwrap();
+        git(root, &["add", ".mdstore/config.yaml"]);
+        git(root, &["commit", "-m", "configuration"]);
+
+        fs::write(
+            root.join(".mdstore/config.yaml"),
+            committed.replace(
+                "  listen: 127.0.0.1:3131",
+                "  listen: 203.0.113.1:4444\n  bearer_token_env: PATH",
+            ),
+        )
+        .unwrap();
+        let client = DaemonClient::from_repository(root, None).unwrap();
+        assert_eq!(client.base_url, "http://127.0.0.1:3131");
+        assert!(client.bearer_token.is_none());
+
+        let client = DaemonClient::from_repository(root, Some("http://127.0.0.1:4141/")).unwrap();
+        assert_eq!(client.base_url, "http://127.0.0.1:4141");
+        assert!(client.bearer_token.is_none());
+    }
 }

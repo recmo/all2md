@@ -83,6 +83,13 @@ pub fn head(root: &Path) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().into())
 }
 
+pub fn read_head_text(root: &Path, path: &str) -> Result<String> {
+    validate_repo_path(path)?;
+    let object = format!("HEAD:{path}");
+    let output = checked(root, ["show", &object])?;
+    String::from_utf8(output.stdout).context("committed repository file is not UTF-8")
+}
+
 pub fn recover_worktree(root: &Path) -> Result<Vec<String>> {
     let output = checked(root, ["diff", "HEAD", "--name-only", "-z"])?;
     let modified: Vec<String> = output
@@ -306,7 +313,7 @@ pub fn push(root: &Path, config: &Config) -> Result<PushState> {
     let mut command = Command::new("git");
     command.current_dir(root).arg("push");
     if let Some(remote) = &config.git.remote {
-        command.arg(remote).arg("HEAD");
+        command.arg("--set-upstream").arg(remote).arg("HEAD");
     }
     let output = command.output().context("push mdstore commits")?;
     if output.status.success() {
@@ -325,10 +332,13 @@ fn push_failure_state(stderr: &str) -> PushState {
 }
 
 pub fn has_unpushed(root: &Path) -> Result<bool> {
-    let output = run(root, ["rev-list", "--count", "@{upstream}..HEAD"])?;
-    if !output.status.success() {
-        return Ok(false);
+    if !run(root, ["rev-parse", "--verify", "@{upstream}"])?
+        .status
+        .success()
+    {
+        return Ok(true);
     }
+    let output = checked(root, ["rev-list", "--count", "@{upstream}..HEAD"])?;
     Ok(String::from_utf8_lossy(&output.stdout).trim() != "0")
 }
 
@@ -427,6 +437,41 @@ mod tests {
             push_failure_state("! [remote rejected] main -> main (protected branch hook declined)"),
             PushState::Queued
         );
+    }
+
+    #[test]
+    fn configured_push_establishes_upstream_and_tracks_unpushed_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        fs::create_dir(&root).unwrap();
+        checked(directory.path(), ["init", "--bare", "remote.git"]).unwrap();
+        checked(&root, ["init", "-b", "main"]).unwrap();
+        checked(&root, ["config", "user.name", "mdstore test"]).unwrap();
+        checked(&root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
+        checked(&root, ["config", "commit.gpgsign", "false"]).unwrap();
+        checked(&root, ["remote", "add", "origin", "../remote.git"]).unwrap();
+        fs::write(root.join("note.md"), "one\n").unwrap();
+        checked(&root, ["add", "note.md"]).unwrap();
+        checked(&root, ["commit", "-m", "initial"]).unwrap();
+        assert!(has_unpushed(&root).unwrap());
+
+        let config = Config::from_yaml(
+            "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push: true\n  remote: origin\n",
+        )
+        .unwrap();
+        assert_eq!(push(&root, &config).unwrap(), PushState::Pushed);
+        let upstream = checked(&root, ["rev-parse", "--abbrev-ref", "@{upstream}"]).unwrap();
+        assert_eq!(
+            String::from_utf8(upstream.stdout).unwrap().trim(),
+            "origin/main"
+        );
+        assert!(!has_unpushed(&root).unwrap());
+
+        fs::write(root.join("note.md"), "two\n").unwrap();
+        checked(&root, ["commit", "-am", "second"]).unwrap();
+        assert!(has_unpushed(&root).unwrap());
+        assert_eq!(push(&root, &config).unwrap(), PushState::Pushed);
+        assert!(!has_unpushed(&root).unwrap());
     }
 
     #[test]

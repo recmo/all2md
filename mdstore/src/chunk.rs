@@ -287,13 +287,17 @@ fn embedding_plan(
     let mut prefix = context.to_vec();
     prefix.extend(heading.iter().cloned());
     let prefix = prefix.join(" > ");
-    let prefix_limit = max_chars.saturating_sub(3);
-    let prefix: String = prefix.chars().take(prefix_limit).collect();
+    let minimum_body = target_chars.min(max_chars.saturating_mul(3) / 4).max(1);
+    let mut auxiliary = max_chars.saturating_sub(minimum_body);
     let mut remaining = max_chars;
+    let prefix_limit = auxiliary.saturating_sub(2);
+    let prefix: String = prefix.chars().take(prefix_limit).collect();
     if !prefix.is_empty() {
-        remaining -= prefix.chars().count() + 2;
+        let cost = prefix.chars().count() + 2;
+        auxiliary -= cost;
+        remaining -= cost;
     }
-    let overlap_chars = overlap_chars.min(remaining.saturating_sub(3));
+    let overlap_chars = overlap_chars.min(auxiliary.saturating_sub(2));
     if overlap_chars > 0 {
         remaining -= overlap_chars + 2;
     }
@@ -405,6 +409,29 @@ mod tests {
                 .iter()
                 .skip(1)
                 .all(|chunk| chunk.embedding_text.split("\n\n").count() == 3)
+        );
+    }
+
+    #[test]
+    fn long_context_cannot_collapse_chunk_bodies() {
+        let text = format!("# Notes\n\n{}\n", "x".repeat(72));
+        let parsed = parse_page(&text, &LinkConfig::default()).unwrap();
+        let config = ChunkConfig {
+            target_tokens: 5,
+            overlap_percent: 25,
+            max_chars: 24,
+            ..ChunkConfig::default()
+        };
+        let chunks = chunk_page(&text, &parsed, &config, &["title".repeat(100)]);
+        assert_eq!(chunks.len(), 4);
+        assert!(chunks.iter().all(|chunk| {
+            chunk.text.chars().count() == 18
+                && chunk.embedding_text.chars().count() <= config.max_chars
+        }));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.embedding_text.contains('t'))
         );
     }
 

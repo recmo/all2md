@@ -39,6 +39,7 @@ pub struct Store {
 #[derive(Clone)]
 struct StoreState {
     config: Config,
+    config_files: HashMap<String, String>,
     pages: HashMap<String, String>,
     parsed: HashMap<String, ParsedPage>,
     edges: Vec<Edge>,
@@ -142,6 +143,7 @@ impl Store {
             root,
             state: RwLock::new(StoreState {
                 config,
+                config_files: extra,
                 pages,
                 parsed,
                 edges,
@@ -169,8 +171,7 @@ impl Store {
 
     pub fn validate(&self) -> std::result::Result<(), Vec<Finding>> {
         let state = self.state.read();
-        let extra = load_config_files(&self.root).unwrap_or_default();
-        validate_corpus(&state.config, &state.pages, &extra).map(|_| ())
+        validate_corpus(&state.config, &state.pages, &state.config_files).map(|_| ())
     }
 
     pub fn get_page(&self, path: &str, window: Option<(usize, usize)>) -> Result<PageResponse> {
@@ -190,18 +191,16 @@ impl Store {
                     .collect(),
             });
         }
-        drop(state);
         let config_resource = path.starts_with(".mdstore/")
             && Path::new(path).extension().is_some_and(|extension| {
                 extension.eq_ignore_ascii_case("yaml")
                     || extension.eq_ignore_ascii_case("yml")
                     || extension.eq_ignore_ascii_case("json")
             });
-        if config_resource && git::is_tracked(&self.root, path)? {
-            let text = read_repository_text(&self.root, path)?;
+        if config_resource && let Some(text) = state.config_files.get(path) {
             return Ok(PageResponse {
                 path: path.into(),
-                content: render(&text, window),
+                content: render(text, window),
                 metadata: serde_json::json!({}),
                 relations: Vec::new(),
             });
@@ -234,14 +233,7 @@ impl Store {
             bail!("edits must contain at least one operation");
         }
         let digest = request_digest(request)?;
-        let lock_path = self.git_dir.join("mdstore/write.lock");
-        fs::create_dir_all(lock_path.parent().expect("lock parent"))?;
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path)?;
-        lock.lock_exclusive()?;
+        let _lock = self.lock_repository()?;
         git::recover_worktree(&self.root)?;
         self.refresh_external_commit()?;
         if let Some(response) = self.read_receipt(&digest)? {
@@ -295,7 +287,7 @@ impl Store {
         let applied = apply_operations_with_ranges(&originals, &request.edits)?;
         let changes = &applied.changes;
         let mut pages = current.pages.clone();
-        let mut extra = load_config_files(&self.root)?;
+        let mut extra = current.config_files.clone();
         for (path, content) in changes {
             if path.ends_with(".md") && !path.starts_with(".mdstore/") {
                 match content {
@@ -423,6 +415,7 @@ impl Store {
         );
         *self.state.write() = StoreState {
             config,
+            config_files: extra,
             pages,
             parsed,
             edges,
@@ -574,6 +567,9 @@ impl Store {
     }
 
     pub fn push(&self) -> Result<PushState> {
+        let _lock = self.lock_repository()?;
+        git::recover_worktree(&self.root)?;
+        self.refresh_external_commit()?;
         let state = git::push(&self.root, &self.state.read().config)?;
         if matches!(state, PushState::Pushed) {
             self.set_blocked(None)?;
@@ -598,7 +594,7 @@ impl Store {
                     "external commit is invalid:\n{}",
                     serde_json::to_string_pretty(&findings).unwrap_or_default()
                 );
-                self.set_blocked(Some(reason.clone()))?;
+                self.set_external_blocked(reason.clone())?;
                 bail!(reason);
             }
         };
@@ -609,7 +605,7 @@ impl Store {
         let provider = if config.provider != current_state.config.provider {
             let Some(factory) = self.provider_factory else {
                 let reason = "external commit changes provider configuration; restart required";
-                self.set_blocked(Some(reason.into()))?;
+                self.set_external_blocked(reason.into())?;
                 bail!(reason);
             };
             factory(config.provider.clone())
@@ -626,6 +622,7 @@ impl Store {
         );
         *self.state.write() = StoreState {
             config,
+            config_files: extra,
             pages,
             parsed,
             edges,
@@ -643,6 +640,25 @@ impl Store {
             self.set_blocked(None)?;
         }
         Ok(())
+    }
+
+    fn lock_repository(&self) -> Result<fs::File> {
+        let path = self.git_dir.join("mdstore/write.lock");
+        fs::create_dir_all(path.parent().expect("lock parent"))?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        lock.lock_exclusive()?;
+        Ok(lock)
+    }
+
+    fn set_external_blocked(&self, reason: String) -> Result<()> {
+        if self.blocked.read().as_deref() == Some("remote history diverged") {
+            return Ok(());
+        }
+        self.set_blocked(Some(reason))
     }
 
     fn receipt_path(&self, digest: &str) -> PathBuf {
