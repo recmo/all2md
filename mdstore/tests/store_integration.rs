@@ -426,6 +426,38 @@ fn rejects_tracked_embedding_sidecars() {
     assert!(format!("{:#}", opened.err().unwrap()).contains("must be ignored and untracked"));
 }
 
+#[test]
+fn rejects_unignored_sidecar_paths_before_committing_a_new_page() {
+    let repository = Repository::new();
+    fs::write(
+        repository.root.join(".gitignore"),
+        "alice.mdstore\nbob.mdstore\n!.mdstore/\n",
+    )
+    .unwrap();
+    command(&repository.root, &["add", ".gitignore"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "ignore existing sidecars only"],
+    );
+    let store = repository.store();
+    let before = command(&repository.root, &["rev-parse", "HEAD"]);
+    let error = store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "create Charlie".into(),
+            edits: vec![EditOperation::CreatePage {
+                path: "charlie.md".into(),
+                content: page("Charlie"),
+            }],
+        })
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("charlie.mdstore"));
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), before);
+    assert!(!repository.root.join("charlie.md").exists());
+    assert_eq!(store.status().unwrap().pages, 2);
+}
+
 #[tokio::test]
 async fn reindex_checks_sidecar_ignore_rules_before_provider_calls() {
     let repository = Repository::new();

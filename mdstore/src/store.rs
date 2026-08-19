@@ -136,7 +136,8 @@ impl Store {
         let (parsed, edges) = validate_corpus(&config, &pages, &extra).map_err(|findings| {
             anyhow!(serde_json::to_string_pretty(&findings).unwrap_or_default())
         })?;
-        let index = build_index(&root, &config, &pages, &parsed, &edges, provider.as_ref())?;
+        ensure_sidecars_ignored(&root, pages.keys().map(String::as_str))?;
+        let index = build_index(&root, &config, &pages, &parsed, &edges, provider.as_ref());
         let head = git::head(&root)?;
         let blocked = read_blocked(&git_dir)?;
         Ok(Arc::new(Self {
@@ -330,6 +331,7 @@ impl Store {
                 );
             }
         };
+        ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
         let provider = if config.provider != current.config.provider {
             let factory = self
                 .provider_factory
@@ -396,7 +398,7 @@ impl Store {
             &parsed,
             &edges,
             provider.as_ref(),
-        )?;
+        );
         *self.state.write() = StoreState {
             config,
             config_files: extra,
@@ -456,7 +458,13 @@ impl Store {
         let edges = snapshot.edges;
         let provider = snapshot.provider;
         let provider_identity = provider.embedding_provider_identity();
-        ensure_sidecars_ignored(&self.root, paths.iter().map(String::as_str))?;
+        ensure_sidecars_ignored(
+            &self.root,
+            pages
+                .keys()
+                .map(String::as_str)
+                .chain(paths.iter().map(String::as_str)),
+        )?;
         for path in paths {
             let Some(text) = pages.get(path) else {
                 let path = sidecar::sidecar_path(&self.root.join(path));
@@ -519,7 +527,7 @@ impl Store {
             &parsed,
             &edges,
             provider.as_ref(),
-        )?;
+        );
         let mut current = self.state.write();
         if current.generation == generation {
             current.index = Arc::new(index);
@@ -576,6 +584,7 @@ impl Store {
                 bail!(reason);
             }
         };
+        ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
         let current_state = self.state.read().clone();
         if config.server != current_state.config.server {
             bail!("external commit changes server configuration; restart required");
@@ -597,7 +606,7 @@ impl Store {
             &parsed,
             &edges,
             provider.as_ref(),
-        )?;
+        );
         *self.state.write() = StoreState {
             config,
             config_files: extra,
@@ -784,8 +793,7 @@ fn build_index(
     parsed: &HashMap<String, ParsedPage>,
     edges: &[Edge],
     provider: &dyn RetrievalProvider,
-) -> Result<SearchIndex> {
-    ensure_sidecars_ignored(root, pages.keys().map(String::as_str))?;
+) -> SearchIndex {
     let mut all_chunks = HashMap::new();
     let provider_identity = provider.embedding_provider_identity();
     for (path, text) in pages {
@@ -818,7 +826,7 @@ fn build_index(
             .collect();
         all_chunks.insert(path.clone(), values);
     }
-    Ok(SearchIndex::build(config, pages, parsed, edges, all_chunks))
+    SearchIndex::build(config, pages, parsed, edges, all_chunks)
 }
 
 fn ensure_sidecars_ignored<'a>(

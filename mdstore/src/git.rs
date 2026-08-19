@@ -68,7 +68,9 @@ pub fn tracked_config_files(root: &Path) -> Result<Vec<String>> {
 }
 
 pub fn is_tracked(root: &Path, path: &str) -> Result<bool> {
-    Ok(run(root, ["ls-files", "--error-unmatch", "--", path])?
+    validate_repo_path(path)?;
+    let pathspec = literal_pathspec(path);
+    Ok(run(root, ["ls-files", "--error-unmatch", "--", &pathspec])?
         .status
         .success())
 }
@@ -150,11 +152,12 @@ pub fn recover_worktree(root: &Path) -> Result<Vec<String>> {
         .map(|part| String::from_utf8_lossy(part).into_owned())
         .collect();
     if !modified.is_empty() {
+        let pathspecs: Vec<String> = modified.iter().map(|path| literal_pathspec(path)).collect();
         let mut command = Command::new("git");
         command
             .current_dir(root)
             .args(["restore", "--staged", "--worktree", "--"]);
-        command.args(&modified);
+        command.args(&pathspecs);
         let output = command
             .output()
             .context("restore daemon-owned tracked files")?;
@@ -170,17 +173,7 @@ pub fn recover_worktree(root: &Path) -> Result<Vec<String>> {
 }
 
 fn quarantine_untracked_markdown(root: &Path) -> Result<()> {
-    let output = checked(
-        root,
-        [
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            "--",
-            "*.md",
-        ],
-    )?;
+    let output = checked(root, ["ls-files", "--others", "-z", "--", "*.md"])?;
     let paths: Vec<String> = output
         .stdout
         .split(|byte| *byte == 0)
@@ -241,14 +234,52 @@ pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Resul
 }
 
 pub fn stage_tree(root: &Path, paths: &[String]) -> Result<Option<String>> {
-    let mut add = Command::new("git");
-    add.current_dir(root).args(["add", "-A", "--"]).args(paths);
-    let output = add.output().context("stage mdstore edit batch")?;
-    if !output.status.success() {
-        bail!(
-            "git add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    for path in paths {
+        validate_repo_path(path)?;
+        let target = root.join(path);
+        match fs::read(&target) {
+            Ok(content) => {
+                let mut child = Command::new("git")
+                    .current_dir(root)
+                    .args(["hash-object", "-w", "--no-filters", "--stdin"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .with_context(|| format!("store edited contents for {path}"))?;
+                child
+                    .stdin
+                    .take()
+                    .context("open git hash-object input")?
+                    .write_all(&content)?;
+                let output = child.wait_with_output()?;
+                if !output.status.success() {
+                    bail!(
+                        "git hash-object failed for {path}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                let object = String::from_utf8(output.stdout)?.trim().to_owned();
+                let cacheinfo = format!("100644,{object},{path}");
+                let output = run(root, ["update-index", "--add", "--cacheinfo", &cacheinfo])?;
+                if !output.status.success() {
+                    bail!(
+                        "git update-index failed for {path}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let output = run(root, ["update-index", "--force-remove", "--", path])?;
+                if !output.status.success() {
+                    bail!(
+                        "git update-index failed for {path}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+            Err(error) => return Err(error).with_context(|| format!("read edited file {path}")),
+        }
     }
     let staged = run(root, ["diff", "--cached", "--quiet"])?;
     if staged.status.success() {
@@ -318,7 +349,9 @@ pub fn rollback(root: &Path, paths: &[String]) -> Result<()> {
     let mut present = Vec::new();
     let mut absent = Vec::new();
     for path in paths {
-        let output = checked(root, ["ls-tree", "-z", "HEAD", "--", path])?;
+        validate_repo_path(path)?;
+        let pathspec = literal_pathspec(path);
+        let output = checked(root, ["ls-tree", "-z", "HEAD", "--", &pathspec])?;
         if output.stdout.is_empty() {
             absent.push(path.clone());
         } else {
@@ -326,11 +359,12 @@ pub fn rollback(root: &Path, paths: &[String]) -> Result<()> {
         }
     }
     if !present.is_empty() {
+        let pathspecs: Vec<String> = present.iter().map(|path| literal_pathspec(path)).collect();
         let mut restore = Command::new("git");
         restore
             .current_dir(root)
             .args(["restore", "--source=HEAD", "--staged", "--worktree", "--"])
-            .args(&present);
+            .args(&pathspecs);
         let output = restore.output()?;
         if !output.status.success() {
             bail!(
@@ -340,11 +374,12 @@ pub fn rollback(root: &Path, paths: &[String]) -> Result<()> {
         }
     }
     if !absent.is_empty() {
+        let pathspecs: Vec<String> = absent.iter().map(|path| literal_pathspec(path)).collect();
         let mut reset = Command::new("git");
         reset
             .current_dir(root)
             .args(["reset", "-q", "HEAD", "--"])
-            .args(&absent);
+            .args(&pathspecs);
         let output = reset.output()?;
         if !output.status.success() {
             bail!(
@@ -385,6 +420,10 @@ fn push_failure_state(stderr: &str) -> PushState {
     } else {
         PushState::Queued
     }
+}
+
+fn literal_pathspec(path: &str) -> String {
+    format!(":(literal){path}")
 }
 
 pub fn has_unpushed(root: &Path) -> Result<bool> {
@@ -485,6 +524,77 @@ mod tests {
     }
 
     #[test]
+    fn stage_tree_preserves_validated_bytes_despite_clean_filters_and_eol_rules() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        checked(root, ["init", "-b", "main"]).unwrap();
+        checked(root, ["config", "user.name", "mdstore test"]).unwrap();
+        checked(root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
+        checked(root, ["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(root.join("note.md"), "old\n").unwrap();
+        checked(root, ["add", "note.md"]).unwrap();
+        checked(root, ["commit", "-m", "initial"]).unwrap();
+        fs::write(
+            root.join(".gitattributes"),
+            "*.md filter=uppercase text eol=crlf\n",
+        )
+        .unwrap();
+        checked(root, ["config", "filter.uppercase.clean", "tr a-z A-Z"]).unwrap();
+        checked(root, ["config", "filter.uppercase.smudge", "cat"]).unwrap();
+        checked(root, ["config", "filter.uppercase.required", "true"]).unwrap();
+        checked(root, ["add", ".gitattributes"]).unwrap();
+        checked(root, ["commit", "-m", "attributes"]).unwrap();
+
+        let validated = b"exact lowercase bytes\n";
+        fs::write(root.join("note.md"), validated).unwrap();
+        let tree = stage_tree(root, &["note.md".into()]).unwrap().unwrap();
+        let committed = checked(root, ["show", &format!("{tree}:note.md")]).unwrap();
+        assert_eq!(committed.stdout, validated);
+    }
+
+    #[test]
+    fn exact_paths_with_pathspec_metacharacters_never_expand() {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        checked(root, ["init", "-b", "main"]).unwrap();
+        checked(root, ["config", "user.name", "mdstore test"]).unwrap();
+        checked(root, ["config", "user.email", "mdstore@example.invalid"]).unwrap();
+        checked(root, ["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(root.join("note?.md"), "question old\n").unwrap();
+        fs::write(root.join("note1.md"), "one old\n").unwrap();
+        checked(root, ["add", "note?.md", "note1.md"]).unwrap();
+        checked(root, ["commit", "-m", "initial"]).unwrap();
+
+        fs::write(root.join("note?.md"), "question new\n").unwrap();
+        fs::write(root.join("note1.md"), "one concurrent\n").unwrap();
+        let tree = stage_tree(root, &["note?.md".into()]).unwrap().unwrap();
+        assert_eq!(
+            checked(root, ["show", &format!("{tree}:note?.md")])
+                .unwrap()
+                .stdout,
+            b"question new\n"
+        );
+        assert_eq!(
+            checked(root, ["show", &format!("{tree}:note1.md")])
+                .unwrap()
+                .stdout,
+            b"one old\n"
+        );
+        assert!(is_tracked(root, "note?.md").unwrap());
+        assert!(!is_tracked(root, "missing?.md").unwrap());
+
+        rollback(root, &["note?.md".into()]).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("note?.md")).unwrap(),
+            "question old\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("note1.md")).unwrap(),
+            "one concurrent\n"
+        );
+    }
+
+    #[test]
     fn only_history_rejections_are_divergence() {
         assert_eq!(
             push_failure_state("! [rejected] main -> main (non-fast-forward)"),
@@ -571,6 +681,8 @@ mod tests {
         let repository = tempfile::tempdir().unwrap();
         let root = repository.path();
         checked(root, ["init", "-b", "main"]).unwrap();
+        fs::write(root.join(".gitignore"), "ignored.md\n").unwrap();
+        checked(root, ["add", ".gitignore"]).unwrap();
         checked(
             root,
             [
@@ -581,24 +693,36 @@ mod tests {
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
-                "--allow-empty",
                 "-m",
                 "initial",
             ],
         )
         .unwrap();
         fs::write(root.join("note.md"), "first").unwrap();
+        fs::write(root.join("ignored.md"), "ignored").unwrap();
         recover_worktree(root).unwrap();
+        assert!(!root.join("ignored.md").exists());
         fs::write(root.join("note.md"), "second").unwrap();
         recover_worktree(root).unwrap();
 
         let quarantine = git_dir(root).unwrap().join("mdstore/quarantine");
-        let mut copies: Vec<String> = fs::read_dir(quarantine)
+        let directories: Vec<PathBuf> = fs::read_dir(quarantine)
             .unwrap()
-            .map(|entry| fs::read_to_string(entry.unwrap().path().join("note.md")).unwrap())
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        let mut copies: Vec<String> = directories
+            .iter()
+            .map(|path| fs::read_to_string(path.join("note.md")).unwrap())
             .collect();
         copies.sort();
         assert_eq!(copies, ["first", "second"]);
+        assert_eq!(
+            directories
+                .iter()
+                .filter_map(|path| fs::read_to_string(path.join("ignored.md")).ok())
+                .collect::<Vec<_>>(),
+            ["ignored"]
+        );
     }
 
     #[test]

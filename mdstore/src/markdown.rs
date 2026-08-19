@@ -505,6 +505,7 @@ impl TargetResolver {
             if let Some(name) = Path::new(without_extension)
                 .file_name()
                 .and_then(|v| v.to_str())
+                .filter(|name| *name != without_extension)
             {
                 stems.entry(name.into()).or_default().push(path.clone());
             }
@@ -801,6 +802,17 @@ provider: {dimensions: 2}
             ("notes/other note.md".into(), "Other.\n".into()),
         ]);
         assert!(validate_corpus(&config, &pages, &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn root_page_stems_resolve_once() {
+        let paths = ["page.md".to_owned()];
+        let resolver = TargetResolver::new(paths.iter());
+
+        assert_eq!(
+            resolver.resolve("source.md", "page", LinkSyntax::Wiki),
+            Ok(Some("page.md".into()))
+        );
     }
 
     #[test]
