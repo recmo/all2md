@@ -27,6 +27,7 @@ use crate::{
     sidecar::{self, Sidecar},
 };
 
+/// Daemon-owned coherent view of one Git-backed Markdown repository.
 pub struct Store {
     root: PathBuf,
     state: RwLock<StoreState>,
@@ -35,6 +36,15 @@ pub struct Store {
     git_dir: PathBuf,
     head: RwLock<String>,
     blocked: RwLock<Option<String>>,
+}
+
+impl fmt::Debug for Store {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Store")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]
@@ -51,23 +61,35 @@ struct StoreState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// One required-summary atomic edit request.
 pub struct ApplyEditsRequest {
+    /// Non-empty Git commit message.
     pub edit_summary: String,
+    /// Hashline operations resolved against one pre-edit snapshot.
     pub edits: Vec<EditOperation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// Result of accepting or replaying an edit request.
 pub struct ApplyEditsResponse {
+    /// Whether a new commit was accepted or the request was already applied.
     pub status: ApplyStatus,
+    /// Ordered push state after the request.
     pub push: PushState,
+    /// Repository-relative paths addressed by the request.
     pub touched_paths: Vec<String>,
+    /// Current hashline windows for changed regions.
     pub fresh_hashlines: HashMap<String, String>,
+    /// Structured corpus findings when applicable.
     pub validation_findings: Vec<Finding>,
+    /// Current or pending derived embedding state.
     pub embedding_state: String,
 }
 
 #[derive(Debug)]
+/// Corpus validation failure with structured findings.
 pub struct ValidationError {
+    /// All findings from validating the proposed complete tree.
     pub findings: Vec<Finding>,
 }
 
@@ -85,8 +107,11 @@ impl Error for ValidationError {}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+/// Idempotency status of an edit request.
 pub enum ApplyStatus {
+    /// A new commit was created.
     Accepted,
+    /// The exact request was already represented by repository history.
     AlreadyApplied,
 }
 
@@ -117,35 +142,50 @@ enum ReplayState {
 const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 
 #[derive(Debug, Clone, Serialize)]
+/// Hashline-rendered page or configuration resource.
 pub struct PageResponse {
+    /// Exact repository-relative path.
     pub path: String,
+    /// Raw Markdown or configuration text with hashline prefixes.
     pub content: String,
+    /// Repository-configured projected frontmatter metadata.
     pub metadata: serde_json::Value,
+    /// Typed relations authored by this page.
     pub relations: Vec<Edge>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// Operational daemon and derived-index status.
 pub struct StatusResponse {
+    /// Number of indexed Markdown pages.
     pub pages: usize,
+    /// Number of searchable chunks.
     pub chunks: usize,
+    /// Chunks with valid vectors.
     pub vectors_ready: usize,
+    /// Total searchable chunks.
     pub vectors_total: usize,
+    /// Whether local commits are absent from the upstream.
     pub unpushed: bool,
+    /// Persisted reason that writes are blocked, when present.
     pub blocked: Option<String>,
 }
 
 impl Store {
+    /// Opens a repository with its configured ZeroEntropy provider.
     pub fn open(root: impl AsRef<Path>) -> Result<Arc<Self>> {
         let (root, git_dir) = Self::prepare_repository(root)?;
-        Self::open_stable(root, git_dir, None)
+        Self::open_stable(&root, &git_dir, None)
     }
 
+    /// Opens a repository with an injected retrieval provider.
     pub fn open_with_provider(
         root: impl AsRef<Path>,
         provider: Arc<dyn RetrievalProvider>,
     ) -> Result<Arc<Self>> {
         let (root, git_dir) = Self::prepare_repository(root)?;
-        Self::open_stable(root, git_dir, Some(provider))
+        let provider = Some(provider);
+        Self::open_stable(&root, &git_dir, provider.as_ref())
     }
 
     fn prepare_repository(root: impl AsRef<Path>) -> Result<(PathBuf, PathBuf)> {
@@ -168,40 +208,40 @@ impl Store {
     }
 
     fn open_stable(
-        root: PathBuf,
-        git_dir: PathBuf,
-        injected_provider: Option<Arc<dyn RetrievalProvider>>,
+        root: &Path,
+        git_dir: &Path,
+        injected_provider: Option<&Arc<dyn RetrievalProvider>>,
     ) -> Result<Arc<Self>> {
         Self::open_stable_with(root, git_dir, injected_provider, |_, _| {})
     }
 
     fn open_stable_with(
-        root: PathBuf,
-        git_dir: PathBuf,
-        injected_provider: Option<Arc<dyn RetrievalProvider>>,
+        root: &Path,
+        git_dir: &Path,
+        injected_provider: Option<&Arc<dyn RetrievalProvider>>,
         mut after_capture: impl FnMut(&Path, &str),
     ) -> Result<Arc<Self>> {
         for _ in 0..STARTUP_SNAPSHOT_ATTEMPTS {
-            let head = git::head(&root)?;
-            after_capture(&root, &head);
-            let result = Self::load_config(&root, &head).and_then(|config| {
-                let (provider, provider_factory) = if let Some(provider) = &injected_provider {
-                    (provider.clone(), None)
+            let head = git::head(root)?;
+            after_capture(root, &head);
+            let result = Self::load_config(root, &head).and_then(|config| {
+                let (provider, provider_factory) = if let Some(provider) = injected_provider {
+                    (Arc::clone(provider), None)
                 } else {
                     let factory: fn(ProviderConfig) -> Arc<dyn RetrievalProvider> =
                         zeroentropy_provider;
                     (zeroentropy_provider(config.provider.clone()), Some(factory))
                 };
                 Self::open_inner(
-                    root.clone(),
+                    root.to_path_buf(),
                     head.clone(),
                     config,
                     provider,
-                    git_dir.clone(),
+                    git_dir.to_path_buf(),
                     provider_factory,
                 )
             });
-            if git::head(&root)? == head {
+            if git::head(root)? == head {
                 return result;
             }
         }
@@ -251,20 +291,24 @@ impl Store {
     }
 
     #[must_use]
+    /// Returns the canonical repository worktree root.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     #[must_use]
+    /// Returns the currently published repository configuration.
     pub fn config(&self) -> Config {
         self.state.read().config.clone()
     }
 
+    /// Revalidates the currently published corpus snapshot.
     pub fn validate(&self) -> std::result::Result<(), Vec<Finding>> {
         let state = self.state.read();
         validate_corpus(&state.config, &state.pages, &state.config_files).map(|_| ())
     }
 
+    /// Reads an exact page or configuration resource as hashlines.
     pub fn get_page(&self, path: &str, window: Option<(usize, usize)>) -> Result<PageResponse> {
         validate_repo_path(path)?;
         let state = self.state.read();
@@ -295,6 +339,7 @@ impl Store {
         bail!("page or configuration resource not found: {path}")
     }
 
+    /// Searches the published exact, vector, and graph index.
     pub async fn search(&self, query: &str, variants: &[String]) -> Result<SearchResponse> {
         if query.trim().is_empty() {
             bail!("query must be non-empty");
@@ -312,6 +357,7 @@ impl Store {
             .await)
     }
 
+    /// Validates, commits, and pushes one atomic hashline edit batch.
     pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<ApplyEditsResponse> {
         if request.edit_summary.trim().is_empty() {
             bail!("edit_summary must be non-empty");
@@ -525,14 +571,17 @@ impl Store {
         Ok(response)
     }
 
+    /// Rebuilds every embedding sidecar and the search index.
     pub async fn reindex(&self) -> Result<()> {
         self.reindex_all(true).await
     }
 
+    /// Rebuilds missing or stale embedding sidecars and the search index.
     pub async fn reindex_missing(&self) -> Result<()> {
         self.reindex_all(false).await
     }
 
+    /// Force-rebuilds embedding sidecars for selected page paths.
     pub async fn reindex_paths(&self, paths: &[String]) -> Result<()> {
         self.reindex_paths_mode(paths, true).await
     }
@@ -631,6 +680,7 @@ impl Store {
         Ok(())
     }
 
+    /// Returns current corpus, vector, push, and block status.
     pub fn status(&self) -> Result<StatusResponse> {
         let state = self.state.read();
         Ok(StatusResponse {
@@ -648,6 +698,7 @@ impl Store {
         })
     }
 
+    /// Refreshes external state and attempts one ordered push.
     pub fn push(&self) -> Result<PushState> {
         let _lock = self.lock_repository()?;
         git::recover_worktree(&self.root)?;
@@ -1236,7 +1287,7 @@ mod tests {
         );
         run_git(root, &["commit", "-q", "-m", "old snapshot"]);
 
-        let provider = Arc::new(AdvancingProvider {
+        let provider: Arc<dyn RetrievalProvider> = Arc::new(AdvancingProvider {
             root: root.to_path_buf(),
             advanced: AtomicBool::new(false),
         });
@@ -1265,13 +1316,13 @@ mod tests {
         run_git(root, &["commit", "-q", "-m", "invalid old snapshot"]);
 
         let (root, git_dir) = Store::prepare_repository(root).unwrap();
-        let provider = Arc::new(AdvancingProvider {
+        let provider: Arc<dyn RetrievalProvider> = Arc::new(AdvancingProvider {
             root: root.clone(),
             advanced: AtomicBool::new(true),
         });
         let mut advanced = false;
         let store =
-            Store::open_stable_with(root, git_dir, Some(provider), |root, _captured_head| {
+            Store::open_stable_with(&root, &git_dir, Some(&provider), |root, _captured_head| {
                 if !advanced {
                     fs::write(root.join(".mdstore/config.yaml"), config("new.md")).unwrap();
                     fs::write(root.join("new.md"), "new snapshot\n").unwrap();

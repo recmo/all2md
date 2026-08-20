@@ -1,3 +1,5 @@
+//! Command-line client and daemon entry point for mdstore.
+
 use std::{
     error::Error,
     fmt,

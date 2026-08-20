@@ -16,7 +16,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::{ApplyEditsRequest, Store, store::ValidationError};
 
+/// Preferred MCP protocol revision.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+/// Older MCP protocol revision accepted for compatibility.
 pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
 #[derive(Clone)]
@@ -25,6 +27,7 @@ struct AppState {
     bearer_token: Option<String>,
 }
 
+/// Builds the authenticated health, MCP, and daemon-CLI router.
 pub fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
     let state = AppState {
         store,
@@ -39,6 +42,7 @@ pub fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
         .with_state(state)
 }
 
+/// Serves the daemon until shutdown on the configured socket.
 pub async fn serve(
     store: Arc<Store>,
     listen: SocketAddr,
@@ -91,9 +95,9 @@ async fn cli(State(state): State<AppState>, Json(command): Json<CliCommand>) -> 
         CliCommand::Reindex => match state.store.reindex().await {
             Ok(()) => match state.store.status() {
                 Ok(status) => Json(json!(status)).into_response(),
-                Err(error) => internal_error(error),
+                Err(error) => internal_error(&error),
             },
-            Err(error) => internal_error(error),
+            Err(error) => internal_error(&error),
         },
         CliCommand::Push => match state.store.push() {
             Ok(push) => {
@@ -105,12 +109,12 @@ async fn cli(State(state): State<AppState>, Json(command): Json<CliCommand>) -> 
                 });
                 Json(json!(push)).into_response()
             }
-            Err(error) => internal_error(error),
+            Err(error) => internal_error(&error),
         },
     }
 }
 
-fn internal_error(error: anyhow::Error) -> Response {
+fn internal_error(error: &anyhow::Error) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({"error": error.to_string()})),
@@ -211,6 +215,7 @@ fn initialize(id: Value, params: &Value) -> Response {
 }
 
 #[must_use]
+/// Returns the exact public MCP tool allowlist.
 pub fn tool_names() -> [&'static str; 3] {
     ["search", "get_page", "apply_edits"]
 }
@@ -387,17 +392,17 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
 }
 
 fn rpc_result(id: Value, result: Value) -> Response {
-    (
-        StatusCode::OK,
-        Json(json!({"jsonrpc": "2.0", "id": id, "result": result})),
-    )
-        .into_response()
+    let mut response = serde_json::Map::new();
+    response.insert("jsonrpc".into(), json!("2.0"));
+    response.insert("id".into(), id);
+    response.insert("result".into(), result);
+    (StatusCode::OK, Json(Value::Object(response))).into_response()
 }
 
 fn rpc_error(id: Value, code: i64, message: &str) -> Response {
-    (
-        StatusCode::OK,
-        Json(json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})),
-    )
-        .into_response()
+    let mut response = serde_json::Map::new();
+    response.insert("jsonrpc".into(), json!("2.0"));
+    response.insert("id".into(), id);
+    response.insert("error".into(), json!({"code": code, "message": message}));
+    (StatusCode::OK, Json(Value::Object(response))).into_response()
 }

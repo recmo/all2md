@@ -10,25 +10,39 @@ const MAGIC: &[u8; 8] = b"MDSTORE\0";
 const VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Versioned embedding state derived from one Markdown page.
 pub struct Sidecar {
+    /// Binary schema version.
     pub version: u16,
+    /// Fingerprint of the complete source page.
     pub source_fingerprint: Vec<u8>,
+    /// Credential-free embedding backend identity.
     pub provider_identity: String,
+    /// Embedding model identifier.
     pub model: String,
+    /// Number of vector components per chunk.
     pub dimensions: usize,
+    /// Stored chunk metadata and vector bytes.
     pub chunks: Vec<SidecarChunk>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Stored metadata and vector bytes for one chunk.
 pub struct SidecarChunk {
+    /// First source line, one-based and inclusive.
     pub start_line: usize,
+    /// Last source line, one-based and inclusive.
     pub end_line: usize,
+    /// Heading breadcrumb captured when chunked.
     pub heading: Vec<String>,
+    /// Fingerprint of the embedding input.
     pub text_fingerprint: Vec<u8>,
+    /// Vector components encoded as little-endian `f32` values.
     pub vector_le_f32: Vec<u8>,
 }
 
 impl Sidecar {
+    /// Builds a sidecar after validating the supplied vectors.
     pub fn new(
         source: &str,
         provider_identity: &str,
@@ -62,6 +76,8 @@ impl Sidecar {
         })
     }
 
+    /// Returns vectors only when all source, provider, and chunk metadata match.
+    #[must_use]
     pub fn vectors_for(
         &self,
         source: &str,
@@ -107,10 +123,12 @@ impl Sidecar {
 }
 
 #[must_use]
+/// Returns the adjacent sidecar path for a Markdown page.
 pub fn sidecar_path(page: &Path) -> std::path::PathBuf {
     page.with_extension("mdstore")
 }
 
+/// Reads and decodes a sidecar.
 pub fn read(path: &Path) -> Result<Sidecar> {
     let bytes = fs::read(path).with_context(|| format!("read sidecar {}", path.display()))?;
     if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
@@ -119,6 +137,7 @@ pub fn read(path: &Path) -> Result<Sidecar> {
     serde_cbor::from_slice(&bytes[MAGIC.len()..]).context("decode mdstore CBOR sidecar")
 }
 
+/// Atomically replaces a sidecar with a versioned CBOR encoding.
 pub fn write_atomic(path: &Path, sidecar: &Sidecar) -> Result<()> {
     let parent = path.parent().context("sidecar has no parent")?;
     fs::create_dir_all(parent)?;
@@ -133,6 +152,7 @@ pub fn write_atomic(path: &Path, sidecar: &Sidecar) -> Result<()> {
 }
 
 #[must_use]
+/// Computes a stable source or embedding-input fingerprint.
 pub fn fingerprint(text: &str) -> Vec<u8> {
     Sha256::digest(text.as_bytes()).to_vec()
 }

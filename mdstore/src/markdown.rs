@@ -8,40 +8,62 @@ use serde::Serialize;
 use crate::config::{Config, RelationLinkSyntax, RelationSelector};
 
 #[derive(Debug, Clone, Serialize)]
+/// Parsed structural and authored-link information for one page.
 pub struct ParsedPage {
+    /// YAML frontmatter converted to JSON.
     pub frontmatter: serde_json::Value,
+    /// First body line after frontmatter, one-based.
     pub body_start_line: usize,
+    /// Parsed headings in source order.
     pub headings: Vec<Heading>,
+    /// Fenced and indented code block ranges.
     pub code_blocks: Vec<SourceRange>,
+    /// Source lines that begin or end structural blocks.
     pub structural_boundaries: Vec<usize>,
+    /// Authored Markdown and configured wiki links.
     pub links: Vec<RawLink>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
+/// Inclusive one-based source line range.
 pub struct SourceRange {
+    /// First line.
     pub start_line: usize,
+    /// Last line.
     pub end_line: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// A parsed Markdown heading.
 pub struct Heading {
+    /// Heading depth from one through six.
     pub level: u8,
+    /// Plain heading text.
     pub text: String,
+    /// One-based source line.
     pub line: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// An authored link before corpus target resolution.
 pub struct RawLink {
+    /// Raw authored target.
     pub target: String,
+    /// One-based source line.
     pub line: usize,
+    /// Syntax that produced the link.
     pub syntax: LinkSyntax,
+    /// Containing heading breadcrumb.
     pub sections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
+/// Supported authored link syntax.
 pub enum LinkSyntax {
+    /// Standard Markdown link.
     Markdown,
+    /// Repository-configured wiki link.
     Wiki,
 }
 
@@ -61,20 +83,29 @@ struct ResolvedLink {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+/// A resolved, typed relation edge between pages.
 pub struct Edge {
+    /// Source page path.
     pub source: String,
+    /// Configured relation name.
     pub relation: String,
+    /// Target page path.
     pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// A structured corpus validation finding.
 pub struct Finding {
+    /// Page or configuration resource path.
     pub path: String,
+    /// Human-readable validation message.
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional one-based source line.
     pub line: Option<usize>,
 }
 
+/// Parses one Markdown page according to configured link syntaxes.
 pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
     let (frontmatter, body_start_line, body) = parse_frontmatter(text)?;
     let mut headings = Vec::new();
@@ -293,6 +324,7 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
     anyhow::bail!("unterminated YAML frontmatter")
 }
 
+/// Successful parsed corpus and relation graph, or all validation findings.
 pub type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
 
 struct CompiledSchema {
@@ -300,6 +332,7 @@ struct CompiledSchema {
     validator: jsonschema::Validator,
 }
 
+/// Parses and validates the complete corpus and its configured resources.
 pub fn validate_corpus(
     config: &Config,
     pages: &HashMap<String, String>,
@@ -562,8 +595,8 @@ fn validate_reciprocals(config: &Config, edges: &[Edge], findings: &mut Vec<Find
             findings.push(Finding {
                 path: edge.source.clone(),
                 message: format!(
-                    "missing reciprocal {} edge from {} to {} for {} edge",
-                    reciprocal, edge.target, edge.source, edge.relation
+                    "missing reciprocal {reciprocal} edge from {} to {} for {} edge",
+                    edge.target, edge.source, edge.relation
                 ),
                 line: None,
             });
@@ -730,6 +763,8 @@ fn normalize_path(path: &Path) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
+/// Projects configured frontmatter fields into search result metadata.
+#[must_use]
 pub fn project_metadata(config: &Config, frontmatter: &serde_json::Value) -> serde_json::Value {
     let mut output = serde_json::Map::new();
     for (name, pointer) in &config.metadata {

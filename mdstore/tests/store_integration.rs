@@ -1,3 +1,5 @@
+//! End-to-end repository, daemon, MCP, and sidecar behavior tests.
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -190,9 +192,8 @@ fn command(root: &Path, arguments: &[&str]) -> String {
         .unwrap();
     assert!(
         output.status.success(),
-        "git {:?} failed: {}",
-        arguments,
-        String::from_utf8_lossy(&output.stderr)
+        "git {arguments:?} failed: {stderr}",
+        stderr = String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
 }

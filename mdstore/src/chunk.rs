@@ -3,11 +3,17 @@ use serde::{Deserialize, Serialize};
 use crate::{config::ChunkConfig, markdown::ParsedPage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A searchable excerpt and the context used to embed it.
 pub struct Chunk {
+    /// First source line, one-based and inclusive.
     pub start_line: usize,
+    /// Last source line, one-based and inclusive.
     pub end_line: usize,
+    /// Heading breadcrumb that contains the excerpt.
     pub heading: Vec<String>,
+    /// Source excerpt returned to callers.
     pub text: String,
+    /// Excerpt plus configured context sent to the embedding provider.
     pub embedding_text: String,
 }
 
@@ -19,6 +25,8 @@ struct Block {
     text: String,
 }
 
+/// Splits a parsed page into bounded, structure-aware excerpts.
+#[must_use]
 pub fn chunk_page(
     text: &str,
     parsed: &ParsedPage,
@@ -50,7 +58,7 @@ pub fn chunk_page(
                     config.max_chars,
                 );
             }
-            for split in split_block(block, body_limit) {
+            for split in split_block(&block, body_limit) {
                 push_chunk(
                     &mut chunks,
                     split,
@@ -200,7 +208,7 @@ fn is_setext_underline(line: &str) -> bool {
         && (trimmed.bytes().all(|byte| byte == b'=') || trimmed.bytes().all(|byte| byte == b'-'))
 }
 
-fn split_block(block: Block, max_chars: usize) -> Vec<Block> {
+fn split_block(block: &Block, max_chars: usize) -> Vec<Block> {
     let mut output = Vec::new();
     let mut start = 0;
     while start < block.text.len() {
@@ -274,7 +282,7 @@ fn push_chunk(
         .last()
         .map(|previous| tail(&previous.text, plan.overlap_chars))
         .unwrap_or_default();
-    chunks.push(to_chunk(block, plan.prefix, &overlap, max_chars));
+    chunks.push(to_chunk(block, &plan.prefix, &overlap, max_chars));
 }
 
 struct EmbeddingPlan {
@@ -314,7 +322,7 @@ fn embedding_plan(
     }
 }
 
-fn to_chunk(block: Block, prefix: String, overlap: &str, max_chars: usize) -> Chunk {
+fn to_chunk(block: Block, prefix: &str, overlap: &str, max_chars: usize) -> Chunk {
     let mut remaining = max_chars.saturating_sub(block.text.chars().count());
     let prefix = if prefix.is_empty() || remaining <= 2 {
         String::new()

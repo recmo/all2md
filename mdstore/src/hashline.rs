@@ -5,54 +5,95 @@ use thiserror::Error;
 use xxhash_rust::xxh32::xxh32;
 
 #[derive(Debug, Error, Clone, Serialize)]
+/// Failure to resolve or combine hashline edit anchors.
 pub enum HashlineError {
+    /// The anchor syntax is invalid.
     #[error("invalid anchor {0:?}")]
     InvalidAnchor(String),
+    /// No current line matches the anchor.
     #[error("stale anchor {anchor}; current neighborhood:\n{context}")]
-    StaleAnchor { anchor: String, context: String },
+    StaleAnchor {
+        /// Anchor supplied by the caller.
+        anchor: String,
+        /// Current nearby hashlines for recovery.
+        context: String,
+    },
+    /// More than one current line matches the anchor.
     #[error("ambiguous anchor {anchor}; matches lines {lines:?}")]
-    AmbiguousAnchor { anchor: String, lines: Vec<usize> },
+    AmbiguousAnchor {
+        /// Anchor supplied by the caller.
+        anchor: String,
+        /// One-based matching line numbers.
+        lines: Vec<usize>,
+    },
+    /// The inclusive range syntax or ordering is invalid.
     #[error("invalid range {0:?}")]
     InvalidRange(String),
+    /// Two operations modify overlapping source ranges.
     #[error("overlapping edits in {0}")]
     Overlap(String),
+    /// Operations on one path cannot be applied together.
     #[error("operation {0} is incompatible with other operations on the same path")]
     Incompatible(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+/// A hashline-anchored page edit.
 pub enum EditOperation {
+    /// Replaces an anchored line or inclusive range.
     Replace {
+        /// Repository-relative target path.
         path: String,
+        /// Hashline line or range anchor.
         anchor: String,
+        /// Replacement text.
         content: String,
     },
+    /// Inserts text before an anchored line or range.
     InsertBefore {
+        /// Repository-relative target path.
         path: String,
+        /// Hashline line or range anchor.
         anchor: String,
+        /// Text to insert.
         content: String,
     },
+    /// Inserts text after an anchored line or range.
     InsertAfter {
+        /// Repository-relative target path.
         path: String,
+        /// Hashline line or range anchor.
         anchor: String,
+        /// Text to insert.
         content: String,
     },
+    /// Deletes an anchored line or inclusive range.
     Delete {
+        /// Repository-relative target path.
         path: String,
+        /// Hashline line or range anchor.
         anchor: String,
     },
+    /// Creates a page that does not yet exist.
     CreatePage {
+        /// Repository-relative new page path.
         path: String,
+        /// Complete page text.
         content: String,
     },
+    /// Removes a page anchored by its complete current contents.
     RemovePage {
+        /// Repository-relative target path.
         path: String,
+        /// Hashline range covering the complete page.
         anchor: String,
     },
 }
 
 impl EditOperation {
+    /// Returns the repository-relative target path.
+    #[must_use]
     pub fn path(&self) -> &str {
         match self {
             Self::Replace { path, .. }
@@ -66,12 +107,14 @@ impl EditOperation {
 }
 
 #[must_use]
+/// Computes the two-digit hash used in a hashline anchor.
 pub fn short_hash(line: &str) -> String {
     let value = xxh32(line.trim_end().as_bytes(), 0) as u8;
     format!("{value:02x}")
 }
 
 #[must_use]
+/// Renders a page or line window as `LINE:HASH|content` records.
 pub fn render(text: &str, window: Option<(usize, usize)>) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let (start, end) = window.unwrap_or((1, lines.len()));
@@ -83,7 +126,7 @@ pub fn render(text: &str, window: Option<(usize, usize)>) -> String {
     lines[start - 1..end]
         .iter()
         .enumerate()
-        .map(|(offset, line)| format!("{}:{}|{}", start + offset, short_hash(line), line))
+        .map(|(offset, line)| format!("{}:{}|{line}", start + offset, short_hash(line)))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -109,16 +152,24 @@ enum ResolvedKind {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Changed line bounds in the post-edit page.
 pub struct ChangedRange {
+    /// First changed line, one-based and inclusive.
     pub start_line: usize,
+    /// Last changed line, one-based and inclusive.
     pub end_line: usize,
 }
 
+#[derive(Debug)]
+/// Resulting page texts and their changed line ranges.
 pub struct AppliedOperations {
+    /// Complete resulting text, or `None` for removed pages.
     pub changes: HashMap<String, Option<String>>,
+    /// Changed post-edit ranges keyed by path.
     pub changed_ranges: HashMap<String, Vec<ChangedRange>>,
 }
 
+/// Applies a batch against one immutable pre-edit snapshot.
 pub fn apply_operations(
     original: &HashMap<String, String>,
     operations: &[EditOperation],
@@ -126,6 +177,7 @@ pub fn apply_operations(
     Ok(apply_operations_with_ranges(original, operations)?.changes)
 }
 
+/// Applies a batch and returns post-edit changed line ranges.
 pub fn apply_operations_with_ranges(
     original: &HashMap<String, String>,
     operations: &[EditOperation],

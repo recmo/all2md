@@ -72,37 +72,51 @@ fn default_listen() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Complete repository-defined mdstore configuration.
 pub struct Config {
+    /// Markdown corpus selection rules.
     pub documents: DocumentConfig,
     #[serde(default)]
+    /// Frontmatter schema assignments.
     pub schemas: Vec<SchemaRule>,
     #[serde(default)]
+    /// Required or bounded heading rules.
     pub sections: Vec<SectionRule>,
     #[serde(default)]
+    /// Output metadata names mapped to JSON pointers.
     pub metadata: BTreeMap<String, String>,
     #[serde(default)]
+    /// Enabled Markdown and wiki-link syntaxes.
     pub links: LinkConfig,
     #[serde(default)]
+    /// Typed relation projections and reciprocal rules.
     pub relations: Vec<RelationRule>,
     #[serde(default)]
+    /// Chunk construction settings.
     pub chunking: ChunkConfig,
     #[serde(default)]
+    /// Retrieval and ranking settings.
     pub search: SearchConfig,
     #[serde(default)]
+    /// Embedding and reranking provider settings.
     pub provider: ProviderConfig,
     #[serde(default)]
+    /// Git push settings.
     pub git: GitConfig,
     #[serde(default)]
+    /// HTTP server settings.
     pub server: ServerConfig,
 }
 
 impl Config {
+    /// Parses and validates repository YAML configuration.
     pub fn from_yaml(text: &str) -> Result<Self> {
         let value: Self = serde_yaml::from_str(text).context("parse .mdstore/config.yaml")?;
         value.validate()?;
         Ok(value)
     }
 
+    /// Validates all configuration invariants.
     pub fn validate(&self) -> Result<()> {
         if self.documents.include.is_empty() {
             bail!("documents.include must contain at least one glob");
@@ -196,6 +210,7 @@ impl Config {
         Ok(())
     }
 
+    /// Compiles the document include and exclude glob sets.
     pub fn document_globs(&self) -> Result<(GlobSet, GlobSet)> {
         Ok((
             compile_globs(&self.documents.include)?,
@@ -230,6 +245,7 @@ fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validates a repository-relative path without accessing the filesystem.
 pub fn validate_repo_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
     if path.is_empty() || candidate.is_absolute() {
@@ -255,6 +271,7 @@ pub(crate) fn is_config_resource_path(path: &str) -> bool {
         })
 }
 
+/// Rejects repository paths whose existing ancestors contain symlinks.
 pub fn ensure_repository_path_safe(root: &Path, path: &str) -> Result<()> {
     validate_repo_path(path)?;
     let mut current = root.to_path_buf();
@@ -271,30 +288,42 @@ pub fn ensure_repository_path_safe(root: &Path, path: &str) -> Result<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Selects tracked Markdown files for the canonical corpus.
 pub struct DocumentConfig {
+    /// Glob patterns included in the corpus.
     pub include: Vec<String>,
     #[serde(default)]
+    /// Glob patterns removed from the included set.
     pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Assigns a JSON Schema resource to matching pages.
 pub struct SchemaRule {
+    /// Glob pattern selecting pages governed by the schema.
     pub include: String,
+    /// Repository-relative JSON Schema resource path.
     pub schema: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Constrains occurrences of a heading in selected pages.
 pub struct SectionRule {
     #[serde(default)]
+    /// Optional glob selecting pages governed by the rule.
     pub include: Option<String>,
+    /// Exact heading text to count.
     pub heading: String,
     #[serde(default)]
+    /// Requires at least one occurrence when true.
     pub required: bool,
     #[serde(default)]
+    /// Explicit minimum occurrence count.
     pub minimum: Option<usize>,
     #[serde(default)]
+    /// Optional maximum occurrence count.
     pub maximum: Option<usize>,
 }
 
@@ -308,10 +337,13 @@ impl SectionRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Configures authored link syntaxes.
 pub struct LinkConfig {
     #[serde(default = "default_true")]
+    /// Parses standard Markdown links when true.
     pub markdown: bool,
     #[serde(default)]
+    /// Regex patterns with a named `target` capture for wiki links.
     pub wiki: Vec<String>,
 }
 
@@ -326,30 +358,44 @@ impl Default for LinkConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Defines one typed relation and its optional reciprocal type.
 pub struct RelationRule {
+    /// Stable relation name.
     pub name: String,
     #[serde(default)]
+    /// Relation name required on the reverse edge.
     pub reciprocal: Option<String>,
+    /// Authored data selected as relation targets.
     pub selector: RelationSelector,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Selects relation targets from links or frontmatter.
 pub enum RelationSelector {
+    /// Selects resolved links from matching pages or sections.
     MarkdownLinks {
         #[serde(default)]
+        /// Optional source-page glob.
         include: Option<String>,
         #[serde(default)]
+        /// Optional containing heading text.
         section: Option<String>,
         #[serde(default)]
+        /// Optional required authored link syntax.
         syntax: Option<RelationLinkSyntax>,
     },
+    /// Selects target records from a frontmatter array.
     Frontmatter {
+        /// JSON pointer to the array of relation records.
         array_pointer: String,
+        /// JSON pointer within each record to its target string.
         target_pointer: String,
         #[serde(default)]
+        /// Optional JSON pointer used to discriminate record types.
         type_pointer: Option<String>,
         #[serde(default)]
+        /// Required value at `type_pointer` for selected records.
         type_value: Option<serde_json::Value>,
     },
 }
@@ -389,23 +435,32 @@ impl RelationSelector {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Authored link syntax used by a relation selector.
 pub enum RelationLinkSyntax {
+    /// Standard Markdown link.
     Markdown,
+    /// Configured wiki-link form.
     Wiki,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Controls structure-aware Markdown chunking.
 pub struct ChunkConfig {
     #[serde(default = "default_chunk_tokens")]
+    /// Approximate target chunk size in tokens.
     pub target_tokens: usize,
     #[serde(default = "default_overlap_percent")]
+    /// Percentage of the prior excerpt carried into embedding context.
     pub overlap_percent: usize,
     #[serde(default = "default_max_chars")]
+    /// Hard character ceiling for each embedding input.
     pub max_chars: usize,
     #[serde(default)]
+    /// Heading texts whose complete sections are excluded.
     pub exclude_sections: Vec<String>,
     #[serde(default)]
+    /// Frontmatter JSON pointers prepended to embedding context.
     pub context_pointers: Vec<String>,
 }
 
@@ -423,14 +478,19 @@ impl Default for ChunkConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Controls retrieval, fusion, graph signals, and result counts.
 pub struct SearchConfig {
     #[serde(default = "default_limit")]
+    /// Maximum number of returned results.
     pub limit: usize,
     #[serde(default = "default_candidates")]
+    /// Candidate count retained before reranking.
     pub candidates: usize,
     #[serde(default = "default_rrf_k")]
+    /// Reciprocal-rank-fusion offset.
     pub rrf_k: f64,
     #[serde(default = "default_graph_weight")]
+    /// Weight applied to degree-normalized graph neighbors.
     pub graph_weight: f64,
 }
 
@@ -451,20 +511,28 @@ impl Default for SearchConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Configures the external embedding and reranking provider.
 pub struct ProviderConfig {
     #[serde(default = "default_base_url")]
+    /// Provider API base URL.
     pub base_url: String,
     #[serde(default = "default_api_key_env")]
+    /// Environment variable containing the API key.
     pub api_key_env: String,
     #[serde(default = "default_embed_model")]
+    /// Embedding model identifier.
     pub embedding_model: String,
     #[serde(default = "default_rerank_model")]
+    /// Reranking model identifier.
     pub rerank_model: String,
     #[serde(default = "default_dimensions")]
+    /// Requested embedding dimensions.
     pub dimensions: usize,
     #[serde(default)]
+    /// Optional document embedding batch size.
     pub batch_size: Option<usize>,
     #[serde(default = "default_request_timeout_seconds")]
+    /// Per-request network timeout in seconds.
     pub request_timeout_seconds: u64,
 }
 
@@ -484,12 +552,16 @@ impl Default for ProviderConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Controls ordered pushes of accepted commits.
 pub struct GitConfig {
     #[serde(default = "default_true")]
+    /// Pushes accepted commits when true.
     pub push: bool,
     #[serde(default)]
+    /// Optional remote used to establish or update the upstream.
     pub remote: Option<String>,
     #[serde(default = "default_push_timeout_seconds")]
+    /// Maximum synchronous push duration in seconds.
     pub push_timeout_seconds: u64,
 }
 
@@ -505,10 +577,13 @@ impl Default for GitConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Configures the daemon HTTP listener and authentication source.
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
+    /// Fixed IP socket address on which the daemon listens.
     pub listen: String,
     #[serde(default)]
+    /// Optional environment variable containing the bearer token.
     pub bearer_token_env: Option<String>,
 }
 

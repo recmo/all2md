@@ -10,7 +10,9 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
+/// Immutable exact, vector, and graph retrieval index.
 pub struct SearchIndex {
+    /// Indexed chunks in deterministic repository order.
     pub chunks: Vec<IndexedChunk>,
     document_frequency: HashMap<String, usize>,
     average_length: f64,
@@ -19,46 +21,72 @@ pub struct SearchIndex {
 }
 
 #[derive(Debug, Clone)]
+/// Searchable fields and optional vector for one chunk.
 pub struct IndexedChunk {
+    /// Repository-relative page path.
     pub path: String,
+    /// Source excerpt and embedding context.
     pub chunk: Chunk,
+    /// Repository-configured projected metadata.
     pub metadata: serde_json::Value,
+    /// Combined text used by exact retrieval.
     pub search_text: String,
+    /// Exact-search term frequencies.
     pub terms: HashMap<String, usize>,
+    /// Valid sidecar vector, when available.
     pub vector: Option<Vec<f32>>,
 }
 
+/// Prebuilt chunks and optional vectors keyed by page path.
 pub type PageChunks = HashMap<String, Vec<(Chunk, Option<Vec<f32>>)>>;
 
 #[derive(Debug, Clone, Serialize)]
+/// Ranked search results and any provider degradation.
 pub struct SearchResponse {
+    /// Results in final rank order.
     pub results: Vec<SearchResult>,
+    /// Retrieval arms that failed or returned invalid data.
     pub degraded: Vec<String>,
+    /// Current vector availability across indexed chunks.
     pub vector_coverage: VectorCoverage,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// Available and total indexed vectors.
 pub struct VectorCoverage {
+    /// Chunks with a valid vector.
     pub ready: usize,
+    /// Total indexed chunks.
     pub total: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// One ranked searchable excerpt.
 pub struct SearchResult {
+    /// Repository-relative page path.
     pub path: String,
+    /// Repository-configured projected metadata.
     pub metadata: serde_json::Value,
+    /// Heading breadcrumb containing the excerpt.
     pub heading: Vec<String>,
+    /// First excerpt line, one-based and inclusive.
     pub start_line: usize,
+    /// Last excerpt line, one-based and inclusive.
     pub end_line: usize,
+    /// Source excerpt without embedding-only context.
     pub excerpt: String,
+    /// Exact, vector, or graph arms that contributed.
     pub matched_arms: Vec<String>,
+    /// Reciprocal-rank-fusion score before reranking.
     pub fused_score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Provider reranking score, when reranking succeeded.
     pub rerank_score: Option<f64>,
 }
 
 impl SearchIndex {
     #[must_use]
+    /// Builds a deterministic index from validated pages and sidecar vectors.
     pub fn build(
         config: &Config,
         pages: &HashMap<String, String>,
@@ -83,13 +111,9 @@ impl SearchIndex {
             });
             let metadata = project_metadata(config, &page.frontmatter);
             for (chunk, vector) in values {
-                let search_text = format!(
-                    "{} {} {} {}",
-                    path,
-                    metadata,
-                    chunk.heading.join(" "),
-                    chunk.text
-                );
+                let heading = chunk.heading.join(" ");
+                let text = &chunk.text;
+                let search_text = format!("{path} {metadata} {heading} {text}");
                 let terms = term_counts(&search_text);
                 first_chunk.entry(path.clone()).or_insert(chunks.len());
                 chunks.push(IndexedChunk {
@@ -138,6 +162,7 @@ impl SearchIndex {
         }
     }
 
+    /// Runs exact and vector retrieval, graph expansion, fusion, and reranking.
     pub async fn search(
         &self,
         config: &Config,
@@ -290,9 +315,11 @@ impl SearchIndex {
                     continue;
                 }
                 let frequency_docs = self.document_frequency.get(term).copied().unwrap_or(0) as f64;
-                let idf = ((count - frequency_docs + 0.5) / (frequency_docs + 0.5) + 1.0).ln();
-                let denominator =
-                    frequency + 1.2 * (1.0 - 0.75 + 0.75 * length / self.average_length.max(1.0));
+                let idf = ((count - frequency_docs + 0.5) / (frequency_docs + 0.5)).ln_1p();
+                let denominator = 1.2_f64.mul_add(
+                    1.0 - 0.75 + 0.75 * length / self.average_length.max(1.0),
+                    frequency,
+                );
                 score += idf * frequency * 2.2 / denominator;
             }
             let lowered = chunk.search_text.to_lowercase();
@@ -391,9 +418,9 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
     for (left, right) in left.iter().zip(right) {
         let left = f64::from(*left);
         let right = f64::from(*right);
-        dot += left * right;
-        left_norm += left * left;
-        right_norm += right * right;
+        dot = left.mul_add(right, dot);
+        left_norm = left.mul_add(left, left_norm);
+        right_norm = right.mul_add(right, right_norm);
     }
     if left_norm == 0.0 || right_norm == 0.0 {
         0.0

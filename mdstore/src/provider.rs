@@ -6,22 +6,31 @@ use serde::{Deserialize, Serialize};
 use crate::config::ProviderConfig;
 
 #[async_trait]
+/// Supplies query/document embeddings and final reranking.
 pub trait RetrievalProvider: Send + Sync {
+    /// Embeds inputs in the provider mode appropriate to their role.
     async fn embed(&self, input_type: InputType, input: &[String]) -> Result<Vec<Vec<f32>>>;
+    /// Reranks candidate documents for the original query.
     async fn rerank(
         &self,
         query: &str,
         documents: &[String],
         top_n: usize,
     ) -> Result<Vec<RerankResult>>;
+    /// Returns the embedding model identifier.
     fn model(&self) -> &str;
+    /// Returns the embedding vector dimensions.
     fn dimensions(&self) -> usize;
+    /// Returns a credential-free embedding backend identity.
     fn embedding_provider_identity(&self) -> String;
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Provider input mode for embedding requests.
 pub enum InputType {
+    /// Search query or caller-supplied query variant.
     Query,
+    /// Persisted document chunk.
     Document,
 }
 
@@ -80,20 +89,35 @@ impl InputType {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+/// One provider reranking result.
 pub struct RerankResult {
+    /// Index into the submitted document array.
     pub index: usize,
+    /// Provider relevance score.
     pub relevance_score: f64,
 }
 
 #[derive(Clone)]
+/// HTTP client for the ZeroEntropy embedding and reranking APIs.
 pub struct ZeroEntropyProvider {
     client: reqwest::Client,
     config: ProviderConfig,
     api_key: Option<String>,
 }
 
+impl std::fmt::Debug for ZeroEntropyProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ZeroEntropyProvider")
+            .field("config", &self.config)
+            .field("api_key_configured", &self.api_key.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ZeroEntropyProvider {
     #[must_use]
+    /// Creates a bounded HTTP client and snapshots the configured API key.
     pub fn new(config: ProviderConfig) -> Self {
         let api_key = std::env::var(&config.api_key_env)
             .ok()
@@ -111,7 +135,7 @@ impl ZeroEntropyProvider {
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}/{}", self.config.base_url.trim_end_matches('/'), path)
+        format!("{}/{path}", self.config.base_url.trim_end_matches('/'))
     }
 
     fn key(&self) -> Result<&str> {

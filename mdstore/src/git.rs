@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     fs,
-    io::{Read, Seek, Write},
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
@@ -17,13 +17,19 @@ use crate::config::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+/// Outcome of an ordered push attempt.
 pub enum PushState {
+    /// Pushing is disabled by repository configuration.
     Disabled,
+    /// All local commits reached the configured upstream.
     Pushed,
+    /// Commits remain queued after a temporary failure or timeout.
     Queued,
+    /// Remote history prevents a fast-forward push.
     Diverged,
 }
 
+/// Requires `root` to be a Git worktree top level.
 pub fn ensure_repository(root: &Path) -> Result<()> {
     let output = run(root, ["rev-parse", "--is-inside-work-tree"])?;
     if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "true" {
@@ -32,6 +38,7 @@ pub fn ensure_repository(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Returns the worktree's Git metadata directory.
 pub fn git_dir(root: &Path) -> Result<PathBuf> {
     let output = checked(root, ["rev-parse", "--git-dir"])?;
     let path = PathBuf::from(String::from_utf8(output.stdout)?.trim());
@@ -42,6 +49,7 @@ pub fn git_dir(root: &Path) -> Result<PathBuf> {
     })
 }
 
+/// Lists tracked Markdown selected by the configuration at a revision.
 pub fn tracked_markdown(root: &Path, revision: &str, config: &Config) -> Result<Vec<String>> {
     let output = checked(root, ["ls-tree", "-r", "--name-only", "-z", revision])?;
     let (include, exclude) = config.document_globs()?;
@@ -55,6 +63,7 @@ pub fn tracked_markdown(root: &Path, revision: &str, config: &Config) -> Result<
         .collect())
 }
 
+/// Lists tracked YAML and JSON resources below `.mdstore`.
 pub fn tracked_config_files(root: &Path, revision: &str) -> Result<Vec<String>> {
     let output = checked(root, ["ls-tree", "-r", "--name-only", "-z", revision])?;
     Ok(output
@@ -66,6 +75,7 @@ pub fn tracked_config_files(root: &Path, revision: &str) -> Result<Vec<String>> 
         .collect())
 }
 
+/// Lists ignored, untracked adjacent embedding sidecars.
 pub fn untracked_sidecars(root: &Path) -> Result<Vec<String>> {
     let output = checked(
         root,
@@ -86,6 +96,7 @@ pub fn untracked_sidecars(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Returns whether an exact repository path is tracked.
 pub fn is_tracked(root: &Path, path: &str) -> Result<bool> {
     validate_repo_path(path)?;
     let pathspec = literal_pathspec(path);
@@ -94,12 +105,14 @@ pub fn is_tracked(root: &Path, path: &str) -> Result<bool> {
         .success())
 }
 
+/// Returns whether an exact repository path is ignored.
 pub fn is_ignored(root: &Path, path: &str) -> Result<bool> {
     Ok(run(root, ["check-ignore", "--quiet", "--", path])?
         .status
         .success())
 }
 
+/// Requires every exact path to be both ignored and untracked.
 pub fn ensure_ignored<'a>(root: &Path, paths: impl IntoIterator<Item = &'a str>) -> Result<()> {
     let paths: BTreeSet<&str> = paths.into_iter().collect();
     if paths.is_empty() {
@@ -150,11 +163,13 @@ pub fn ensure_ignored<'a>(root: &Path, paths: impl IntoIterator<Item = &'a str>)
     Ok(())
 }
 
+/// Returns the current `HEAD` object ID.
 pub fn head(root: &Path) -> Result<String> {
     let output = checked(root, ["rev-parse", "HEAD"])?;
     Ok(String::from_utf8(output.stdout)?.trim().into())
 }
 
+/// Reads a regular UTF-8 file from a specific revision without filters.
 pub fn read_text(root: &Path, revision: &str, path: &str) -> Result<String> {
     validate_repo_path(path)?;
     let pathspec = literal_pathspec(path);
@@ -170,10 +185,12 @@ pub fn read_text(root: &Path, revision: &str, path: &str) -> Result<String> {
     String::from_utf8(output.stdout).context("committed repository file is not UTF-8")
 }
 
+/// Reads a regular UTF-8 file from `HEAD` without filters.
 pub fn read_head_text(root: &Path, path: &str) -> Result<String> {
     read_text(root, "HEAD", path)
 }
 
+/// Restores tracked files and quarantines direct Markdown additions.
 pub fn recover_worktree(root: &Path) -> Result<Vec<String>> {
     let worktree = checked(root, ["diff", "--name-only", "-z"])?;
     let staged = checked(
@@ -306,6 +323,7 @@ fn create_quarantine_directory(root: &Path) -> Result<PathBuf> {
     unreachable!()
 }
 
+/// Atomically materializes validated changes in the worktree.
 pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Result<()> {
     for (path, content) in changes {
         validate_repo_path(path)?;
@@ -331,6 +349,7 @@ pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Resul
     Ok(())
 }
 
+/// Builds a tree from validated bytes using an isolated temporary index.
 pub fn stage_tree(
     root: &Path,
     base: &str,
@@ -343,68 +362,62 @@ pub fn stage_tree(
     let base_tree = String::from_utf8(base_tree.stdout)?.trim().to_owned();
     for (path, content) in changes {
         validate_repo_path(path)?;
-        match content {
-            Some(content) => {
-                let mut child = Command::new("git")
-                    .current_dir(root)
-                    .args(["hash-object", "-w", "--no-filters", "--stdin"])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .with_context(|| format!("store edited contents for {path}"))?;
-                child
-                    .stdin
-                    .take()
-                    .context("open git hash-object input")?
-                    .write_all(content.as_bytes())?;
-                let output = child.wait_with_output()?;
-                if !output.status.success() {
-                    bail!(
-                        "git hash-object failed for {path}: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-                let object = String::from_utf8(output.stdout)?.trim().to_owned();
-                let pathspec = literal_pathspec(path);
-                let existing = checked_with_index(
-                    root,
-                    &index,
-                    ["ls-files", "--stage", "-z", "--", &pathspec],
-                )?;
-                let mode = existing
-                    .stdout
-                    .split(|byte| *byte == b' ')
-                    .next()
-                    .filter(|mode| !mode.is_empty())
-                    .map(String::from_utf8_lossy)
-                    .unwrap_or_else(|| "100644".into());
-                let cacheinfo = format!("{mode},{object},{path}");
-                let output = run_with_index(
-                    root,
-                    &index,
-                    ["update-index", "--add", "--cacheinfo", &cacheinfo],
-                )?;
-                if !output.status.success() {
-                    bail!(
-                        "git update-index failed for {path}: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
+        if let Some(content) = content {
+            let mut child = Command::new("git")
+                .current_dir(root)
+                .args(["hash-object", "-w", "--no-filters", "--stdin"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .with_context(|| format!("store edited contents for {path}"))?;
+            child
+                .stdin
+                .take()
+                .context("open git hash-object input")?
+                .write_all(content.as_bytes())?;
+            let output = child.wait_with_output()?;
+            if !output.status.success() {
+                bail!(
+                    "git hash-object failed for {path}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
-            None => {
-                let pathspec = literal_pathspec(path);
-                let output = run_with_index(
-                    root,
-                    &index,
-                    ["update-index", "--force-remove", "--", &pathspec],
-                )?;
-                if !output.status.success() {
-                    bail!(
-                        "git update-index failed for {path}: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
+            let object = String::from_utf8(output.stdout)?.trim().to_owned();
+            let pathspec = literal_pathspec(path);
+            let existing =
+                checked_with_index(root, &index, ["ls-files", "--stage", "-z", "--", &pathspec])?;
+            let mode = existing
+                .stdout
+                .split(|byte| *byte == b' ')
+                .next()
+                .filter(|mode| !mode.is_empty())
+                .map(String::from_utf8_lossy)
+                .unwrap_or_else(|| "100644".into());
+            let cacheinfo = format!("{mode},{object},{path}");
+            let output = run_with_index(
+                root,
+                &index,
+                ["update-index", "--add", "--cacheinfo", &cacheinfo],
+            )?;
+            if !output.status.success() {
+                bail!(
+                    "git update-index failed for {path}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        } else {
+            let pathspec = literal_pathspec(path);
+            let output = run_with_index(
+                root,
+                &index,
+                ["update-index", "--force-remove", "--", &pathspec],
+            )?;
+            if !output.status.success() {
+                bail!(
+                    "git update-index failed for {path}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
         }
     }
@@ -416,6 +429,7 @@ pub fn stage_tree(
     Ok(Some(tree))
 }
 
+/// Creates a commit with an exact message and advances the branch by CAS.
 pub fn commit_tree(root: &Path, tree: &str, parent: &str, summary: &str) -> Result<String> {
     let reference = checked(root, ["symbolic-ref", "-q", "HEAD"])?;
     let reference = String::from_utf8(reference.stdout)?.trim().to_owned();
@@ -460,6 +474,7 @@ pub fn commit_tree(root: &Path, tree: &str, parent: &str, summary: &str) -> Resu
     Ok(commit)
 }
 
+/// Synchronizes exact real-index paths to a committed revision.
 pub fn sync_index(root: &Path, revision: &str, paths: &[String]) -> Result<()> {
     let pathspecs: Vec<String> = paths.iter().map(|path| literal_pathspec(path)).collect();
     let mut command = Command::new("git");
@@ -479,6 +494,7 @@ pub fn sync_index(root: &Path, revision: &str, paths: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Returns whether history after `base` contains the exact tree.
 pub fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool> {
     let ancestor = run(root, ["merge-base", "--is-ancestor", base, "HEAD"])?;
     if !ancestor.status.success() {
@@ -491,6 +507,7 @@ pub fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool
         .any(|candidate| candidate == tree))
 }
 
+/// Restores exact paths from the current winning `HEAD`.
 pub fn rollback(root: &Path, paths: &[String]) -> Result<()> {
     let mut present = Vec::new();
     let mut absent = Vec::new();
@@ -543,6 +560,8 @@ pub fn rollback(root: &Path, paths: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Attempts one bounded, ordered push.
+#[must_use]
 pub fn push(root: &Path, config: &Config) -> PushState {
     if !config.git.push {
         return PushState::Disabled;
@@ -565,10 +584,10 @@ pub fn push(root: &Path, config: &Config) -> PushState {
 }
 
 fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Option<Output>> {
-    let mut stderr = tempfile::tempfile()?;
+    let stderr = tempfile::NamedTempFile::new()?;
     command
         .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr.try_clone()?));
+        .stderr(Stdio::from(stderr.reopen()?));
     let mut child = command.spawn()?;
     let started = Instant::now();
     let status = loop {
@@ -582,9 +601,7 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Optio
         }
         thread::sleep(Duration::from_millis(10));
     };
-    stderr.rewind()?;
-    let mut error = Vec::new();
-    stderr.read_to_end(&mut error)?;
+    let error = fs::read(stderr.path())?;
     Ok(Some(Output {
         status,
         stdout: Vec::new(),
@@ -605,6 +622,7 @@ fn literal_pathspec(path: &str) -> String {
     format!(":(literal){path}")
 }
 
+/// Returns whether `HEAD` contains commits absent from its upstream.
 pub fn has_unpushed(root: &Path) -> Result<bool> {
     if !run(root, ["rev-parse", "--verify", "@{upstream}"])?
         .status
