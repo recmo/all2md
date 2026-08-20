@@ -9,7 +9,7 @@ use crate::config::{Config, RelationLinkSyntax, RelationSelector};
 
 #[derive(Debug, Clone, Serialize)]
 /// Parsed structural and authored-link information for one page.
-pub struct ParsedPage {
+pub(crate) struct ParsedPage {
     /// YAML frontmatter converted to JSON.
     pub frontmatter: serde_json::Value,
     /// First body line after frontmatter, one-based.
@@ -26,7 +26,7 @@ pub struct ParsedPage {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 /// Inclusive one-based source line range.
-pub struct SourceRange {
+pub(crate) struct SourceRange {
     /// First line.
     pub start_line: usize,
     /// Last line.
@@ -35,7 +35,7 @@ pub struct SourceRange {
 
 #[derive(Debug, Clone, Serialize)]
 /// A parsed Markdown heading.
-pub struct Heading {
+pub(crate) struct Heading {
     /// Heading depth from one through six.
     pub level: u8,
     /// Plain heading text.
@@ -46,7 +46,7 @@ pub struct Heading {
 
 #[derive(Debug, Clone, Serialize)]
 /// An authored link before corpus target resolution.
-pub struct RawLink {
+pub(crate) struct RawLink {
     /// Raw authored target.
     pub target: String,
     /// One-based source line.
@@ -60,7 +60,7 @@ pub struct RawLink {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 /// Supported authored link syntax.
-pub enum LinkSyntax {
+pub(crate) enum LinkSyntax {
     /// Standard Markdown link.
     Markdown,
     /// Repository-configured wiki link.
@@ -106,7 +106,7 @@ pub struct Finding {
 }
 
 /// Parses one Markdown page according to configured link syntaxes.
-pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
+pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
     let (frontmatter, body_start_line, body) = parse_frontmatter(text)?;
     let mut headings = Vec::new();
     let mut code_blocks = Vec::new();
@@ -325,7 +325,7 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
 }
 
 /// Successful parsed corpus and relation graph, or all validation findings.
-pub type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
+pub(crate) type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
 
 struct CompiledSchema {
     matcher: globset::GlobMatcher,
@@ -333,7 +333,7 @@ struct CompiledSchema {
 }
 
 /// Parses and validates the complete corpus and its configured resources.
-pub fn validate_corpus(
+pub(crate) fn validate_corpus(
     config: &Config,
     pages: &HashMap<String, String>,
     extra_files: &HashMap<String, String>,
@@ -765,7 +765,10 @@ fn normalize_path(path: &Path) -> Result<String, String> {
 
 /// Projects configured frontmatter fields into search result metadata.
 #[must_use]
-pub fn project_metadata(config: &Config, frontmatter: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn project_metadata(
+    config: &Config,
+    frontmatter: &serde_json::Value,
+) -> serde_json::Value {
     let mut output = serde_json::Map::new();
     for (name, pointer) in &config.metadata {
         if let Some(value) = frontmatter.pointer(pointer) {

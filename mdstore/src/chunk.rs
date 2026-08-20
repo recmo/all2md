@@ -4,7 +4,7 @@ use crate::{config::ChunkConfig, markdown::ParsedPage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// A searchable excerpt and the context used to embed it.
-pub struct Chunk {
+pub(crate) struct Chunk {
     /// First source line, one-based and inclusive.
     pub start_line: usize,
     /// Last source line, one-based and inclusive.
@@ -27,7 +27,7 @@ struct Block {
 
 /// Splits a parsed page into bounded, structure-aware excerpts.
 #[must_use]
-pub fn chunk_page(
+pub(crate) fn chunk_page(
     text: &str,
     parsed: &ParsedPage,
     config: &ChunkConfig,

@@ -246,7 +246,7 @@ fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
 }
 
 /// Validates a repository-relative path without accessing the filesystem.
-pub fn validate_repo_path(path: &str) -> Result<()> {
+pub(crate) fn validate_repo_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
     if path.is_empty() || candidate.is_absolute() {
         bail!("path must stay within the repository: {path}");
@@ -272,7 +272,7 @@ pub(crate) fn is_config_resource_path(path: &str) -> bool {
 }
 
 /// Rejects repository paths whose existing ancestors contain symlinks.
-pub fn ensure_repository_path_safe(root: &Path, path: &str) -> Result<()> {
+pub(crate) fn ensure_repository_path_safe(root: &Path, path: &str) -> Result<()> {
     validate_repo_path(path)?;
     let mut current = root.to_path_buf();
     for component in Path::new(path).components() {

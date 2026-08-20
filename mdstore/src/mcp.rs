@@ -64,7 +64,7 @@ pub async fn serve(
 }
 
 async fn health(State(state): State<AppState>) -> Response {
-    match state.store.status() {
+    match run_blocking(move || state.store.status()).await {
         Ok(status) => (
             StatusCode::OK,
             Json(json!({"status": "ok", "store": status})),
@@ -88,30 +88,48 @@ enum CliCommand {
 
 async fn cli(State(state): State<AppState>, Json(command): Json<CliCommand>) -> Response {
     match command {
-        CliCommand::Validate => match state.store.validate() {
-            Ok(()) => Json(json!({"valid": true})).into_response(),
-            Err(findings) => Json(json!({"valid": false, "findings": findings})).into_response(),
-        },
+        CliCommand::Validate => {
+            let store = state.store.clone();
+            match run_blocking(move || Ok(store.validate())).await {
+                Ok(Ok(())) => Json(json!({"valid": true})).into_response(),
+                Ok(Err(findings)) => {
+                    Json(json!({"valid": false, "findings": findings})).into_response()
+                }
+                Err(error) => internal_error(&error),
+            }
+        }
         CliCommand::Reindex => match state.store.reindex().await {
-            Ok(()) => match state.store.status() {
+            Ok(()) => match run_blocking(move || state.store.status()).await {
                 Ok(status) => Json(json!(status)).into_response(),
                 Err(error) => internal_error(&error),
             },
             Err(error) => internal_error(&error),
         },
-        CliCommand::Push => match state.store.push() {
-            Ok(push) => {
-                let background = state.store.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = background.reindex_missing().await {
-                        tracing::warn!(%error, "post-refresh embedding rebuild is degraded");
-                    }
-                });
-                Json(json!(push)).into_response()
+        CliCommand::Push => {
+            let store = state.store.clone();
+            match run_blocking(move || store.push()).await {
+                Ok(push) => {
+                    let background = state.store.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = background.reindex_missing().await {
+                            tracing::warn!(%error, "post-refresh embedding rebuild is degraded");
+                        }
+                    });
+                    Json(json!(push)).into_response()
+                }
+                Err(error) => internal_error(&error),
             }
-            Err(error) => internal_error(&error),
-        },
+        }
     }
+}
+
+async fn run_blocking<T>(operation: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .context("blocking daemon operation failed")?
 }
 
 fn internal_error(error: &anyhow::Error) -> Response {
@@ -350,18 +368,21 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             Err(error) => Err(error.into()),
         },
         "apply_edits" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
-            Ok(arguments) => match store.apply_edits(&arguments) {
-                Ok(value) => {
-                    let background = Arc::clone(store);
-                    tokio::spawn(async move {
-                        if let Err(error) = background.reindex_missing().await {
-                            tracing::warn!(%error, "post-edit embedding rebuild is degraded");
-                        }
-                    });
-                    serde_json::to_value(value).map_err(Into::into)
+            Ok(arguments) => {
+                let blocking_store = Arc::clone(store);
+                match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
+                    Ok(value) => {
+                        let background = Arc::clone(store);
+                        tokio::spawn(async move {
+                            if let Err(error) = background.reindex_missing().await {
+                                tracing::warn!(%error, "post-edit embedding rebuild is degraded");
+                            }
+                        });
+                        serde_json::to_value(value).map_err(Into::into)
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            },
+            }
             Err(error) => Err(error.into()),
         },
         _ => return rpc_error(id, -32602, "unknown tool"),

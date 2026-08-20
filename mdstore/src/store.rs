@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    chunk::chunk_page,
+    chunk::{Chunk, chunk_page},
     config::{
         Config, ProviderConfig, ensure_repository_path_safe, is_config_resource_path,
         validate_repo_path,
@@ -137,6 +137,27 @@ enum ReplayState {
     Applied,
     Reverted,
     Partial,
+}
+
+struct ReindexContext {
+    config: Config,
+    pages: HashMap<String, String>,
+    parsed: HashMap<String, ParsedPage>,
+    edges: Vec<Edge>,
+    provider: Arc<dyn RetrievalProvider>,
+    provider_identity: String,
+    model: String,
+    dimensions: usize,
+    actions: Vec<ReindexAction>,
+}
+
+enum ReindexAction {
+    Remove(PathBuf),
+    Embed {
+        text: String,
+        chunks: Vec<Chunk>,
+        sidecar_path: PathBuf,
+    },
 }
 
 const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
@@ -540,6 +561,7 @@ impl Store {
             &edges,
             provider.as_ref(),
         );
+        let push_config = config.clone();
         *self.state.write() = StoreState {
             config,
             config_files: extra,
@@ -550,7 +572,7 @@ impl Store {
             provider,
             generation: current.generation + 1,
         };
-        let push = git::push(&self.root, &self.state.read().config);
+        let push = git::push(&self.root, &push_config);
         if matches!(push, PushState::Diverged) {
             self.set_blocked(Some("remote history diverged".into()))?;
         }
@@ -588,7 +610,9 @@ impl Store {
 
     async fn reindex_all(&self, force: bool) -> Result<()> {
         let mut paths: BTreeSet<String> = self.state.read().pages.keys().cloned().collect();
-        paths.extend(orphaned_sidecar_sources(&self.root, &paths)?);
+        let root = self.root.clone();
+        let current = paths.clone();
+        paths.extend(blocking(move || orphaned_sidecar_sources(&root, &current)).await?);
         let paths: Vec<String> = paths.into_iter().collect();
         self.reindex_paths_mode(&paths, force).await
     }
@@ -597,82 +621,84 @@ impl Store {
         let _guard = self.reindex_lock.lock().await;
         let snapshot = self.state.read().clone();
         let generation = snapshot.generation;
-        let config = snapshot.config;
-        let pages = snapshot.pages;
-        let parsed = snapshot.parsed;
-        let edges = snapshot.edges;
-        let provider = snapshot.provider;
-        let provider_identity = provider.embedding_provider_identity();
-        ensure_sidecars_ignored(
-            &self.root,
-            pages
-                .keys()
-                .map(String::as_str)
-                .chain(paths.iter().map(String::as_str)),
-        )?;
-        for path in paths {
-            let Some(text) = pages.get(path) else {
-                let path = sidecar::sidecar_path(&self.root.join(path));
-                if self.state.read().generation != generation {
-                    return Ok(());
-                }
-                if path.exists() {
-                    fs::remove_file(path)?;
-                }
-                continue;
-            };
-            let page = parsed.get(path).context("missing parsed page")?;
-            let context = embedding_context(&config, page);
-            let chunks = chunk_page(text, page, &config.chunking, &context);
-            let sidecar_path = sidecar::sidecar_path(&self.root.join(path));
-            if !force
-                && sidecar::read(&sidecar_path).ok().is_some_and(|stored| {
-                    stored
-                        .vectors_for(
-                            text,
-                            &provider_identity,
-                            provider.model(),
-                            provider.dimensions(),
-                            &chunks,
-                        )
-                        .is_some()
-                })
-            {
-                continue;
-            }
-            let mut vectors = Vec::new();
-            let batch_size = config.provider.batch_size.unwrap_or(64).max(1);
-            for batch in chunks.chunks(batch_size) {
-                let input: Vec<String> = batch
-                    .iter()
-                    .map(|chunk| chunk.embedding_text.clone())
-                    .collect();
-                vectors.extend(provider.embed(InputType::Document, &input).await?);
-                if self.state.read().generation != generation {
-                    return Ok(());
-                }
-            }
-            let sidecar = Sidecar::new(
-                text,
-                &provider_identity,
-                provider.model(),
-                provider.dimensions(),
-                &chunks,
-                &vectors,
-            )?;
-            if self.state.read().generation != generation {
-                return Ok(());
-            }
-            sidecar::write_atomic(&sidecar_path, &sidecar)?;
+        let root = self.root.clone();
+        let paths = paths.to_vec();
+        let context = blocking(move || prepare_reindex(&root, snapshot, paths, force)).await?;
+        if self.state.read().generation != generation {
+            return Ok(());
         }
-        let index = build_index(
-            &self.root,
-            &config,
-            &pages,
-            &parsed,
-            &edges,
-            provider.as_ref(),
-        );
+        for action in context.actions {
+            match action {
+                ReindexAction::Remove(path) => {
+                    if self.state.read().generation != generation {
+                        return Ok(());
+                    }
+                    blocking(move || {
+                        if path.exists() {
+                            fs::remove_file(path)?;
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                }
+                ReindexAction::Embed {
+                    text,
+                    chunks,
+                    sidecar_path,
+                } => {
+                    let mut vectors = Vec::new();
+                    let batch_size = context.config.provider.batch_size.unwrap_or(64).max(1);
+                    for batch in chunks.chunks(batch_size) {
+                        let input: Vec<String> = batch
+                            .iter()
+                            .map(|chunk| chunk.embedding_text.clone())
+                            .collect();
+                        vectors.extend(context.provider.embed(InputType::Document, &input).await?);
+                        if self.state.read().generation != generation {
+                            return Ok(());
+                        }
+                    }
+                    if self.state.read().generation != generation {
+                        return Ok(());
+                    }
+                    let provider_identity = context.provider_identity.clone();
+                    let model = context.model.clone();
+                    let dimensions = context.dimensions;
+                    blocking(move || {
+                        let sidecar = Sidecar::new(
+                            &text,
+                            &provider_identity,
+                            &model,
+                            dimensions,
+                            &chunks,
+                            &vectors,
+                        )?;
+                        sidecar::write_atomic(&sidecar_path, &sidecar)
+                    })
+                    .await?;
+                }
+            }
+        }
+        if self.state.read().generation != generation {
+            return Ok(());
+        }
+        let root = self.root.clone();
+        let config = context.config;
+        let pages = context.pages;
+        let parsed = context.parsed;
+        let edges = context.edges;
+        let provider = context.provider;
+        let index = blocking(move || {
+            Ok(build_index(
+                &root,
+                &config,
+                &pages,
+                &parsed,
+                &edges,
+                provider.as_ref(),
+            ))
+        })
+        .await?;
         let mut current = self.state.write();
         if current.generation == generation {
             current.index = Arc::new(index);
@@ -682,19 +708,28 @@ impl Store {
 
     /// Returns current corpus, vector, push, and block status.
     pub fn status(&self) -> Result<StatusResponse> {
-        let state = self.state.read();
+        let (pages, chunks, vectors_ready) = {
+            let state = self.state.read();
+            (
+                state.pages.len(),
+                state.index.chunks.len(),
+                state
+                    .index
+                    .chunks
+                    .iter()
+                    .filter(|chunk| chunk.vector.is_some())
+                    .count(),
+            )
+        };
+        let unpushed = git::has_unpushed(&self.root)?;
+        let blocked = self.blocked.read().clone();
         Ok(StatusResponse {
-            pages: state.pages.len(),
-            chunks: state.index.chunks.len(),
-            vectors_ready: state
-                .index
-                .chunks
-                .iter()
-                .filter(|chunk| chunk.vector.is_some())
-                .count(),
-            vectors_total: state.index.chunks.len(),
-            unpushed: git::has_unpushed(&self.root)?,
-            blocked: self.blocked.read().clone(),
+            pages,
+            chunks,
+            vectors_ready,
+            vectors_total: chunks,
+            unpushed,
+            blocked,
         })
     }
 
@@ -703,7 +738,8 @@ impl Store {
         let _lock = self.lock_repository()?;
         git::recover_worktree(&self.root)?;
         self.refresh_external_commit()?;
-        let state = git::push(&self.root, &self.state.read().config);
+        let config = self.state.read().config.clone();
+        let state = git::push(&self.root, &config);
         if matches!(state, PushState::Pushed) {
             self.set_blocked(None)?;
         } else if matches!(state, PushState::Diverged) {
@@ -884,7 +920,8 @@ impl Store {
                 )
             }
         }
-        let push = git::push(&self.root, &self.state.read().config);
+        let config = self.state.read().config.clone();
+        let push = git::push(&self.root, &config);
         if matches!(push, PushState::Diverged) {
             self.set_blocked(Some("remote history diverged".into()))?;
         }
@@ -944,7 +981,8 @@ impl Store {
     }
 
     fn current_push_state(&self) -> Result<PushState> {
-        if !self.state.read().config.git.push {
+        let push_enabled = self.state.read().config.git.push;
+        if !push_enabled {
             Ok(PushState::Disabled)
         } else if git::has_unpushed(&self.root)? {
             Ok(PushState::Queued)
@@ -1011,6 +1049,79 @@ fn ensure_paths_match_config<'a>(
         }
     }
     Ok(())
+}
+
+async fn blocking<T>(operation: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .context("blocking repository operation failed")?
+}
+
+fn prepare_reindex(
+    root: &Path,
+    snapshot: StoreState,
+    paths: Vec<String>,
+    force: bool,
+) -> Result<ReindexContext> {
+    let StoreState {
+        config,
+        config_files: _,
+        pages,
+        parsed,
+        edges,
+        index: _,
+        provider,
+        generation: _,
+    } = snapshot;
+    let provider_identity = provider.embedding_provider_identity();
+    let model = provider.model().to_owned();
+    let dimensions = provider.dimensions();
+    ensure_sidecars_ignored(
+        root,
+        pages
+            .keys()
+            .map(String::as_str)
+            .chain(paths.iter().map(String::as_str)),
+    )?;
+    let mut actions = Vec::new();
+    for path in paths {
+        let sidecar_path = sidecar::sidecar_path(&root.join(&path));
+        let Some(text) = pages.get(&path) else {
+            actions.push(ReindexAction::Remove(sidecar_path));
+            continue;
+        };
+        let page = parsed.get(&path).context("missing parsed page")?;
+        let context = embedding_context(&config, page);
+        let chunks = chunk_page(text, page, &config.chunking, &context);
+        if !force
+            && sidecar::read(&sidecar_path).ok().is_some_and(|stored| {
+                stored
+                    .vectors_for(text, &provider_identity, &model, dimensions, &chunks)
+                    .is_some()
+            })
+        {
+            continue;
+        }
+        actions.push(ReindexAction::Embed {
+            text: text.clone(),
+            chunks,
+            sidecar_path,
+        });
+    }
+    Ok(ReindexContext {
+        config,
+        pages,
+        parsed,
+        edges,
+        provider,
+        provider_identity,
+        model,
+        dimensions,
+        actions,
+    })
 }
 
 fn build_index(

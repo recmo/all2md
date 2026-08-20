@@ -11,7 +11,7 @@ const VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Versioned embedding state derived from one Markdown page.
-pub struct Sidecar {
+pub(crate) struct Sidecar {
     /// Binary schema version.
     pub version: u16,
     /// Fingerprint of the complete source page.
@@ -28,7 +28,7 @@ pub struct Sidecar {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Stored metadata and vector bytes for one chunk.
-pub struct SidecarChunk {
+pub(crate) struct SidecarChunk {
     /// First source line, one-based and inclusive.
     pub start_line: usize,
     /// Last source line, one-based and inclusive.
@@ -43,7 +43,7 @@ pub struct SidecarChunk {
 
 impl Sidecar {
     /// Builds a sidecar after validating the supplied vectors.
-    pub fn new(
+    pub(crate) fn new(
         source: &str,
         provider_identity: &str,
         model: &str,
@@ -78,7 +78,7 @@ impl Sidecar {
 
     /// Returns vectors only when all source, provider, and chunk metadata match.
     #[must_use]
-    pub fn vectors_for(
+    pub(crate) fn vectors_for(
         &self,
         source: &str,
         provider_identity: &str,
@@ -124,12 +124,12 @@ impl Sidecar {
 
 #[must_use]
 /// Returns the adjacent sidecar path for a Markdown page.
-pub fn sidecar_path(page: &Path) -> std::path::PathBuf {
+pub(crate) fn sidecar_path(page: &Path) -> std::path::PathBuf {
     page.with_extension("mdstore")
 }
 
 /// Reads and decodes a sidecar.
-pub fn read(path: &Path) -> Result<Sidecar> {
+pub(crate) fn read(path: &Path) -> Result<Sidecar> {
     let bytes = fs::read(path).with_context(|| format!("read sidecar {}", path.display()))?;
     if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
         bail!("invalid mdstore sidecar magic");
@@ -138,7 +138,7 @@ pub fn read(path: &Path) -> Result<Sidecar> {
 }
 
 /// Atomically replaces a sidecar with a versioned CBOR encoding.
-pub fn write_atomic(path: &Path, sidecar: &Sidecar) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, sidecar: &Sidecar) -> Result<()> {
     let parent = path.parent().context("sidecar has no parent")?;
     fs::create_dir_all(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
@@ -153,7 +153,7 @@ pub fn write_atomic(path: &Path, sidecar: &Sidecar) -> Result<()> {
 
 #[must_use]
 /// Computes a stable source or embedding-input fingerprint.
-pub fn fingerprint(text: &str) -> Vec<u8> {
+pub(crate) fn fingerprint(text: &str) -> Vec<u8> {
     Sha256::digest(text.as_bytes()).to_vec()
 }
 

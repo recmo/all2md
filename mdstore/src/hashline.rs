@@ -6,7 +6,7 @@ use xxhash_rust::xxh32::xxh32;
 
 #[derive(Debug, Error, Clone, Serialize)]
 /// Failure to resolve or combine hashline edit anchors.
-pub enum HashlineError {
+pub(crate) enum HashlineError {
     /// The anchor syntax is invalid.
     #[error("invalid anchor {0:?}")]
     InvalidAnchor(String),
@@ -115,7 +115,7 @@ pub fn short_hash(line: &str) -> String {
 
 #[must_use]
 /// Renders a page or line window as `LINE:HASH|content` records.
-pub fn render(text: &str, window: Option<(usize, usize)>) -> String {
+pub(crate) fn render(text: &str, window: Option<(usize, usize)>) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let (start, end) = window.unwrap_or((1, lines.len()));
     if lines.is_empty() {
@@ -153,7 +153,7 @@ enum ResolvedKind {
 
 #[derive(Debug, Clone, Copy)]
 /// Changed line bounds in the post-edit page.
-pub struct ChangedRange {
+pub(crate) struct ChangedRange {
     /// First changed line, one-based and inclusive.
     pub start_line: usize,
     /// Last changed line, one-based and inclusive.
@@ -162,7 +162,7 @@ pub struct ChangedRange {
 
 #[derive(Debug)]
 /// Resulting page texts and their changed line ranges.
-pub struct AppliedOperations {
+pub(crate) struct AppliedOperations {
     /// Complete resulting text, or `None` for removed pages.
     pub changes: HashMap<String, Option<String>>,
     /// Changed post-edit ranges keyed by path.
@@ -170,7 +170,8 @@ pub struct AppliedOperations {
 }
 
 /// Applies a batch against one immutable pre-edit snapshot.
-pub fn apply_operations(
+#[cfg(test)]
+fn apply_operations(
     original: &HashMap<String, String>,
     operations: &[EditOperation],
 ) -> Result<HashMap<String, Option<String>>, HashlineError> {
@@ -178,7 +179,7 @@ pub fn apply_operations(
 }
 
 /// Applies a batch and returns post-edit changed line ranges.
-pub fn apply_operations_with_ranges(
+pub(crate) fn apply_operations_with_ranges(
     original: &HashMap<String, String>,
     operations: &[EditOperation],
 ) -> Result<AppliedOperations, HashlineError> {

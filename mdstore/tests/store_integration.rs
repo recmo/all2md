@@ -2,12 +2,14 @@
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -19,9 +21,8 @@ use axum::{
 use fs2::FileExt;
 use http_body_util::BodyExt;
 use mdstore::{
-    ApplyEditsRequest, Config, Store,
-    hashline::{EditOperation, short_hash},
-    provider::{InputType, RerankResult, RetrievalProvider},
+    ApplyEditsRequest, ApplyStatus, Config, EditOperation, InputType, PushState, RerankResult,
+    RetrievalProvider, Store, router, serve, short_hash, tool_names,
 };
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -298,10 +299,7 @@ fn reciprocal_links_are_caller_authored_and_atomic() {
     assert!(command(&repository.root, &["status", "--porcelain"]).is_empty());
 
     let replay = store.apply_edits(&request).unwrap();
-    assert!(matches!(
-        replay.status,
-        mdstore::store::ApplyStatus::AlreadyApplied
-    ));
+    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
 }
 
 #[test]
@@ -329,10 +327,7 @@ fn delayed_idempotent_retry_returns_current_hashlines() {
         .unwrap();
 
     let replay = store.apply_edits(&first).unwrap();
-    assert!(matches!(
-        replay.status,
-        mdstore::store::ApplyStatus::AlreadyApplied
-    ));
+    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
     let hashline = &replay.fresh_hashlines["alice.md"];
     assert!(hashline.contains("Alice current."));
     assert!(!hashline.contains("Alice first."));
@@ -365,10 +360,7 @@ fn far_shifted_insert_retry_stays_already_applied() {
     );
 
     let replay = store.apply_edits(&request).unwrap();
-    assert!(matches!(
-        replay.status,
-        mdstore::store::ApplyStatus::AlreadyApplied
-    ));
+    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
     assert_eq!(
         fs::read_to_string(path)
             .unwrap()
@@ -396,10 +388,7 @@ fn recreated_page_keeps_create_receipt_applied() {
     command(&repository.root, &["commit", "-q", "-m", "recreate Carol"]);
 
     let replay = store.apply_edits(&request).unwrap();
-    assert!(matches!(
-        replay.status,
-        mdstore::store::ApplyStatus::AlreadyApplied
-    ));
+    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
     assert!(
         fs::read_to_string(repository.root.join("carol.md"))
             .unwrap()
@@ -429,10 +418,7 @@ fn reverted_request_can_be_applied_again() {
     );
 
     let response = store.apply_edits(&request).unwrap();
-    assert!(matches!(
-        response.status,
-        mdstore::store::ApplyStatus::Accepted
-    ));
+    assert!(matches!(response.status, ApplyStatus::Accepted));
     assert!(
         fs::read_to_string(repository.root.join("alice.md"))
             .unwrap()
@@ -476,10 +462,7 @@ fn legacy_receipt_without_preimages_remains_conservative() {
     );
 
     let replay = store.apply_edits(&request).unwrap();
-    assert!(matches!(
-        replay.status,
-        mdstore::store::ApplyStatus::AlreadyApplied
-    ));
+    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
     assert!(
         fs::read_to_string(repository.root.join("alice.md"))
             .unwrap()
@@ -567,11 +550,8 @@ fn no_op_edit_retries_queued_pushes() {
         })
         .unwrap();
 
-    assert!(matches!(
-        response.status,
-        mdstore::store::ApplyStatus::AlreadyApplied
-    ));
-    assert_eq!(response.push, mdstore::git::PushState::Pushed);
+    assert!(matches!(response.status, ApplyStatus::AlreadyApplied));
+    assert_eq!(response.push, PushState::Pushed);
     assert_eq!(
         command(&repository.root, &["rev-parse", "HEAD"]).trim(),
         command(&remote, &["rev-parse", "HEAD"]).trim()
@@ -878,10 +858,7 @@ fn schemas_are_repository_configuration_not_rust_fields() {
 
 #[test]
 fn mcp_allowlist_is_exact() {
-    assert_eq!(
-        mdstore::mcp::tool_names(),
-        ["search", "get_page", "apply_edits"]
-    );
+    assert_eq!(tool_names(), ["search", "get_page", "apply_edits"]);
 }
 
 #[test]
@@ -976,7 +953,7 @@ fn injected_provider_open_uses_committed_configuration() {
 async fn mcp_lists_only_three_tools_and_enforces_authentication() {
     let repository = Repository::new();
     let store = repository.store();
-    let app = mdstore::mcp::router(store.clone(), Some("secret".into()));
+    let app = router(store.clone(), Some("secret".into()));
     let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
     let unauthorized = app
         .clone()
@@ -1048,7 +1025,7 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
 
-    let loopback = mdstore::mcp::router(store, None);
+    let loopback = router(store, None);
     for (path, body) in [
         (
             "/mcp",
@@ -1074,7 +1051,7 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
 #[tokio::test]
 async fn mcp_validates_protocol_and_json_rpc_envelopes() {
     let repository = Repository::new();
-    let app = mdstore::mcp::router(repository.store(), None);
+    let app = router(repository.store(), None);
 
     let unsupported = app
         .clone()
@@ -1192,7 +1169,7 @@ async fn mcp_validates_protocol_and_json_rpc_envelopes() {
 #[tokio::test]
 async fn mcp_apply_errors_preserve_structured_validation_findings() {
     let repository = Repository::new();
-    let app = mdstore::mcp::router(repository.store(), None);
+    let app = router(repository.store(), None);
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -1235,7 +1212,7 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
 async fn non_loopback_listener_requires_a_token() {
     let repository = Repository::new();
     let store = repository.store();
-    let error = mdstore::mcp::serve(store, "0.0.0.0:0".parse().unwrap(), None)
+    let error = serve(store, "0.0.0.0:0".parse().unwrap(), None)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("bearer token"));
@@ -1248,9 +1225,7 @@ async fn cli_status_uses_the_running_daemon() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        axum::serve(listener, mdstore::mcp::router(store, None))
-            .await
-            .unwrap();
+        axum::serve(listener, router(store, None)).await.unwrap();
     });
     fs::write(repository.root.join("alice.md"), "uncommitted local text\n").unwrap();
     let root = repository.root.clone();
@@ -1396,7 +1371,7 @@ fn manual_push_uses_the_repository_write_lock() {
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap()
             .unwrap(),
-        mdstore::git::PushState::Disabled
+        PushState::Disabled
     ));
     handle.join().unwrap();
 }
@@ -1413,10 +1388,7 @@ fn manual_push_refreshes_external_configuration_before_selecting_push_settings()
         &["commit", "-q", "-m", "external schema formatting"],
     );
 
-    assert!(matches!(
-        store.push().unwrap(),
-        mdstore::git::PushState::Disabled
-    ));
+    assert!(matches!(store.push().unwrap(), PushState::Disabled));
     assert!(
         store
             .get_page(".mdstore/schema.json", None)
@@ -1664,10 +1636,7 @@ fn pending_tree_receipts_recover_committed_requests() {
     );
     let store = repository.store();
     let response = store.apply_edits(&request).unwrap();
-    assert!(matches!(
-        response.status,
-        mdstore::store::ApplyStatus::AlreadyApplied
-    ));
+    assert!(matches!(response.status, ApplyStatus::AlreadyApplied));
     assert!(
         !repository
             .root
@@ -1741,4 +1710,144 @@ async fn stale_reindex_work_is_discarded_after_an_edit() {
     reindex.await.unwrap().unwrap();
     assert_eq!(store.status().unwrap().vectors_ready, 0);
     assert!(!repository.root.join("alice.mdstore").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stalled_push_keeps_http_and_index_publication_responsive() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repository = Repository::new();
+    let remote = tempfile::tempdir().unwrap();
+    command(remote.path(), &["init", "--bare", "."]);
+    command(
+        &repository.root,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    let config_path = repository.root.join(".mdstore/config.yaml");
+    let config = fs::read_to_string(&config_path).unwrap().replace(
+        "  push: false",
+        "  push: true\n  remote: origin\n  push_timeout_seconds: 5",
+    );
+    fs::write(&config_path, config).unwrap();
+    command(&repository.root, &["add", ".mdstore/config.yaml"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "enable delayed push"],
+    );
+    command(&repository.root, &["push", "-u", "origin", "HEAD"]);
+
+    let hook = remote.path().join("hooks/pre-receive");
+    fs::write(&hook, "#!/bin/sh\n: > \"$0.started\"\nsleep 2\n").unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+    let hook_started = remote.path().join("hooks/pre-receive.started");
+
+    let store = repository.store();
+    let app = router(store.clone(), None);
+    let body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "apply_edits",
+            "arguments": {
+                "edit_summary": "exercise delayed push",
+                "edits": [{
+                    "op": "replace",
+                    "path": "alice.md",
+                    "anchor": format!("6:{}", short_hash("Alice profile.")),
+                    "content": "Alice updated."
+                }]
+            }
+        }
+    }))
+    .unwrap();
+    let request = Request::post("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let apply = {
+        let app = app.clone();
+        tokio::spawn(async move { app.oneshot(request).await.unwrap() })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !hook_started.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("push must start without blocking the runtime");
+
+    let health = tokio::time::timeout(
+        Duration::from_millis(500),
+        app.clone()
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap()),
+    )
+    .await
+    .expect("health must remain responsive during push")
+    .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_millis(500), store.reindex_missing())
+        .await
+        .expect("reindex must publish while push waits")
+        .unwrap();
+
+    let response = tokio::time::timeout(Duration::from_secs(5), apply)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn blocking_sidecar_reads_do_not_stall_the_async_scheduler() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let sidecar = repository.root.join("alice.mdstore");
+    let output = std::process::Command::new("mkfifo")
+        .arg(&sidecar)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut writer = fs::OpenOptions::new().write(true).open(sidecar).unwrap();
+        opened_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        writer.write_all(b"invalid sidecar").unwrap();
+    });
+    let reindex = {
+        let store = store.clone();
+        tokio::spawn(async move { store.reindex_missing().await })
+    };
+    let started = Instant::now();
+    tokio::time::timeout(Duration::from_millis(500), opened_rx)
+        .await
+        .expect("sidecar read must run outside the async scheduler")
+        .unwrap();
+
+    let ping =
+        serde_json::to_vec(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+            .unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_millis(250),
+        router(store, None).oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(ping))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("ping must remain responsive during sidecar I/O")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(started.elapsed() < Duration::from_millis(750));
+
+    writer.await.unwrap();
+    reindex.await.unwrap().unwrap();
 }

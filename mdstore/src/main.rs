@@ -11,8 +11,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use mdstore::{
-    ApplyEditsRequest, Config, Store,
-    mcp::{LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION},
+    ApplyEditsRequest, LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, Store,
+    load_repository_config, serve,
 };
 use serde_json::{Value, json};
 
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
                     tracing::warn!(%error, "background embedding rebuild is degraded");
                 }
             });
-            mdstore::mcp::serve(store, listen, token).await?;
+            serve(store, listen, token).await?;
         }
         Command::Search { query, variants } => {
             let client = DaemonClient::from_repository(&root, cli.daemon_url.as_deref())?;
@@ -202,8 +202,7 @@ impl Error for ToolCallError {}
 
 impl DaemonClient {
     fn from_repository(root: &std::path::Path, override_url: Option<&str>) -> Result<Self> {
-        let config =
-            Config::from_yaml(&mdstore::git::read_head_text(root, ".mdstore/config.yaml")?)?;
+        let config = load_repository_config(root)?;
         let base_url = match override_url {
             Some(url) if !url.trim().is_empty() => url.trim_end_matches('/').to_owned(),
             _ => {

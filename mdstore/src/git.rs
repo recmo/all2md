@@ -30,7 +30,7 @@ pub enum PushState {
 }
 
 /// Requires `root` to be a Git worktree top level.
-pub fn ensure_repository(root: &Path) -> Result<()> {
+pub(crate) fn ensure_repository(root: &Path) -> Result<()> {
     let output = run(root, ["rev-parse", "--is-inside-work-tree"])?;
     if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "true" {
         bail!("{} is not a Git worktree", root.display());
@@ -39,7 +39,7 @@ pub fn ensure_repository(root: &Path) -> Result<()> {
 }
 
 /// Returns the worktree's Git metadata directory.
-pub fn git_dir(root: &Path) -> Result<PathBuf> {
+pub(crate) fn git_dir(root: &Path) -> Result<PathBuf> {
     let output = checked(root, ["rev-parse", "--git-dir"])?;
     let path = PathBuf::from(String::from_utf8(output.stdout)?.trim());
     Ok(if path.is_absolute() {
@@ -50,7 +50,11 @@ pub fn git_dir(root: &Path) -> Result<PathBuf> {
 }
 
 /// Lists tracked Markdown selected by the configuration at a revision.
-pub fn tracked_markdown(root: &Path, revision: &str, config: &Config) -> Result<Vec<String>> {
+pub(crate) fn tracked_markdown(
+    root: &Path,
+    revision: &str,
+    config: &Config,
+) -> Result<Vec<String>> {
     let output = checked(root, ["ls-tree", "-r", "--name-only", "-z", revision])?;
     let (include, exclude) = config.document_globs()?;
     Ok(output
@@ -64,7 +68,7 @@ pub fn tracked_markdown(root: &Path, revision: &str, config: &Config) -> Result<
 }
 
 /// Lists tracked YAML and JSON resources below `.mdstore`.
-pub fn tracked_config_files(root: &Path, revision: &str) -> Result<Vec<String>> {
+pub(crate) fn tracked_config_files(root: &Path, revision: &str) -> Result<Vec<String>> {
     let output = checked(root, ["ls-tree", "-r", "--name-only", "-z", revision])?;
     Ok(output
         .stdout
@@ -76,7 +80,7 @@ pub fn tracked_config_files(root: &Path, revision: &str) -> Result<Vec<String>> 
 }
 
 /// Lists ignored, untracked adjacent embedding sidecars.
-pub fn untracked_sidecars(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn untracked_sidecars(root: &Path) -> Result<Vec<String>> {
     let output = checked(
         root,
         [
@@ -97,7 +101,7 @@ pub fn untracked_sidecars(root: &Path) -> Result<Vec<String>> {
 }
 
 /// Returns whether an exact repository path is tracked.
-pub fn is_tracked(root: &Path, path: &str) -> Result<bool> {
+pub(crate) fn is_tracked(root: &Path, path: &str) -> Result<bool> {
     validate_repo_path(path)?;
     let pathspec = literal_pathspec(path);
     Ok(run(root, ["ls-files", "--error-unmatch", "--", &pathspec])?
@@ -105,15 +109,11 @@ pub fn is_tracked(root: &Path, path: &str) -> Result<bool> {
         .success())
 }
 
-/// Returns whether an exact repository path is ignored.
-pub fn is_ignored(root: &Path, path: &str) -> Result<bool> {
-    Ok(run(root, ["check-ignore", "--quiet", "--", path])?
-        .status
-        .success())
-}
-
 /// Requires every exact path to be both ignored and untracked.
-pub fn ensure_ignored<'a>(root: &Path, paths: impl IntoIterator<Item = &'a str>) -> Result<()> {
+pub(crate) fn ensure_ignored<'a>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
     let paths: BTreeSet<&str> = paths.into_iter().collect();
     if paths.is_empty() {
         return Ok(());
@@ -164,13 +164,13 @@ pub fn ensure_ignored<'a>(root: &Path, paths: impl IntoIterator<Item = &'a str>)
 }
 
 /// Returns the current `HEAD` object ID.
-pub fn head(root: &Path) -> Result<String> {
+pub(crate) fn head(root: &Path) -> Result<String> {
     let output = checked(root, ["rev-parse", "HEAD"])?;
     Ok(String::from_utf8(output.stdout)?.trim().into())
 }
 
 /// Reads a regular UTF-8 file from a specific revision without filters.
-pub fn read_text(root: &Path, revision: &str, path: &str) -> Result<String> {
+pub(crate) fn read_text(root: &Path, revision: &str, path: &str) -> Result<String> {
     validate_repo_path(path)?;
     let pathspec = literal_pathspec(path);
     let entry = checked(root, ["ls-tree", "-z", revision, "--", &pathspec])?;
@@ -185,13 +185,8 @@ pub fn read_text(root: &Path, revision: &str, path: &str) -> Result<String> {
     String::from_utf8(output.stdout).context("committed repository file is not UTF-8")
 }
 
-/// Reads a regular UTF-8 file from `HEAD` without filters.
-pub fn read_head_text(root: &Path, path: &str) -> Result<String> {
-    read_text(root, "HEAD", path)
-}
-
 /// Restores tracked files and quarantines direct Markdown additions.
-pub fn recover_worktree(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn recover_worktree(root: &Path) -> Result<Vec<String>> {
     let worktree = checked(root, ["diff", "--name-only", "-z"])?;
     let staged = checked(
         root,
@@ -324,7 +319,7 @@ fn create_quarantine_directory(root: &Path) -> Result<PathBuf> {
 }
 
 /// Atomically materializes validated changes in the worktree.
-pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Result<()> {
+pub(crate) fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Result<()> {
     for (path, content) in changes {
         validate_repo_path(path)?;
         let target = root.join(path);
@@ -350,7 +345,7 @@ pub fn write_changes(root: &Path, changes: &[(String, Option<String>)]) -> Resul
 }
 
 /// Builds a tree from validated bytes using an isolated temporary index.
-pub fn stage_tree(
+pub(crate) fn stage_tree(
     root: &Path,
     base: &str,
     changes: &[(String, Option<String>)],
@@ -430,7 +425,7 @@ pub fn stage_tree(
 }
 
 /// Creates a commit with an exact message and advances the branch by CAS.
-pub fn commit_tree(root: &Path, tree: &str, parent: &str, summary: &str) -> Result<String> {
+pub(crate) fn commit_tree(root: &Path, tree: &str, parent: &str, summary: &str) -> Result<String> {
     let reference = checked(root, ["symbolic-ref", "-q", "HEAD"])?;
     let reference = String::from_utf8(reference.stdout)?.trim().to_owned();
     let mut child = Command::new("git")
@@ -475,7 +470,7 @@ pub fn commit_tree(root: &Path, tree: &str, parent: &str, summary: &str) -> Resu
 }
 
 /// Synchronizes exact real-index paths to a committed revision.
-pub fn sync_index(root: &Path, revision: &str, paths: &[String]) -> Result<()> {
+pub(crate) fn sync_index(root: &Path, revision: &str, paths: &[String]) -> Result<()> {
     let pathspecs: Vec<String> = paths.iter().map(|path| literal_pathspec(path)).collect();
     let mut command = Command::new("git");
     command
@@ -495,7 +490,7 @@ pub fn sync_index(root: &Path, revision: &str, paths: &[String]) -> Result<()> {
 }
 
 /// Returns whether history after `base` contains the exact tree.
-pub fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool> {
+pub(crate) fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool> {
     let ancestor = run(root, ["merge-base", "--is-ancestor", base, "HEAD"])?;
     if !ancestor.status.success() {
         return Ok(false);
@@ -508,7 +503,7 @@ pub fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool
 }
 
 /// Restores exact paths from the current winning `HEAD`.
-pub fn rollback(root: &Path, paths: &[String]) -> Result<()> {
+pub(crate) fn rollback(root: &Path, paths: &[String]) -> Result<()> {
     let mut present = Vec::new();
     let mut absent = Vec::new();
     for path in paths {
@@ -562,7 +557,7 @@ pub fn rollback(root: &Path, paths: &[String]) -> Result<()> {
 
 /// Attempts one bounded, ordered push.
 #[must_use]
-pub fn push(root: &Path, config: &Config) -> PushState {
+pub(crate) fn push(root: &Path, config: &Config) -> PushState {
     if !config.git.push {
         return PushState::Disabled;
     }
@@ -623,7 +618,7 @@ fn literal_pathspec(path: &str) -> String {
 }
 
 /// Returns whether `HEAD` contains commits absent from its upstream.
-pub fn has_unpushed(root: &Path) -> Result<bool> {
+pub(crate) fn has_unpushed(root: &Path) -> Result<bool> {
     if !run(root, ["rev-parse", "--verify", "@{upstream}"])?
         .status
         .success()

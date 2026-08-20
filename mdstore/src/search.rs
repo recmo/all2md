@@ -11,7 +11,7 @@ use crate::{
 
 #[derive(Debug, Clone)]
 /// Immutable exact, vector, and graph retrieval index.
-pub struct SearchIndex {
+pub(crate) struct SearchIndex {
     /// Indexed chunks in deterministic repository order.
     pub chunks: Vec<IndexedChunk>,
     document_frequency: HashMap<String, usize>,
@@ -22,7 +22,7 @@ pub struct SearchIndex {
 
 #[derive(Debug, Clone)]
 /// Searchable fields and optional vector for one chunk.
-pub struct IndexedChunk {
+pub(crate) struct IndexedChunk {
     /// Repository-relative page path.
     pub path: String,
     /// Source excerpt and embedding context.
@@ -38,7 +38,7 @@ pub struct IndexedChunk {
 }
 
 /// Prebuilt chunks and optional vectors keyed by page path.
-pub type PageChunks = HashMap<String, Vec<(Chunk, Option<Vec<f32>>)>>;
+pub(crate) type PageChunks = HashMap<String, Vec<(Chunk, Option<Vec<f32>>)>>;
 
 #[derive(Debug, Clone, Serialize)]
 /// Ranked search results and any provider degradation.
@@ -87,7 +87,7 @@ pub struct SearchResult {
 impl SearchIndex {
     #[must_use]
     /// Builds a deterministic index from validated pages and sidecar vectors.
-    pub fn build(
+    pub(crate) fn build(
         config: &Config,
         pages: &HashMap<String, String>,
         parsed: &HashMap<String, ParsedPage>,
@@ -163,7 +163,7 @@ impl SearchIndex {
     }
 
     /// Runs exact and vector retrieval, graph expansion, fusion, and reranking.
-    pub async fn search(
+    pub(crate) async fn search(
         &self,
         config: &Config,
         provider: &dyn RetrievalProvider,
