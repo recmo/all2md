@@ -16,6 +16,7 @@ from pages2md.compare import compare_text
 from pages2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
 from pages2md.native import parse_native_observation, reconcile_observations
 from pages2md.adapters import _link_target, detect_kind
+from pages2md.formatting import FormatResult
 from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _canonicalize_figure_blocks, _convert_workspace, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, _repair_runaway_repetition, convert
 from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from pages2md.verify import verify_bundle
@@ -886,6 +887,27 @@ def test_content_quality_warning_does_not_suppress_output(tmp_path: Path, capsys
     captured = capsys.readouterr()
     assert long_output.is_file()
     assert "needs content review: visual_implausible_output_length" in captured.err
+
+
+def test_markdown_lint_findings_are_warnings_and_do_not_suppress_output(tmp_path: Path, monkeypatch, capsys):
+    pdf = tmp_path / "linted.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "A document with a lint finding.")
+    document.save(pdf)
+    document.close()
+
+    monkeypatch.setattr(
+        "pages2md.pipeline.format_and_lint",
+        lambda paths: FormatResult(lint_errors=["book.md:1: MD999 test finding"]),
+    )
+
+    output = convert(pdf, backend=FixtureOcr())
+
+    assert output.is_file()
+    captured = capsys.readouterr()
+    assert "metadata reports Markdown lint failures" in captured.err
+    assert "markdown lint: book.md:1: MD999 test finding" in captured.err
 
 
 def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path):

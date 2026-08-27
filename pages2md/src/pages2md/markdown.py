@@ -464,7 +464,11 @@ def _page_targets(
         match = HEADING.search(page.visual_markdown)
         if match and page.number in targets:
             filename, existing = targets[page.number]
-            targets[page.number] = (filename, existing or _heading_anchor(match.group(2)))
+            # The outline title may omit the section number (for example,
+            # ``Introduction`` versus the rendered ``1 Introduction``).  Page
+            # links must target the heading that is actually written, not the
+            # normalized outline label.
+            targets[page.number] = (filename, _heading_anchor(match.group(2)) or existing)
     return targets
 
 

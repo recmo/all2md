@@ -209,6 +209,26 @@ def test_single_file_accepts_multiple_structural_boundaries(tmp_path: Path):
     assert files == ["book.md"]
 
 
+def test_page_links_follow_rendered_numbered_heading(tmp_path: Path):
+    contents = page(1)
+    contents.visual_markdown = "[Introduction](#page-2)"
+    introduction = page(2)
+    introduction.visual_markdown = "# 1 Introduction\n\nBody"
+
+    write_markdown(
+        tmp_path,
+        [contents, introduction],
+        [Chapter("Introduction", 2, 2, "introduction")],
+        split=False,
+        title="Paper",
+    )
+
+    markdown = (tmp_path / "book.md").read_text()
+    assert "[Introduction](#1-introduction)" in markdown
+    assert "#introduction" not in markdown
+    assert "1-introduction" in markdown_anchors(markdown)
+
+
 def test_synthetic_matter_file_contains_level_two_sections(tmp_path: Path):
     first = page(1)
     first.visual_markdown = "# Introduction\n\nText"

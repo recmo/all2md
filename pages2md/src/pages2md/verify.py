@@ -179,8 +179,10 @@ def verify_bundle(root: Path) -> Verification:
                     errors.append(f"recovery provenance references unknown observation: {reference}")
     if metadata.get("formatting", {}).get("idempotent") is not True:
         errors.append("metadata reports non-idempotent formatting")
-    if metadata.get("formatting", {}).get("lint_errors"):
+    lint_errors = metadata.get("formatting", {}).get("lint_errors", [])
+    if lint_errors:
         warnings.append("metadata reports Markdown lint failures")
+        warnings.extend(f"markdown lint: {error}" for error in lint_errors)
     for failed in metadata.get("failed_pages", []):
         warnings.append(f"page {failed.get('page')} failed: {failed.get('error')}")
     warnings.extend(metadata.get("warnings", []))
