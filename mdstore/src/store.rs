@@ -605,9 +605,15 @@ impl Store {
 
     async fn spawn_reindex(self: &Arc<Self>, force: bool) -> Result<()> {
         let store = Arc::clone(self);
-        tokio::spawn(async move { store.reindex_all(force).await })
-            .await
-            .context("reindex task failed")?
+        tokio::spawn(async move {
+            let result = store.reindex_all(force).await;
+            if let Err(error) = &result {
+                tracing::error!(%error, "reindex failed");
+            }
+            result
+        })
+        .await
+        .context("reindex task failed")?
     }
 
     async fn reindex_all(&self, force: bool) -> Result<()> {
