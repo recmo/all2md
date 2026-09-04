@@ -257,6 +257,18 @@ def _convert_workspace(
                 finally:
                     progress.update()
 
+    if failed:
+        shutil.rmtree(work, ignore_errors=True)
+        _write_progress(
+            bundle,
+            source=source,
+            fingerprint=fingerprint,
+            completed_pages=completed_pages,
+            status="failed",
+            errors=[f"page {item['page']}: {item['error']}" for item in failed],
+        )
+        raise RuntimeError(f"{len(failed)} page(s) failed; intermediate bundle: {bundle}")
+
     page_results.sort(key=lambda item: item.number)
     _normalize_document_blocks(page_results)
     _merge_continued_tables(page_results)
@@ -378,10 +390,8 @@ def _convert_workspace(
         source=source,
         fingerprint=fingerprint,
         completed_pages=completed_pages,
-        status="failed" if failed else "assembled",
+        status="assembled",
     )
-    if failed:
-        raise RuntimeError(f"{len(failed)} page(s) failed; intermediate bundle: {bundle}")
     verification = verify_bundle(bundle)
     if not verification.ok:
         _write_progress(

@@ -906,7 +906,9 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
     document.close()
 
     original_page_result = pipeline._page_result
+    original_normalize = pipeline._normalize_document_blocks
     interrupted = False
+    normalized_page_sets = []
 
     def fail_once(source_page, *args, **kwargs):
         nonlocal interrupted
@@ -915,7 +917,12 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
             raise RuntimeError("simulated page interruption")
         return original_page_result(source_page, *args, **kwargs)
 
+    def record_normalization(pages):
+        normalized_page_sets.append([page.number for page in pages])
+        return original_normalize(pages)
+
     monkeypatch.setattr(pipeline, "_page_result", fail_once)
+    monkeypatch.setattr(pipeline, "_normalize_document_blocks", record_normalization)
     backend = FixtureOcr()
     try:
         convert(pdf, backend=backend)
@@ -931,10 +938,12 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
     progress = json.loads((intermediate / "progress.json").read_text())
     assert progress["completed_pages"] == [1, 3]
     assert progress["status"] == "failed"
+    assert normalized_page_sets == []
 
     output = convert(pdf, backend=backend)
     assert output == tmp_path / "page-interruption.pdf.md"
     assert json.loads((intermediate / "progress.json").read_text())["completed_pages"] == [1, 2, 3]
+    assert normalized_page_sets == [[1, 2, 3]]
 
 
 def test_content_quality_warning_does_not_suppress_output(tmp_path: Path, capsys):
