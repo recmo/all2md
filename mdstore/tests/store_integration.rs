@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -112,6 +112,54 @@ impl RetrievalProvider for CountingProvider {
 struct BlockingProvider {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+}
+
+struct BlockingFailProvider {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RetrievalProvider for BlockingFailProvider {
+    async fn embed(&self, _input_type: InputType, _input: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.started.notify_one();
+        self.release.notified().await;
+        anyhow::bail!("expected provider failure")
+    }
+
+    async fn rerank(
+        &self,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> Result<Vec<RerankResult>> {
+        FakeProvider.rerank(query, documents, top_n).await
+    }
+
+    fn model(&self) -> &str {
+        "fake-embed"
+    }
+
+    fn dimensions(&self) -> usize {
+        2
+    }
+
+    fn embedding_provider_identity(&self) -> String {
+        "fake-provider".into()
+    }
 }
 
 #[async_trait]
@@ -1860,4 +1908,40 @@ async fn cancelling_a_reindex_waiter_does_not_release_the_job_lock() {
         .unwrap();
     assert!(calls.load(Ordering::SeqCst) > 0);
     assert!(store.status().unwrap().vectors_ready > 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn detached_reindex_failure_is_logged() {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || LogWriter(writer.clone()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let repository = Repository::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let store = repository.store_with_provider(Arc::new(BlockingFailProvider {
+        started: started.clone(),
+        release: release.clone(),
+    }));
+    let waiter = tokio::spawn(async move { store.reindex_missing().await });
+    started.notified().await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    release.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+            if logged.contains("reindex failed") && logged.contains("expected provider failure") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("detached failure must be logged");
 }
