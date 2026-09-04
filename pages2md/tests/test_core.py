@@ -110,6 +110,10 @@ def test_cli_has_one_input_and_force_only():
     arguments = parser().parse_args(["paper.pdf", "--force"])
     assert arguments.input == Path("paper.pdf")
     assert arguments.force is True
+    with pytest.raises(SystemExit):
+        parser().parse_args(["convert", "paper.pdf"])
+    with pytest.raises(SystemExit):
+        parser().parse_args(["paper.pdf", "--output", "result"])
 
 
 def test_file_workspace_name_strips_one_extension(tmp_path: Path):
@@ -120,40 +124,6 @@ def test_file_workspace_name_strips_one_extension(tmp_path: Path):
 
     assert _intermediate_root(source) == tmp_path / "TR26-164.pages2md"
     assert _intermediate_root(scans) == tmp_path / "scans.v1.pages2md"
-
-
-def test_legacy_nested_workspace_is_adopted_without_duplication(tmp_path: Path):
-    source = tmp_path / "TR26-164.pdf"
-    source.touch()
-    legacy_root = tmp_path / "TR26-164.pdf.pages2md"
-    legacy_bundle = legacy_root / "tr26-164-pdf"
-    legacy_bundle.mkdir(parents=True)
-    (legacy_bundle / "progress.json").write_text('{"status":"running"}')
-
-    workspace = pipeline._prepare_intermediate_workspace(source)
-
-    assert workspace == tmp_path / "TR26-164.pages2md"
-    assert (workspace / "progress.json").exists()
-    assert not legacy_root.exists()
-
-
-def test_legacy_directory_workspace_is_flattened(tmp_path: Path):
-    source = tmp_path / "scans.v1"
-    source.mkdir()
-    workspace = tmp_path / "scans.v1.pages2md"
-    nested = workspace / "scans-v1"
-    nested.mkdir(parents=True)
-    (nested / "progress.json").write_text('{"status":"running"}')
-
-    prepared = pipeline._prepare_intermediate_workspace(source)
-
-    assert prepared == workspace
-    assert (workspace / "progress.json").exists()
-    assert not nested.exists()
-    with pytest.raises(SystemExit):
-        parser().parse_args(["convert", "paper.pdf"])
-    with pytest.raises(SystemExit):
-        parser().parse_args(["paper.pdf", "--output", "result"])
 
 
 def test_parse_unlimited_output():

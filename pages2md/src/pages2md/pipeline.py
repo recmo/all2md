@@ -59,7 +59,7 @@ def convert(
         raise RuntimeError("pages2md source commit is unavailable")
     workspace = _convert_workspace(
         source,
-        _prepare_intermediate_workspace(source),
+        _intermediate_root(source),
         backend=backend,
         force=force,
     )
@@ -73,27 +73,6 @@ def _intermediate_root(source: Path) -> Path:
     """Return the persistent, private workspace directory beside ``source``."""
     source = source.resolve()
     return source.with_name(f"{_source_stem(source)}.pages2md")
-
-
-def _prepare_intermediate_workspace(source: Path) -> Path:
-    """Adopt the nested, extension-bearing workspace created by pages2md 0.2."""
-    workspace = _intermediate_root(source)
-    legacy_root = source.resolve().with_name(f"{source.name}.pages2md")
-    legacy_bundle = legacy_root / slugify(source.name, "document")
-    if workspace != legacy_root and not workspace.exists() and legacy_bundle.exists():
-        legacy_bundle.rename(workspace)
-        try:
-            legacy_root.rmdir()
-        except OSError:
-            pass
-    nested_bundle = workspace / slugify(source.name, "document")
-    if nested_bundle.is_dir() and not (workspace / "progress.json").exists():
-        children = list(nested_bundle.iterdir())
-        if not any((workspace / child.name).exists() for child in children):
-            for child in children:
-                child.rename(workspace / child.name)
-            nested_bundle.rmdir()
-    return workspace
 
 
 def _source_stem(source: Path) -> str:
@@ -1625,11 +1604,6 @@ def _reprocess_page_checkpoint(
     multi_value = previous.visual.get("multi_page", {})
     if isinstance(multi_value, dict) and multi_value.get("id"):
         primary.id = str(multi_value["id"])
-    group_observation = _stored_observation(
-        multi_value,
-        bundle,
-        fallback=primary,
-    )
     candidates = [
         _stored_observation(candidate, bundle)
         for candidate in previous.visual.get("candidates", [])
@@ -1648,7 +1622,7 @@ def _reprocess_page_checkpoint(
     return _page_result(
         source_page,
         primary,
-        group_observation,
+        primary,
         candidates,
         blocks,
         recovery,
@@ -1661,37 +1635,22 @@ def _reprocess_page_checkpoint(
 def _stored_observation(
     value: object,
     bundle: Path,
-    *,
-    fallback: OcrObservation | None = None,
 ) -> OcrObservation:
     if not isinstance(value, dict):
-        if fallback is None:
-            raise ValueError("stored OCR observation is missing")
-        return fallback
+        raise ValueError("stored OCR observation is missing")
     raw_path = value.get("raw_path")
     raw_file = bundle / str(raw_path) if raw_path else None
-    raw = raw_file.read_text(encoding="utf-8") if raw_file and raw_file.is_file() else ""
-    if raw:
-        observation = parse_native_observation(
-            raw,
-            mode=str(value.get("mode", "unknown")),
-            source_pages=list(value.get("source_pages", [])),
-            generation=dict(value.get("generation", {})),
-        )
-        if value.get("id"):
-            observation.id = str(value["id"])
-        return observation
-    if fallback is not None:
-        return fallback
-    return OcrObservation(
-        id=str(value.get("id", "stored-observation")),
+    if raw_file is None or not raw_file.is_file():
+        raise ValueError("stored raw OCR observation is missing")
+    observation = parse_native_observation(
+        raw_file.read_text(encoding="utf-8"),
         mode=str(value.get("mode", "unknown")),
-        raw="",
         source_pages=list(value.get("source_pages", [])),
         generation=dict(value.get("generation", {})),
-        blocks=[_block_from_dict(block) for block in value.get("blocks", [])],
-        warnings=list(value.get("warnings", [])),
     )
+    if value.get("id"):
+        observation.id = str(value["id"])
+    return observation
 
 
 def _write_progress(
