@@ -642,6 +642,14 @@ def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObs
     severe = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
     if not severe or set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS:
         return False
+    # A generation loop that exhausts the token budget is unusable evidence.
+    # Its clean page-level recovery will naturally have little textual overlap,
+    # so do not apply the ordinary overlap gate in this specific failure mode.
+    if (
+        "visual_text_repetition" in primary.warnings
+        and primary.generation.get("finish_reason") in {"length", "max_tokens"}
+    ):
+        return True
     primary_tokens = set(normalize(_observation_text(primary)).casefold().split())
     recovery_tokens = set(normalize(_observation_text(recovery)).casefold().split())
     overlap = len(primary_tokens & recovery_tokens) / max(1, min(len(primary_tokens), len(recovery_tokens)))

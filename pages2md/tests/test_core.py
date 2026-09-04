@@ -265,6 +265,48 @@ def test_recovery_keeps_ungrounded_content_until_document_evidence_filtering():
     assert "visual_suspicious_ungrounded_preamble" not in warnings
 
 
+def test_clean_recovery_replaces_repaired_runaway_without_text_overlap():
+    primary = parse_native_observation(
+        " ".join(["loop phrase"] * 20),
+        mode="multi_base",
+        source_pages=[17],
+        generation={"finish_reason": "length"},
+    )
+    assert "visual_text_repetition" in primary.warnings
+    recovery = parse_native_observation(
+        r"Proof. For each \(0 \leq r < m\), define \(\mathcal K_r\).",
+        mode="gundam_detail",
+        source_pages=[17],
+        generation={"target_block_indices": []},
+    )
+
+    blocks, provenance, warnings = reconcile_observations(primary, [recovery])
+
+    assert blocks[0].markdown.startswith("Proof. For each")
+    assert provenance[0]["action"] == "replaced_corrupt_page_local_content"
+    assert "visual_text_repetition" in warnings
+
+
+def test_nontruncated_repetition_still_requires_recovery_overlap():
+    primary = parse_native_observation(
+        " ".join(["loop phrase"] * 20),
+        mode="multi_base",
+        source_pages=[17],
+        generation={"finish_reason": "stop"},
+    )
+    recovery = parse_native_observation(
+        "Entirely unrelated but structurally valid recovery text.",
+        mode="gundam_detail",
+        source_pages=[17],
+        generation={"target_block_indices": []},
+    )
+
+    blocks, provenance, _ = reconcile_observations(primary, [recovery])
+
+    assert blocks[0].markdown.startswith("loop phrase")
+    assert provenance == []
+
+
 def test_split_multi_page_output_requires_one_segment_per_image():
     assert split_multi_page_output("<PAGE>\nOne\n<PAGE>\nTwo", 2) == ["One", "Two"]
     assert split_multi_page_output("<PAGE>\nMerged", 2) == ["Merged"]

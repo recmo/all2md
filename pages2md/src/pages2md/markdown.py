@@ -493,7 +493,12 @@ def _rendered_page_targets(
 
 
 def _heading_anchor(heading: str) -> str:
-    return slugify(re.sub(r"[*_`]", "", heading))
+    # Anchor identity follows the rendered label, not a link destination.  Page
+    # links are rewritten after targets are collected, so including their
+    # destinations here would make the heading's anchor change underneath us.
+    visible = IMAGE_LINK.sub(r"\1", heading)
+    visible = MARKDOWN_LINK.sub(r"\1", visible)
+    return slugify(re.sub(r"[*_`]", "", visible))
 
 
 def _strip_grounding_artifacts(markdown: str) -> str:
