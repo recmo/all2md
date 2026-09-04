@@ -38,6 +38,8 @@ from .verify import verify_bundle
 
 FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
 FORMULA_KINDS = {"formula", "equation", "display_formula"}
+# Bump only when stored raw observations are incompatible with recognition.
+OCR_CHECKPOINT_VERSION = 1
 
 
 def convert(
@@ -96,14 +98,12 @@ def _convert_workspace(
         shutil.rmtree(bundle)
     backend = backend or MlxUnlimitedOcr()
     ocr_fingerprint = {
+        "contract_version": OCR_CHECKPOINT_VERSION,
         "source_sha256": _source_hash(source),
         "backend": dict(backend.identity),
         "dpi": DEFAULT_DPI,
         "multi_page": True,
         "quality": "thorough",
-        "code": _code_fingerprint(
-            "adapters.py", "assets.py", "compare.py", "model.py", "native.py", "ocr.py", "pipeline.py", "quality.py"
-        ),
     }
     assembly_fingerprint = {
         "split_mode": "auto",
@@ -114,17 +114,11 @@ def _convert_workspace(
     previous = _read_json(bundle / "metadata.json")
     progress_state = _read_json(bundle / "progress.json")
     resume_state = progress_state or previous
-    can_resume_exact = bool(
-        resume
-        and resume_state
-        and resume_state.get("source") == str(source)
-        and resume_state.get("ocr_fingerprint") == ocr_fingerprint
-    )
     can_reuse_ocr = bool(
         resume
         and resume_state
         and resume_state.get("source") == str(source)
-        and _same_ocr_inputs(resume_state.get("ocr_fingerprint"), ocr_fingerprint)
+        and resume_state.get("ocr_fingerprint") == ocr_fingerprint
     )
     if bundle.exists() and not can_reuse_ocr:
         raise RuntimeError(
@@ -151,10 +145,7 @@ def _convert_workspace(
     resumed: dict[int, PageResult] = {}
     reprocess_resumed = bool(
         can_reuse_ocr
-        and (
-            not can_resume_exact
-            or resume_state.get("assembly_fingerprint") != assembly_fingerprint
-        )
+        and resume_state.get("assembly_fingerprint") != assembly_fingerprint
     )
     if can_reuse_ocr:
         for source_page in document.pages:
@@ -1567,16 +1558,6 @@ def _code_fingerprint(*names: str) -> str:
     return digest.hexdigest()
 
 
-def _same_ocr_inputs(stored: object, current: dict[str, Any]) -> bool:
-    """Compare expensive OCR inputs independently of post-processing code."""
-    if not isinstance(stored, dict):
-        return False
-    return (
-        {key: value for key, value in stored.items() if key != "code"}
-        == {key: value for key, value in current.items() if key != "code"}
-    )
-
-
 def _read_json(path: Path):
     if not path.exists():
         return None
@@ -1602,8 +1583,8 @@ def _reprocess_page_checkpoint(
         generation=previous.generation,
     )
     multi_value = previous.visual.get("multi_page", {})
-    if isinstance(multi_value, dict) and multi_value.get("id"):
-        primary.id = str(multi_value["id"])
+    group_observation = _checkpoint_observation(multi_value)
+    primary.id = group_observation.id
     candidates = [
         _stored_observation(candidate, bundle)
         for candidate in previous.visual.get("candidates", [])
@@ -1622,7 +1603,7 @@ def _reprocess_page_checkpoint(
     return _page_result(
         source_page,
         primary,
-        primary,
+        group_observation,
         candidates,
         blocks,
         recovery,
@@ -1651,6 +1632,21 @@ def _stored_observation(
     if value.get("id"):
         observation.id = str(value["id"])
     return observation
+
+
+def _checkpoint_observation(value: object) -> OcrObservation:
+    """Restore immutable observation metadata already stored in a checkpoint."""
+    if not isinstance(value, dict) or not value.get("id"):
+        raise ValueError("stored group observation is missing")
+    return OcrObservation(
+        id=str(value["id"]),
+        mode=str(value.get("mode", "unknown")),
+        raw="",
+        source_pages=list(value.get("source_pages", [])),
+        generation=dict(value.get("generation", {})),
+        blocks=[_block_from_dict(block) for block in value.get("blocks", [])],
+        warnings=list(value.get("warnings", [])),
+    )
 
 
 def _write_progress(

@@ -955,12 +955,17 @@ def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Pat
 
         def recognize(self, image: Path):
             self.calls += 1
-            return super().recognize(image)
+            number = int(image.stem.rsplit("-", 1)[-1])
+            return (
+                f"<|det|>text [100,100,800,300]<|/det|>Page {number} content.",
+                {"finish_reason": "stop"},
+            )
 
     pdf = tmp_path / "code-change.pdf"
     document = fitz.open()
-    page = document.new_page(width=612, height=792)
-    page.insert_text((72, 72), "The visual text has x squared.")
+    for number in range(1, 3):
+        page = document.new_page(width=612, height=792)
+        page.insert_text((72, 72), f"Page {number} content.")
     document.save(pdf)
     document.close()
     backend = CountingFixture()
@@ -972,9 +977,11 @@ def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Pat
 
     monkeypatch.setattr(pipeline, "_code_fingerprint", versioned_fingerprint)
     bundle = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
-    assert backend.calls == 1
+    assert backend.calls == 2
     checkpoint = bundle / "pages/page-0001.json"
     assert checkpoint.exists()
+    group_before = json.loads(checkpoint.read_text())["visual"]["multi_page"]
+    assert len(group_before["blocks"]) == 2
 
     reconciliations = 0
     original_reconcile = pipeline.reconcile_observations
@@ -989,9 +996,10 @@ def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Pat
     resumed = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
 
     assert resumed == bundle
-    assert backend.calls == 1
-    assert reconciliations == 1
+    assert backend.calls == 2
+    assert reconciliations == 2
     assert checkpoint.exists()
+    assert json.loads(checkpoint.read_text())["visual"]["multi_page"] == group_before
 
 
 def test_incompatible_checkpoint_is_retained_until_force(tmp_path: Path):
@@ -1008,6 +1016,23 @@ def test_incompatible_checkpoint_is_retained_until_force(tmp_path: Path):
     incompatible.identity = {**FixtureOcr.identity, "revision": "2"}
     with pytest.raises(RuntimeError, match="incompatible intermediate bundle retained"):
         _convert_workspace(pdf, _intermediate_root(pdf), backend=incompatible)
+
+    assert checkpoint.exists()
+
+
+def test_ocr_contract_change_does_not_reuse_raw_checkpoint(tmp_path: Path, monkeypatch):
+    pdf = tmp_path / "contract-change.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "Source text.")
+    document.save(pdf)
+    document.close()
+    bundle = _convert_workspace(pdf, _intermediate_root(pdf), backend=FixtureOcr())
+    checkpoint = bundle / "pages/page-0001.json"
+
+    monkeypatch.setattr(pipeline, "OCR_CHECKPOINT_VERSION", 2)
+    with pytest.raises(RuntimeError, match="incompatible intermediate bundle retained"):
+        _convert_workspace(pdf, _intermediate_root(pdf), backend=FixtureOcr())
 
     assert checkpoint.exists()
 
