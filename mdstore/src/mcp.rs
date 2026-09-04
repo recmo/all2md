@@ -120,9 +120,7 @@ async fn cli(State(state): State<AppState>, Json(command): Json<CliCommand>) -> 
                 Ok(push) => {
                     let background = state.store.clone();
                     tokio::spawn(async move {
-                        if let Err(error) = background.reindex_missing().await {
-                            tracing::warn!(%error, "post-refresh embedding rebuild is degraded");
-                        }
+                        let _ = background.reindex_missing().await;
                     });
                     Json(json!(push)).into_response()
                 }
@@ -383,9 +381,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                     Ok(value) => {
                         let background = Arc::clone(store);
                         tokio::spawn(async move {
-                            if let Err(error) = background.reindex_missing().await {
-                                tracing::warn!(%error, "post-edit embedding rebuild is degraded");
-                            }
+                            let _ = background.reindex_missing().await;
                         });
                         serde_json::to_value(value).map_err(Into::into)
                     }

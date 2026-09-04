@@ -77,9 +77,7 @@ async fn main() -> Result<()> {
                 .context("read configured bearer token environment variable")?;
             let background = store.clone();
             tokio::spawn(async move {
-                if let Err(error) = background.reindex_missing().await {
-                    tracing::warn!(%error, "background embedding rebuild is degraded");
-                }
+                let _ = background.reindex_missing().await;
             });
             serve(store, listen, token).await?;
         }
