@@ -28,7 +28,7 @@ from .markdown import (
     strict_page_markdown,
     write_markdown,
 )
-from .model import Block, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult
+from .model import Block, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult, SourcePage
 from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, confidence_summary, split_multi_page_output
 from .quality import adjacent_overlap, output_quality_warnings, runaway_repetition_span
@@ -109,20 +109,29 @@ def _convert_workspace(
     previous = _read_json(bundle / "metadata.json")
     progress_state = _read_json(bundle / "progress.json")
     resume_state = progress_state or previous
-    can_resume = bool(
+    can_resume_exact = bool(
         resume
         and resume_state
         and resume_state.get("source") == str(source)
         and resume_state.get("ocr_fingerprint") == ocr_fingerprint
     )
-    if bundle.exists() and not can_resume:
-        shutil.rmtree(bundle)
+    can_reuse_ocr = bool(
+        resume
+        and resume_state
+        and resume_state.get("source") == str(source)
+        and _same_ocr_inputs(resume_state.get("ocr_fingerprint"), ocr_fingerprint)
+    )
+    if bundle.exists() and not can_reuse_ocr:
+        raise RuntimeError(
+            "incompatible intermediate bundle retained; use --force to replace it: "
+            f"{bundle}"
+        )
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "pages").mkdir(exist_ok=True)
     (bundle / "raw").mkdir(exist_ok=True)
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
-    assets = AssetStore(bundle / "assets", load_existing=can_resume)
+    assets = AssetStore(bundle / "assets", load_existing=can_reuse_ocr)
     fingerprint = {"ocr": ocr_fingerprint, "assembly": assembly_fingerprint}
     started = time.time()
     _write_progress(
@@ -135,14 +144,31 @@ def _convert_workspace(
     document = open_document(source, work, assets, dpi=DEFAULT_DPI)
 
     resumed: dict[int, PageResult] = {}
-    if can_resume:
+    reprocess_resumed = bool(
+        can_reuse_ocr
+        and (
+            not can_resume_exact
+            or resume_state.get("assembly_fingerprint") != assembly_fingerprint
+        )
+    )
+    if can_reuse_ocr:
         for source_page in document.pages:
             page_path = bundle / "pages" / f"page-{source_page.number:04d}.json"
             value = _read_json(page_path)
             if not isinstance(value, dict) or value.get("number") != source_page.number:
                 continue
             try:
-                resumed[source_page.number] = _page_from_dict(value)
+                if reprocess_resumed:
+                    resumed[source_page.number] = _reprocess_page_checkpoint(
+                        value,
+                        source_page,
+                        bundle,
+                        assets,
+                        document.outline,
+                    )
+                    atomic_json(page_path, resumed[source_page.number].to_dict())
+                else:
+                    resumed[source_page.number] = _page_from_dict(value)
             except (KeyError, TypeError, ValueError):
                 continue
     completed_pages = set(resumed)
@@ -1536,10 +1562,110 @@ def _code_fingerprint(*names: str) -> str:
     return digest.hexdigest()
 
 
+def _same_ocr_inputs(stored: object, current: dict[str, Any]) -> bool:
+    """Compare expensive OCR inputs independently of post-processing code."""
+    if not isinstance(stored, dict):
+        return False
+    return (
+        {key: value for key, value in stored.items() if key != "code"}
+        == {key: value for key, value in current.items() if key != "code"}
+    )
+
+
 def _read_json(path: Path):
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _reprocess_page_checkpoint(
+    value: dict[str, Any],
+    source_page: SourcePage,
+    bundle: Path,
+    assets: AssetStore,
+    outline: list[dict[str, Any]],
+) -> PageResult:
+    """Re-run deterministic reconciliation from stored OCR without model calls."""
+    previous = _page_from_dict(value)
+    if not previous.raw_ocr:
+        return previous
+
+    primary = parse_native_observation(
+        previous.raw_ocr,
+        mode="multi_base",
+        source_pages=list(previous.generation.get("source_pages", [source_page.number])),
+        generation=previous.generation,
+    )
+    multi_value = previous.visual.get("multi_page", {})
+    if isinstance(multi_value, dict) and multi_value.get("id"):
+        primary.id = str(multi_value["id"])
+    group_observation = _stored_observation(
+        multi_value,
+        bundle,
+        fallback=primary,
+    )
+    candidates = [
+        _stored_observation(candidate, bundle)
+        for candidate in previous.visual.get("candidates", [])
+        if isinstance(candidate, dict)
+    ]
+    blocks, recovery, validation_warnings = reconcile_observations(
+        primary,
+        candidates,
+        embedded_text=source_page.embedded.text,
+    )
+    validation_warnings.extend(
+        warning
+        for warning in previous.warnings
+        if warning in {"visual_auxiliary_ocr_failed", "visual_auxiliary_ocr_unavailable", "visual_single_page_base_failed"}
+    )
+    return _page_result(
+        source_page,
+        primary,
+        group_observation,
+        candidates,
+        blocks,
+        recovery,
+        validation_warnings,
+        assets,
+        outline,
+    )
+
+
+def _stored_observation(
+    value: object,
+    bundle: Path,
+    *,
+    fallback: OcrObservation | None = None,
+) -> OcrObservation:
+    if not isinstance(value, dict):
+        if fallback is None:
+            raise ValueError("stored OCR observation is missing")
+        return fallback
+    raw_path = value.get("raw_path")
+    raw_file = bundle / str(raw_path) if raw_path else None
+    raw = raw_file.read_text(encoding="utf-8") if raw_file and raw_file.is_file() else ""
+    if raw:
+        observation = parse_native_observation(
+            raw,
+            mode=str(value.get("mode", "unknown")),
+            source_pages=list(value.get("source_pages", [])),
+            generation=dict(value.get("generation", {})),
+        )
+        if value.get("id"):
+            observation.id = str(value["id"])
+        return observation
+    if fallback is not None:
+        return fallback
+    return OcrObservation(
+        id=str(value.get("id", "stored-observation")),
+        mode=str(value.get("mode", "unknown")),
+        raw="",
+        source_pages=list(value.get("source_pages", [])),
+        generation=dict(value.get("generation", {})),
+        blocks=[_block_from_dict(block) for block in value.get("blocks", [])],
+        warnings=list(value.get("warnings", [])),
+    )
 
 
 def _write_progress(
@@ -1582,20 +1708,7 @@ def _page_from_dict(value: dict[str, Any]) -> PageResult:
         ],
         extractor=embedded_value.get("extractor"),
     )
-    blocks = []
-    for block in value.get("blocks", []):
-        blocks.append(
-            Block(
-                kind=block.get("kind", "paragraph"),
-                markdown=block.get("markdown", ""),
-                bbox=tuple(block["bbox"]) if block.get("bbox") is not None else None,
-                confidence=block.get("confidence"),
-                asset_id=block.get("asset_id"),
-                source_pages=block.get("source_pages", []),
-                provenance=block.get("provenance", []),
-                metadata=block.get("metadata", {}),
-            )
-        )
+    blocks = [_block_from_dict(block) for block in value.get("blocks", [])]
     return PageResult(
         number=value["number"],
         image=value.get("image", ""),
@@ -1609,6 +1722,19 @@ def _page_from_dict(value: dict[str, Any]) -> PageResult:
         raw_ocr=value.get("raw_ocr", ""),
         visual=value.get("visual", {}),
         recovery=value.get("recovery", []),
+    )
+
+
+def _block_from_dict(value: dict[str, Any]) -> Block:
+    return Block(
+        kind=value.get("kind", "paragraph"),
+        markdown=value.get("markdown", ""),
+        bbox=tuple(value["bbox"]) if value.get("bbox") is not None else None,
+        confidence=value.get("confidence"),
+        asset_id=value.get("asset_id"),
+        source_pages=value.get("source_pages", []),
+        provenance=value.get("provenance", []),
+        metadata=value.get("metadata", {}),
     )
 
 

@@ -938,6 +938,70 @@ def test_resume_processes_only_pages_missing_from_persistent_workspace(tmp_path:
     assert json.loads((bundle / "progress.json").read_text())["completed_pages"] == [1, 2, 3]
 
 
+def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Path, monkeypatch):
+    class CountingFixture(FixtureOcr):
+        def __init__(self):
+            self.calls = 0
+
+        def recognize(self, image: Path):
+            self.calls += 1
+            return super().recognize(image)
+
+    pdf = tmp_path / "code-change.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "The visual text has x squared.")
+    document.save(pdf)
+    document.close()
+    backend = CountingFixture()
+    code_revision = {"value": "v1"}
+    original_fingerprint = pipeline._code_fingerprint
+
+    def versioned_fingerprint(*names):
+        return f"{original_fingerprint(*names)}-{code_revision['value']}"
+
+    monkeypatch.setattr(pipeline, "_code_fingerprint", versioned_fingerprint)
+    bundle = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
+    assert backend.calls == 1
+    checkpoint = bundle / "pages/page-0001.json"
+    assert checkpoint.exists()
+
+    reconciliations = 0
+    original_reconcile = pipeline.reconcile_observations
+
+    def record_reconciliation(*args, **kwargs):
+        nonlocal reconciliations
+        reconciliations += 1
+        return original_reconcile(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "reconcile_observations", record_reconciliation)
+    code_revision["value"] = "v2"
+    resumed = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
+
+    assert resumed == bundle
+    assert backend.calls == 1
+    assert reconciliations == 1
+    assert checkpoint.exists()
+
+
+def test_incompatible_checkpoint_is_retained_until_force(tmp_path: Path):
+    pdf = tmp_path / "backend-change.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "Source text.")
+    document.save(pdf)
+    document.close()
+    bundle = _convert_workspace(pdf, _intermediate_root(pdf), backend=FixtureOcr())
+    checkpoint = bundle / "pages/page-0001.json"
+
+    incompatible = FixtureOcr()
+    incompatible.identity = {**FixtureOcr.identity, "revision": "2"}
+    with pytest.raises(RuntimeError, match="incompatible intermediate bundle retained"):
+        _convert_workspace(pdf, _intermediate_root(pdf), backend=incompatible)
+
+    assert checkpoint.exists()
+
+
 def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkeypatch):
     pdf = tmp_path / "page-interruption.pdf"
     document = fitz.open()
