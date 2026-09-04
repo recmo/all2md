@@ -265,6 +265,34 @@ def test_recovery_keeps_ungrounded_content_until_document_evidence_filtering():
     assert "visual_suspicious_ungrounded_preamble" not in warnings
 
 
+def test_clean_recovery_replaces_repaired_runaway_without_text_overlap():
+    primary = parse_native_observation(
+        r"\( \alpha_{1} \), \( \alpha_{2} \), \( \alpha_{3377}",
+        mode="multi_base",
+        source_pages=[17],
+        generation={"finish_reason": "length"},
+    )
+    primary.blocks[0].metadata.update(
+        review_required=True,
+        review_reason="runaway_repetition_truncated",
+        original_characters=76557,
+        retained_characters=62,
+    )
+    primary.warnings.extend(["visual_text_repetition", "visual_malformed_math"])
+    recovery = parse_native_observation(
+        r"Proof. For each \(0 \leq r < m\), define \(\mathcal K_r\).",
+        mode="gundam_detail",
+        source_pages=[17],
+        generation={"target_block_indices": []},
+    )
+
+    blocks, provenance, warnings = reconcile_observations(primary, [recovery])
+
+    assert blocks[0].markdown.startswith("Proof. For each")
+    assert provenance[0]["action"] == "replaced_corrupt_page_local_content"
+    assert "visual_malformed_math" in warnings
+
+
 def test_split_multi_page_output_requires_one_segment_per_image():
     assert split_multi_page_output("<PAGE>\nOne\n<PAGE>\nTwo", 2) == ["One", "Two"]
     assert split_multi_page_output("<PAGE>\nMerged", 2) == ["Merged"]

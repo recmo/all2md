@@ -229,6 +229,29 @@ def test_page_links_follow_rendered_numbered_heading(tmp_path: Path):
     assert "1-introduction" in markdown_anchors(markdown)
 
 
+def test_page_links_ignore_link_destinations_inside_rendered_headings(tmp_path: Path):
+    contents = page(1)
+    contents.visual_markdown = "[Proof](#page-2)"
+    proof = page(2)
+    proof.visual_markdown = "# 4 Algorithm: Proof of Theorem [1.1](#page-3)\n\nBody"
+    theorem = page(3)
+    theorem.visual_markdown = "# Theorem 1.1\n\nStatement"
+
+    write_markdown(
+        tmp_path,
+        [contents, proof, theorem],
+        [Chapter("Paper", 1, 3, "paper")],
+        split=False,
+        title="Paper",
+    )
+
+    markdown = (tmp_path / "book.md").read_text()
+    anchor = "4-algorithm-proof-of-theorem-1-1"
+    assert f"[Proof](#{anchor})" in markdown
+    assert anchor in markdown_anchors(markdown)
+    assert "#page-3" not in markdown
+
+
 def test_split_page_links_follow_generated_chapter_heading(tmp_path: Path):
     contents = page(1)
     contents.visual_markdown = "[Introduction](#page-2)"
