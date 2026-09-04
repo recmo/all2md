@@ -18,8 +18,9 @@ object is available, the OCR-detected figure is cropped from the rendered page.
 The model contract is intentionally narrow and immutable: ordered page windows
 use Baidu's multi-page Base recipe, and affected pages use Baidu's Gundam recipe
 for local recovery. Deterministic Python code parses, validates, reconciles,
-structures, and renders the result in a private temporary workspace. The model
-is never prompted to emit JSON or arbitrate between its own readings.
+structures, and renders the result. The model is never prompted to emit JSON
+or arbitrate between its own readings. Page results and model observations are
+checkpointed in a private resumable workspace beside the input document.
 
 ## Install
 
@@ -78,7 +79,9 @@ paper.pdf.md/
 ```
 
 No parsing records, raw model output, manifests, logs, or other intermediates
-are published. Every Markdown file starts with YAML front matter containing the
+are included in the published Markdown output. They remain available in the
+private `<input-name>.pages2md/` workspace beside the source so an interrupted
+run can resume. Every Markdown file starts with YAML front matter containing the
 SHA-256 hash of the input document and the pages2md source commit. All links are
 relative, and only figures referenced by Markdown are retained.
 

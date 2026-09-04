@@ -399,9 +399,10 @@ def write_markdown(
         if context_markdown:
             preamble += f"\n\n{context_markdown}"
         content = f"{preamble}\n\n{rendered_pages}"
+        targets = _rendered_page_targets({"book.md": content})
         content = _rewrite_page_links(
             content,
-            _page_targets(pages, chapters, ["book.md"] * len(chapters)),
+            targets,
             "book.md",
         )
         atomic_text(root / "book.md", content.rstrip() + "\n")
@@ -413,7 +414,7 @@ def write_markdown(
         stale_markdown.unlink()
     index_lines = [f"# {rendered_title}", "", "## Contents", ""]
     chapter_files = [f"{index:03d}-{chapter.slug}.md" for index, chapter in enumerate(chapters)]
-    targets = _page_targets(pages, chapters, chapter_files)
+    chapter_contents: dict[str, str] = {}
     for index, chapter in enumerate(chapters):
         filename = chapter_files[index]
         selected = [page for page in pages if chapter.start_page <= page.number <= chapter.end_page]
@@ -433,10 +434,13 @@ def write_markdown(
             )
             for page in selected
         )
-        content = _rewrite_page_links(content, targets, filename)
-        atomic_text(chapter_dir / filename, content.rstrip() + "\n")
+        chapter_contents[filename] = content
         index_lines.append(f"- [{chapter_title}](chapters/{filename})")
         written.append(f"chapters/{filename}")
+    targets = _rendered_page_targets(chapter_contents, first_page_uses_file_heading=True)
+    for filename, content in chapter_contents.items():
+        content = _rewrite_page_links(content, targets, filename)
+        atomic_text(chapter_dir / filename, content.rstrip() + "\n")
     atomic_text(root / "book.md", "\n".join(index_lines) + "\n")
     return ["book.md", *written]
 
@@ -452,19 +456,39 @@ def markdown_anchors(markdown: str) -> set[str]:
     return anchors
 
 
-def _page_targets(
-    pages: list[PageResult], chapters: list[Chapter], chapter_files: list[str]
+def _rendered_page_targets(
+    rendered_files: dict[str, str],
+    *,
+    first_page_uses_file_heading: bool = False,
 ) -> dict[int, tuple[str, str | None]]:
+    """Map page markers to anchors as they occur in final rendered files."""
     targets: dict[int, tuple[str, str | None]] = {}
-    for index, chapter in enumerate(chapters):
-        filename = chapter_files[index]
-        for number in range(chapter.start_page, chapter.end_page + 1):
-            targets[number] = (filename, slugify(chapter.title) if number == chapter.start_page else None)
-    for page in pages:
-        match = HEADING.search(page.visual_markdown)
-        if match and page.number in targets:
-            filename, existing = targets[page.number]
-            targets[page.number] = (filename, existing or _heading_anchor(match.group(2)))
+    for filename, markdown in rendered_files.items():
+        counts: dict[str, int] = {}
+        current_page: int | None = None
+        pages_in_file: list[int] = []
+        file_heading: str | None = None
+        for line in markdown.splitlines():
+            page_match = re.fullmatch(r"\s*<!--\s*page:\s*(\d+)\s*-->\s*", line)
+            if page_match:
+                current_page = int(page_match.group(1))
+                pages_in_file.append(current_page)
+                targets.setdefault(current_page, (filename, None))
+                continue
+            heading_match = HEADING.fullmatch(line)
+            if not heading_match:
+                continue
+            base = _heading_anchor(heading_match.group(2))
+            count = counts.get(base, 0)
+            anchor = base if count == 0 else f"{base}-{count}"
+            counts[base] = count + 1
+            if current_page is None and file_heading is None:
+                file_heading = anchor
+            elif current_page is not None and targets[current_page][1] is None:
+                targets[current_page] = (filename, anchor)
+        if first_page_uses_file_heading and pages_in_file and file_heading is not None:
+            first_page = pages_in_file[0]
+            targets[first_page] = (filename, file_heading)
     return targets
 
 

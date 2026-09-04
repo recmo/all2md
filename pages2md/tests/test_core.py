@@ -10,13 +10,15 @@ import fitz
 from PIL import Image, ImageDraw
 import pytest
 
+import pages2md.pipeline as pipeline
 from pages2md.chapters import detect_chapters
 from pages2md.cli import parser
 from pages2md.compare import compare_text
 from pages2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
 from pages2md.native import parse_native_observation, reconcile_observations
 from pages2md.adapters import _link_target, detect_kind
-from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _canonicalize_figure_blocks, _convert_workspace, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, _repair_runaway_repetition, convert
+from pages2md.formatting import FormatResult
+from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _canonicalize_figure_blocks, _convert_workspace, _intermediate_root, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, _repair_runaway_repetition, convert
 from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from pages2md.verify import verify_bundle
 
@@ -824,7 +826,7 @@ def test_recovery_observations_and_provenance_are_preserved(tmp_path: Path):
     assert verification.ok, verification.errors
 
 
-def test_failed_conversion_publishes_no_intermediate_results(tmp_path: Path):
+def test_failed_conversion_retains_intermediate_results_for_resume(tmp_path: Path):
     pdf = tmp_path / "interrupted.pdf"
     document = fitz.open()
     for number in range(1, 4):
@@ -850,9 +852,98 @@ def test_failed_conversion_publishes_no_intermediate_results(tmp_path: Path):
     else:
         raise AssertionError("the first conversion should be interrupted")
     assert not (tmp_path / "interrupted.pdf.md").exists()
+    intermediate = _intermediate_root(pdf) / "interrupted-pdf"
+    assert (intermediate / "progress.json").exists()
+    assert json.loads((intermediate / "progress.json").read_text())["status"] == "failed"
     bundle = convert(pdf, backend=backend)
     assert bundle == tmp_path / "interrupted.pdf.md"
     assert verify_bundle(bundle).ok
+    assert json.loads((intermediate / "progress.json").read_text())["status"] == "complete"
+
+
+def test_resume_processes_only_pages_missing_from_persistent_workspace(tmp_path: Path):
+    class CountingFixture(FixtureOcr):
+        def __init__(self):
+            self.calls = 0
+
+        def recognize(self, image: Path):
+            self.calls += 1
+            number = int(image.stem.rsplit("-", 1)[-1])
+            return (
+                f"<|det|>text [100,100,800,300]<|/det|>Page {number} content.",
+                {"finish_reason": "stop"},
+            )
+
+    pdf = tmp_path / "resume.pdf"
+    document = fitz.open()
+    for number in range(1, 4):
+        page = document.new_page(width=612, height=792)
+        page.insert_text((72, 72), f"Page {number} content.")
+    document.save(pdf)
+    document.close()
+    backend = CountingFixture()
+
+    bundle = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
+    first_run_calls = backend.calls
+    assert first_run_calls == 3
+    (bundle / "pages/page-0003.json").unlink()
+
+    resumed = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
+
+    assert resumed == bundle
+    assert backend.calls == first_run_calls + 1
+    assert (bundle / "pages/page-0003.json").exists()
+    assert json.loads((bundle / "progress.json").read_text())["completed_pages"] == [1, 2, 3]
+
+
+def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkeypatch):
+    pdf = tmp_path / "page-interruption.pdf"
+    document = fitz.open()
+    for number in range(1, 4):
+        page = document.new_page(width=612, height=792)
+        page.insert_text((72, 72), f"Page {number} content.")
+    document.save(pdf)
+    document.close()
+
+    original_page_result = pipeline._page_result
+    original_normalize = pipeline._normalize_document_blocks
+    interrupted = False
+    normalized_page_sets = []
+
+    def fail_once(source_page, *args, **kwargs):
+        nonlocal interrupted
+        if source_page.number == 2 and not interrupted:
+            interrupted = True
+            raise RuntimeError("simulated page interruption")
+        return original_page_result(source_page, *args, **kwargs)
+
+    def record_normalization(pages):
+        normalized_page_sets.append([page.number for page in pages])
+        return original_normalize(pages)
+
+    monkeypatch.setattr(pipeline, "_page_result", fail_once)
+    monkeypatch.setattr(pipeline, "_normalize_document_blocks", record_normalization)
+    backend = FixtureOcr()
+    try:
+        convert(pdf, backend=backend)
+    except RuntimeError as error:
+        assert "1 page(s) failed" in str(error)
+    else:
+        raise AssertionError("the first conversion should be interrupted")
+
+    intermediate = _intermediate_root(pdf) / "page-interruption-pdf"
+    assert (intermediate / "pages/page-0001.json").exists()
+    assert not (intermediate / "pages/page-0002.json").exists()
+    assert (intermediate / "pages/page-0003.json").exists()
+    progress = json.loads((intermediate / "progress.json").read_text())
+    assert progress["completed_pages"] == [1, 3]
+    assert progress["status"] == "failed"
+    assert normalized_page_sets == []
+
+    output = convert(pdf, backend=backend)
+    assert output == tmp_path / "page-interruption.pdf.md"
+    assert json.loads((intermediate / "progress.json").read_text())["completed_pages"] == [1, 2, 3]
+    assert normalized_page_sets == [[1, 2, 3]]
 
 
 def test_content_quality_warning_does_not_suppress_output(tmp_path: Path, capsys):
@@ -886,6 +977,27 @@ def test_content_quality_warning_does_not_suppress_output(tmp_path: Path, capsys
     captured = capsys.readouterr()
     assert long_output.is_file()
     assert "needs content review: visual_implausible_output_length" in captured.err
+
+
+def test_markdown_lint_findings_are_warnings_and_do_not_suppress_output(tmp_path: Path, monkeypatch, capsys):
+    pdf = tmp_path / "linted.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "A document with a lint finding.")
+    document.save(pdf)
+    document.close()
+
+    monkeypatch.setattr(
+        "pages2md.pipeline.format_and_lint",
+        lambda paths: FormatResult(lint_errors=["book.md:1: MD999 test finding"]),
+    )
+
+    output = convert(pdf, backend=FixtureOcr())
+
+    assert output.is_file()
+    captured = capsys.readouterr()
+    assert "metadata reports Markdown lint failures" in captured.err
+    assert "markdown lint: book.md:1: MD999 test finding" in captured.err
 
 
 def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path):

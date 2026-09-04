@@ -209,6 +209,71 @@ def test_single_file_accepts_multiple_structural_boundaries(tmp_path: Path):
     assert files == ["book.md"]
 
 
+def test_page_links_follow_rendered_numbered_heading(tmp_path: Path):
+    contents = page(1)
+    contents.visual_markdown = "[Introduction](#page-2)"
+    introduction = page(2)
+    introduction.visual_markdown = "# 1 Introduction\n\nBody"
+
+    write_markdown(
+        tmp_path,
+        [contents, introduction],
+        [Chapter("Introduction", 2, 2, "introduction")],
+        split=False,
+        title="Paper",
+    )
+
+    markdown = (tmp_path / "book.md").read_text()
+    assert "[Introduction](#1-introduction)" in markdown
+    assert "#introduction" not in markdown
+    assert "1-introduction" in markdown_anchors(markdown)
+
+
+def test_split_page_links_follow_generated_chapter_heading(tmp_path: Path):
+    contents = page(1)
+    contents.visual_markdown = "[Introduction](#page-2)"
+    introduction = page(2)
+    introduction.visual_markdown = "# 1 Introduction\n\nBody"
+
+    write_markdown(
+        tmp_path,
+        [contents, introduction],
+        [
+            Chapter("Contents", 1, 1, "contents"),
+            Chapter("Introduction", 2, 2, "introduction"),
+        ],
+        split=True,
+        title="Paper",
+    )
+
+    contents_markdown = (tmp_path / "chapters/000-contents.md").read_text()
+    introduction_markdown = (tmp_path / "chapters/001-introduction.md").read_text()
+    assert "[Introduction](001-introduction.md#introduction)" in contents_markdown
+    assert "#1-introduction)" not in contents_markdown
+    assert markdown_anchors(introduction_markdown) == {"introduction"}
+
+
+def test_page_links_disambiguate_repeated_rendered_headings(tmp_path: Path):
+    contents = page(1)
+    contents.visual_markdown = "[Second introduction](#page-3)"
+    first = page(2)
+    first.visual_markdown = "# Introduction\n\nFirst"
+    second = page(3)
+    second.visual_markdown = "# Introduction\n\nSecond"
+
+    write_markdown(
+        tmp_path,
+        [contents, first, second],
+        [Chapter("Paper", 1, 3, "paper")],
+        split=False,
+        title="Paper",
+    )
+
+    markdown = (tmp_path / "book.md").read_text()
+    assert "[Second introduction](#introduction-1)" in markdown
+    assert {"introduction", "introduction-1"}.issubset(markdown_anchors(markdown))
+
+
 def test_synthetic_matter_file_contains_level_two_sections(tmp_path: Path):
     first = page(1)
     first.visual_markdown = "# Introduction\n\nText"
