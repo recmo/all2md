@@ -176,6 +176,7 @@ def _convert_workspace(
                 ocr_pages.append(page)
                 continue
             result = _blank_page_result(page, ink_fraction)
+            assets.write_manifest()
             atomic_json(bundle / "pages" / f"page-{page.number:04d}.json", result.to_dict())
             page_results.append(result)
             completed_pages.add(page.number)
@@ -240,6 +241,7 @@ def _convert_workspace(
                         assets,
                         document.outline,
                     )
+                    assets.write_manifest()
                     atomic_json(page_path, result.to_dict())
                     page_results.append(result)
                     completed_pages.add(source_page.number)
