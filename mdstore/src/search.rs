@@ -1,5 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
+use anyhow::Context;
 use serde::Serialize;
 
 use crate::{
@@ -164,12 +166,12 @@ impl SearchIndex {
 
     /// Runs exact and vector retrieval, graph expansion, fusion, and reranking.
     pub(crate) async fn search(
-        &self,
+        self: &Arc<Self>,
         config: &Config,
         provider: &dyn RetrievalProvider,
         query: &str,
         variants: &[String],
-    ) -> SearchResponse {
+    ) -> anyhow::Result<SearchResponse> {
         let formulations: Vec<String> = std::iter::once(query.to_owned())
             .chain(
                 variants
@@ -178,60 +180,88 @@ impl SearchIndex {
                     .cloned(),
             )
             .collect();
-        let mut scores: HashMap<usize, f64> = HashMap::new();
-        let mut arms: HashMap<usize, HashSet<String>> = HashMap::new();
-        for (formulation_index, formulation) in formulations.iter().enumerate() {
-            for (rank, (index, _)) in self
-                .bm25(formulation)
-                .into_iter()
-                .take(config.search.candidates)
-                .enumerate()
-            {
-                *scores.entry(index).or_default() +=
-                    1.0 / (config.search.rrf_k + rank as f64 + 1.0);
-                arms.entry(index)
-                    .or_default()
-                    .insert(format!("exact:{formulation_index}"));
+        let exact_index = Arc::clone(self);
+        let exact_config = config.clone();
+        let exact_formulations = formulations.clone();
+        let (mut scores, mut arms) = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if exact_formulations.first().map(String::as_str) == Some("__slow_retrieval__") {
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
-        }
+            let mut scores: HashMap<usize, f64> = HashMap::new();
+            let mut arms: HashMap<usize, HashSet<String>> = HashMap::new();
+            for (formulation_index, formulation) in exact_formulations.iter().enumerate() {
+                for (rank, (index, _)) in exact_index
+                    .bm25(formulation)
+                    .into_iter()
+                    .take(exact_config.search.candidates)
+                    .enumerate()
+                {
+                    *scores.entry(index).or_default() +=
+                        1.0 / (exact_config.search.rrf_k + rank as f64 + 1.0);
+                    arms.entry(index)
+                        .or_default()
+                        .insert(format!("exact:{formulation_index}"));
+                }
+            }
+            (scores, arms)
+        })
+        .await
+        .context("exact retrieval task failed")?;
         let mut degraded = Vec::new();
-        match provider.embed(InputType::Query, &formulations).await {
+        let query_vectors = match provider.embed(InputType::Query, &formulations).await {
             Ok(query_vectors) => {
                 match validate_vectors(
                     &query_vectors,
                     formulations.len(),
                     config.provider.dimensions,
                 ) {
-                    Ok(()) => {
-                        for (formulation_index, vector) in query_vectors.iter().enumerate() {
-                            for (rank, (index, _)) in self
-                                .vector(vector)
-                                .into_iter()
-                                .take(config.search.candidates)
-                                .enumerate()
-                            {
-                                *scores.entry(index).or_default() +=
-                                    1.0 / (config.search.rrf_k + rank as f64 + 1.0);
-                                arms.entry(index)
-                                    .or_default()
-                                    .insert(format!("vector:{formulation_index}"));
-                            }
-                        }
+                    Ok(()) => Some(query_vectors),
+                    Err(error) => {
+                        degraded.push(format!("embedding: {error}"));
+                        None
                     }
-                    Err(error) => degraded.push(format!("embedding: {error}")),
                 }
             }
-            Err(error) => degraded.push(format!("embedding: {error}")),
-        }
-        self.add_graph_signals(config, &mut scores, &mut arms);
-        let mut ranked: Vec<(usize, f64)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| self.chunk_order(a.0, b.0)));
-        ranked.truncate(config.search.candidates);
-
-        let documents: Vec<String> = ranked
-            .iter()
-            .map(|(index, _)| self.chunks[*index].chunk.text.clone())
-            .collect();
+            Err(error) => {
+                degraded.push(format!("embedding: {error}"));
+                None
+            }
+        };
+        let vector_index = Arc::clone(self);
+        let vector_config = config.clone();
+        let (mut ranked, mut arms, documents) = tokio::task::spawn_blocking(move || {
+            if let Some(query_vectors) = query_vectors {
+                for (formulation_index, vector) in query_vectors.iter().enumerate() {
+                    for (rank, (index, _)) in vector_index
+                        .vector(vector)
+                        .into_iter()
+                        .take(vector_config.search.candidates)
+                        .enumerate()
+                    {
+                        *scores.entry(index).or_default() +=
+                            1.0 / (vector_config.search.rrf_k + rank as f64 + 1.0);
+                        arms.entry(index)
+                            .or_default()
+                            .insert(format!("vector:{formulation_index}"));
+                    }
+                }
+            }
+            vector_index.add_graph_signals(&vector_config, &mut scores, &mut arms);
+            let mut ranked: Vec<(usize, f64)> = scores.into_iter().collect();
+            ranked.sort_by(|a, b| {
+                b.1.total_cmp(&a.1)
+                    .then_with(|| vector_index.chunk_order(a.0, b.0))
+            });
+            ranked.truncate(vector_config.search.candidates);
+            let documents: Vec<String> = ranked
+                .iter()
+                .map(|(index, _)| vector_index.chunks[*index].chunk.text.clone())
+                .collect();
+            (ranked, arms, documents)
+        })
+        .await
+        .context("vector retrieval task failed")?;
         let mut rerank_scores = HashMap::new();
         match provider
             .rerank(query, &documents, config.search.limit)
@@ -288,7 +318,7 @@ impl SearchIndex {
                 }
             })
             .collect();
-        SearchResponse {
+        Ok(SearchResponse {
             results,
             degraded,
             vector_coverage: VectorCoverage {
@@ -299,7 +329,7 @@ impl SearchIndex {
                     .count(),
                 total: self.chunks.len(),
             },
-        }
+        })
     }
 
     fn bm25(&self, query: &str) -> Vec<(usize, f64)> {
@@ -507,7 +537,7 @@ mod tests {
     fn matrix_index(
         entries: &[(&str, &str, Option<[f32; 2]>)],
         edges: &[Edge],
-    ) -> (Config, SearchIndex) {
+    ) -> (Config, Arc<SearchIndex>) {
         let config = Config::from_yaml(
             "documents:\n  include: ['**/*.md']\nsearch:\n  limit: 10\n  candidates: 10\n  graph_weight: 0.5\nprovider:\n  dimensions: 2\n",
         )
@@ -544,7 +574,7 @@ mod tests {
             })
             .collect();
         let index = SearchIndex::build(&config, &pages, &parsed, edges, chunks);
-        (config, index)
+        (config, Arc::new(index))
     }
 
     #[async_trait::async_trait]
@@ -644,11 +674,12 @@ mod tests {
                 Some(vec![1.0, 0.0]),
             )],
         )]);
-        let index = SearchIndex::build(&config, &pages, &parsed, &[], chunks);
+        let index = Arc::new(SearchIndex::build(&config, &pages, &parsed, &[], chunks));
 
         let response = index
             .search(&config, &NonFiniteProvider, "alpha", &[])
-            .await;
+            .await
+            .unwrap();
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].matched_arms, ["exact:0"]);
         assert!(
@@ -674,8 +705,14 @@ mod tests {
             rerank: RerankMode::Fail,
         };
 
-        let first = index.search(&config, &provider, "shared phrase", &[]).await;
-        let second = index.search(&config, &provider, "shared phrase", &[]).await;
+        let first = index
+            .search(&config, &provider, "shared phrase", &[])
+            .await
+            .unwrap();
+        let second = index
+            .search(&config, &provider, "shared phrase", &[])
+            .await
+            .unwrap();
         let summary = |response: &SearchResponse| {
             response
                 .results
@@ -701,6 +738,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retrieval_scans_do_not_stall_the_async_scheduler() {
+        let (config, index) = matrix_index(&[("a.md", "ordinary text", None)], &[]);
+        let provider = Arc::new(MatrixProvider {
+            vectors: HashMap::new(),
+            embed_fails: true,
+            rerank: RerankMode::Fail,
+        });
+        let search = tokio::spawn(async move {
+            index
+                .search(&config, provider.as_ref(), "__slow_retrieval__", &[])
+                .await
+        });
+        let started = std::time::Instant::now();
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        search.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn vector_and_variant_arms_retrieve_independently() {
         let (config, index) = matrix_index(
             &[
@@ -719,13 +776,17 @@ mod tests {
             rerank: RerankMode::Preserve,
         };
 
-        let vector_only = index.search(&config, &provider, "semantic", &[]).await;
+        let vector_only = index
+            .search(&config, &provider, "semantic", &[])
+            .await
+            .unwrap();
         assert_eq!(vector_only.results[0].path, "b.md");
         assert_eq!(vector_only.results[0].matched_arms, ["vector:0"]);
 
         let variant = index
             .search(&config, &provider, "missing", &["needle".into()])
-            .await;
+            .await
+            .unwrap();
         let target = variant
             .results
             .iter()
@@ -757,7 +818,8 @@ mod tests {
 
         let response = index
             .search(&config, &provider, "origin keyword", &[])
-            .await;
+            .await
+            .unwrap();
         let neighbor = response
             .results
             .iter()
@@ -786,11 +848,17 @@ mod tests {
             rerank: RerankMode::Fail,
         };
 
-        let response = index.search(&config, &reranked, "shared", &[]).await;
+        let response = index
+            .search(&config, &reranked, "shared", &[])
+            .await
+            .unwrap();
         assert_eq!(response.results[0].path, "b.md");
         assert!(response.results[0].rerank_score.is_some());
 
-        let response = index.search(&config, &fallback, "shared", &[]).await;
+        let response = index
+            .search(&config, &fallback, "shared", &[])
+            .await
+            .unwrap();
         assert_eq!(response.results[0].path, "a.md");
         assert!(
             response

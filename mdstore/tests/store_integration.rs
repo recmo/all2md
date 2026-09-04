@@ -14,18 +14,13 @@ use std::{
 
 use anyhow::Result;
 use async_trait::async_trait;
-use axum::{
-    body::Body,
-    http::{Request, StatusCode},
-};
 use fs2::FileExt;
-use http_body_util::BodyExt;
 use mdstore::{
     ApplyEditsRequest, ApplyStatus, Config, EditOperation, InputType, PushState, RerankResult,
-    RetrievalProvider, Store, router, serve, short_hash, tool_names,
+    RetrievalProvider, Store, serve, serve_listener, short_hash, tool_names,
 };
+use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
-use tower::ServiceExt;
 
 struct FakeProvider;
 
@@ -185,6 +180,18 @@ impl Repository {
     }
 }
 
+async fn start_daemon(
+    store: Arc<Store>,
+    bearer_token: Option<String>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        serve_listener(listener, store, bearer_token).await.unwrap();
+    });
+    (format!("http://{address}"), server)
+}
+
 fn command(root: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
         .current_dir(root)
@@ -303,7 +310,7 @@ fn reciprocal_links_are_caller_authored_and_atomic() {
 }
 
 #[test]
-fn delayed_idempotent_retry_returns_current_hashlines() {
+fn superseded_replacement_requires_fresh_edits() {
     let repository = Repository::new();
     let store = repository.store();
     let first = ApplyEditsRequest {
@@ -326,15 +333,12 @@ fn delayed_idempotent_retry_returns_current_hashlines() {
         })
         .unwrap();
 
-    let replay = store.apply_edits(&first).unwrap();
-    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
-    let hashline = &replay.fresh_hashlines["alice.md"];
-    assert!(hashline.contains("Alice current."));
-    assert!(!hashline.contains("Alice first."));
+    let error = store.apply_edits(&first).unwrap_err().to_string();
+    assert!(error.contains("partially superseded"));
 }
 
 #[test]
-fn far_shifted_insert_retry_stays_already_applied() {
+fn changed_postimage_requires_fresh_edits() {
     let repository = Repository::new();
     let store = repository.store();
     let request = ApplyEditsRequest {
@@ -359,8 +363,8 @@ fn far_shifted_insert_retry_stays_already_applied() {
         &["commit", "-q", "-m", "shift Alice note"],
     );
 
-    let replay = store.apply_edits(&request).unwrap();
-    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
+    let error = store.apply_edits(&request).unwrap_err().to_string();
+    assert!(error.contains("partially superseded"));
     assert_eq!(
         fs::read_to_string(path)
             .unwrap()
@@ -371,7 +375,7 @@ fn far_shifted_insert_retry_stays_already_applied() {
 }
 
 #[test]
-fn recreated_page_keeps_create_receipt_applied() {
+fn recreated_page_requires_fresh_edits() {
     let repository = Repository::new();
     let store = repository.store();
     let request = ApplyEditsRequest {
@@ -387,8 +391,8 @@ fn recreated_page_keeps_create_receipt_applied() {
     command(&repository.root, &["add", "carol.md"]);
     command(&repository.root, &["commit", "-q", "-m", "recreate Carol"]);
 
-    let replay = store.apply_edits(&request).unwrap();
-    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
+    let error = store.apply_edits(&request).unwrap_err().to_string();
+    assert!(error.contains("partially superseded"));
     assert!(
         fs::read_to_string(repository.root.join("carol.md"))
             .unwrap()
@@ -427,46 +431,6 @@ fn reverted_request_can_be_applied_again() {
     assert_eq!(
         command(&repository.root, &["log", "-1", "--pretty=%B"]).trim(),
         "apply Alice edit"
-    );
-}
-
-#[test]
-fn legacy_receipt_without_preimages_remains_conservative() {
-    let repository = Repository::new();
-    let store = repository.store();
-    let request = ApplyEditsRequest {
-        edit_summary: "legacy Alice edit".into(),
-        edits: vec![EditOperation::Replace {
-            path: "alice.md".into(),
-            anchor: format!("6:{}", short_hash("Alice profile.")),
-            content: "Alice changed.".into(),
-        }],
-    };
-    store.apply_edits(&request).unwrap();
-    let receipt = fs::read_dir(repository.root.join(".git/mdstore/receipts"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let mut stored: serde_json::Value =
-        serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
-    stored.as_object_mut().unwrap().remove("preimages");
-    fs::write(receipt, serde_json::to_vec(&stored).unwrap()).unwrap();
-
-    fs::write(repository.root.join("alice.md"), page("Alice")).unwrap();
-    command(&repository.root, &["add", "alice.md"]);
-    command(
-        &repository.root,
-        &["commit", "-q", "-m", "revert legacy Alice edit"],
-    );
-
-    let replay = store.apply_edits(&request).unwrap();
-    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
-    assert!(
-        fs::read_to_string(repository.root.join("alice.md"))
-            .unwrap()
-            .contains("Alice profile.")
     );
 }
 
@@ -625,6 +589,42 @@ fn configuration_activation_reselects_the_tracked_corpus() {
     assert_eq!(store.status().unwrap().pages, 1);
     assert!(store.get_page("bob.md", None).is_err());
     assert!(response.fresh_hashlines[".mdstore/config.yaml"].contains("exclude:"));
+}
+
+#[test]
+fn configured_markdown_under_mdstore_is_editable_content() {
+    let repository = Repository::new();
+    fs::write(repository.root.join(".mdstore/note.md"), page("Internal")).unwrap();
+    command(&repository.root, &["add", ".mdstore/note.md"]);
+    command(
+        &repository.root,
+        &["commit", "-q", "-m", "add internal note"],
+    );
+    let store = repository.store();
+
+    assert!(
+        store
+            .get_page(".mdstore/note.md", None)
+            .unwrap()
+            .content
+            .contains("Internal profile.")
+    );
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "update internal note".into(),
+            edits: vec![EditOperation::Replace {
+                path: ".mdstore/note.md".into(),
+                anchor: format!("6:{}", short_hash("Internal profile.")),
+                content: "Internal updated.".into(),
+            }],
+        })
+        .unwrap();
+
+    assert!(
+        fs::read_to_string(repository.root.join(".mdstore/note.md"))
+            .unwrap()
+            .contains("Internal updated.")
+    );
 }
 
 #[test]
@@ -953,40 +953,33 @@ fn injected_provider_open_uses_committed_configuration() {
 async fn mcp_lists_only_three_tools_and_enforces_authentication() {
     let repository = Repository::new();
     let store = repository.store();
-    let app = router(store.clone(), Some("secret".into()));
+    let (base_url, server) = start_daemon(store.clone(), Some("secret".into())).await;
+    let client = reqwest::Client::new();
     let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-    let unauthorized = app
-        .clone()
-        .oneshot(
-            Request::post("/mcp")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+    let unauthorized = client
+        .post(format!("{base_url}/mcp"))
+        .json(&body)
+        .send()
         .await
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
-    let health = app
-        .clone()
-        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+    let health = client
+        .get(format!("{base_url}/health"))
+        .send()
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::UNAUTHORIZED);
 
-    let authorized = app
-        .clone()
-        .oneshot(
-            Request::post("/mcp")
-                .header("content-type", "application/json")
-                .header("authorization", "Bearer secret")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+    let authorized = client
+        .post(format!("{base_url}/mcp"))
+        .bearer_auth("secret")
+        .json(&body)
+        .send()
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
-    let bytes = authorized.into_body().collect().await.unwrap().to_bytes();
+    let bytes = authorized.bytes().await.unwrap();
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let names: Vec<&str> = value["result"]["tools"]
         .as_array()
@@ -1014,18 +1007,16 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
         serde_json::json!(["op", "path", "anchor", "content"])
     );
 
-    let health = app
-        .oneshot(
-            Request::get("/health")
-                .header("authorization", "Bearer secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let health = client
+        .get(format!("{base_url}/health"))
+        .bearer_auth("secret")
+        .send()
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
+    server.abort();
 
-    let loopback = router(store, None);
+    let (base_url, server) = start_daemon(store, None).await;
     for (path, body) in [
         (
             "/mcp",
@@ -1033,55 +1024,42 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
         ),
         ("/cli", serde_json::json!({"command": "validate"})),
     ] {
-        let response = loopback
-            .clone()
-            .oneshot(
-                Request::post(path)
-                    .header("content-type", "application/json")
-                    .header("origin", "https://attacker.example")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
+        let response = client
+            .post(format!("{base_url}{path}"))
+            .header("origin", "https://attacker.example")
+            .json(&body)
+            .send()
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
+    server.abort();
 }
 
 #[tokio::test]
 async fn mcp_validates_protocol_and_json_rpc_envelopes() {
     let repository = Repository::new();
-    let app = router(repository.store(), None);
+    let (base_url, server) = start_daemon(repository.store(), None).await;
+    let client = reqwest::Client::new();
 
-    let unsupported = app
-        .clone()
-        .oneshot(
-            Request::post("/mcp")
-                .header("content-type", "application/json")
-                .header("mcp-protocol-version", "2099-01-01")
-                .body(Body::from(
-                    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-                        .to_string(),
-                ))
-                .unwrap(),
-        )
+    let unsupported = client
+        .post(format!("{base_url}/mcp"))
+        .header("mcp-protocol-version", "2099-01-01")
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+        .send()
         .await
         .unwrap();
     assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
 
-    let malformed = app
-        .clone()
-        .oneshot(
-            Request::post("/mcp")
-                .header("content-type", "application/json")
-                .body(Body::from("{"))
-                .unwrap(),
-        )
+    let malformed = client
+        .post(format!("{base_url}/mcp"))
+        .header("content-type", "application/json")
+        .body("{")
+        .send()
         .await
         .unwrap();
     assert_eq!(malformed.status(), StatusCode::OK);
-    let malformed: serde_json::Value =
-        serde_json::from_slice(&malformed.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let malformed: serde_json::Value = malformed.json().await.unwrap();
     assert_eq!(malformed["error"]["code"], -32700);
 
     for body in [
@@ -1093,83 +1071,56 @@ async fn mcp_validates_protocol_and_json_rpc_envelopes() {
         serde_json::json!({"jsonrpc": "2.0", "id": 1}),
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": true}),
     ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::post("/mcp")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
+        let response = client
+            .post(format!("{base_url}/mcp"))
+            .json(&body)
+            .send()
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let value: serde_json::Value = response.json().await.unwrap();
         assert_eq!(value["error"]["code"], -32600);
     }
 
     for requested in ["2025-03-26", "2025-06-18"] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::post("/mcp")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": "initialize",
-                            "method": "initialize",
-                            "params": {
-                                "protocolVersion": requested,
-                                "capabilities": {},
-                                "clientInfo": {"name": "test", "version": "1"}
-                            }
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
+        let response = client
+            .post(format!("{base_url}/mcp"))
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "initialize",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": requested,
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"}
+                }
+            }))
+            .send()
             .await
             .unwrap();
-        let value: serde_json::Value =
-            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                .unwrap();
+        let value: serde_json::Value = response.json().await.unwrap();
         assert_eq!(value["result"]["protocolVersion"], requested);
     }
 
-    let notification = app
-        .oneshot(
-            Request::post("/mcp")
-                .header("content-type", "application/json")
-                .header("mcp-protocol-version", "2025-06-18")
-                .body(Body::from(
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/initialized"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
+    let notification = client
+        .post(format!("{base_url}/mcp"))
+        .header("mcp-protocol-version", "2025-06-18")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .send()
         .await
         .unwrap();
     assert_eq!(notification.status(), StatusCode::ACCEPTED);
-    assert!(
-        notification
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty()
-    );
+    assert!(notification.bytes().await.unwrap().is_empty());
+    server.abort();
 }
 
 #[tokio::test]
 async fn mcp_apply_errors_preserve_structured_validation_findings() {
     let repository = Repository::new();
-    let app = router(repository.store(), None);
+    let (base_url, server) = start_daemon(repository.store(), None).await;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -1186,17 +1137,13 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
             }
         }
     });
-    let response = app
-        .oneshot(
-            Request::post("/mcp")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/mcp"))
+        .json(&body)
+        .send()
         .await
         .unwrap();
-    let value: serde_json::Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let value: serde_json::Value = response.json().await.unwrap();
     assert_eq!(value["result"]["isError"], true);
     let findings = value["result"]["structuredContent"]["validation_findings"]
         .as_array()
@@ -1206,6 +1153,7 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
             .iter()
             .any(|finding| finding["path"] == "invalid.md")
     );
+    server.abort();
 }
 
 #[tokio::test]
@@ -1224,9 +1172,7 @@ async fn cli_status_uses_the_running_daemon() {
     let store = repository.store();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router(store, None)).await.unwrap();
-    });
+    let server = tokio::spawn(async move { serve_listener(listener, store, None).await.unwrap() });
     fs::write(repository.root.join("alice.md"), "uncommitted local text\n").unwrap();
     let root = repository.root.clone();
     let output = tokio::task::spawn_blocking(move || {
@@ -1625,7 +1571,10 @@ fn pending_tree_receipts_recover_committed_requests() {
             "base_head": base,
             "tree": tree,
             "touched_paths": ["bob.md"],
-            "fresh_hashlines": {"bob.md": "6:00|Bob recovered."}
+            "preimages": {"bob.md": page("Bob")},
+            "postimages": {
+                "bob.md": page("Bob").replace("Bob profile.", "Bob recovered.")
+            }
         }))
         .unwrap(),
     )
@@ -1745,8 +1694,8 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
     let hook_started = remote.path().join("hooks/pre-receive.started");
 
     let store = repository.store();
-    let app = router(store.clone(), None);
-    let body = serde_json::to_vec(&serde_json::json!({
+    let (base_url, server) = start_daemon(store.clone(), None).await;
+    let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
@@ -1762,17 +1711,19 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
                 }]
             }
         }
-    }))
-    .unwrap();
-    let request = Request::post("/mcp")
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let apply = {
-        let app = app.clone();
-        tokio::spawn(async move { app.oneshot(request).await.unwrap() })
-    };
-    tokio::time::timeout(Duration::from_secs(1), async {
+    });
+    let client = reqwest::Client::new();
+    let apply_url = format!("{base_url}/mcp");
+    let apply_client = client.clone();
+    let apply = tokio::spawn(async move {
+        apply_client
+            .post(apply_url)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
         while !hook_started.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -1782,8 +1733,7 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
 
     let health = tokio::time::timeout(
         Duration::from_millis(500),
-        app.clone()
-            .oneshot(Request::get("/health").body(Body::empty()).unwrap()),
+        client.get(format!("{base_url}/health")).send(),
     )
     .await
     .expect("health must remain responsive during push")
@@ -1799,6 +1749,7 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
         .unwrap()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    server.abort();
 }
 
 #[cfg(unix)]
@@ -1830,17 +1781,14 @@ async fn blocking_sidecar_reads_do_not_stall_the_async_scheduler() {
         .expect("sidecar read must run outside the async scheduler")
         .unwrap();
 
-    let ping =
-        serde_json::to_vec(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
-            .unwrap();
+    let ping = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    let (base_url, server) = start_daemon(store, None).await;
     let response = tokio::time::timeout(
         Duration::from_millis(250),
-        router(store, None).oneshot(
-            Request::post("/mcp")
-                .header("content-type", "application/json")
-                .body(Body::from(ping))
-                .unwrap(),
-        ),
+        reqwest::Client::new()
+            .post(format!("{base_url}/mcp"))
+            .json(&ping)
+            .send(),
     )
     .await
     .expect("ping must remain responsive during sidecar I/O")
@@ -1850,4 +1798,66 @@ async fn blocking_sidecar_reads_do_not_stall_the_async_scheduler() {
 
     writer.await.unwrap();
     reindex.await.unwrap().unwrap();
+    server.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_reindex_waiter_does_not_release_the_job_lock() {
+    let repository = Repository::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = repository.store_with_provider(Arc::new(CountingProvider {
+        calls: calls.clone(),
+    }));
+    let sidecar = repository.root.join("alice.mdstore");
+    let output = Command::new("mkfifo").arg(&sidecar).output().unwrap();
+    assert!(output.status.success());
+
+    let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let fifo = sidecar.clone();
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut writer = fs::OpenOptions::new().write(true).open(fifo).unwrap();
+        opened_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        writer.write_all(b"invalid sidecar").unwrap();
+    });
+    let first = {
+        let store = store.clone();
+        tokio::spawn(async move { store.reindex_missing().await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), opened_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    fs::remove_file(&sidecar).unwrap();
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "change Alice during reindex".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "Alice changed during reindex.".into(),
+            }],
+        })
+        .unwrap();
+
+    let second = {
+        let store = store.clone();
+        tokio::spawn(async move { store.reindex_missing().await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    release_tx.send(()).unwrap();
+    writer.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(calls.load(Ordering::SeqCst) > 0);
+    assert!(store.status().unwrap().vectors_ready > 0);
 }

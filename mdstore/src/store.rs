@@ -120,18 +120,18 @@ struct PendingReceipt {
     base_head: String,
     tree: String,
     touched_paths: Vec<String>,
-    #[serde(default)]
-    preimages: Option<Preimages>,
+    preimages: Images,
+    postimages: Images,
 }
 
 #[derive(Serialize, Deserialize)]
 struct StoredReceipt {
     touched_paths: Vec<String>,
-    #[serde(default)]
-    preimages: Option<Preimages>,
+    preimages: Images,
+    postimages: Images,
 }
 
-type Preimages = BTreeMap<String, Option<String>>;
+type Images = BTreeMap<String, Option<String>>;
 
 enum ReplayState {
     Applied,
@@ -373,9 +373,9 @@ impl Store {
                 state.provider.clone(),
             )
         };
-        Ok(index
+        index
             .search(&config, provider.as_ref(), query, variants)
-            .await)
+            .await
     }
 
     /// Validates, commits, and pushes one atomic hashline edit batch.
@@ -409,13 +409,12 @@ impl Store {
             if path.ends_with(".mdstore") {
                 bail!("embedding sidecars cannot be edited");
             }
-            if path.starts_with(".mdstore/") {
+            if is_config_resource_path(path) {
                 has_config = true;
-                if !is_config_resource_path(path) {
-                    bail!("configuration edits are limited to YAML and JSON files");
-                }
             } else if path.ends_with(".md") {
                 has_content = true;
+            } else if path.starts_with(".mdstore/") {
+                bail!("configuration edits are limited to YAML and JSON files");
             } else {
                 bail!("edits may target configured Markdown or .mdstore YAML/JSON only");
             }
@@ -434,7 +433,7 @@ impl Store {
         let mut originals = HashMap::new();
         for path in &paths {
             ensure_repository_path_safe(&self.root, path)?;
-            let original = if path.ends_with(".md") && !path.starts_with(".mdstore/") {
+            let original = if path.ends_with(".md") {
                 current.pages.get(path)
             } else {
                 current.config_files.get(path)
@@ -453,7 +452,7 @@ impl Store {
         let mut pages = current.pages.clone();
         let mut extra = current.config_files.clone();
         for (path, content) in changes {
-            if path.ends_with(".md") && !path.starts_with(".mdstore/") {
+            if path.ends_with(".md") {
                 match content {
                     Some(text) => {
                         pages.insert(path.clone(), text.clone());
@@ -502,7 +501,7 @@ impl Store {
             .map(|path| (path.clone(), changes.get(path).cloned().flatten()))
             .collect();
         let path_list: Vec<String> = paths.iter().cloned().collect();
-        let preimages = changed_preimages(&originals, changes);
+        let (preimages, postimages) = edit_images(&originals, changes);
         let fresh_hashlines = fresh_windows(changes, &applied.changed_ranges);
         if let Err(error) = git::write_changes(&self.root, &ordered) {
             return Err(rollback_failure(&self.root, &path_list, error));
@@ -519,7 +518,8 @@ impl Store {
                 base_head,
                 tree,
                 touched_paths: path_list.clone(),
-                preimages: Some(preimages.clone()),
+                preimages: preimages.clone(),
+                postimages: postimages.clone(),
             };
             if let Err(error) = self.write_pending(&digest, &pending) {
                 return Err(rollback_failure(&self.root, &path_list, error));
@@ -588,24 +588,26 @@ impl Store {
             validation_findings: Vec::new(),
             embedding_state: "pending".into(),
         };
-        self.write_receipt(&digest, &response, Some(&preimages))?;
+        self.write_receipt(&digest, &response, &preimages, &postimages)?;
         self.remove_pending(&digest)?;
         Ok(response)
     }
 
     /// Rebuilds every embedding sidecar and the search index.
-    pub async fn reindex(&self) -> Result<()> {
-        self.reindex_all(true).await
+    pub async fn reindex(self: &Arc<Self>) -> Result<()> {
+        self.spawn_reindex(true).await
     }
 
     /// Rebuilds missing or stale embedding sidecars and the search index.
-    pub async fn reindex_missing(&self) -> Result<()> {
-        self.reindex_all(false).await
+    pub async fn reindex_missing(self: &Arc<Self>) -> Result<()> {
+        self.spawn_reindex(false).await
     }
 
-    /// Force-rebuilds embedding sidecars for selected page paths.
-    pub async fn reindex_paths(&self, paths: &[String]) -> Result<()> {
-        self.reindex_paths_mode(paths, true).await
+    async fn spawn_reindex(self: &Arc<Self>, force: bool) -> Result<()> {
+        let store = Arc::clone(self);
+        tokio::spawn(async move { store.reindex_all(force).await })
+            .await
+            .context("reindex task failed")?
     }
 
     async fn reindex_all(&self, force: bool) -> Result<()> {
@@ -853,7 +855,7 @@ impl Store {
             return Ok(None);
         }
         let stored: StoredReceipt = serde_json::from_slice(&fs::read(path)?)?;
-        match self.replay_state(stored.preimages.as_ref())? {
+        match self.replay_state(&stored.preimages, &stored.postimages)? {
             ReplayState::Applied => {}
             ReplayState::Reverted => return Ok(None),
             ReplayState::Partial => {
@@ -877,11 +879,13 @@ impl Store {
         &self,
         digest: &str,
         response: &ApplyEditsResponse,
-        preimages: Option<&Preimages>,
+        preimages: &Images,
+        postimages: &Images,
     ) -> Result<()> {
         let stored = StoredReceipt {
             touched_paths: response.touched_paths.clone(),
-            preimages: preimages.cloned(),
+            preimages: preimages.clone(),
+            postimages: postimages.clone(),
         };
         write_atomic(&self.receipt_path(digest), &serde_json::to_vec(&stored)?)
     }
@@ -908,7 +912,7 @@ impl Store {
             fs::remove_file(path)?;
             return Ok(None);
         }
-        match self.replay_state(pending.preimages.as_ref())? {
+        match self.replay_state(&pending.preimages, &pending.postimages)? {
             ReplayState::Applied => {}
             ReplayState::Reverted => {
                 fs::remove_file(path)?;
@@ -933,7 +937,7 @@ impl Store {
             validation_findings: Vec::new(),
             embedding_state: "pending_or_ready".into(),
         };
-        self.write_receipt(digest, &response, pending.preimages.as_ref())?;
+        self.write_receipt(digest, &response, &pending.preimages, &pending.postimages)?;
         self.remove_pending(digest)?;
         Ok(Some(response))
     }
@@ -952,28 +956,28 @@ impl Store {
             .collect()
     }
 
-    fn replay_state(&self, preimages: Option<&Preimages>) -> Result<ReplayState> {
-        let Some(preimages) = preimages else {
-            return Ok(ReplayState::Applied);
-        };
+    fn replay_state(&self, preimages: &Images, postimages: &Images) -> Result<ReplayState> {
+        if !preimages.keys().eq(postimages.keys()) {
+            bail!("receipt preimages and postimages do not cover the same paths");
+        }
         if preimages.is_empty() {
             return Ok(ReplayState::Applied);
         }
         let head = self.head.read().clone();
-        let mut reverted = 0;
+        let mut matches_preimages = true;
+        let mut matches_postimages = true;
         for (path, preimage) in preimages {
             let current = if git::is_tracked(&self.root, path)? {
                 Some(git::read_text(&self.root, &head, path)?)
             } else {
                 None
             };
-            if current == *preimage {
-                reverted += 1;
-            }
+            matches_preimages &= current == *preimage;
+            matches_postimages &= current == postimages[path];
         }
-        Ok(if reverted == 0 {
+        Ok(if matches_postimages {
             ReplayState::Applied
-        } else if reverted == preimages.len() {
+        } else if matches_preimages {
             ReplayState::Reverted
         } else {
             ReplayState::Partial
@@ -1003,17 +1007,18 @@ impl Store {
     }
 }
 
-fn changed_preimages(
+fn edit_images(
     originals: &HashMap<String, String>,
     changes: &HashMap<String, Option<String>>,
-) -> Preimages {
-    changes
-        .iter()
-        .filter_map(|(path, updated)| {
-            let original = originals.get(path).cloned();
-            (original.as_ref() != updated.as_ref()).then(|| (path.clone(), original))
-        })
-        .collect()
+) -> (Images, Images) {
+    let mut preimages = Images::new();
+    let mut postimages = Images::new();
+    for (path, updated) in changes {
+        let original = originals.get(path).cloned();
+        preimages.insert(path.clone(), original);
+        postimages.insert(path.clone(), updated.clone());
+    }
+    (preimages, postimages)
 }
 
 fn load_pages(root: &Path, revision: &str, config: &Config) -> Result<HashMap<String, String>> {
@@ -1357,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn receipt_preimages_include_only_changed_paths() {
+    fn receipt_images_cover_every_edited_path() {
         let originals = HashMap::from([
             ("changed.md".into(), "old".into()),
             ("removed.md".into(), "removed".into()),
@@ -1370,12 +1375,23 @@ mod tests {
             ("removed.md".into(), None),
         ]);
 
+        let (preimages, postimages) = edit_images(&originals, &changes);
         assert_eq!(
-            changed_preimages(&originals, &changes),
+            preimages,
             BTreeMap::from([
                 ("changed.md".into(), Some("old".into())),
                 ("created.md".into(), None),
                 ("removed.md".into(), Some("removed".into())),
+                ("same.md".into(), Some("same".into())),
+            ])
+        );
+        assert_eq!(
+            postimages,
+            BTreeMap::from([
+                ("changed.md".into(), Some("new".into())),
+                ("created.md".into(), Some("created".into())),
+                ("removed.md".into(), None),
+                ("same.md".into(), Some("same".into())),
             ])
         );
     }

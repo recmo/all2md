@@ -27,8 +27,7 @@ struct AppState {
     bearer_token: Option<String>,
 }
 
-/// Builds the authenticated health, MCP, and daemon-CLI router.
-pub fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
+fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
     let state = AppState {
         store,
         bearer_token,
@@ -48,12 +47,22 @@ pub async fn serve(
     listen: SocketAddr,
     bearer_token: Option<String>,
 ) -> Result<()> {
-    if !listen.ip().is_loopback() && bearer_token.as_deref().is_none_or(str::is_empty) {
-        bail!("a bearer token is required when listening beyond loopback");
-    }
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("bind {listen}"))?;
+    serve_listener(listener, store, bearer_token).await
+}
+
+/// Serves the daemon on an already-bound socket.
+pub async fn serve_listener(
+    listener: tokio::net::TcpListener,
+    store: Arc<Store>,
+    bearer_token: Option<String>,
+) -> Result<()> {
+    let listen = listener.local_addr().context("inspect listening socket")?;
+    if !listen.ip().is_loopback() && bearer_token.as_deref().is_none_or(str::is_empty) {
+        bail!("a bearer token is required when listening beyond loopback");
+    }
     tracing::info!(%listen, "mdstore listening");
     axum::serve(listener, router(store, bearer_token))
         .with_graceful_shutdown(async {

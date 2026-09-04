@@ -22,7 +22,9 @@ pub use config::{
 pub use git::PushState;
 pub use hashline::{EditOperation, short_hash};
 pub use markdown::{Edge, Finding};
-pub use mcp::{LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, router, serve, tool_names};
+pub use mcp::{
+    LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, serve, serve_listener, tool_names,
+};
 pub use provider::{InputType, RerankResult, RetrievalProvider, ZeroEntropyProvider};
 pub use search::{SearchResponse, SearchResult, VectorCoverage};
 pub use store::{
