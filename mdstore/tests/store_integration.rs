@@ -119,16 +119,27 @@ struct BlockingFailProvider {
     release: Arc<tokio::sync::Notify>,
 }
 
-struct LogWriter(Arc<Mutex<Vec<u8>>>);
+struct LogWriter {
+    output: Arc<Mutex<Vec<u8>>>,
+    buffer: Vec<u8>,
+    completed: Arc<tokio::sync::Notify>,
+}
 
 impl Write for LogWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
+        self.buffer.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+impl Drop for LogWriter {
+    fn drop(&mut self) {
+        self.output.lock().unwrap().extend_from_slice(&self.buffer);
+        self.completed.notify_one();
     }
 }
 
@@ -1914,12 +1925,18 @@ async fn cancelling_a_reindex_waiter_does_not_release_the_job_lock() {
 async fn detached_reindex_failure_is_logged() {
     let output = Arc::new(Mutex::new(Vec::new()));
     let writer = output.clone();
+    let completed = Arc::new(tokio::sync::Notify::new());
+    let writer_completed = completed.clone();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
         .with_ansi(false)
-        .with_writer(move || LogWriter(writer.clone()))
+        .with_writer(move || LogWriter {
+            output: writer.clone(),
+            buffer: Vec::new(),
+            completed: writer_completed.clone(),
+        })
         .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    tracing::subscriber::set_global_default(subscriber).unwrap();
     let repository = Repository::new();
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -1935,11 +1952,11 @@ async fn detached_reindex_failure_is_logged() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
+            completed.notified().await;
             let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
             if logged.contains("reindex failed") && logged.contains("expected provider failure") {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
