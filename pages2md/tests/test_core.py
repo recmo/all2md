@@ -267,18 +267,12 @@ def test_recovery_keeps_ungrounded_content_until_document_evidence_filtering():
 
 def test_clean_recovery_replaces_repaired_runaway_without_text_overlap():
     primary = parse_native_observation(
-        r"\( \alpha_{1} \), \( \alpha_{2} \), \( \alpha_{3377}",
+        " ".join(["loop phrase"] * 20),
         mode="multi_base",
         source_pages=[17],
         generation={"finish_reason": "length"},
     )
-    primary.blocks[0].metadata.update(
-        review_required=True,
-        review_reason="runaway_repetition_truncated",
-        original_characters=76557,
-        retained_characters=62,
-    )
-    primary.warnings.extend(["visual_text_repetition", "visual_malformed_math"])
+    assert "visual_text_repetition" in primary.warnings
     recovery = parse_native_observation(
         r"Proof. For each \(0 \leq r < m\), define \(\mathcal K_r\).",
         mode="gundam_detail",
@@ -290,7 +284,27 @@ def test_clean_recovery_replaces_repaired_runaway_without_text_overlap():
 
     assert blocks[0].markdown.startswith("Proof. For each")
     assert provenance[0]["action"] == "replaced_corrupt_page_local_content"
-    assert "visual_malformed_math" in warnings
+    assert "visual_text_repetition" in warnings
+
+
+def test_nontruncated_repetition_still_requires_recovery_overlap():
+    primary = parse_native_observation(
+        " ".join(["loop phrase"] * 20),
+        mode="multi_base",
+        source_pages=[17],
+        generation={"finish_reason": "stop"},
+    )
+    recovery = parse_native_observation(
+        "Entirely unrelated but structurally valid recovery text.",
+        mode="gundam_detail",
+        source_pages=[17],
+        generation={"target_block_indices": []},
+    )
+
+    blocks, provenance, _ = reconcile_observations(primary, [recovery])
+
+    assert blocks[0].markdown.startswith("loop phrase")
+    assert provenance == []
 
 
 def test_split_multi_page_output_requires_one_segment_per_image():

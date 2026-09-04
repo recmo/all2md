@@ -642,12 +642,12 @@ def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObs
     severe = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
     if not severe or set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS:
         return False
-    # Repetition repair deliberately leaves only a short diagnostic fragment of
-    # the runaway output.  Requiring that fragment to overlap a clean page-level
-    # recovery prevents recovery precisely when it is most necessary.
-    if any(
-        block.metadata.get("review_reason") == "runaway_repetition_truncated"
-        for block in primary.blocks
+    # A generation loop that exhausts the token budget is unusable evidence.
+    # Its clean page-level recovery will naturally have little textual overlap,
+    # so do not apply the ordinary overlap gate in this specific failure mode.
+    if (
+        "visual_text_repetition" in primary.warnings
+        and primary.generation.get("finish_reason") in {"length", "max_tokens"}
     ):
         return True
     primary_tokens = set(normalize(_observation_text(primary)).casefold().split())
