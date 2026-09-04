@@ -110,6 +110,46 @@ def test_cli_has_one_input_and_force_only():
     arguments = parser().parse_args(["paper.pdf", "--force"])
     assert arguments.input == Path("paper.pdf")
     assert arguments.force is True
+
+
+def test_file_workspace_name_strips_one_extension(tmp_path: Path):
+    source = tmp_path / "TR26-164.PDF"
+    source.touch()
+    scans = tmp_path / "scans.v1"
+    scans.mkdir()
+
+    assert _intermediate_root(source) == tmp_path / "TR26-164.pages2md"
+    assert _intermediate_root(scans) == tmp_path / "scans.v1.pages2md"
+
+
+def test_legacy_nested_workspace_is_adopted_without_duplication(tmp_path: Path):
+    source = tmp_path / "TR26-164.pdf"
+    source.touch()
+    legacy_root = tmp_path / "TR26-164.pdf.pages2md"
+    legacy_bundle = legacy_root / "tr26-164-pdf"
+    legacy_bundle.mkdir(parents=True)
+    (legacy_bundle / "progress.json").write_text('{"status":"running"}')
+
+    workspace = pipeline._prepare_intermediate_workspace(source)
+
+    assert workspace == tmp_path / "TR26-164.pages2md"
+    assert (workspace / "progress.json").exists()
+    assert not legacy_root.exists()
+
+
+def test_legacy_directory_workspace_is_flattened(tmp_path: Path):
+    source = tmp_path / "scans.v1"
+    source.mkdir()
+    workspace = tmp_path / "scans.v1.pages2md"
+    nested = workspace / "scans-v1"
+    nested.mkdir(parents=True)
+    (nested / "progress.json").write_text('{"status":"running"}')
+
+    prepared = pipeline._prepare_intermediate_workspace(source)
+
+    assert prepared == workspace
+    assert (workspace / "progress.json").exists()
+    assert not nested.exists()
     with pytest.raises(SystemExit):
         parser().parse_args(["convert", "paper.pdf"])
     with pytest.raises(SystemExit):
@@ -573,12 +613,12 @@ def test_single_markdown_with_figures_publishes_only_final_artifacts(tmp_path: P
     document.close()
 
     bundle = convert(pdf, backend=FixtureOcr())
-    assert bundle == tmp_path / "paper.pdf.md"
+    assert bundle == tmp_path / "paper.md"
     published = sorted(str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file())
-    assert published[-1] == "paper.pdf.md"
+    assert published[-1] == "paper.md"
     assert len(published) == 2
     assert published[0].startswith("figures/fig-")
-    markdown = (bundle / "paper.pdf.md").read_text()
+    markdown = (bundle / "paper.md").read_text()
     assert markdown.startswith("---\nsource_sha256: ")
     assert "\npages2md_version: " in markdown.split("---", 2)[1]
     assert "The visual text has $x^2$." in markdown
@@ -613,7 +653,7 @@ def test_ocr_detected_figure_prefers_matching_embedded_pdf_image(tmp_path: Path)
     assert len(figures) == 1
     with Image.open(figures[0]) as figure:
         assert figure.size == (100, 100)
-    assert "![A matched diagram.]" in (bundle / "matched.pdf.md").read_text()
+    assert "![A matched diagram.]" in (bundle / "matched.md").read_text()
 
 
 def test_pdf_link_targets_accept_string_page_numbers():
@@ -893,12 +933,12 @@ def test_failed_conversion_retains_intermediate_results_for_resume(tmp_path: Pat
         assert "3 page(s) failed" in str(error)
     else:
         raise AssertionError("the first conversion should be interrupted")
-    assert not (tmp_path / "interrupted.pdf.md").exists()
-    intermediate = _intermediate_root(pdf) / "interrupted-pdf"
+    assert not (tmp_path / "interrupted.md").exists()
+    intermediate = _intermediate_root(pdf)
     assert (intermediate / "progress.json").exists()
     assert json.loads((intermediate / "progress.json").read_text())["status"] == "failed"
     bundle = convert(pdf, backend=backend)
-    assert bundle == tmp_path / "interrupted.pdf.md"
+    assert bundle == tmp_path / "interrupted.md"
     assert verify_bundle(bundle).ok
     assert json.loads((intermediate / "progress.json").read_text())["status"] == "complete"
 
@@ -1037,7 +1077,7 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
     else:
         raise AssertionError("the first conversion should be interrupted")
 
-    intermediate = _intermediate_root(pdf) / "page-interruption-pdf"
+    intermediate = _intermediate_root(pdf)
     assert (intermediate / "pages/page-0001.json").exists()
     assert not (intermediate / "pages/page-0002.json").exists()
     assert (intermediate / "pages/page-0003.json").exists()
@@ -1047,7 +1087,7 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
     assert normalized_page_sets == []
 
     output = convert(pdf, backend=backend)
-    assert output == tmp_path / "page-interruption.pdf.md"
+    assert output == tmp_path / "page-interruption.md"
     assert json.loads((intermediate / "progress.json").read_text())["completed_pages"] == [1, 2, 3]
     assert normalized_page_sets == [[1, 2, 3]]
 
@@ -1067,7 +1107,7 @@ def test_content_quality_warning_does_not_suppress_output(tmp_path: Path, capsys
     assert not any("needs content review: visual_text_repetition" in warning for warning in verification.warnings)
 
     output = convert(pdf, backend=RepeatingFixtureOcr())
-    assert output == tmp_path / "repetition.pdf.md"
+    assert output == tmp_path / "repetition.md"
     assert output.is_file()
     assert "Useful introduction." in output.read_text()
     assert "repeated phrase" in output.read_text()
@@ -1227,7 +1267,7 @@ def test_embedded_table_image_does_not_create_a_figure_without_ocr_claim(tmp_pat
     markdown = bundle.read_text()
     assert "| A   | B   |" in markdown
     assert "![Embedded figure]" not in markdown
-    assert bundle == tmp_path / "table.pdf.md"
+    assert bundle == tmp_path / "table.md"
 
 
 def test_reused_pdf_image_records_distinct_placements(tmp_path: Path):

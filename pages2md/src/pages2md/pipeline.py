@@ -50,7 +50,7 @@ def convert(
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    target = source.with_name(f"{source.name}.md")
+    target = source.with_name(f"{_source_stem(source)}.md")
     if target.exists() and not force:
         raise FileExistsError(f"output exists (use --force): {target}")
     source_hash = _source_hash(source)
@@ -59,7 +59,7 @@ def convert(
         raise RuntimeError("pages2md source commit is unavailable")
     workspace = _convert_workspace(
         source,
-        _intermediate_root(source),
+        _prepare_intermediate_workspace(source),
         backend=backend,
         force=force,
     )
@@ -72,7 +72,33 @@ def convert(
 def _intermediate_root(source: Path) -> Path:
     """Return the persistent, private workspace directory beside ``source``."""
     source = source.resolve()
-    return source.with_name(f"{source.name}.pages2md")
+    return source.with_name(f"{_source_stem(source)}.pages2md")
+
+
+def _prepare_intermediate_workspace(source: Path) -> Path:
+    """Adopt the nested, extension-bearing workspace created by pages2md 0.2."""
+    workspace = _intermediate_root(source)
+    legacy_root = source.resolve().with_name(f"{source.name}.pages2md")
+    legacy_bundle = legacy_root / slugify(source.name, "document")
+    if workspace != legacy_root and not workspace.exists() and legacy_bundle.exists():
+        legacy_bundle.rename(workspace)
+        try:
+            legacy_root.rmdir()
+        except OSError:
+            pass
+    nested_bundle = workspace / slugify(source.name, "document")
+    if nested_bundle.is_dir() and not (workspace / "progress.json").exists():
+        children = list(nested_bundle.iterdir())
+        if not any((workspace / child.name).exists() for child in children):
+            for child in children:
+                child.rename(workspace / child.name)
+            nested_bundle.rmdir()
+    return workspace
+
+
+def _source_stem(source: Path) -> str:
+    """Drop one document extension while preserving dotted directory names."""
+    return source.stem if source.is_file() else source.name
 
 
 def _convert_workspace(
@@ -86,7 +112,7 @@ def _convert_workspace(
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    bundle = output.resolve() / slugify(source.name, "document")
+    bundle = output.resolve()
     if force and bundle.exists():
         shutil.rmtree(bundle)
     backend = backend or MlxUnlimitedOcr()
