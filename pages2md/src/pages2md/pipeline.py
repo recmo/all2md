@@ -28,7 +28,7 @@ from .markdown import (
     strict_page_markdown,
     write_markdown,
 )
-from .model import Block, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult
+from .model import Block, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult, SourcePage
 from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, confidence_summary, split_multi_page_output
 from .quality import adjacent_overlap, output_quality_warnings, runaway_repetition_span
@@ -38,6 +38,8 @@ from .verify import verify_bundle
 
 FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
 FORMULA_KINDS = {"formula", "equation", "display_formula"}
+# Bump only when stored raw observations are incompatible with recognition.
+OCR_CHECKPOINT_VERSION = 1
 
 
 def convert(
@@ -50,7 +52,7 @@ def convert(
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    target = source.with_name(f"{source.name}.md")
+    target = source.with_name(f"{_source_stem(source)}.md")
     if target.exists() and not force:
         raise FileExistsError(f"output exists (use --force): {target}")
     source_hash = _source_hash(source)
@@ -72,7 +74,12 @@ def convert(
 def _intermediate_root(source: Path) -> Path:
     """Return the persistent, private workspace directory beside ``source``."""
     source = source.resolve()
-    return source.with_name(f"{source.name}.pages2md")
+    return source.with_name(f"{_source_stem(source)}.pages2md")
+
+
+def _source_stem(source: Path) -> str:
+    """Drop one document extension while preserving dotted directory names."""
+    return source.stem if source.is_file() else source.name
 
 
 def _convert_workspace(
@@ -86,19 +93,17 @@ def _convert_workspace(
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    bundle = output.resolve() / slugify(source.name, "document")
+    bundle = output.resolve()
     if force and bundle.exists():
         shutil.rmtree(bundle)
     backend = backend or MlxUnlimitedOcr()
     ocr_fingerprint = {
+        "contract_version": OCR_CHECKPOINT_VERSION,
         "source_sha256": _source_hash(source),
         "backend": dict(backend.identity),
         "dpi": DEFAULT_DPI,
         "multi_page": True,
         "quality": "thorough",
-        "code": _code_fingerprint(
-            "adapters.py", "assets.py", "compare.py", "model.py", "native.py", "ocr.py", "pipeline.py", "quality.py"
-        ),
     }
     assembly_fingerprint = {
         "split_mode": "auto",
@@ -109,20 +114,23 @@ def _convert_workspace(
     previous = _read_json(bundle / "metadata.json")
     progress_state = _read_json(bundle / "progress.json")
     resume_state = progress_state or previous
-    can_resume = bool(
+    can_reuse_ocr = bool(
         resume
         and resume_state
         and resume_state.get("source") == str(source)
         and resume_state.get("ocr_fingerprint") == ocr_fingerprint
     )
-    if bundle.exists() and not can_resume:
-        shutil.rmtree(bundle)
+    if bundle.exists() and not can_reuse_ocr:
+        raise RuntimeError(
+            "incompatible intermediate bundle retained; use --force to replace it: "
+            f"{bundle}"
+        )
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "pages").mkdir(exist_ok=True)
     (bundle / "raw").mkdir(exist_ok=True)
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
-    assets = AssetStore(bundle / "assets", load_existing=can_resume)
+    assets = AssetStore(bundle / "assets", load_existing=can_reuse_ocr)
     fingerprint = {"ocr": ocr_fingerprint, "assembly": assembly_fingerprint}
     started = time.time()
     _write_progress(
@@ -135,14 +143,28 @@ def _convert_workspace(
     document = open_document(source, work, assets, dpi=DEFAULT_DPI)
 
     resumed: dict[int, PageResult] = {}
-    if can_resume:
+    reprocess_resumed = bool(
+        can_reuse_ocr
+        and resume_state.get("assembly_fingerprint") != assembly_fingerprint
+    )
+    if can_reuse_ocr:
         for source_page in document.pages:
             page_path = bundle / "pages" / f"page-{source_page.number:04d}.json"
             value = _read_json(page_path)
             if not isinstance(value, dict) or value.get("number") != source_page.number:
                 continue
             try:
-                resumed[source_page.number] = _page_from_dict(value)
+                if reprocess_resumed:
+                    resumed[source_page.number] = _reprocess_page_checkpoint(
+                        value,
+                        source_page,
+                        bundle,
+                        assets,
+                        document.outline,
+                    )
+                    atomic_json(page_path, resumed[source_page.number].to_dict())
+                else:
+                    resumed[source_page.number] = _page_from_dict(value)
             except (KeyError, TypeError, ValueError):
                 continue
     completed_pages = set(resumed)
@@ -1542,6 +1564,91 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _reprocess_page_checkpoint(
+    value: dict[str, Any],
+    source_page: SourcePage,
+    bundle: Path,
+    assets: AssetStore,
+    outline: list[dict[str, Any]],
+) -> PageResult:
+    """Re-run deterministic reconciliation from stored OCR without model calls."""
+    previous = _page_from_dict(value)
+    if not previous.raw_ocr:
+        return previous
+
+    primary = parse_native_observation(
+        previous.raw_ocr,
+        mode="multi_base",
+        source_pages=list(previous.generation.get("source_pages", [source_page.number])),
+        generation=previous.generation,
+    )
+    multi_value = previous.visual.get("multi_page", {})
+    group_observation = _checkpoint_observation(multi_value)
+    primary.id = group_observation.id
+    candidates = [
+        _stored_observation(candidate, bundle)
+        for candidate in previous.visual.get("candidates", [])
+        if isinstance(candidate, dict)
+    ]
+    blocks, recovery, validation_warnings = reconcile_observations(
+        primary,
+        candidates,
+        embedded_text=source_page.embedded.text,
+    )
+    validation_warnings.extend(
+        warning
+        for warning in previous.warnings
+        if warning in {"visual_auxiliary_ocr_failed", "visual_auxiliary_ocr_unavailable", "visual_single_page_base_failed"}
+    )
+    return _page_result(
+        source_page,
+        primary,
+        group_observation,
+        candidates,
+        blocks,
+        recovery,
+        validation_warnings,
+        assets,
+        outline,
+    )
+
+
+def _stored_observation(
+    value: object,
+    bundle: Path,
+) -> OcrObservation:
+    if not isinstance(value, dict):
+        raise ValueError("stored OCR observation is missing")
+    raw_path = value.get("raw_path")
+    raw_file = bundle / str(raw_path) if raw_path else None
+    if raw_file is None or not raw_file.is_file():
+        raise ValueError("stored raw OCR observation is missing")
+    observation = parse_native_observation(
+        raw_file.read_text(encoding="utf-8"),
+        mode=str(value.get("mode", "unknown")),
+        source_pages=list(value.get("source_pages", [])),
+        generation=dict(value.get("generation", {})),
+    )
+    if value.get("id"):
+        observation.id = str(value["id"])
+    return observation
+
+
+def _checkpoint_observation(value: object) -> OcrObservation:
+    """Restore immutable observation metadata already stored in a checkpoint."""
+    if not isinstance(value, dict) or not value.get("id"):
+        raise ValueError("stored group observation is missing")
+    return OcrObservation(
+        id=str(value["id"]),
+        mode=str(value.get("mode", "unknown")),
+        raw="",
+        source_pages=list(value.get("source_pages", [])),
+        generation=dict(value.get("generation", {})),
+        blocks=[_block_from_dict(block) for block in value.get("blocks", [])],
+        warnings=list(value.get("warnings", [])),
+    )
+
+
 def _write_progress(
     bundle: Path,
     *,
@@ -1582,20 +1689,7 @@ def _page_from_dict(value: dict[str, Any]) -> PageResult:
         ],
         extractor=embedded_value.get("extractor"),
     )
-    blocks = []
-    for block in value.get("blocks", []):
-        blocks.append(
-            Block(
-                kind=block.get("kind", "paragraph"),
-                markdown=block.get("markdown", ""),
-                bbox=tuple(block["bbox"]) if block.get("bbox") is not None else None,
-                confidence=block.get("confidence"),
-                asset_id=block.get("asset_id"),
-                source_pages=block.get("source_pages", []),
-                provenance=block.get("provenance", []),
-                metadata=block.get("metadata", {}),
-            )
-        )
+    blocks = [_block_from_dict(block) for block in value.get("blocks", [])]
     return PageResult(
         number=value["number"],
         image=value.get("image", ""),
@@ -1609,6 +1703,19 @@ def _page_from_dict(value: dict[str, Any]) -> PageResult:
         raw_ocr=value.get("raw_ocr", ""),
         visual=value.get("visual", {}),
         recovery=value.get("recovery", []),
+    )
+
+
+def _block_from_dict(value: dict[str, Any]) -> Block:
+    return Block(
+        kind=value.get("kind", "paragraph"),
+        markdown=value.get("markdown", ""),
+        bbox=tuple(value["bbox"]) if value.get("bbox") is not None else None,
+        confidence=value.get("confidence"),
+        asset_id=value.get("asset_id"),
+        source_pages=value.get("source_pages", []),
+        provenance=value.get("provenance", []),
+        metadata=value.get("metadata", {}),
     )
 
 

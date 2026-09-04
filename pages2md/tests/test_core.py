@@ -116,6 +116,16 @@ def test_cli_has_one_input_and_force_only():
         parser().parse_args(["paper.pdf", "--output", "result"])
 
 
+def test_file_workspace_name_strips_one_extension(tmp_path: Path):
+    source = tmp_path / "TR26-164.PDF"
+    source.touch()
+    scans = tmp_path / "scans.v1"
+    scans.mkdir()
+
+    assert _intermediate_root(source) == tmp_path / "TR26-164.pages2md"
+    assert _intermediate_root(scans) == tmp_path / "scans.v1.pages2md"
+
+
 def test_parse_unlimited_output():
     markdown, blocks = parse_output(
         "<|det|>title [1, 2, 3, 4]<|/det|>Hello\n<|det|>text [5,6,7,8]<|/det|>World"
@@ -573,12 +583,12 @@ def test_single_markdown_with_figures_publishes_only_final_artifacts(tmp_path: P
     document.close()
 
     bundle = convert(pdf, backend=FixtureOcr())
-    assert bundle == tmp_path / "paper.pdf.md"
+    assert bundle == tmp_path / "paper.md"
     published = sorted(str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file())
-    assert published[-1] == "paper.pdf.md"
+    assert published[-1] == "paper.md"
     assert len(published) == 2
     assert published[0].startswith("figures/fig-")
-    markdown = (bundle / "paper.pdf.md").read_text()
+    markdown = (bundle / "paper.md").read_text()
     assert markdown.startswith("---\nsource_sha256: ")
     assert "\npages2md_version: " in markdown.split("---", 2)[1]
     assert "The visual text has $x^2$." in markdown
@@ -613,7 +623,7 @@ def test_ocr_detected_figure_prefers_matching_embedded_pdf_image(tmp_path: Path)
     assert len(figures) == 1
     with Image.open(figures[0]) as figure:
         assert figure.size == (100, 100)
-    assert "![A matched diagram.]" in (bundle / "matched.pdf.md").read_text()
+    assert "![A matched diagram.]" in (bundle / "matched.md").read_text()
 
 
 def test_pdf_link_targets_accept_string_page_numbers():
@@ -893,12 +903,12 @@ def test_failed_conversion_retains_intermediate_results_for_resume(tmp_path: Pat
         assert "3 page(s) failed" in str(error)
     else:
         raise AssertionError("the first conversion should be interrupted")
-    assert not (tmp_path / "interrupted.pdf.md").exists()
-    intermediate = _intermediate_root(pdf) / "interrupted-pdf"
+    assert not (tmp_path / "interrupted.md").exists()
+    intermediate = _intermediate_root(pdf)
     assert (intermediate / "progress.json").exists()
     assert json.loads((intermediate / "progress.json").read_text())["status"] == "failed"
     bundle = convert(pdf, backend=backend)
-    assert bundle == tmp_path / "interrupted.pdf.md"
+    assert bundle == tmp_path / "interrupted.md"
     assert verify_bundle(bundle).ok
     assert json.loads((intermediate / "progress.json").read_text())["status"] == "complete"
 
@@ -938,6 +948,95 @@ def test_resume_processes_only_pages_missing_from_persistent_workspace(tmp_path:
     assert json.loads((bundle / "progress.json").read_text())["completed_pages"] == [1, 2, 3]
 
 
+def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Path, monkeypatch):
+    class CountingFixture(FixtureOcr):
+        def __init__(self):
+            self.calls = 0
+
+        def recognize(self, image: Path):
+            self.calls += 1
+            number = int(image.stem.rsplit("-", 1)[-1])
+            return (
+                f"<|det|>text [100,100,800,300]<|/det|>Page {number} content.",
+                {"finish_reason": "stop"},
+            )
+
+    pdf = tmp_path / "code-change.pdf"
+    document = fitz.open()
+    for number in range(1, 3):
+        page = document.new_page(width=612, height=792)
+        page.insert_text((72, 72), f"Page {number} content.")
+    document.save(pdf)
+    document.close()
+    backend = CountingFixture()
+    code_revision = {"value": "v1"}
+    original_fingerprint = pipeline._code_fingerprint
+
+    def versioned_fingerprint(*names):
+        return f"{original_fingerprint(*names)}-{code_revision['value']}"
+
+    monkeypatch.setattr(pipeline, "_code_fingerprint", versioned_fingerprint)
+    bundle = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
+    assert backend.calls == 2
+    checkpoint = bundle / "pages/page-0001.json"
+    assert checkpoint.exists()
+    group_before = json.loads(checkpoint.read_text())["visual"]["multi_page"]
+    assert len(group_before["blocks"]) == 2
+
+    reconciliations = 0
+    original_reconcile = pipeline.reconcile_observations
+
+    def record_reconciliation(*args, **kwargs):
+        nonlocal reconciliations
+        reconciliations += 1
+        return original_reconcile(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "reconcile_observations", record_reconciliation)
+    code_revision["value"] = "v2"
+    resumed = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
+
+    assert resumed == bundle
+    assert backend.calls == 2
+    assert reconciliations == 2
+    assert checkpoint.exists()
+    assert json.loads(checkpoint.read_text())["visual"]["multi_page"] == group_before
+
+
+def test_incompatible_checkpoint_is_retained_until_force(tmp_path: Path):
+    pdf = tmp_path / "backend-change.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "Source text.")
+    document.save(pdf)
+    document.close()
+    bundle = _convert_workspace(pdf, _intermediate_root(pdf), backend=FixtureOcr())
+    checkpoint = bundle / "pages/page-0001.json"
+
+    incompatible = FixtureOcr()
+    incompatible.identity = {**FixtureOcr.identity, "revision": "2"}
+    with pytest.raises(RuntimeError, match="incompatible intermediate bundle retained"):
+        _convert_workspace(pdf, _intermediate_root(pdf), backend=incompatible)
+
+    assert checkpoint.exists()
+
+
+def test_ocr_contract_change_does_not_reuse_raw_checkpoint(tmp_path: Path, monkeypatch):
+    pdf = tmp_path / "contract-change.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "Source text.")
+    document.save(pdf)
+    document.close()
+    bundle = _convert_workspace(pdf, _intermediate_root(pdf), backend=FixtureOcr())
+    checkpoint = bundle / "pages/page-0001.json"
+
+    monkeypatch.setattr(pipeline, "OCR_CHECKPOINT_VERSION", 2)
+    with pytest.raises(RuntimeError, match="incompatible intermediate bundle retained"):
+        _convert_workspace(pdf, _intermediate_root(pdf), backend=FixtureOcr())
+
+    assert checkpoint.exists()
+
+
 def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkeypatch):
     pdf = tmp_path / "page-interruption.pdf"
     document = fitz.open()
@@ -973,7 +1072,7 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
     else:
         raise AssertionError("the first conversion should be interrupted")
 
-    intermediate = _intermediate_root(pdf) / "page-interruption-pdf"
+    intermediate = _intermediate_root(pdf)
     assert (intermediate / "pages/page-0001.json").exists()
     assert not (intermediate / "pages/page-0002.json").exists()
     assert (intermediate / "pages/page-0003.json").exists()
@@ -983,7 +1082,7 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
     assert normalized_page_sets == []
 
     output = convert(pdf, backend=backend)
-    assert output == tmp_path / "page-interruption.pdf.md"
+    assert output == tmp_path / "page-interruption.md"
     assert json.loads((intermediate / "progress.json").read_text())["completed_pages"] == [1, 2, 3]
     assert normalized_page_sets == [[1, 2, 3]]
 
@@ -1003,7 +1102,7 @@ def test_content_quality_warning_does_not_suppress_output(tmp_path: Path, capsys
     assert not any("needs content review: visual_text_repetition" in warning for warning in verification.warnings)
 
     output = convert(pdf, backend=RepeatingFixtureOcr())
-    assert output == tmp_path / "repetition.pdf.md"
+    assert output == tmp_path / "repetition.md"
     assert output.is_file()
     assert "Useful introduction." in output.read_text()
     assert "repeated phrase" in output.read_text()
@@ -1163,7 +1262,7 @@ def test_embedded_table_image_does_not_create_a_figure_without_ocr_claim(tmp_pat
     markdown = bundle.read_text()
     assert "| A   | B   |" in markdown
     assert "![Embedded figure]" not in markdown
-    assert bundle == tmp_path / "table.pdf.md"
+    assert bundle == tmp_path / "table.md"
 
 
 def test_reused_pdf_image_records_distinct_placements(tmp_path: Path):
