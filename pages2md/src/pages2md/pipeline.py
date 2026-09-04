@@ -28,7 +28,7 @@ from .markdown import (
     strict_page_markdown,
     write_markdown,
 )
-from .model import Block, OcrObservation, PageResult
+from .model import Block, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult
 from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, confidence_summary, split_multi_page_output
 from .quality import adjacent_overlap, output_quality_warnings, runaway_repetition_span
@@ -46,7 +46,7 @@ def convert(
     force: bool = False,
     backend: OcrBackend | None = None,
 ) -> Path:
-    """Convert a document in a private workspace and publish only final artifacts."""
+    """Convert a document, checkpointing pages beside the source before publishing."""
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
@@ -57,12 +57,22 @@ def convert(
     version = commit_version()
     if not re.fullmatch(r"[0-9a-f]{40,64}", version):
         raise RuntimeError("pages2md source commit is unavailable")
-    with tempfile.TemporaryDirectory(prefix="pages2md-") as temporary:
-        workspace = _convert_workspace(source, Path(temporary), backend=backend)
-        verification = verify_bundle(workspace)
-        for warning in verification.warnings:
-            print(f"pages2md: warning: {warning}", file=sys.stderr)
-        return _publish_output(workspace, target, source_hash, version)
+    workspace = _convert_workspace(
+        source,
+        _intermediate_root(source),
+        backend=backend,
+        force=force,
+    )
+    verification = verify_bundle(workspace)
+    for warning in verification.warnings:
+        print(f"pages2md: warning: {warning}", file=sys.stderr)
+    return _publish_output(workspace, target, source_hash, version)
+
+
+def _intermediate_root(source: Path) -> Path:
+    """Return the persistent, private workspace directory beside ``source``."""
+    source = source.resolve()
+    return source.with_name(f"{source.name}.pages2md")
 
 
 def _convert_workspace(
@@ -70,11 +80,15 @@ def _convert_workspace(
     output: Path,
     *,
     backend: OcrBackend | None = None,
+    force: bool = False,
+    resume: bool = True,
 ) -> Path:
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
     bundle = output.resolve() / slugify(source.name, "document")
+    if force and bundle.exists():
+        shutil.rmtree(bundle)
     backend = backend or MlxUnlimitedOcr()
     ocr_fingerprint = {
         "source_sha256": _source_hash(source),
@@ -92,15 +106,53 @@ def _convert_workspace(
             "chapters.py", "formatting.py", "lists.py", "markdown.py", "model.py", "pipeline.py", "quality.py", "verify.py"
         ),
     }
+    previous = _read_json(bundle / "metadata.json")
+    progress_state = _read_json(bundle / "progress.json")
+    resume_state = progress_state or previous
+    can_resume = bool(
+        resume
+        and resume_state
+        and resume_state.get("source") == str(source)
+        and resume_state.get("ocr_fingerprint") == ocr_fingerprint
+    )
+    if bundle.exists() and not can_resume:
+        shutil.rmtree(bundle)
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "pages").mkdir(exist_ok=True)
     (bundle / "raw").mkdir(exist_ok=True)
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
-    assets = AssetStore(bundle / "assets")
+    assets = AssetStore(bundle / "assets", load_existing=can_resume)
     fingerprint = {"ocr": ocr_fingerprint, "assembly": assembly_fingerprint}
     started = time.time()
+    _write_progress(
+        bundle,
+        source=source,
+        fingerprint=fingerprint,
+        completed_pages=set(),
+        status="opening",
+    )
     document = open_document(source, work, assets, dpi=DEFAULT_DPI)
+
+    resumed: dict[int, PageResult] = {}
+    if can_resume:
+        for source_page in document.pages:
+            page_path = bundle / "pages" / f"page-{source_page.number:04d}.json"
+            value = _read_json(page_path)
+            if not isinstance(value, dict) or value.get("number") != source_page.number:
+                continue
+            try:
+                resumed[source_page.number] = _page_from_dict(value)
+            except (KeyError, TypeError, ValueError):
+                continue
+    completed_pages = set(resumed)
+    _write_progress(
+        bundle,
+        source=source,
+        fingerprint=fingerprint,
+        completed_pages=completed_pages,
+        status="running",
+    )
 
     page_results: list[PageResult] = []
     failed: list[dict[str, Any]] = []
@@ -115,6 +167,10 @@ def _convert_workspace(
     ) as progress:
         progress.set_postfix_str("checking pages", refresh=False)
         for page in document.pages:
+            if page.number in resumed:
+                page_results.append(resumed[page.number])
+                progress.update()
+                continue
             blank, ink_fraction = _is_visually_blank(page.image_path)
             if not blank:
                 ocr_pages.append(page)
@@ -122,6 +178,14 @@ def _convert_workspace(
             result = _blank_page_result(page, ink_fraction)
             atomic_json(bundle / "pages" / f"page-{page.number:04d}.json", result.to_dict())
             page_results.append(result)
+            completed_pages.add(page.number)
+            _write_progress(
+                bundle,
+                source=source,
+                fingerprint=fingerprint,
+                completed_pages=completed_pages,
+                status="running",
+            )
             progress.update()
 
         for group in _ocr_groups(ocr_pages, document.outline):
@@ -178,6 +242,14 @@ def _convert_workspace(
                     )
                     atomic_json(page_path, result.to_dict())
                     page_results.append(result)
+                    completed_pages.add(source_page.number)
+                    _write_progress(
+                        bundle,
+                        source=source,
+                        fingerprint=fingerprint,
+                        completed_pages=completed_pages,
+                        status="running",
+                    )
                 except Exception as error:
                     failed.append({"page": source_page.number, "error": str(error)})
                 finally:
@@ -299,11 +371,35 @@ def _convert_workspace(
     atomic_json(bundle / "metadata.json", metadata)
     _write_log(bundle, metadata)
     shutil.rmtree(work, ignore_errors=True)
+    _write_progress(
+        bundle,
+        source=source,
+        fingerprint=fingerprint,
+        completed_pages=completed_pages,
+        status="failed" if failed else "assembled",
+    )
     if failed:
-        raise RuntimeError(f"{len(failed)} page(s) failed")
+        raise RuntimeError(f"{len(failed)} page(s) failed; intermediate bundle: {bundle}")
     verification = verify_bundle(bundle)
     if not verification.ok:
-        raise RuntimeError(f"bundle verification failed: {'; '.join(verification.errors)}")
+        _write_progress(
+            bundle,
+            source=source,
+            fingerprint=fingerprint,
+            completed_pages=completed_pages,
+            status="verification_failed",
+            errors=verification.errors,
+        )
+        raise RuntimeError(
+            f"bundle verification failed: {'; '.join(verification.errors)}; intermediate bundle: {bundle}"
+        )
+    _write_progress(
+        bundle,
+        source=source,
+        fingerprint=fingerprint,
+        completed_pages=completed_pages,
+        status="complete",
+    )
     return bundle
 
 
@@ -1432,6 +1528,76 @@ def _read_json(path: Path):
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_progress(
+    bundle: Path,
+    *,
+    source: Path,
+    fingerprint: dict[str, Any],
+    completed_pages: set[int],
+    status: str,
+    errors: list[str] | None = None,
+) -> None:
+    atomic_json(
+        bundle / "progress.json",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "source": str(source),
+            "ocr_fingerprint": fingerprint["ocr"],
+            "assembly_fingerprint": fingerprint["assembly"],
+            "completed_pages": sorted(completed_pages),
+            "status": status,
+            "errors": errors or [],
+            "updated_at": time.time(),
+        },
+    )
+
+
+def _page_from_dict(value: dict[str, Any]) -> PageResult:
+    embedded_value = value.get("embedded", {})
+    embedded = EmbeddedEvidence(
+        text=embedded_value.get("text", ""),
+        blocks=embedded_value.get("blocks", []),
+        links=[
+            Link(
+                text=link.get("text", ""),
+                target=link.get("target", ""),
+                bbox=tuple(link["bbox"]) if link.get("bbox") is not None else None,
+                external=link.get("external", True),
+            )
+            for link in embedded_value.get("links", [])
+        ],
+        extractor=embedded_value.get("extractor"),
+    )
+    blocks = []
+    for block in value.get("blocks", []):
+        blocks.append(
+            Block(
+                kind=block.get("kind", "paragraph"),
+                markdown=block.get("markdown", ""),
+                bbox=tuple(block["bbox"]) if block.get("bbox") is not None else None,
+                confidence=block.get("confidence"),
+                asset_id=block.get("asset_id"),
+                source_pages=block.get("source_pages", []),
+                provenance=block.get("provenance", []),
+                metadata=block.get("metadata", {}),
+            )
+        )
+    return PageResult(
+        number=value["number"],
+        image=value.get("image", ""),
+        visual_markdown=value.get("visual_markdown", ""),
+        blocks=blocks,
+        embedded=embedded,
+        comparison=Comparison(**value.get("comparison", {})),
+        warnings=value.get("warnings", []),
+        generation=value.get("generation", {}),
+        source_assets=value.get("source_assets", []),
+        raw_ocr=value.get("raw_ocr", ""),
+        visual=value.get("visual", {}),
+        recovery=value.get("recovery", []),
+    )
 
 
 def _write_log(bundle: Path, metadata: dict[str, Any]) -> None:
