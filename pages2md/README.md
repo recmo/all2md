@@ -188,16 +188,20 @@ repetition failures.
 
 Raw OCR observations are immutable evidence. Editable content lives in page
 blocks and structured list-item bodies; rendered Markdown is derived from them.
-`lists.editable_leaves` lets repairs visit both through the same interface.
+`lists.repair_text_leaves` runs repairs on detached text leaves and commits only
+Markdown and metadata after success, then renders list containers. Block kinds
+and geometry are context, not editable structure.
 
 - `pipeline.py` owns conversion, checkpointing, and publication.
 - `document.py` owns document-wide normalization and link application.
-- `reconciliation.py` sequences text repairs; `alignment.py` owns occurrence
+- `reconciliation.py` explicitly sequences math repairs per block, reusing
+  alignment until an edit changes the text; `alignment.py` owns occurrence
   matching, font decoding, and glyph relationships. Structural edits require
   native baselines; incomplete legacy geometry cannot establish a script.
-- `syntax.py` owns source-mapped math and protected Markdown ranges.
+- `syntax.py` owns source-mapped math and protected Markdown ranges, sharing
+  parsed blocks and math spans within each analysis.
 - `edits.py` applies source-offset changes and records their evidence. Conflicting
-  edits abstain rather than depending on rule order.
+  edits within a batch abstain; no-op proposals cannot block real changes.
 - `formatting.py` protects literal math and local footnotes before formatting
   prose. Preservation checks remain a safety net, not the normal formatting path.
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
-from contextlib import contextmanager
+from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from .compare import compare_text
 from .model import FORMULA_KINDS, Block, PageResult
@@ -25,25 +26,32 @@ ENUMERATOR = re.compile(
 ROMAN = frozenset("ivxlcdm")
 
 
-@contextmanager
-def editable_leaves(blocks: list[Block]):
-    """Expose list item bodies and ordinary blocks through the same interface.
+T = TypeVar("T")
 
-    List dictionaries are the checkpoint representation; their Markdown is
-    derived here after editing, never an independent repair target.
+
+def repair_text_leaves(blocks: list[Block], repair: Callable[[list[Block]], T]) -> T:
+    """Apply text/provenance repairs to detached leaves, then render lists.
+
+    Only markdown and metadata are committed, for both ordinary blocks and list
+    children. Kind and geometry are repair context, not editable structure.
+    A failed repair leaves the original blocks untouched.
     """
     leaves = []
     bindings = []
     containers = []
 
+    def add(source, owner):
+        leaf = deepcopy(source) if isinstance(source, Block) else Block(
+            source.get("kind", "paragraph"), source.get("markdown", ""),
+            bbox=deepcopy(source.get("bbox") or owner.bbox),
+            metadata=deepcopy(source.get("metadata", {})))
+        leaves.append(leaf)
+        bindings.append((source, leaf))
+
     def visit(node, owner):
         for item in node.get("items", []):
             for child in item.get("blocks", []):
-                leaf = Block(child.get("kind", "paragraph"), child.get("markdown", ""),
-                             bbox=child.get("bbox") or owner.bbox,
-                             metadata=child.setdefault("metadata", {}))
-                leaves.append(leaf)
-                bindings.append((child, leaf))
+                add(child, owner)
             for child in item.get("children", []):
                 visit(child, owner)
 
@@ -53,12 +61,16 @@ def editable_leaves(blocks: list[Block]):
             containers.append(block)
             visit(node, block)
         else:
-            leaves.append(block)
-    yield leaves
-    for child, leaf in bindings:
-        child["markdown"] = leaf.markdown
+            add(block, block)
+    result = repair(leaves)
+    for source, leaf in bindings:
+        if isinstance(source, Block):
+            source.markdown, source.metadata = leaf.markdown, leaf.metadata
+        else:
+            source["markdown"], source["metadata"] = leaf.markdown, leaf.metadata
     for block in containers:
         block.markdown = render_list(block.metadata["list"])
+    return result
 
 
 @dataclass

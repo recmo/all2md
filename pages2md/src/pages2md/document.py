@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from .model import FIGURE_KINDS, Block, PageResult
-from .lists import normalize_lists, editable_leaves
+from .lists import normalize_lists, repair_text_leaves
 from .markdown import merge_html_tables
 from .embedded import bbox_coverage as _bbox_coverage
 from .syntax import protected_ranges
@@ -116,11 +116,13 @@ def normalize_document(pages: list[PageResult]) -> None:
             left.metadata["cross_page_paragraph"] = True
             current.blocks.pop(0)
 
+    def clean(leaves):
+        for block in leaves:
+            if block.kind == "paragraph":
+                block.markdown = _clean_prose(block.markdown)
+
     for page in pages:
-        with editable_leaves(page.blocks) as leaves:
-            for block in leaves:
-                if block.kind == "paragraph":
-                    block.markdown = _clean_prose(block.markdown)
+        repair_text_leaves(page.blocks, clean)
 
         retained: list[Block] = []
         index = 0
@@ -207,7 +209,7 @@ def apply_links_to_blocks(
     *,
     page_number: int | None = None,
 ) -> None:
-    with editable_leaves(blocks) as blocks:
+    def repair(blocks):
         for link in links:
             label = " ".join(link.text.split())
             if not label or not link.target:
@@ -258,6 +260,7 @@ def apply_links_to_blocks(
                             {"target": link.target, "source": "embedded_doi_target_geometry"}
                         )
                         break
+    repair_text_leaves(blocks, repair)
 
 
 def _replace_doi_tail(markdown: str, target: str) -> str:

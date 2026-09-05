@@ -16,7 +16,7 @@ from .alignment import (
 )
 from .syntax import math_spans, non_math_ranges, protected_ranges
 from .edits import apply_edits
-from .lists import editable_leaves
+from .lists import repair_text_leaves
 from .semantics import repair_accents, restore_inline_math
 
 
@@ -24,17 +24,20 @@ def reconcile_text(blocks: list[Block], embedded: EmbeddedEvidence, trust: Embed
     """One explicit repair sequence for all editable text leaves."""
     usable = embedded if trust.usable else EmbeddedEvidence()
     geometric = embedded if trust.geometric else EmbeddedEvidence()
-    warnings = []
-    with editable_leaves(blocks) as leaves:
+
+    def repair(leaves):
+        warnings = []
         warnings.extend(_repair_embedded_digit_runs(leaves, usable))
         warnings.extend(_repair_embedded_math_structure(leaves, usable))
         warnings.extend(_repair_malformed_math_syntax(leaves))
         warnings.extend(_repair_embedded_short_insertions(leaves, geometric))
         warnings.extend(_restore_embedded_math_alphabets(leaves, geometric))
         warnings.extend(_repair_embedded_word_tokens(leaves, usable))
-        warnings.extend(repair_accents(leaves, geometric, semantic_math_projection))
-        warnings.extend(restore_inline_math(leaves, geometric, semantic_math_projection))
-    return warnings
+        warnings.extend(repair_accents(leaves, geometric))
+        warnings.extend(restore_inline_math(leaves, geometric))
+        return warnings
+
+    return repair_text_leaves(blocks, repair)
 
 
 def _repair_embedded_digit_runs(
@@ -167,7 +170,7 @@ def _repair_embedded_word_tokens(
             [token[0].casefold() for token in embedded_tokens],
             autojunk=False,
         )
-        replacements: list[tuple[int, int, str, str]] = []
+        replacements: list[tuple[int, int, str]] = []
         for operation, visual_start, visual_end, embedded_start, embedded_end in matcher.get_opcodes():
             if operation != "replace" or visual_end - visual_start != embedded_end - embedded_start:
                 continue
@@ -177,10 +180,10 @@ def _repair_embedded_word_tokens(
             ):
                 if not _safe_embedded_token_repair(visual[0], native[0]):
                     continue
-                replacements.append((visual[1], visual[2], visual[0], native[0]))
+                replacements.append((visual[1], visual[2], native[0]))
         if not replacements:
             continue
-        repaired |= apply_edits(block, [(start, end, target) for start, end, _, target in replacements], "lexical")
+        repaired |= apply_edits(block, replacements, "lexical")
     return ["visual_embedded_lexical_repair"] if repaired else []
 
 
@@ -348,20 +351,6 @@ def _format_embedded_inserted_math(
     return block.markdown
 
 
-def _repair_embedded_delimiters(blocks, embedded):
-    repaired = False
-    for block in blocks:
-        if not block.bbox or block.kind in FIGURE_KINDS:
-            continue
-        native, _ = semantic_math_projection(embedded_text_for_bbox(embedded, block.bbox, either_box=True))
-        alignment = align_glyphs(block.markdown, embedded, block.bbox, semantic_math_projection).with_text_fallback(native)
-        ranges = _math_source_ranges(block.markdown)
-        if not ranges and block.kind in FORMULA_KINDS:
-            ranges = [(0, len(block.markdown))]
-        repaired |= apply_edits(block, delimiter_edits(block.markdown, alignment, ranges), "delimiter")
-    return ["visual_embedded_delimiter_repair"] if repaired else []
-
-
 def _math_source_ranges(markdown: str) -> list[tuple[int, int]]:
     return [(s.start, s.end) for s in math_spans(markdown)[0]]
 
@@ -391,66 +380,49 @@ def _math_character_family(character: str) -> str:
     return category
 
 
-def _repair_embedded_math_glyphs(
-    blocks: list[Block],
-    embedded: EmbeddedEvidence,
-) -> list[str]:
-    """Repair isolated math glyph substitutions with strong local PDF anchors."""
-    repaired = bool(_repair_embedded_delimiters(blocks, embedded))
-    for block in blocks:
-        if not block.bbox or block.kind in FIGURE_KINDS:
+def _math_glyph_edits(block, alignment, ranges, evidence):
+    """Propose isolated substitutions; the caller owns ordering and mutation."""
+    visual, visual_spans = alignment.text, alignment.spans
+    native = alignment.native
+    if not native:
+        native, _ = semantic_math_projection(evidence)
+    if not visual or not native:
+        return []
+    replacements: list[tuple[int, int, str]] = []
+    for left_start, right_start, native_character, left_anchor, right_anchor in alignment.substitutions(native):
+        source_start, source_end = visual_spans[left_start]
+        if not any(start <= source_start and source_end <= end for start, end in ranges):
             continue
-        ranges = _math_source_ranges(block.markdown)
-        if not ranges:
+        uncertain = [
+            span for span in block.metadata.get("uncertain_spans", [])
+            if float(span.get("confidence", 1.0)) <= 0.75
+        ]
+        near_uncertain = _near_uncertain_span(source_start, uncertain)
+        required_anchor = 4 if near_uncertain or block.kind in FORMULA_KINDS else 6
+        if min(left_anchor, right_anchor) < 1 or left_anchor + right_anchor < required_anchor:
             continue
-        evidence = embedded_text_for_bbox(embedded, block.bbox, either_box=True)
-        if not evidence:
+        visual_character = visual[left_start]
+        if _math_character_family(visual_character) != _math_character_family(native_character):
             continue
-        alignment = align_glyphs(block.markdown, embedded, block.bbox, semantic_math_projection)
-        visual, visual_spans = alignment.text, alignment.spans
-        native = alignment.native
-        if not native:
-            native, _ = semantic_math_projection(evidence)
-        if not visual or not native:
+        if _math_character_family(visual_character) in {"Ps", "Pe"}:
+            continue  # Delimiter endpoints are repaired as pairs.
+        replacement = _math_replacement(native_character)
+        if replacement is None or replacement == block.markdown[source_start:source_end]:
             continue
-        replacements: list[tuple[int, int, str, str]] = []
-        for left_start, right_start, native_character, left_anchor, right_anchor in alignment.substitutions(native):
-            source_start, source_end = visual_spans[left_start]
-            if not any(start <= source_start and source_end <= end for start, end in ranges):
-                continue
-            uncertain = [
-                span for span in block.metadata.get("uncertain_spans", [])
-                if float(span.get("confidence", 1.0)) <= 0.75
-            ]
-            near_uncertain = _near_uncertain_span(source_start, uncertain)
-            required_anchor = 4 if near_uncertain or block.kind in FORMULA_KINDS else 6
-            if min(left_anchor, right_anchor) < 1 or left_anchor + right_anchor < required_anchor:
-                continue
-            visual_character = visual[left_start]
-            if _math_character_family(visual_character) != _math_character_family(native_character):
-                continue
-            if _math_character_family(visual_character) in {"Ps", "Pe"}:
-                continue  # Delimiter endpoints are repaired as pairs.
-            replacement = _math_replacement(native_character)
-            if replacement is None or replacement == block.markdown[source_start:source_end]:
-                continue
-            if replacement.startswith("\\") and re.match(r"[A-Za-z]", block.markdown[source_end:]):
-                replacement += " "
-            if visual_character.isdigit() and native_character.isdigit():
-                continue
-            if (
-                visual_character.isascii() and visual_character.isalpha()
-                and native_character.isascii() and native_character.isalpha()
-                and ((source_start and block.markdown[source_start - 1].isalpha())
-                     or (source_end < len(block.markdown) and block.markdown[source_end].isalpha()))
-                and not block.markdown[source_start:source_end].startswith("\\")
-            ):
-                continue
-            replacements.append((source_start, source_end, block.markdown[source_start:source_end], replacement))
-        if not replacements:
+        if replacement.startswith("\\") and re.match(r"[A-Za-z]", block.markdown[source_end:]):
+            replacement += " "
+        if visual_character.isdigit() and native_character.isdigit():
             continue
-        repaired |= apply_edits(block, [(start, end, target) for start, end, _, target in replacements], "math_glyph")
-    return ["visual_embedded_math_glyph_repair"] if repaired else []
+        if (
+            visual_character.isascii() and visual_character.isalpha()
+            and native_character.isascii() and native_character.isalpha()
+            and ((source_start and block.markdown[source_start - 1].isalpha())
+                 or (source_end < len(block.markdown) and block.markdown[source_end].isalpha()))
+            and not block.markdown[source_start:source_end].startswith("\\")
+        ):
+            continue
+        replacements.append((source_start, source_end, replacement))
+    return replacements
 
 
 def _repair_embedded_math_structure(
@@ -458,28 +430,39 @@ def _repair_embedded_math_structure(
     embedded: EmbeddedEvidence,
 ) -> list[str]:
     """Use PDF geometry for scripts and paired delimiters lost by linear OCR."""
-    repaired = bool(_repair_embedded_math_glyphs(blocks, embedded))
+    repaired = False
     for block in blocks:
-        if not block.bbox or block.kind in FIGURE_KINDS or not _math_source_ranges(block.markdown):
+        if not block.bbox or block.kind in FIGURE_KINDS:
             continue
         evidence = embedded_text_for_bbox(embedded, block.bbox, either_box=True)
-        if not evidence:
+        replacements: list[tuple[int, int, str]] = []
+        alignment = align_glyphs(block.markdown, embedded, block.bbox)
+        native, _ = semantic_math_projection(evidence)
+        ranges = _math_source_ranges(block.markdown)
+        delimiter_ranges = ranges or ([(0, len(block.markdown))] if block.kind in FORMULA_KINDS else [])
+        if apply_edits(block, delimiter_edits(
+            block.markdown, alignment.with_text_fallback(native), delimiter_ranges
+        ), "delimiter"):
+            repaired = True
+            alignment = align_glyphs(block.markdown, embedded, block.bbox)
+            ranges = _math_source_ranges(block.markdown)
+        if not evidence or not ranges:
             continue
-        replacements: list[tuple[int, int, str, str]] = []
-        alignment = align_glyphs(block.markdown, embedded, block.bbox, semantic_math_projection)
+        after_delimiters = block.markdown
+        if apply_edits(block, _math_glyph_edits(block, alignment, ranges, evidence), "math_glyph"):
+            repaired = True
+            alignment = align_glyphs(block.markdown, embedded, block.bbox)
         if apply_edits(block, script_substitutions(block.markdown, alignment), "script_glyph"):
             repaired = True
-            alignment = align_glyphs(block.markdown, embedded, block.bbox, semantic_math_projection)
+            alignment = align_glyphs(block.markdown, embedded, block.bbox)
         structured = script_edits(block.markdown, alignment)
-        if structured:
-            repaired |= apply_edits(block, structured, "script")
-
-        if structured:
-            alignment = align_glyphs(block.markdown, embedded, block.bbox, semantic_math_projection)
-        for start, end, replacement in delimiter_edits(
-            block.markdown, alignment, _math_source_ranges(block.markdown)
-        ):
-            replacements.append((start, end, block.markdown[start:end], replacement))
+        if apply_edits(block, structured, "script"):
+            repaired = True
+            alignment = align_glyphs(block.markdown, embedded, block.bbox)
+        if block.markdown != after_delimiters:
+            # Intervening edits can expose new delimiter pairings.
+            replacements.extend(delimiter_edits(
+                block.markdown, alignment, _math_source_ranges(block.markdown)))
 
         # A visually raised trailing symbol belongs inside the preceding exponent.
         exponent_tail = re.compile(
@@ -503,11 +486,11 @@ def _repair_embedded_math_structure(
                     break
             if supported:
                 replacement = f"{base} ^ {{{match.group('exponent').rstrip()} {match.group('tail')}}}"
-                replacements.append((match.start(), match.end(), match.group(0), replacement))
+                replacements.append((match.start(), match.end(), replacement))
 
         if not replacements:
             continue
-        repaired |= apply_edits(block, [(start, end, target) for start, end, _, target in replacements], "math_structure")
+        repaired |= apply_edits(block, replacements, "math_structure")
     return ["visual_embedded_math_structure_repair"] if repaired else []
 
 
@@ -537,7 +520,7 @@ def _restore_embedded_math_alphabets(
         if not block.bbox or block.kind in FIGURE_KINDS:
             continue
         visual = _visible_uppercase_occurrences(block.markdown)
-        alignment = align_glyphs(block.markdown, embedded, block.bbox, semantic_math_projection)
+        alignment = align_glyphs(block.markdown, embedded, block.bbox)
         by_start = {start: index for index, (start, _) in enumerate(alignment.spans)}
         aligned: list[tuple[dict[str, object], dict[str, object], bool]] = []
         for occurrence in visual:
@@ -549,7 +532,7 @@ def _restore_embedded_math_alphabets(
             aligned.append((occurrence, {**glyph, "match_letter": glyph["letter"]},
                             occurrence["letter"] == glyph["letter"]))
 
-        replacements: list[tuple[int, int, str, str]] = []
+        replacements: list[tuple[int, int, str]] = []
         for occurrence, glyph, same_letter in aligned:
             role = math_font_role(glyph)
             style = occurrence.get("style")
@@ -577,12 +560,11 @@ def _restore_embedded_math_alphabets(
             replacements.append((
                 start,
                 end,
-                block.markdown[start:end],
                 replacement,
             ))
         if not replacements:
             continue
-        repaired |= apply_edits(block, [(start, end, target) for start, end, _, target in replacements], "math_alphabet")
+        repaired |= apply_edits(block, replacements, "math_alphabet")
     return ["visual_embedded_math_alphabet_repair"] if repaired else []
 
 

@@ -3,9 +3,6 @@ from __future__ import annotations
 import pytest
 
 from pages2md.model import Block
-from pages2md.alignment import (
-    semantic_math_projection as project,
-)
 from pages2md.semantics import accent_identity, repair_accents, restore_inline_math
 from test_alignment import BOX, evidence
 
@@ -23,9 +20,9 @@ def test_accents_are_attached_to_arbitrary_letters(mark, font, command):
                        ("+1", 45, 100, 10, "Times-Roman")])
     wrong = "hat" if command == "tilde" else "tilde"
     block = Block("formula", rf"\[value=\{wrong}{{z}}+1\]", bbox=BOX)
-    assert repair_accents([block], native, project)
+    assert repair_accents([block], native)
     assert block.markdown == rf"\[value=\{command}{{z}}+1\]"
-    assert repair_accents([block], native, project) == []
+    assert repair_accents([block], native) == []
 
 
 @pytest.mark.parametrize("font", ["txexs", "Times-Roman", "unknown", "not-txsys"])
@@ -38,10 +35,10 @@ def test_ambiguous_accent_attachment_and_code_are_unchanged():
                        ("z", 40, 100, 10, "NewTXMI"),
                        ("®", 40, 100, 10, "txsys")])
     block = Block("formula", r"\(\tilde{z}\)", bbox=BOX)
-    assert repair_accents([block], native, project) == []
+    assert repair_accents([block], native) == []
     native = evidence([("z", 40, 100, 10, "NewTXMI"), ("®", 40, 100, 10, "txsys")])
     block = Block("paragraph", r"`\(\tilde{z}\)`", bbox=BOX)
-    assert repair_accents([block], native, project) == []
+    assert repair_accents([block], native) == []
 
 
 def test_inline_math_uses_math_glyphs_not_ordinary_italics_or_article_a():
@@ -51,9 +48,9 @@ def test_inline_math_uses_math_glyphs_not_ordinary_italics_or_article_a():
                        ("mA", 70, 100, 10, "NewTXMI"),
                        (" here.", 80, 100, 10, "Times-Italic")])
     block = Block("paragraph", "Use a a and mA here.", bbox=BOX)
-    assert restore_inline_math([block], native, project)
+    assert restore_inline_math([block], native)
     assert block.markdown == r"Use a \(a\) and \(mA\) here."
-    assert restore_inline_math([block], native, project) == []
+    assert restore_inline_math([block], native) == []
 
 
 def test_inline_math_wraps_complete_arithmetic_expression():
@@ -61,7 +58,7 @@ def test_inline_math_wraps_complete_arithmetic_expression():
                        ("k", 45, 100, 10, "NewTXMI"),
                        (" - 1", 50, 100, 10, "Times-Roman")])
     block = Block("paragraph", "degree k - 1", bbox=BOX)
-    restore_inline_math([block], native, project)
+    restore_inline_math([block], native)
     assert block.markdown == r"degree \(k - 1\)"
 
 
@@ -69,23 +66,23 @@ def test_inline_math_wraps_complete_arithmetic_expression():
 def test_inline_math_protects_existing_syntax(text):
     native = evidence([("a", 40, 100, 10, "NewTXMI")])
     block = Block("paragraph", text, bbox=BOX)
-    assert restore_inline_math([block], native, project) == []
+    assert restore_inline_math([block], native) == []
     assert block.markdown == text
 
 
 def test_missing_evidence_and_partial_words_abstain():
     native = evidence([("c", 10, 100, 10, "NewTXMI"), ("at", 15, 100, 10, "Times-Roman")])
     block = Block("paragraph", "cat", bbox=BOX)
-    assert restore_inline_math([block], native, project) == []
-    assert restore_inline_math([Block("paragraph", "c")], native, project) == []
+    assert restore_inline_math([block], native) == []
+    assert restore_inline_math([Block("paragraph", "c")], native) == []
 
 
 def test_inline_math_updates_structured_list_source_and_is_idempotent():
-    from pages2md.lists import render_list
+    from pages2md.lists import render_list, repair_text_leaves
     native = evidence([("Use ", 10, 100, 10, "Times-Roman"), ("x", 30, 100, 10, "NewTXMI")])
     node = {"marker_style": "decimal", "items": [
         {"source_ordinal": 1, "blocks": [{"kind": "paragraph", "markdown": "Use x"}]}]}
     block = Block("list", "1. Use x", bbox=BOX, metadata={"list": node})
-    assert restore_inline_math([block], native, project)
+    assert repair_text_leaves([block], lambda leaves: restore_inline_math(leaves, native))
     assert render_list(node) == block.markdown == r"1. Use \(x\)"
-    assert restore_inline_math([block], native, project) == []
+    assert repair_text_leaves([block], lambda leaves: restore_inline_math(leaves, native)) == []

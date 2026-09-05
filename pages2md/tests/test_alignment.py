@@ -8,15 +8,11 @@ from pages2md.alignment import align_glyphs, math_font_role, ordered_glyphs, scr
 from pages2md.embedded import assess_embedded, iter_embedded_characters
 from pages2md.model import Block, EmbeddedEvidence
 from pages2md.reconciliation import (
-    _repair_embedded_math_glyphs,
     _repair_embedded_math_structure,
     _restore_embedded_math_alphabets,
 )
 from pages2md.pipeline import (
     _restore_embedded_proof_marks,
-)
-from pages2md.alignment import (
-    semantic_math_projection as _semantic_math_projection,
 )
 
 
@@ -144,7 +140,7 @@ def test_unique_equation_context_survives_multiline_layout():
 def test_complete_native_line_recovers_an_ocr_clipped_delimiter():
     native = evidence([("value=⌈u+v⌉+x", 20, 100, 10, "NewTXMI")])
     block = Block("formula", r"\[value=\lceil u+v\rfloor+x\]", bbox=(15, 80, 67, 110))
-    _repair_embedded_math_glyphs([block], native)
+    _repair_embedded_math_structure([block], native)
     assert block.markdown == r"\[value=\lceil u+v\rceil+x\]"
 
 
@@ -171,7 +167,7 @@ def test_literal_division_is_not_rewritten_as_a_script():
         ("+1", 48, 100, 10, "NewTXMI"),
     ])
     markdown = r"\[a=Y_{r}^{u / v}+1\]"
-    alignment = align_glyphs(markdown, native, BOX, _semantic_math_projection)
+    alignment = align_glyphs(markdown, native, BOX)
     assert script_edits(markdown, alignment) == []
 
 
@@ -186,7 +182,7 @@ def test_layout_orders_centered_operator_limits_before_glyph_repair():
         ("(t)", 63, 100, 10, "NewTXMI"),
     ])
     block = Block("formula", r"\[h=\sum_{b,\vec{c}}q_{b,\vec{c}}(t)\]", bbox=BOX)
-    _repair_embedded_math_glyphs([block], native)
+    _repair_embedded_math_structure([block], native)
     assert block.markdown == r"\[h=\sum_{b,\vec{e}}q_{b,\vec{e}}(t)\]"
 
 
@@ -243,7 +239,7 @@ def test_nested_delimiter_repair_preserves_probability_brackets(opening, closing
     assert _repair_embedded_math_structure([block], native)
     assert block.markdown == expected
     for _ in range(3):
-        assert _repair_embedded_math_glyphs([block], native) == []
+        assert _repair_embedded_math_structure([block], native) == []
         assert _repair_embedded_math_structure([block], native) == []
         assert block.markdown == expected
 

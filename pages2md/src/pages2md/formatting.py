@@ -65,8 +65,8 @@ def format_and_lint(paths: list[Path]) -> FormatResult:
             result.preservation_skips.append(str(path))
         else:
             atomic_text(path, formatted)
-        if format_markdown(formatted) != formatted:
-            reformatted = format_markdown(formatted)
+        reformatted = format_markdown(formatted)
+        if reformatted != formatted:
             if _structural_signature(reformatted) == _structural_signature(formatted):
                 result.idempotent = False
         spans, unclosed = math_spans(formatted)

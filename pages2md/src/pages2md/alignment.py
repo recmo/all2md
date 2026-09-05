@@ -11,13 +11,9 @@ import unicodedata
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from statistics import median
-from typing import Callable
 
 from .embedded import embedded_characters_for_bbox, iter_embedded_characters
 from .model import EmbeddedEvidence
-
-
-Projection = Callable[[str], tuple[str, list[tuple[int, int]]]]
 
 
 @dataclass
@@ -192,8 +188,8 @@ def _agreed_matches(visual: str, native: str) -> dict[int, int]:
     return agreed
 
 
-def align_glyphs(markdown: str, embedded: EmbeddedEvidence, bbox, project: Projection) -> GlyphAlignment:
-    text, spans = project(markdown)
+def align_glyphs(markdown: str, embedded: EmbeddedEvidence, bbox) -> GlyphAlignment:
+    text, spans = semantic_math_projection(markdown)
     glyphs = embedded_characters_for_bbox(embedded, bbox)
     # OCR boxes can clip a line's final symbols. Complete intersecting PDF
     # lines instead of inventing a fixed pixel padding or borrowing a neighbor.
@@ -208,7 +204,7 @@ def align_glyphs(markdown: str, embedded: EmbeddedEvidence, bbox, project: Proje
     native = []
     old_to_new = {}
     for index, glyph in enumerate(ordered):
-        value, _ = project(str(glyph["text"]))
+        value, _ = semantic_math_projection(str(glyph["text"]))
         if value:
             old_to_new[index] = len(expanded)
         for letter in value:

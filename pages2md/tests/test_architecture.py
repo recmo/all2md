@@ -1,11 +1,10 @@
 """Cross-cutting contracts shared by every transcription repair."""
 import pytest
 
-from pages2md.alignment import semantic_math_projection
 from pages2md.edits import apply_edits
 from pages2md.embedded import assess_embedded
 from pages2md.formatting import format_and_lint, format_markdown
-from pages2md.lists import normalize_page_blocks
+from pages2md.lists import normalize_page_blocks, repair_text_leaves
 from pages2md.model import Block
 from pages2md.reconciliation import _math_source_ranges, _repair_embedded_math_structure, reconcile_text
 from pages2md.syntax import math_spans, protected_ranges
@@ -53,6 +52,80 @@ def test_reconciliation_is_idempotent_and_list_rendering_is_derived():
     assert r'\(a\)' in once and r'\(b\)' in once
     assert not reconcile_text(blocks, native, trust)
     assert normalize_page_blocks(blocks)[0].markdown == once
+
+
+def test_no_op_edits_do_not_conflict_with_real_edits():
+    block = Block('paragraph', 'abc')
+    assert apply_edits(block, [(0, 3, 'abc'), (1, 2, 'B')], 'test')
+    assert block.markdown == 'aBc'
+    assert len(block.metadata['embedded_text_repairs']) == 1
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_leaf_repairs_commit_only_text_and_metadata_consistently(fail):
+    ordinary = Block('paragraph', 'abc', metadata={'original': []})
+    blocks = [ordinary, *normalize_page_blocks([Block('list', '- abc', bbox=BOX)])]
+    child = blocks[1].metadata['list']['items'][0]['blocks'][0]
+
+    def repair(leaves):
+        for leaf in leaves:
+            leaf.kind = 'caption'
+            leaf.markdown = 'changed'
+            leaf.metadata['probe'] = True
+        leaves[0].metadata['original'].append('changed')
+        if fail:
+            raise ValueError('failed repair')
+        return ['repaired']
+
+    if fail:
+        with pytest.raises(ValueError, match='failed repair'):
+            repair_text_leaves(blocks, repair)
+    else:
+        assert repair_text_leaves(blocks, repair) == ['repaired']
+    assert ordinary.kind == child['kind'] == 'paragraph'
+    assert ordinary.markdown == child['markdown'] == ('abc' if fail else 'changed')
+    assert ('probe' in ordinary.metadata) == ('probe' in child.get('metadata', {})) == (not fail)
+    assert ordinary.metadata['original'] == ([] if fail else ['changed'])
+    assert blocks[1].markdown == ('- abc' if fail else '- changed')
+
+
+@pytest.mark.parametrize('function', ['protected_ranges', 'non_math_ranges', 'formatting_spans'])
+def test_syntax_analysis_parses_blocks_once(monkeypatch, function):
+    from pages2md import syntax
+    original = syntax.MarkdownIt.parse
+    calls = []
+
+    def parse(self, *args, **kwargs):
+        calls.append(1)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(syntax.MarkdownIt, 'parse', parse)
+    getattr(syntax, function)(r'Text \(x\) and [link](https://example.com).')
+    assert len(calls) == 1
+
+
+def test_unchanged_math_is_aligned_once(monkeypatch):
+    from pages2md import reconciliation
+    native = evidence([('x=y+z', 20, 100, 10, 'NewTXMI')])
+    block = Block('formula', r'\(x=y+z\)', bbox=BOX)
+    original = reconciliation.align_glyphs
+    calls = []
+
+    def align(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(reconciliation, 'align_glyphs', align)
+    assert reconciliation._repair_embedded_math_structure([block], native) == []
+    assert len(calls) == 1
+
+
+def test_delimiters_can_use_glyphs_without_block_text():
+    native = evidence([('P[j](X)', 20, 100, 10, 'Times-Roman')])
+    native.blocks[0]['text'] = ''
+    block = Block('formula', r'P ^ {\lfloor j \rfloor} (X)', bbox=BOX)
+    assert _repair_embedded_math_structure([block], native)
+    assert block.markdown == r'P ^ {[ j ]} (X)'
 
 
 def test_formatter_preserves_math_and_local_notes_without_skipping_document(tmp_path):

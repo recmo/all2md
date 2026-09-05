@@ -9,9 +9,6 @@ from pages2md.model import Block, Chapter, Comparison, EmbeddedEvidence, PageRes
 from pages2md.document import (
     normalize_document,
 )
-from pages2md.alignment import (
-    semantic_math_projection as project,
-)
 from pages2md.syntax import math_spans
 from test_alignment import evidence
 
@@ -33,44 +30,44 @@ def native_note(marker_baseline=95, body_font="Times-Roman"):
 
 def test_ocr_labelled_notes_work_without_embedded_text():
     p = page()
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert p.blocks[0].markdown == "Some prose[^p1-note-1] with a note"
     assert footnote_definitions([p]) == "[^p1-note-1]: A detailed explanatory note."
     before = [b.markdown for b in p.blocks]
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert [b.markdown for b in p.blocks] == before
 
 
 def test_geometry_recovers_unlabelled_small_note():
     p = page(embedded=native_note(), note_kind="paragraph")
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert p.blocks[1].metadata.get("footnote")
 
 
 @pytest.mark.parametrize(("baseline", "font"), [(100, "Times-Roman"), (95, "NewTXMI")])
 def test_normal_digits_and_math_exponents_are_not_footnote_references(baseline, font):
     p = page(embedded=native_note(baseline, font), note_kind="paragraph")
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert not p.blocks[1].metadata.get("footnote")
 
 
 def test_small_caption_without_matching_reference_is_not_a_note():
     p = page(embedded=native_note(), note_kind="paragraph")
     p.blocks[1].markdown = "2 A detailed explanatory caption."
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert not p.blocks[1].metadata.get("footnote")
 
 
 def test_ambiguous_duplicate_notes_abstain():
     p = page()
     p.blocks.append(Block("page_footnote", "1 Another explanatory note."))
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert not any(b.metadata.get("footnote") for b in p.blocks)
 
 
 def test_footnotes_are_outside_body_and_identifiers_do_not_collide(tmp_path):
     pages = [page(1), page(2)]
-    normalize_footnotes(pages, project)
+    normalize_footnotes(pages)
     for p in pages:
         p.visual_markdown = strict_page_markdown(p, [])
         assert "explanatory" not in p.visual_markdown
@@ -92,7 +89,7 @@ def test_footnotes_are_outside_body_and_identifiers_do_not_collide(tmp_path):
 def test_cross_page_prose_can_join_without_swallowing_note():
     p = page()
     q = PageResult(2, "p.png", "continued here.", [Block("paragraph", "continued here.")], EmbeddedEvidence(), Comparison())
-    normalize_footnotes([p, q], project)
+    normalize_footnotes([p, q])
     normalize_document([p, q])
     assert p.blocks[0].markdown.endswith("with a note continued here.")
     assert p.blocks[1].markdown == "A detailed explanatory note."
@@ -114,7 +111,7 @@ def test_author_asterisk_can_be_extracted_as_math_asterisk():
     p.embedded.text += note.text
     p.blocks[0].markdown = "Author*"
     p.blocks[1].markdown = "*A detailed explanatory note."
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert p.blocks[0].markdown == "Author[^p1-note-1]"
 
 
@@ -124,7 +121,7 @@ def test_ocr_only_footnotes_do_not_rewrite_code_links_or_emphasis(text):
     p.blocks[0].markdown = text
     if text == "*emphasis*":
         p.blocks[1].markdown = "*A detailed explanatory note."
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert p.blocks[0].markdown == text
     assert not p.blocks[1].metadata.get("footnote")
 
@@ -132,24 +129,24 @@ def test_ocr_only_footnotes_do_not_rewrite_code_links_or_emphasis(text):
 def test_flattened_numeric_reference_requires_native_superscript_geometry():
     p = page(embedded=native_note())
     p.blocks[0].markdown = "Some prose1 with a note"
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert p.blocks[0].markdown == "Some prose[^p1-note-1] with a note"
     p = page()
     p.blocks[0].markdown = "Some prose1 with a note"
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert p.blocks[0].markdown == "Some prose1 with a note"
 
 
 def test_note_identifiers_avoid_existing_reference_ids():
     p = page()
     p.blocks.append(Block("paragraph", "Existing[^p1-note-1]"))
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     assert p.blocks[1].metadata["footnote"]["id"] == "p1-note-2"
 
 
 def test_definitions_follow_full_paragraph_and_only_first_reference():
     p = page()
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     source = "First[^p1-note-1]\ncontinued line.\n\nNext[^p1-note-1].\n"
     assert place_footnotes(source, [p]) == (
         "First[^p1-note-1]\ncontinued line.\n\n"
@@ -158,7 +155,7 @@ def test_definitions_follow_full_paragraph_and_only_first_reference():
 
 def test_code_references_do_not_claim_definitions():
     p = page()
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     source = "```\nFake[^p1-note-1]\n```\n\n`Fake[^p1-note-1]`\n\nReal[^p1-note-1].\n"
     output = place_footnotes(source, [p])
     assert output.startswith(source)
@@ -167,6 +164,6 @@ def test_code_references_do_not_claim_definitions():
 
 def test_multiple_notes_follow_reference_order_not_page_order():
     p, q = page(1), page(2)
-    normalize_footnotes([p, q], project)
+    normalize_footnotes([p, q])
     output = place_footnotes("Text[^p2-note-1] and[^p1-note-1].\n\nNext.\n", [p, q])
     assert output.index("[^p2-note-1]:") < output.index("[^p1-note-1]:") < output.index("Next.")

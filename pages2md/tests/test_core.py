@@ -40,9 +40,7 @@ from pages2md.document import (
     normalize_document,
 )
 from pages2md.reconciliation import (
-    _repair_embedded_delimiters,
     _repair_embedded_digit_runs,
-    _repair_embedded_math_glyphs,
     _repair_embedded_math_structure,
     _repair_embedded_short_insertions,
     _repair_embedded_word_tokens,
@@ -1528,9 +1526,9 @@ def test_pdf_text_repairs_confirmed_hasse_derivative_brackets():
         Block("formula", r"P ^ {\lfloor k \rfloor} (X)", bbox=(100, 100, 900, 200)),
     ]
 
-    warnings = _repair_embedded_delimiters(blocks, embedded)
+    warnings = _repair_embedded_math_structure(blocks, embedded)
 
-    assert warnings == ["visual_embedded_delimiter_repair"]
+    assert warnings == ["visual_embedded_math_structure_repair"]
     assert blocks[0].markdown == r"P ^ {[j ]} (X)"
     assert blocks[1].markdown == r"P ^ {[ j ]} (X)"
     assert blocks[2].markdown == r"P ^ {\lfloor k \rfloor} (X)"
@@ -1739,9 +1737,9 @@ def test_pdf_math_glyph_repairs_use_local_anchors_and_stay_inside_math():
         metadata={"uncertain_spans": [{"start": 31, "end": 32, "confidence": 0.5}]},
     )
 
-    warnings = _repair_embedded_math_glyphs([block], embedded)
+    warnings = _repair_embedded_math_structure([block], embedded)
 
-    assert warnings == ["visual_embedded_math_glyph_repair"]
+    assert warnings == ["visual_embedded_math_structure_repair"]
     assert block.markdown == (
         r"The prose typu stays. \((-1)^{j+1} T^j Y_j\) and "
         r"\(k > \lceil \varepsilon^{-3/\theta} \rceil\)."
@@ -1759,7 +1757,7 @@ def test_pdf_math_glyph_does_not_turn_operator_commands_into_pdf_font_letters():
         bbox=(100, 100, 900, 200),
     )
 
-    assert _repair_embedded_math_glyphs([block], embedded) == []
+    assert _repair_embedded_math_structure([block], embedded) == []
     assert r"\sum" in block.markdown
 
 
@@ -1774,9 +1772,9 @@ def test_pdf_math_glyph_ignores_embedded_vector_accent_encoding():
         bbox=(100, 100, 900, 200),
     )
 
-    warnings = _repair_embedded_math_glyphs([block], embedded)
+    warnings = _repair_embedded_math_structure([block], embedded)
 
-    assert warnings == ["visual_embedded_math_glyph_repair"]
+    assert warnings == ["visual_embedded_math_structure_repair"]
     assert r"\vec {e}" in block.markdown
 
 

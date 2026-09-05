@@ -23,7 +23,7 @@ from .chapters import detect_chapters
 from .compare import compare_text
 from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, SCHEMA_VERSION, commit_version
 from .embedded import assess_embedded, bbox_coverage, iter_embedded_characters
-from .alignment import align_glyphs, semantic_math_projection as _semantic_math_projection
+from .alignment import align_glyphs
 from .embedded import bbox_iou as _iou
 from .reconciliation import reconcile_text
 from .document import normalize_document, merge_continued_tables, apply_links_to_blocks
@@ -359,7 +359,7 @@ def _convert_workspace(
         raise RuntimeError(f"{len(failed)} page(s) failed; intermediate bundle: {bundle}")
 
     page_results.sort(key=lambda item: item.number)
-    normalize_footnotes(page_results, _semantic_math_projection)
+    normalize_footnotes(page_results)
     normalize_document(page_results)
     merge_continued_tables(page_results)
     for result in page_results:
@@ -1467,7 +1467,7 @@ def _embedded_proof_anchor(blocks: list[Block], embedded: EmbeddedEvidence, glyp
             continue
         if block.bbox[3] < baseline - 3 * em or block.bbox[1] > baseline + 3 * em:
             continue
-        aligned = align_glyphs(block.markdown, embedded, region, _semantic_math_projection)
+        aligned = align_glyphs(block.markdown, embedded, region)
         equal = [(a, b) for a, b in aligned.matches.items() if aligned.text[a] == aligned.native[b]]
         if len(equal) < 6 or len(equal) / max(1, len(aligned.text)) < .7:
             continue

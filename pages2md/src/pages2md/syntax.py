@@ -31,14 +31,25 @@ def math_spans(text: str) -> tuple[list[MathSpan], list[int]]:
     an error. Explicit unmatched TeX delimiters are reported, never consumed to
     EOF (which would hide subsequent prose from the Markdown linter).
     """
-    lines = text.splitlines(keepends=True)
+    _, tokens, _, offsets = _parse(text)
+    return _math_spans(text, tokens, offsets)
+
+
+def _parse(text: str, *, keep_footnotes: bool = False):
+    parser = MarkdownIt("commonmark").use(footnote_plugin)
+    if keep_footnotes:
+        parser.core.ruler.disable("footnote_tail")
+    env = {}
+    tokens = parser.parse(text, env)
     offsets = [0]
-    for line in lines:
+    for line in text.splitlines(keepends=True):
         offsets.append(offsets[-1] + len(line))
-    excluded = []
-    for token in MarkdownIt("commonmark").use(footnote_plugin).parse(text):
-        if token.type in {"fence", "code_block"} and token.map:
-            excluded.append((offsets[token.map[0]], offsets[token.map[1]]))
+    return parser, tokens, env, offsets
+
+
+def _math_spans(text, tokens, offsets):
+    excluded = [(offsets[t.map[0]], offsets[t.map[1]]) for t in tokens
+                if t.type in {"fence", "code_block"} and t.map]
     excluded.extend((m.start(), m.end()) for m in re.finditer(r"<!--.*?(?:-->|\Z)", text, re.S))
     excluded.sort()
     spans, unclosed = [], []
@@ -122,17 +133,18 @@ def mask_math(text: str, spans: list[MathSpan]) -> str:
 
 def non_math_ranges(text: str, *, references: bool = True) -> list[tuple[int, int]]:
     """Opaque code, links, HTML, and reference labels, in original offsets."""
-    parser = MarkdownIt("commonmark").use(footnote_plugin)
-    env = {}
-    tokens = parser.parse(text, env)
-    offsets = [0]
-    for line in text.splitlines(keepends=True):
-        offsets.append(offsets[-1] + len(line))
+    parsed = _parse(text)
+    spans, _ = _math_spans(text, parsed[1], parsed[3])
+    return _non_math_ranges(text, parsed, spans, references=references)
+
+
+def _non_math_ranges(text, parsed, spans, *, references):
+    parser, tokens, env, offsets = parsed
     ranges = [(offsets[t.map[0]], offsets[t.map[1]]) for t in tokens
               if t.map and t.type in {"code_block", "fence", "html_block"}]
     ranges.extend((offsets[r["map"][0]], offsets[r["map"][1]])
                   for r in env.get("references", {}).values() if "map" in r)
-    source = mask_math(text, math_spans(text)[0])
+    source = mask_math(text, spans)
     # Wrapping existing parser rules gives exact source spans even for nested
     # labels, escaped punctuation, and variable-length code delimiters.
     for name in ("backticks", "link", "image", "autolink", "html_inline"):
@@ -165,19 +177,18 @@ def non_math_ranges(text: str, *, references: bool = True) -> list[tuple[int, in
 
 
 def protected_ranges(text: str, *, references: bool = True) -> list[tuple[int, int]]:
-    return sorted(non_math_ranges(text, references=references) + [(s.start, s.end) for s in math_spans(text)[0]])
+    parsed = _parse(text)
+    spans, _ = _math_spans(text, parsed[1], parsed[3])
+    return sorted(_non_math_ranges(text, parsed, spans, references=references)
+                  + [(s.start, s.end) for s in spans])
 
 
 def formatting_spans(text: str) -> list[tuple[int, int, bool]]:
     """Protect literal math and the containers owning paragraph-local notes."""
-    parser = MarkdownIt("commonmark").use(footnote_plugin)
-    parser.core.ruler.disable("footnote_tail")  # Keep definitions at their source positions.
-    offsets = [0]
-    for line in text.splitlines(keepends=True):
-        offsets.append(offsets[-1] + len(line))
-    tokens = parser.parse(text)
+    _, tokens, _, offsets = _parse(text, keep_footnotes=True)
+    spans, _ = _math_spans(text, tokens, offsets)
     roots = [t.map for t in tokens if t.level == 0 and t.map]
-    ranges = [(s.start, s.end, False) for s in math_spans(text)[0]]
+    ranges = [(s.start, s.end, False) for s in spans]
     ranges.extend((*m.span(), False) for m in re.finditer(r"\[\^[^\]]+\]", text))
     for token in tokens:
         if token.type == "footnote_reference_open" and token.map:

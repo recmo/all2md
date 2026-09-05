@@ -6,7 +6,7 @@ from collections import Counter
 from statistics import median
 from markdown_it import MarkdownIt
 
-from .alignment import Projection, glyph_baseline, glyph_em, align_glyphs
+from .alignment import glyph_baseline, glyph_em, align_glyphs
 from .embedded import assess_embedded, embedded_characters_for_bbox
 from .model import Block, PageResult
 from .alignment import math_letter
@@ -33,9 +33,9 @@ def _body_size(glyphs: list[dict]) -> float:
     return median(sizes) if sizes else 0
 
 
-def _raised_reference(page: PageResult, block: Block, match: re.Match, project: Projection) -> bool:
+def _raised_reference(page: PageResult, block: Block, match: re.Match) -> bool:
     """Require a raised marker beside prose, not an equation's exponent."""
-    aligned = align_glyphs(block.markdown, page.embedded, block.bbox, project)
+    aligned = align_glyphs(block.markdown, page.embedded, block.bbox)
     preceding = [i for i, (_, end) in enumerate(aligned.spans) if end <= match.start()]
     if not preceding:
         return False
@@ -58,7 +58,7 @@ def _raised_reference(page: PageResult, block: Block, match: re.Match, project: 
     return "".join(g["text"].replace("∗", "*") for g in sorted(candidates, key=lambda g: g["bbox"][0])) == label
 
 
-def normalize_footnotes(pages: list[PageResult], project: Projection) -> None:
+def normalize_footnotes(pages: list[PageResult]) -> None:
     for page in pages:
         trusted = assess_embedded(page.embedded, page.visual_markdown).geometric
         sizes = [_body_size(_glyphs(page, b)) for b in page.blocks
@@ -98,7 +98,7 @@ def normalize_footnotes(pages: list[PageResult], project: Projection) -> None:
                            for a, b in protected):
                         continue
                     if trusted:
-                        valid = bool(block.bbox and _raised_reference(page, block, match, project))
+                        valid = bool(block.bbox and _raised_reference(page, block, match))
                     else:
                         # OCR-only fallback: explicit note label plus a standalone
                         # superscript, or an attached symbolic author reference.

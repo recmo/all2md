@@ -10,7 +10,7 @@ from pages2md.reconciliation import (
 from pages2md.footnotes import normalize_footnotes, place_footnotes
 from pages2md.markdown import strict_page_markdown, title_case_heading
 from test_alignment import evidence, BOX
-from test_footnotes import page, project
+from test_footnotes import page
 
 
 @pytest.mark.parametrize('text', [
@@ -67,7 +67,7 @@ def test_heading_footnote_survives_title_case_and_placement():
     p = page()
     p.blocks[0].kind = 'heading'
     p.blocks[0].markdown = r'# Important result\(^{1}\)'
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     rendered = strict_page_markdown(p, [])
     output = place_footnotes(rendered, [p])
     assert '# Important Result[^p1-note-1]' in output
@@ -84,7 +84,7 @@ def test_heading_link_preserves_nested_reference_placeholder():
 ])
 def test_footnote_placement_preserves_quote_and_list_containers(prefix, continuation):
     p = page()
-    normalize_footnotes([p], project)
+    normalize_footnotes([p])
     source = f'{prefix}First[^p1-note-1].\n{continuation}\n{continuation}Second paragraph.\n'
     output = place_footnotes(source, [p])
     assert continuation + '[^p1-note-1]:' in output
