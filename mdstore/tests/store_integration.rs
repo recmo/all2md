@@ -607,6 +607,236 @@ fn rejects_mixed_configuration_and_content_batch() {
 }
 
 #[test]
+fn directory_templates_are_discoverable_read_only_and_atomic() {
+    let repository = Repository::new();
+    let template = "instructions: Keep notes concise.\nstructure: {level: 1}\nsections:\n- heading: Notes\n  rules: {required: true, content: paragraphs, paragraphs: {minimum: 1, maximum: 1}}\n";
+    fs::write(repository.root.join("template.yaml"), template).unwrap();
+    command(&repository.root, &["add", "template.yaml"]);
+    command(&repository.root, &["commit", "-qm", "add template"]);
+    let store = repository.store();
+    let existing = store.get_page("alice.md", None).unwrap();
+    assert!(existing.exists);
+    assert_eq!(existing.template.unwrap()["path"], "template.yaml");
+    let proposed = store.get_page("people/new.md", None).unwrap();
+    assert!(!proposed.exists);
+    assert_eq!(
+        proposed.template.unwrap()["definition"]["instructions"],
+        "Keep notes concise."
+    );
+    assert!(
+        store
+            .get_page("template.yaml", None)
+            .unwrap()
+            .content
+            .contains("Keep notes concise.")
+    );
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    for edits in [
+        vec![EditOperation::Replace {
+            path: "template.yaml".into(),
+            anchor: format!("1:{}", short_hash("instructions: Keep notes concise.")),
+            content: "instructions: Weaken rules".into(),
+        }],
+        vec![EditOperation::CreatePage {
+            path: "people/template.yaml".into(),
+            content: "{}".into(),
+        }],
+        vec![
+            EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "One.\n\nTwo.".into(),
+            },
+            EditOperation::Replace {
+                path: "bob.md".into(),
+                anchor: format!("6:{}", short_hash("Bob profile.")),
+                content: "Valid.".into(),
+            },
+        ],
+    ] {
+        assert!(
+            store
+                .apply_edits(&ApplyEditsRequest {
+                    edit_summary: "invalid update".into(),
+                    edits
+                })
+                .is_err()
+        );
+        assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    }
+    assert_eq!(
+        fs::read_to_string(repository.root.join("bob.md")).unwrap(),
+        page("Bob")
+    );
+    drop(store);
+    assert!(
+        repository
+            .store()
+            .get_page("new.md", None)
+            .unwrap()
+            .template
+            .is_some()
+    );
+}
+
+#[test]
+fn invalid_templates_block_startup_even_without_matching_pages() {
+    let repository = Repository::new();
+    fs::create_dir(repository.root.join("empty")).unwrap();
+    fs::write(
+        repository.root.join("empty/template.yaml"),
+        "sections: [{heading: A, rules: {words: {minimum: 5, maximum: 2}}}]",
+    )
+    .unwrap();
+    command(&repository.root, &["add", "empty/template.yaml"]);
+    command(&repository.root, &["commit", "-qm", "invalid template"]);
+    assert!(Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).is_err());
+}
+
+#[test]
+fn template_recovery_and_invalid_external_activation() {
+    let repository = Repository::new();
+    fs::write(repository.root.join("template.yaml"), "unknown: untracked").unwrap();
+    let store = repository.store();
+    assert!(!repository.root.join("template.yaml").exists());
+    assert!(store.get_page("alice.md", None).unwrap().template.is_none());
+    fs::write(
+        repository.root.join("template.yaml"),
+        "sections: [{heading: Missing, rules: {required: true}}]",
+    )
+    .unwrap();
+    command(&repository.root, &["add", "template.yaml"]);
+    command(
+        &repository.root,
+        &["commit", "-qm", "incompatible template"],
+    );
+    assert!(store.push().is_err());
+    assert!(store.get_page("alice.md", None).unwrap().template.is_none());
+}
+
+#[test]
+fn structured_sections_validate_activation_and_atomic_batches() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let configure = ApplyEditsRequest {
+        edit_summary: "require dated Notes entries".into(),
+        edits: vec![EditOperation::InsertBefore {
+            path: ".mdstore/config.yaml".into(),
+            anchor: format!("1:{}", short_hash("documents:")),
+            content: "sections:\n- heading: Notes\n  required: true\n  list:\n    minimum_items: 1\n    date_order: descending".into(),
+        }],
+    };
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    assert!(store.apply_edits(&configure).is_err());
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "author dated entries".into(),
+            edits: ["Alice", "Bob"]
+                .iter()
+                .map(|name| EditOperation::Replace {
+                    path: format!("{}.md", name.to_lowercase()),
+                    anchor: format!("6:{}", short_hash(&format!("{name} profile."))),
+                    content: "- 2024-01-01 Created".into(),
+                })
+                .collect(),
+        })
+        .unwrap();
+    store.apply_edits(&configure).unwrap();
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    assert!(
+        store
+            .apply_edits(&ApplyEditsRequest {
+                edit_summary: "invalid dated batch".into(),
+                edits: [
+                    ("alice.md", "- 2024-02-01 Valid"),
+                    ("bob.md", "- 2024-02-30 Invalid")
+                ]
+                .iter()
+                .map(|(path, content)| EditOperation::Replace {
+                    path: (*path).into(),
+                    anchor: format!("6:{}", short_hash("- 2024-01-01 Created")),
+                    content: (*content).into(),
+                })
+                .collect(),
+            })
+            .is_err()
+    );
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    assert!(
+        fs::read_to_string(repository.root.join("alice.md"))
+            .unwrap()
+            .contains("2024-01-01")
+    );
+}
+
+#[test]
+fn markdown_style_activation_and_edits_are_atomic() {
+    let repository = Repository::new();
+    let store = repository.store();
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    let configure = |settings: &str| ApplyEditsRequest {
+        edit_summary: "configure Markdown validation".into(),
+        edits: vec![EditOperation::InsertBefore {
+            path: ".mdstore/config.yaml".into(),
+            anchor: format!("1:{}", short_hash("documents:")),
+            content: format!("markdown:\n{settings}"),
+        }],
+    };
+    let error = store
+        .apply_edits(&configure("  max_line_length: 5"))
+        .unwrap_err();
+    let findings = &error
+        .downcast_ref::<mdstore::ValidationError>()
+        .unwrap()
+        .findings;
+    assert!(findings.iter().any(|finding| finding.path == "alice.md"));
+    assert!(findings.iter().any(|finding| finding.path == "bob.md"));
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    assert!(store.config().markdown.max_line_length.is_none());
+
+    store
+        .apply_edits(&configure(
+            "  no_trailing_whitespace: true\n  closed_fences: true",
+        ))
+        .unwrap();
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    let error = store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "invalid multi-page update".into(),
+            edits: vec![
+                EditOperation::Replace {
+                    path: "alice.md".into(),
+                    anchor: format!("6:{}", short_hash("Alice profile.")),
+                    content: "Valid change.".into(),
+                },
+                EditOperation::Replace {
+                    path: "bob.md".into(),
+                    anchor: format!("6:{}", short_hash("Bob profile.")),
+                    content: "Invalid change. ".into(),
+                },
+            ],
+        })
+        .unwrap_err();
+    let findings = &error
+        .downcast_ref::<mdstore::ValidationError>()
+        .unwrap()
+        .findings;
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].path, "bob.md");
+    assert_eq!(findings[0].line, Some(6));
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read_to_string(repository.root.join("alice.md")).unwrap(),
+        page("Alice")
+    );
+    assert_eq!(
+        fs::read_to_string(repository.root.join("bob.md")).unwrap(),
+        page("Bob")
+    );
+}
+
+#[test]
 fn create_page_never_overwrites_an_untracked_config_resource() {
     let repository = Repository::new();
     let store = repository.store();

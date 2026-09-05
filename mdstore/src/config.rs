@@ -83,6 +83,9 @@ pub struct Config {
     /// Required or bounded heading rules.
     pub sections: Vec<SectionRule>,
     #[serde(default)]
+    /// Optional Markdown syntax and style requirements.
+    pub markdown: MarkdownConfig,
+    #[serde(default)]
     /// Output metadata names mapped to JSON pointers.
     pub metadata: BTreeMap<String, String>,
     #[serde(default)]
@@ -108,6 +111,30 @@ pub struct Config {
     pub server: ServerConfig,
 }
 
+/// Repository-selected Markdown checks. All checks are disabled by default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MarkdownConfig {
+    /// Reject fenced code blocks without a closing fence.
+    pub closed_fences: bool,
+    /// Require a nonempty language/info string on fenced code blocks.
+    pub fence_language: bool,
+    /// Reject headings without visible text.
+    pub nonempty_headings: bool,
+    /// Reject increases of more than one heading level; the first level is unrestricted.
+    pub heading_increment: bool,
+    /// Reject Markdown links with empty destinations.
+    pub nonempty_links: bool,
+    /// Reject trailing spaces/tabs outside code, except two-space hard breaks.
+    pub no_trailing_whitespace: bool,
+    /// Reject tabs outside code blocks.
+    pub no_tabs: bool,
+    /// Maximum Unicode character count per body line, excluding code blocks.
+    pub max_line_length: Option<usize>,
+    /// Require a terminating newline on nonempty documents.
+    pub final_newline: bool,
+}
+
 impl Config {
     /// Parses and validates repository YAML configuration.
     pub fn from_yaml(text: &str) -> Result<Self> {
@@ -122,11 +149,24 @@ impl Config {
             bail!("documents.include must contain at least one glob");
         }
         let _ = self.document_globs()?;
+        if self.markdown.max_line_length == Some(0) {
+            bail!("markdown.max_line_length must be greater than zero");
+        }
         for schema in &self.schemas {
             let _ = compile_globs(std::slice::from_ref(&schema.include))?;
             validate_repo_path(&schema.schema)?;
         }
         for section in &self.sections {
+            if section.level.is_some_and(|level| !(1..=6).contains(&level)) {
+                bail!("section level must be between 1 and 6");
+            }
+            if let Some(pattern) = section
+                .list
+                .as_ref()
+                .and_then(|list| list.item_pattern.as_ref())
+            {
+                let _ = Regex::new(pattern).context("invalid section list item_pattern")?;
+            }
             if let Some(include) = &section.include {
                 let _ = compile_globs(std::slice::from_ref(include))?;
             }
@@ -325,6 +365,36 @@ pub struct SectionRule {
     #[serde(default)]
     /// Optional maximum occurrence count.
     pub maximum: Option<usize>,
+    #[serde(default)]
+    /// Required level of each matching heading, if specified.
+    pub level: Option<u8>,
+    #[serde(default)]
+    /// Require the section body to consist of lists satisfying these rules.
+    pub list: Option<SectionListRule>,
+}
+
+/// Constraints on top-level items in a section containing only lists.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SectionListRule {
+    /// Require numbered lists when true, bullet lists when false; either when omitted.
+    pub ordered: Option<bool>,
+    /// Minimum number of top-level items across the section's lists.
+    pub minimum_items: usize,
+    /// Regex matched against raw item content after its list marker.
+    pub item_pattern: Option<String>,
+    /// Require a valid YYYY-MM-DD prefix and this date order, allowing equal dates.
+    pub date_order: Option<DateOrder>,
+}
+
+/// Ordering of ISO calendar dates at the beginning of section list items.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DateOrder {
+    /// Oldest date first.
+    Ascending,
+    /// Newest date first.
+    Descending,
 }
 
 impl SectionRule {

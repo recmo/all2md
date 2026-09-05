@@ -5,19 +5,23 @@ mod config;
 mod git;
 mod hashline;
 mod markdown;
+mod markdown_style;
 mod mcp;
 mod provider;
 mod search;
 mod sidecar;
 mod store;
+mod structure;
+mod template;
 
 use std::path::Path;
 
 use anyhow::Result;
 
 pub use config::{
-    ChunkConfig, Config, DocumentConfig, GitConfig, LinkConfig, ProviderConfig, RelationLinkSyntax,
-    RelationRule, RelationSelector, SchemaRule, SearchConfig, SectionRule, ServerConfig,
+    ChunkConfig, Config, DateOrder, DocumentConfig, GitConfig, LinkConfig, MarkdownConfig,
+    ProviderConfig, RelationLinkSyntax, RelationRule, RelationSelector, SchemaRule, SearchConfig,
+    SectionListRule, SectionRule, ServerConfig,
 };
 pub use git::PushState;
 pub use hashline::{EditOperation, short_hash};

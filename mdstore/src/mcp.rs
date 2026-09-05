@@ -262,7 +262,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read tracked Markdown or a .mdstore configuration resource with hashline anchors.",
+            "description": "Read Markdown, template.yaml, or .mdstore configuration with hashline anchors. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Templates are read-only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

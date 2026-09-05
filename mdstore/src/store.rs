@@ -165,6 +165,10 @@ const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 #[derive(Debug, Clone, Serialize)]
 /// Hashline-rendered page or configuration resource.
 pub struct PageResponse {
+    /// Whether the requested file exists in the published tree.
+    pub exists: bool,
+    /// Applicable directory template, including guidance and hard rules.
+    pub template: Option<serde_json::Value>,
     /// Exact repository-relative path.
     pub path: String,
     /// Raw Markdown or configuration text with hashline prefixes.
@@ -336,6 +340,8 @@ impl Store {
         if let Some(text) = state.pages.get(path) {
             let page = state.parsed.get(path).context("page was not parsed")?;
             return Ok(PageResponse {
+                exists: true,
+                template: crate::template::discovery(path, &state.config_files)?,
                 path: path.into(),
                 content: render(text, window),
                 metadata: project_metadata(&state.config, &page.frontmatter),
@@ -347,12 +353,25 @@ impl Store {
                     .collect(),
             });
         }
-        if is_config_resource_path(path)
+        if (is_config_resource_path(path) || crate::template::is_template(path))
             && let Some(text) = state.config_files.get(path)
         {
             return Ok(PageResponse {
+                exists: true,
+                template: None,
                 path: path.into(),
                 content: render(text, window),
+                metadata: serde_json::json!({}),
+                relations: Vec::new(),
+            });
+        }
+        if path.ends_with(".md") {
+            ensure_paths_match_config(&state.config, [&path.to_owned()])?;
+            return Ok(PageResponse {
+                exists: false,
+                template: crate::template::discovery(path, &state.config_files)?,
+                path: path.into(),
+                content: String::new(),
                 metadata: serde_json::json!({}),
                 relations: Vec::new(),
             });
@@ -406,6 +425,9 @@ impl Store {
         for edit in &request.edits {
             let path = edit.path();
             validate_repo_path(path)?;
+            if crate::template::is_template(path) {
+                bail!("template.yaml is read-only through apply_edits");
+            }
             if path.ends_with(".mdstore") {
                 bail!("embedding sidecars cannot be edited");
             }

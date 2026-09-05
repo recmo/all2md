@@ -75,7 +75,7 @@ pub(crate) fn tracked_config_files(root: &Path, revision: &str) -> Result<Vec<St
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).into_owned())
-        .filter(|path| is_config_resource_path(path))
+        .filter(|path| is_config_resource_path(path) || crate::template::is_template(path))
         .collect())
 }
 
@@ -219,7 +219,9 @@ pub(crate) fn recover_worktree(root: &Path) -> Result<Vec<String>> {
             .is_empty()
         {
             absent.push(path.clone());
-            if path.ends_with(".md") && root.join(path).exists() {
+            if (path.ends_with(".md") || crate::template::is_template(path))
+                && root.join(path).exists()
+            {
                 staged_markdown.push(path.clone());
             }
         } else {
@@ -275,7 +277,7 @@ fn quarantine_untracked_markdown(root: &Path) -> Result<()> {
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).into_owned())
-        .filter(|path| path.ends_with(".md"))
+        .filter(|path| path.ends_with(".md") || crate::template::is_template(path))
         .collect();
     if paths.is_empty() {
         return Ok(());

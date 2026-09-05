@@ -340,12 +340,15 @@ pub(crate) fn validate_corpus(
 ) -> CorpusValidation {
     let mut findings = Vec::new();
     let schemas = compile_schemas(config, extra_files, &mut findings);
+    crate::template::validate_corpus(pages, extra_files, &mut findings);
     let mut parsed = HashMap::new();
     for (path, text) in pages {
         match parse_page(text, &config.links) {
             Ok(page) => {
                 validate_schema(&schemas, path, &page.frontmatter, &mut findings);
                 validate_sections(config, path, &page, &mut findings);
+                crate::structure::validate(config, path, text, &page, &mut findings);
+                crate::markdown_style::validate(&config.markdown, path, text, &page, &mut findings);
                 parsed.insert(path.clone(), page);
             }
             Err(error) => findings.push(Finding {
