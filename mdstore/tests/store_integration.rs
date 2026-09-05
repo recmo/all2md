@@ -808,7 +808,7 @@ fn markdown_style_activation_and_edits_are_atomic() {
 }
 
 #[test]
-fn create_page_never_overwrites_an_untracked_config_resource() {
+fn edit_interface_preserves_untracked_non_markdown_files() {
     let repository = Repository::new();
     let store = repository.store();
     let path = repository.root.join("local.json");
@@ -1477,7 +1477,7 @@ fn valid_external_commit_is_loaded_before_the_next_write() {
 }
 
 #[test]
-fn live_server_configuration_changes_require_restart() {
+fn edit_interface_cannot_change_server_configuration() {
     let repository = Repository::new();
     let store = repository.store();
     let config = fs::read_to_string(repository.root.join("config.yaml")).unwrap();
@@ -1705,7 +1705,7 @@ fn fresh_hashlines_cover_middle_edits() {
 }
 
 #[test]
-fn deleting_a_referenced_schema_fails_against_the_overlay() {
+fn edit_interface_cannot_remove_templates() {
     let repository = Repository::new();
     let store = repository.store();
     let schema = fs::read_to_string(repository.root.join("template.yaml")).unwrap();
@@ -2306,7 +2306,7 @@ fn operational_config_rejects_document_rules() {
         "links: {}",
         "metadata: {}",
     ] {
-        assert!(Config::from_root_yaml(&format!("{}\n{rule}\n", config_yaml())).is_err());
+        assert!(Config::from_yaml(&format!("{}\n{rule}\n", config_yaml())).is_err());
     }
     let repository = Repository::new();
     let store = repository.store();
@@ -2528,4 +2528,74 @@ async fn detached_reindex_failure_is_logged() {
     })
     .await
     .expect("detached failure must be logged");
+}
+
+#[tokio::test]
+async fn daemon_embedding_worker_coalesces_edits_and_observes_direct_store_writes() {
+    let repository = Repository::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = repository.store_with_provider(Arc::new(CountingProvider {
+        calls: calls.clone(),
+    }));
+    let mut content = "Alice profile.".to_owned();
+    for index in 0..12 {
+        let next = format!("Alice revision {index}.");
+        store
+            .apply_edits(&ApplyEditsRequest {
+                edit_summary: format!("revision {index}"),
+                edits: vec![EditOperation::Replace {
+                    path: "alice.md".into(),
+                    anchor: format!("6:{}", short_hash(&content)),
+                    content: next.clone(),
+                }],
+            })
+            .unwrap();
+        content = next;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let (_, server) = start_daemon(store.clone(), None).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = store.status().unwrap();
+            if status.vectors_ready == status.vectors_total && status.vectors_total > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "only the latest two pages should be embedded"
+    );
+
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "direct store edit while serving".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash(&content)),
+                content: "Alice's final revision.".into(),
+            }],
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = store.status().unwrap();
+            if status.vectors_ready == status.vectors_total && status.vectors_total > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "unchanged page must keep its vector"
+    );
+    server.abort();
 }

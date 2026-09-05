@@ -65,6 +65,7 @@ pub async fn serve_listener(
     }
     tracing::info!(%listen, "mdstore listening");
     let sync = Arc::clone(&store).synchronize();
+    let embeddings = Arc::clone(&store).maintain_embeddings();
     let server = axum::serve(listener, router(store, bearer_token))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -73,6 +74,7 @@ pub async fn serve_listener(
     tokio::select! {
         result = server => result?,
         _ = sync => bail!("synchronization worker stopped"),
+        _ = embeddings => bail!("embedding worker stopped"),
     }
     Ok(())
 }
@@ -122,13 +124,7 @@ async fn cli(State(state): State<AppState>, Json(command): Json<CliCommand>) -> 
         CliCommand::Push => {
             let store = state.store.clone();
             match run_blocking(move || store.push()).await {
-                Ok(push) => {
-                    let background = state.store.clone();
-                    tokio::spawn(async move {
-                        let _ = background.reindex_missing().await;
-                    });
-                    Json(json!(push)).into_response()
-                }
+                Ok(push) => Json(json!(push)).into_response(),
                 Err(error) => internal_error(&error),
             }
         }
@@ -383,13 +379,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             Ok(arguments) => {
                 let blocking_store = Arc::clone(store);
                 match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
-                    Ok(value) => {
-                        let background = Arc::clone(store);
-                        tokio::spawn(async move {
-                            let _ = background.reindex_missing().await;
-                        });
-                        serde_json::to_value(value).map_err(Into::into)
-                    }
+                    Ok(value) => serde_json::to_value(value).map_err(Into::into),
                     Err(error) => Err(error),
                 }
             }

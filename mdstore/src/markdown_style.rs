@@ -134,17 +134,16 @@ pub(crate) fn validate(
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{Config, markdown::validate_corpus};
+    use crate::{markdown::validate_corpus, template::test_templates};
 
     fn check(text: &str, rules: &str) -> Vec<crate::Finding> {
-        let config = Config::from_yaml(&format!(
-            "documents:\n  include: ['**/*.md']\nmarkdown:\n{rules}"
+        let templates = test_templates(&format!(
+            "structure: {{additional_sections: true}}\nmarkdown:\n{rules}"
         ))
         .unwrap();
         validate_corpus(
-            &config,
             &HashMap::from([("page.md".into(), text.into())]),
-            &HashMap::new(),
+            &templates,
         )
         .err()
         .unwrap_or_default()
@@ -196,13 +195,7 @@ mod tests {
         let text = "---\nvalue: 'long value'\n---\n## 中\ntext  \n```rust\n\tlong code with spaces   \n```\n";
         assert!(check(text, "  no_trailing_whitespace: true\n  no_tabs: true\n  max_line_length: 6\n  heading_increment: true\n  closed_fences: true").is_empty());
         assert!(check("中日\r\n", "  max_line_length: 2\n  final_newline: true").is_empty());
-        assert!(
-            Config::from_yaml("documents: {include: ['**/*.md']}\nmarkdown: {max_line_length: 0}")
-                .is_err()
-        );
-        assert!(
-            Config::from_yaml("documents: {include: ['**/*.md']}\nmarkdown: {unknown_rule: true}")
-                .is_err()
-        );
+        assert!(test_templates("markdown: {max_line_length: 0}").is_err());
+        assert!(test_templates("markdown: {unknown_rule: true}").is_err());
     }
 }

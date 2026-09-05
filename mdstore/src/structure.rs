@@ -1,100 +1,7 @@
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use regex::Regex;
 
-use crate::{
-    Config, DateOrder, SectionListRule,
-    markdown::{Finding, ParsedPage},
-};
-
-pub(crate) fn validate(
-    config: &Config,
-    path: &str,
-    text: &str,
-    page: &ParsedPage,
-    findings: &mut Vec<Finding>,
-) {
-    if !config
-        .sections
-        .iter()
-        .any(|rule| rule.level.is_some() || rule.list.is_some())
-    {
-        return;
-    }
-    let mut offsets = vec![0];
-    offsets.extend(text.match_indices('\n').map(|(offset, _)| offset + 1));
-    let body_offset = offsets
-        .get(page.body_start_line - 1)
-        .copied()
-        .unwrap_or(text.len());
-    let mut depth = 0_usize;
-    let mut headings = Vec::new();
-    for (event, range) in Parser::new_ext(&text[body_offset..], Options::all()).into_offset_iter() {
-        match event {
-            Event::Start(tag) => {
-                if let Tag::Heading { level, .. } = tag
-                    && depth == 0
-                {
-                    headings.push((
-                        offsets.partition_point(|offset| *offset <= body_offset + range.start),
-                        level as u8,
-                        body_offset + range.start,
-                        body_offset + range.end,
-                    ));
-                }
-                depth += 1;
-            }
-            Event::End(_) => depth -= 1,
-            _ => {}
-        }
-    }
-    for rule in &config.sections {
-        if rule.include.as_ref().is_some_and(|glob| {
-            !globset::Glob::new(glob)
-                .expect("validated glob")
-                .compile_matcher()
-                .is_match(path)
-        }) {
-            continue;
-        }
-        for heading in page.headings.iter().filter(|h| h.text == rule.heading) {
-            let mut report = |line, message: String| {
-                findings.push(Finding {
-                    path: path.into(),
-                    line: Some(line),
-                    message: format!("section {:?}: {message}", rule.heading),
-                })
-            };
-            if rule.level.is_some_and(|level| level != heading.level) {
-                report(
-                    heading.line,
-                    format!("heading must have level {}", rule.level.unwrap()),
-                );
-            }
-            let Some(list) = &rule.list else {
-                continue;
-            };
-            if let Some(index) = headings.iter().position(|(line, ..)| *line == heading.line) {
-                let heading_end = headings[index].3;
-                let end = headings[index + 1..]
-                    .iter()
-                    .find(|(_, level, ..)| *level <= heading.level)
-                    .map_or(text.len(), |(_, _, start, _)| *start);
-                validate_list(
-                    &text[heading_end..end],
-                    heading_end,
-                    &offsets,
-                    list,
-                    &mut report,
-                );
-            } else {
-                report(
-                    heading.line,
-                    "structured sections must use uncontained headings".into(),
-                );
-            }
-        }
-    }
-}
+use crate::{DateOrder, SectionListRule};
 
 pub(crate) fn validate_list(
     text: &str,
@@ -223,17 +130,23 @@ fn date_prefix(content: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        Finding,
+        template::{Templates, test_templates},
+    };
     use std::collections::HashMap;
 
     fn check(text: &str) -> Vec<Finding> {
-        let config = Config::from_yaml("documents: {include: ['**/*.md']}\nsections:\n  - include: 'people/**'\n    heading: Timeline\n    required: true\n    maximum: 1\n    level: 2\n    list:\n      minimum_items: 1\n      ordered: false\n      date_order: descending\n").unwrap();
+        let templates = Templates::compile(&HashMap::from([(
+            "people/template.yaml".into(),
+            "structure: {level: 2, additional_sections: true}\nsections:\n- heading: Timeline\n  rules:\n    required: true\n    list:\n      minimum_items: 1\n      ordered: false\n      date_order: descending\n".into(),
+        )])).unwrap();
         crate::markdown::validate_corpus(
-            &config,
             &HashMap::from([
                 ("people/a.md".into(), text.into()),
                 ("other/a.md".into(), "# Other template\n".into()),
             ]),
-            &HashMap::new(),
+            &templates,
         )
         .err()
         .unwrap_or_default()
@@ -318,8 +231,10 @@ mod tests {
 
     #[test]
     fn alternative_folder_template_and_invalid_configuration() {
-        let yaml = "documents: {include: ['**/*.md']}\nsections:\n- include: 'projects/**'\n  heading: Milestones\n  required: true\n  list:\n    ordered: true\n    minimum_items: 2\n    date_order: ascending\n    item_pattern: '^\\d{4}-\\d{2}-\\d{2} M[0-9]+: '\n";
-        let config = Config::from_yaml(yaml).unwrap();
+        let templates = Templates::compile(&HashMap::from([(
+            "projects/template.yaml".into(),
+            "sections:\n- heading: Milestones\n  rules:\n    required: true\n    list:\n      ordered: true\n      minimum_items: 2\n      date_order: ascending\n      item_pattern: '^\\d{4}-\\d{2}-\\d{2} M[0-9]+: '\n".into(),
+        )])).unwrap();
         for (text, valid) in [
             (
                 "# Milestones\n1. 2024-01-01 M1: Start\n2. 2024-02-01 M2: End\n",
@@ -337,27 +252,21 @@ mod tests {
         ] {
             assert_eq!(
                 crate::markdown::validate_corpus(
-                    &config,
                     &HashMap::from([("projects/a.md".into(), text.into())]),
-                    &HashMap::new()
+                    &templates
                 )
                 .is_ok(),
                 valid
             );
         }
         for setting in [
-            "level: 7",
-            "level: 0",
-            "list: {item_pattern: '['}",
-            "list: {date_order: random}",
-            "list: {unknown: true}",
+            "structure: {level: 7}",
+            "structure: {level: 0}",
+            "rules: {list: {item_pattern: '['}}",
+            "rules: {list: {date_order: random}}",
+            "rules: {list: {unknown: true}}",
         ] {
-            assert!(
-                Config::from_yaml(&format!(
-                    "documents: {{include: ['**/*.md']}}\nsections:\n- heading: Any\n  {setting}\n"
-                ))
-                .is_err()
-            );
+            assert!(test_templates(&format!("sections:\n- heading: Any\n  {setting}\n")).is_err());
         }
     }
 }

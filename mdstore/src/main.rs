@@ -75,10 +75,6 @@ async fn main() -> Result<()> {
                 .map(std::env::var)
                 .transpose()
                 .context("read configured bearer token environment variable")?;
-            let background = store.clone();
-            tokio::spawn(async move {
-                let _ = background.reindex_missing().await;
-            });
             serve(store, listen, token).await?;
         }
         Command::Search { query, variants } => {

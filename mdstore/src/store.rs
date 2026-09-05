@@ -31,11 +31,11 @@ use crate::{
 /// Daemon-owned coherent view of one Git-backed Markdown repository.
 pub struct Store {
     root: PathBuf,
-    state: RwLock<StoreState>,
+    state: RwLock<Arc<StoreState>>,
     provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     reindex_lock: tokio::sync::Mutex<()>,
     git_dir: PathBuf,
-    head: RwLock<String>,
+    reindex_notify: tokio::sync::Notify,
     blocked: RwLock<Option<String>>,
     sync_lock: parking_lot::Mutex<()>,
     sync_notify: tokio::sync::Notify,
@@ -53,11 +53,13 @@ impl fmt::Debug for Store {
 
 #[derive(Clone)]
 struct StoreState {
+    head: String,
+    templates: Arc<crate::template::Templates>,
     config: Config,
-    config_files: HashMap<String, String>,
-    pages: HashMap<String, String>,
-    parsed: HashMap<String, ParsedPage>,
-    edges: Vec<Edge>,
+    config_files: Arc<HashMap<String, String>>,
+    pages: Arc<HashMap<String, String>>,
+    parsed: Arc<HashMap<String, ParsedPage>>,
+    edges: Arc<Vec<Edge>>,
     index: Arc<SearchIndex>,
     provider: Arc<dyn RetrievalProvider>,
     generation: u64,
@@ -144,11 +146,7 @@ enum ReplayState {
 }
 
 struct ReindexContext {
-    config: Config,
-    pages: HashMap<String, String>,
-    parsed: HashMap<String, ParsedPage>,
-    edges: Vec<Edge>,
-    provider: Arc<dyn RetrievalProvider>,
+    snapshot: Arc<StoreState>,
     provider_identity: String,
     model: String,
     dimensions: usize,
@@ -298,7 +296,7 @@ impl Store {
     fn load_config(root: &Path, head: &str) -> Result<Config> {
         let config_text = git::read_text(root, head, "config.yaml")
             .map_err(|_| anyhow!("config.yaml must be tracked by Git"))?;
-        Config::from_root_yaml(&config_text)
+        Config::from_yaml(&config_text)
     }
 
     fn open_inner(
@@ -311,7 +309,9 @@ impl Store {
     ) -> Result<Arc<Self>> {
         let pages = load_pages(&root, &head, &config)?;
         let extra = load_config_files(&root, &head)?;
-        let (parsed, edges) = validate_corpus(&config, &pages, &extra).map_err(|findings| {
+        let templates = crate::template::Templates::compile(&extra)
+            .map_err(|findings| ValidationError { findings })?;
+        let (parsed, edges) = validate_corpus(&pages, &templates).map_err(|findings| {
             anyhow!(serde_json::to_string_pretty(&findings).unwrap_or_default())
         })?;
         ensure_sidecars_ignored(&root, pages.keys().map(String::as_str))?;
@@ -325,20 +325,22 @@ impl Store {
         };
         Ok(Arc::new(Self {
             root,
-            state: RwLock::new(StoreState {
+            state: RwLock::new(Arc::new(StoreState {
+                head,
+                templates: Arc::new(templates),
                 config,
-                config_files: extra,
-                pages,
-                parsed,
-                edges,
+                config_files: Arc::new(extra),
+                pages: Arc::new(pages),
+                parsed: Arc::new(parsed),
+                edges: Arc::new(edges),
                 index: Arc::new(index),
                 provider,
                 generation: 0,
-            }),
+            })),
             provider_factory,
             reindex_lock: tokio::sync::Mutex::new(()),
             git_dir,
-            head: RwLock::new(head),
+            reindex_notify: tokio::sync::Notify::new(),
             blocked: RwLock::new(blocked),
             sync_lock: parking_lot::Mutex::new(()),
             sync_notify: tokio::sync::Notify::new(),
@@ -361,7 +363,7 @@ impl Store {
     /// Revalidates the currently published corpus snapshot.
     pub fn validate(&self) -> std::result::Result<(), Vec<Finding>> {
         let state = self.state.read();
-        validate_corpus(&state.config, &state.pages, &state.config_files).map(|_| ())
+        validate_corpus(&state.pages, &state.templates).map(|_| ())
     }
 
     /// Reads an exact page or configuration resource as hashlines.
@@ -372,7 +374,7 @@ impl Store {
             let page = state.parsed.get(path).context("page was not parsed")?;
             return Ok(PageResponse {
                 exists: true,
-                template: crate::template::discovery(path, &state.config_files)?,
+                template: state.templates.discovery(path),
                 path: path.into(),
                 content: render(text, window),
                 metadata: page.metadata.clone(),
@@ -400,7 +402,7 @@ impl Store {
             ensure_paths_match_config(&state.config, [&path.to_owned()])?;
             return Ok(PageResponse {
                 exists: false,
-                template: crate::template::discovery(path, &state.config_files)?,
+                template: state.templates.discovery(path),
                 path: path.into(),
                 content: String::new(),
                 metadata: serde_json::json!({}),
@@ -428,7 +430,7 @@ impl Store {
             .await
     }
 
-    /// Validates, commits, and pushes one atomic hashline edit batch.
+    /// Validates and commits one atomic hashline edit batch, then notifies replication.
     pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<ApplyEditsResponse> {
         if request.edit_summary.trim().is_empty() {
             bail!("edit_summary must be non-empty");
@@ -463,7 +465,7 @@ impl Store {
         }
 
         let current = self.state.read().clone();
-        let base_head = self.head.read().clone();
+        let mut base_head = current.head.clone();
         ensure_paths_match_config(&current.config, paths.iter())?;
 
         let mut originals = HashMap::new();
@@ -481,7 +483,7 @@ impl Store {
         }
         let applied = apply_operations_with_ranges(&originals, &request.edits)?;
         let changes = &applied.changes;
-        let mut pages = current.pages.clone();
+        let mut pages = (*current.pages).clone();
         let extra = current.config_files.clone();
         for (path, content) in changes {
             match content {
@@ -495,7 +497,7 @@ impl Store {
         }
         let config = current.config.clone();
         ensure_pages_match_config(&config, &pages)?;
-        let (parsed, edges) = validate_corpus(&config, &pages, &extra)
+        let (parsed, edges) = validate_corpus(&pages, &current.templates)
             .map_err(|findings| ValidationError { findings })?;
         ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
         let provider = current.provider.clone();
@@ -519,7 +521,7 @@ impl Store {
         let committed = tree.is_some();
         if let Some(tree) = tree {
             let pending = PendingReceipt {
-                base_head,
+                base_head: base_head.clone(),
                 tree,
                 touched_paths: path_list.clone(),
                 preimages: preimages.clone(),
@@ -548,7 +550,7 @@ impl Store {
             if let Err(error) = git::sync_index(&self.root, &commit, &path_list) {
                 return Err(rollback_failure(&self.root, &path_list, error));
             }
-            *self.head.write() = commit.clone();
+            base_head = commit.clone();
             if git::head(&self.root)? != commit {
                 return Err(rollback_failure(
                     &self.root,
@@ -565,16 +567,18 @@ impl Store {
             &edges,
             provider.as_ref(),
         );
-        *self.state.write() = StoreState {
+        *self.state.write() = Arc::new(StoreState {
+            head: base_head,
+            templates: Arc::clone(&current.templates),
             config,
             config_files: extra,
-            pages,
-            parsed,
-            edges,
+            pages: Arc::new(pages),
+            parsed: Arc::new(parsed),
+            edges: Arc::new(edges),
             index: Arc::new(index),
             provider,
             generation: current.generation + 1,
-        };
+        });
         let push = self.current_push_state()?;
         let response = ApplyEditsResponse {
             status: if committed {
@@ -591,6 +595,7 @@ impl Store {
         self.write_receipt(&digest, &response, &preimages, &postimages)?;
         self.remove_pending(&digest)?;
         self.sync_notify.notify_one();
+        self.reindex_notify.notify_one();
         Ok(response)
     }
 
@@ -604,7 +609,16 @@ impl Store {
         self.spawn_reindex(false).await
     }
 
+    pub(crate) async fn maintain_embeddings(self: Arc<Self>) {
+        self.reindex_notify.notify_one();
+        loop {
+            self.reindex_notify.notified().await;
+            let _ = self.reindex_missing().await;
+        }
+    }
+
     async fn spawn_reindex(self: &Arc<Self>, force: bool) -> Result<()> {
+        // Cancellation must not release the job lock while blocking sidecar I/O is running.
         let store = Arc::clone(self);
         tokio::spawn(async move {
             let result = store.reindex_all(force).await;
@@ -618,21 +632,11 @@ impl Store {
     }
 
     async fn reindex_all(&self, force: bool) -> Result<()> {
-        let mut paths: BTreeSet<String> = self.state.read().pages.keys().cloned().collect();
-        let root = self.root.clone();
-        let current = paths.clone();
-        paths.extend(blocking(move || orphaned_sidecar_sources(&root, &current)).await?);
-        let paths: Vec<String> = paths.into_iter().collect();
-        self.reindex_paths_mode(&paths, force).await
-    }
-
-    async fn reindex_paths_mode(&self, paths: &[String], force: bool) -> Result<()> {
         let _guard = self.reindex_lock.lock().await;
         let snapshot = self.state.read().clone();
         let generation = snapshot.generation;
         let root = self.root.clone();
-        let paths = paths.to_vec();
-        let context = blocking(move || prepare_reindex(&root, snapshot, paths, force)).await?;
+        let context = blocking(move || prepare_reindex(&root, snapshot, force)).await?;
         if self.state.read().generation != generation {
             return Ok(());
         }
@@ -656,13 +660,25 @@ impl Store {
                     sidecar_path,
                 } => {
                     let mut vectors = Vec::new();
-                    let batch_size = context.config.provider.batch_size.unwrap_or(64).max(1);
+                    let batch_size = context
+                        .snapshot
+                        .config
+                        .provider
+                        .batch_size
+                        .unwrap_or(64)
+                        .max(1);
                     for batch in chunks.chunks(batch_size) {
                         let input: Vec<String> = batch
                             .iter()
                             .map(|chunk| chunk.embedding_text.clone())
                             .collect();
-                        vectors.extend(context.provider.embed(InputType::Document, &input).await?);
+                        vectors.extend(
+                            context
+                                .snapshot
+                                .provider
+                                .embed(InputType::Document, &input)
+                                .await?,
+                        );
                         if self.state.read().generation != generation {
                             return Ok(());
                         }
@@ -692,25 +708,21 @@ impl Store {
             return Ok(());
         }
         let root = self.root.clone();
-        let config = context.config;
-        let pages = context.pages;
-        let parsed = context.parsed;
-        let edges = context.edges;
-        let provider = context.provider;
+        let snapshot = context.snapshot;
         let index = blocking(move || {
             Ok(build_index(
                 &root,
-                &config,
-                &pages,
-                &parsed,
-                &edges,
-                provider.as_ref(),
+                &snapshot.config,
+                &snapshot.pages,
+                &snapshot.parsed,
+                &snapshot.edges,
+                snapshot.provider.as_ref(),
             ))
         })
         .await?;
         let mut current = self.state.write();
         if current.generation == generation {
-            current.index = Arc::new(index);
+            Arc::make_mut(&mut current).index = Arc::new(index);
         }
         Ok(())
     }
@@ -787,7 +799,7 @@ impl Store {
                 bail!("Git settings changed during synchronization; retry");
             }
             let mut local = git::head(&self.root)?;
-            if local != *self.head.read() {
+            if local != self.state.read().head {
                 bail!("live branch changed during synchronization; retry");
             }
             if let Some(incoming) = incoming {
@@ -804,8 +816,8 @@ impl Store {
                         );
                     }
                     git::activate_candidate(&self.root, &local, &incoming)?;
-                    *self.state.write() = state;
-                    *self.head.write() = incoming.clone();
+                    *self.state.write() = Arc::new(state);
+                    self.reindex_notify.notify_one();
                     local = incoming;
                 } else if !git::is_ancestor(&self.root, &incoming, &local)? {
                     self.set_blocked(Some("remote history diverged".into()))?;
@@ -824,7 +836,6 @@ impl Store {
     pub(crate) async fn synchronize(self: Arc<Self>) {
         let mut retry = 1_u64;
         loop {
-            let generation = self.state.read().generation;
             let store = Arc::clone(&self);
             let enabled = self.state.read().config.git.push;
             let result = if enabled {
@@ -832,12 +843,6 @@ impl Store {
             } else {
                 Ok(PushState::Disabled)
             };
-            if self.state.read().generation != generation {
-                let store = Arc::clone(&self);
-                tokio::spawn(async move {
-                    let _ = store.reindex_missing().await;
-                });
-            }
             if matches!(result, Ok(PushState::Pushed | PushState::Disabled)) {
                 retry = 1;
                 tokio::select! {
@@ -853,14 +858,14 @@ impl Store {
 
     fn refresh_external_commit(&self) -> Result<()> {
         let current = git::head(&self.root)?;
-        if current == *self.head.read() {
+        if current == self.state.read().head {
             return Ok(());
         }
         let state = self.load_candidate(&current, false).inspect_err(|error| {
             let _ = self.set_external_blocked(format!("external commit is invalid: {error}"));
         })?;
-        *self.state.write() = state;
-        *self.head.write() = current;
+        *self.state.write() = Arc::new(state);
+        self.reindex_notify.notify_one();
         if self
             .blocked
             .read()
@@ -873,10 +878,12 @@ impl Store {
     }
 
     fn load_candidate(&self, current: &str, allow_restart: bool) -> Result<StoreState> {
-        let config = Config::from_root_yaml(&git::read_text(&self.root, current, "config.yaml")?)?;
+        let config = Config::from_yaml(&git::read_text(&self.root, current, "config.yaml")?)?;
         let pages = load_pages(&self.root, current, &config)?;
         let extra = load_config_files(&self.root, current)?;
-        let (parsed, edges) = match validate_corpus(&config, &pages, &extra) {
+        let templates = crate::template::Templates::compile(&extra)
+            .map_err(|findings| ValidationError { findings })?;
+        let (parsed, edges) = match validate_corpus(&pages, &templates) {
             Ok(value) => value,
             Err(findings) => {
                 let reason = format!(
@@ -917,11 +924,13 @@ impl Store {
             provider.as_ref(),
         );
         Ok(StoreState {
+            head: current.to_owned(),
+            templates: Arc::new(templates),
             config,
-            config_files: extra,
-            pages,
-            parsed,
-            edges,
+            config_files: Arc::new(extra),
+            pages: Arc::new(pages),
+            parsed: Arc::new(parsed),
+            edges: Arc::new(edges),
             index: Arc::new(index),
             provider,
             generation: current_state.generation + 1,
@@ -1087,7 +1096,7 @@ impl Store {
         if preimages.is_empty() {
             return Ok(ReplayState::Applied);
         }
-        let head = self.head.read().clone();
+        let head = self.state.read().head.clone();
         let mut matches_preimages = true;
         let mut matches_postimages = true;
         for (path, preimage) in preimages {
@@ -1204,32 +1213,17 @@ where
         .context("blocking repository operation failed")?
 }
 
-fn prepare_reindex(
-    root: &Path,
-    snapshot: StoreState,
-    paths: Vec<String>,
-    force: bool,
-) -> Result<ReindexContext> {
-    let StoreState {
-        config,
-        config_files: _,
-        pages,
-        parsed,
-        edges,
-        index: _,
-        provider,
-        generation: _,
-    } = snapshot;
+fn prepare_reindex(root: &Path, snapshot: Arc<StoreState>, force: bool) -> Result<ReindexContext> {
+    let config = &snapshot.config;
+    let pages = &snapshot.pages;
+    let parsed = &snapshot.parsed;
+    let provider = &snapshot.provider;
+    let mut paths: BTreeSet<String> = pages.keys().cloned().collect();
+    paths.extend(orphaned_sidecar_sources(root, &paths)?);
     let provider_identity = provider.embedding_provider_identity();
     let model = provider.model().to_owned();
     let dimensions = provider.dimensions();
-    ensure_sidecars_ignored(
-        root,
-        pages
-            .keys()
-            .map(String::as_str)
-            .chain(paths.iter().map(String::as_str)),
-    )?;
+    ensure_sidecars_ignored(root, paths.iter().map(String::as_str))?;
     let mut actions = Vec::new();
     for path in paths {
         let sidecar_path = sidecar::sidecar_path(&root.join(&path));
@@ -1238,7 +1232,7 @@ fn prepare_reindex(
             continue;
         };
         let page = parsed.get(&path).context("missing parsed page")?;
-        let context = embedding_context(&config, page);
+        let context = embedding_context(config, page);
         let chunks = chunk_page(text, page, &config.chunking, &context);
         if !force
             && sidecar::read(&sidecar_path).ok().is_some_and(|stored| {
@@ -1256,11 +1250,7 @@ fn prepare_reindex(
         });
     }
     Ok(ReindexContext {
-        config,
-        pages,
-        parsed,
-        edges,
-        provider,
+        snapshot,
         provider_identity,
         model,
         dimensions,
@@ -1308,7 +1298,7 @@ fn build_index(
             .collect();
         all_chunks.insert(path.clone(), values);
     }
-    SearchIndex::build(config, pages, parsed, edges, all_chunks)
+    SearchIndex::build(parsed, edges, all_chunks)
 }
 
 fn ensure_sidecars_ignored<'a>(
@@ -1543,8 +1533,7 @@ mod tests {
         run_git(root, &["config", "user.name", "mdstore test"]);
         run_git(root, &["config", "user.email", "mdstore@example.invalid"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
-        fs::create_dir(root.join(".mdstore")).unwrap();
-        fs::write(root.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
+        fs::write(root.join(".gitignore"), "*.mdstore\n").unwrap();
         fs::write(root.join("config.yaml"), config("old.md")).unwrap();
         fs::write(root.join("old.md"), "old snapshot\n").unwrap();
         run_git(root, &["add", ".gitignore", "config.yaml", "old.md"]);
@@ -1558,6 +1547,26 @@ mod tests {
         assert_eq!(store.config().documents.include, ["new.md"]);
         assert!(store.get_page("old.md", None).is_err());
         assert!(store.get_page("new.md", None).is_ok());
+
+        let before = store.state.read().clone();
+        assert!(Arc::ptr_eq(&before, &store.state.read()));
+        store
+            .apply_edits(&ApplyEditsRequest {
+                edit_summary: "publish coherent snapshot".into(),
+                edits: vec![EditOperation::Replace {
+                    path: "new.md".into(),
+                    anchor: format!("1:{}", crate::short_hash("new snapshot")),
+                    content: "edited snapshot".into(),
+                }],
+            })
+            .unwrap();
+        let after = store.state.read().clone();
+        assert_eq!(after.head, git::head(root).unwrap());
+        assert_ne!(before.head, after.head);
+        assert_eq!(before.pages["new.md"], "new snapshot\n");
+        assert_eq!(after.pages["new.md"], "edited snapshot\n");
+        assert!(Arc::ptr_eq(&before.templates, &after.templates));
+        assert!(Arc::ptr_eq(&before.config_files, &after.config_files));
     }
 
     #[test]
@@ -1568,8 +1577,7 @@ mod tests {
         run_git(root, &["config", "user.name", "mdstore test"]);
         run_git(root, &["config", "user.email", "mdstore@example.invalid"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
-        fs::create_dir(root.join(".mdstore")).unwrap();
-        fs::write(root.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
+        fs::write(root.join(".gitignore"), "*.mdstore\n").unwrap();
         fs::write(root.join("config.yaml"), config("old.md")).unwrap();
         fs::write(root.join("old.md"), "---\nunterminated\n").unwrap();
         run_git(root, &["add", ".gitignore", "config.yaml", "old.md"]);

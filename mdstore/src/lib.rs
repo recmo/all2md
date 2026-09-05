@@ -20,8 +20,8 @@ use anyhow::Result;
 
 pub use config::{
     ChunkConfig, Config, DateOrder, DocumentConfig, GitConfig, LinkConfig, MarkdownConfig,
-    ProviderConfig, RelationLinkSyntax, RelationRule, RelationSelector, SchemaRule, SearchConfig,
-    SectionListRule, SectionRule, ServerConfig,
+    ProviderConfig, RelationLinkSyntax, RelationRule, RelationSelector, SearchConfig,
+    SectionListRule, ServerConfig,
 };
 pub use git::PushState;
 pub use hashline::{EditOperation, short_hash};
@@ -39,5 +39,5 @@ pub use store::{
 /// Loads and validates the configuration from the repository's committed `HEAD`.
 pub fn load_repository_config(root: &Path) -> Result<Config> {
     let head = git::head(root)?;
-    Config::from_root_yaml(&git::read_text(root, &head, "config.yaml")?)
+    Config::from_yaml(&git::read_text(root, &head, "config.yaml")?)
 }

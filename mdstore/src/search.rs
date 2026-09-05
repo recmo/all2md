@@ -90,8 +90,6 @@ impl SearchIndex {
     #[must_use]
     /// Builds a deterministic index from validated pages and sidecar vectors.
     pub(crate) fn build(
-        _config: &Config,
-        pages: &HashMap<String, String>,
         parsed: &HashMap<String, ParsedPage>,
         edges: &[Edge],
         page_chunks: PageChunks,
@@ -154,7 +152,6 @@ impl SearchIndex {
                 .or_default()
                 .insert(edge.source.clone());
         }
-        let _ = pages;
         Self {
             chunks,
             document_frequency,
@@ -573,7 +570,7 @@ mod tests {
                 )
             })
             .collect();
-        let index = SearchIndex::build(&config, &pages, &parsed, edges, chunks);
+        let index = SearchIndex::build(&parsed, edges, chunks);
         (config, Arc::new(index))
     }
 
@@ -607,9 +604,6 @@ mod tests {
 
     #[test]
     fn index_order_does_not_depend_on_hashmap_iteration() {
-        let config =
-            Config::from_yaml("documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\n")
-                .unwrap();
         let pages: HashMap<String, String> = HashMap::from([
             ("b.md".into(), "bravo".into()),
             ("a.md".into(), "alpha".into()),
@@ -646,8 +640,8 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            paths(SearchIndex::build(&config, &pages, &parsed, &[], first)),
-            paths(SearchIndex::build(&config, &pages, &parsed, &[], second))
+            paths(SearchIndex::build(&parsed, &[], first)),
+            paths(SearchIndex::build(&parsed, &[], second))
         );
     }
 
@@ -656,7 +650,6 @@ mod tests {
         let config =
             Config::from_yaml("documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\n")
                 .unwrap();
-        let pages = HashMap::from([("a.md".into(), "alpha".into())]);
         let parsed = HashMap::from([(
             "a.md".into(),
             parse_page("alpha", &LinkConfig::default()).unwrap(),
@@ -674,7 +667,7 @@ mod tests {
                 Some(vec![1.0, 0.0]),
             )],
         )]);
-        let index = Arc::new(SearchIndex::build(&config, &pages, &parsed, &[], chunks));
+        let index = Arc::new(SearchIndex::build(&parsed, &[], chunks));
 
         let response = index
             .search(&config, &NonFiniteProvider, "alpha", &[])

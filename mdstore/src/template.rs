@@ -4,20 +4,22 @@ use std::{
     path::Path,
 };
 
+use crate::config::validate_json_pointer;
 use anyhow::{Context, Result, bail};
 use pulldown_cmark::{Event, Options, Parser, Tag};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::{SectionListRule, markdown::Finding};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct Template {
+pub(crate) struct Template {
     frontmatter: Option<serde_json::Value>,
-    markdown: crate::MarkdownConfig,
-    links: crate::LinkConfig,
-    relations: Vec<crate::RelationRule>,
-    metadata: std::collections::BTreeMap<String, String>,
+    pub(crate) markdown: crate::MarkdownConfig,
+    pub(crate) links: crate::LinkConfig,
+    pub(crate) relations: Vec<crate::RelationRule>,
+    pub(crate) metadata: std::collections::BTreeMap<String, String>,
     instructions: String,
     examples: Vec<String>,
     structure: Structure,
@@ -95,68 +97,137 @@ pub(crate) fn is_template(path: &str) -> bool {
         .is_some_and(|name| name == "template.yaml")
 }
 
-fn applicable<'a>(path: &str, files: &'a HashMap<String, String>) -> Option<(String, &'a str)> {
-    let mut directory = Path::new(path).parent()?;
-    loop {
-        let candidate = directory
-            .join("template.yaml")
-            .to_string_lossy()
-            .into_owned();
-        if let Some(text) = files.get(&candidate) {
-            return Some((candidate, text));
+pub(crate) struct Templates {
+    entries: HashMap<String, CompiledTemplate>,
+    default: Template,
+}
+
+struct CompiledTemplate {
+    template: Template,
+    schema: Option<jsonschema::Validator>,
+    definition: serde_json::Value,
+}
+
+impl Templates {
+    pub(crate) fn compile(files: &HashMap<String, String>) -> Result<Self, Vec<Finding>> {
+        let mut entries = HashMap::new();
+        let mut findings = Vec::new();
+        for (path, text) in files.iter().filter(|(path, _)| is_template(path)) {
+            match parse(text) {
+                Ok(template) => {
+                    entries.insert(path.clone(), template);
+                }
+                Err(error) => findings.push(Finding {
+                    path: path.clone(),
+                    line: None,
+                    message: format!("invalid template: {error}"),
+                }),
+            }
         }
-        directory = directory.parent()?;
+        if findings.is_empty() {
+            Ok(Self {
+                entries,
+                default: Template::default(),
+            })
+        } else {
+            Err(findings)
+        }
+    }
+
+    fn applicable(&self, path: &str) -> Option<(String, &CompiledTemplate)> {
+        let mut directory = Path::new(path).parent()?;
+        loop {
+            let candidate = directory
+                .join("template.yaml")
+                .to_string_lossy()
+                .into_owned();
+            if let Some(template) = self.entries.get(&candidate) {
+                return Some((candidate, template));
+            }
+            directory = directory.parent()?;
+        }
+    }
+
+    pub(crate) fn policy(&self, path: &str) -> &Template {
+        self.applicable(path)
+            .map_or(&self.default, |(_, entry)| &entry.template)
+    }
+
+    pub(crate) fn discovery(&self, path: &str) -> Option<serde_json::Value> {
+        self.applicable(path).map(|(path, entry)| {
+            serde_json::json!({
+                "path": path, "definition": entry.definition
+            })
+        })
+    }
+
+    pub(crate) fn validate_page(
+        &self,
+        path: &str,
+        text: &str,
+        page: &crate::markdown::ParsedPage,
+        findings: &mut Vec<Finding>,
+    ) {
+        let Some((template_path, entry)) = self.applicable(path) else {
+            return;
+        };
+        validate_page(path, text, page, &template_path, entry, findings);
     }
 }
 
-fn parse(text: &str) -> Result<Template> {
-    let template: Template = serde_yaml::from_str(text)?;
+fn parse(text: &str) -> Result<CompiledTemplate> {
+    let definition: serde_yaml::Value = serde_yaml::from_str(text)?;
+    let template: Template = serde_yaml::from_value(definition.clone())?;
     validate_definition(&template.structure, &template.sections, 0)?;
     validate_rules(&template.preamble)?;
-    let base = crate::Config::from_yaml("documents: {include: ['**/*.md']}")?;
-    policy(&template, &base).validate()?;
-    if let Some(schema) = &template.frontmatter {
-        let _ = jsonschema::validator_for(schema)?;
+    if template.markdown.max_line_length == Some(0) {
+        bail!("markdown.max_line_length must be greater than zero");
     }
-    Ok(template)
-}
+    for wiki in &template.links.wiki {
+        let pattern =
+            Regex::new(wiki).with_context(|| format!("invalid wiki-link pattern {wiki:?}"))?;
+        if !pattern
+            .capture_names()
+            .flatten()
+            .any(|name| name == "target")
+        {
+            bail!("wiki-link pattern must define a named target capture");
+        }
+    }
+    for pointer in template.metadata.values() {
+        validate_json_pointer(pointer, "metadata")?;
+    }
+    let mut relation_names = HashSet::new();
+    for relation in &template.relations {
+        if relation.name.trim().is_empty() {
+            bail!("relation names must be non-empty");
+        }
+        if !relation_names.insert(relation.name.as_str()) {
+            bail!("duplicate relation name: {}", relation.name);
+        }
+        relation.selector.validate()?;
+    }
+    for relation in &template.relations {
+        if let Some(reciprocal) = &relation.reciprocal
+            && !relation_names.contains(reciprocal.as_str())
+        {
+            bail!(
+                "relation {} references unknown reciprocal relation {reciprocal}",
+                relation.name
+            );
+        }
+    }
 
-fn policy(template: &Template, base: &crate::Config) -> crate::Config {
-    let mut config = base.clone();
-    config.schemas.clear();
-    config.sections.clear();
-    config.markdown = template.markdown.clone();
-    config.links = template.links.clone();
-    config.relations = template.relations.clone();
-    config.metadata = template.metadata.clone();
-    config
-}
-
-pub(crate) fn page_policy(
-    base: &crate::Config,
-    path: &str,
-    files: &HashMap<String, String>,
-    policies: &HashMap<String, crate::Config>,
-) -> Result<crate::Config> {
-    applicable(path, files).map_or_else(
-        || Ok(base.clone()),
-        |(path, _)| policies.get(&path).cloned().context("invalid template"),
-    )
-}
-
-pub(crate) fn compile_policies(
-    base: &crate::Config,
-    files: &HashMap<String, String>,
-) -> HashMap<String, crate::Config> {
-    files
-        .iter()
-        .filter(|(path, _)| is_template(path))
-        .filter_map(|(path, text)| {
-            parse(text)
-                .ok()
-                .map(|template| (path.clone(), policy(&template, base)))
-        })
-        .collect()
+    let schema = template
+        .frontmatter
+        .as_ref()
+        .map(jsonschema::validator_for)
+        .transpose()?;
+    Ok(CompiledTemplate {
+        template,
+        schema,
+        definition: serde_json::to_value(definition)?,
+    })
 }
 
 fn validate_rules(rules: &Rules) -> Result<()> {
@@ -211,132 +282,82 @@ fn validate_definition(
     Ok(())
 }
 
-pub(crate) fn discovery(
+fn validate_page(
     path: &str,
-    files: &HashMap<String, String>,
-) -> Result<Option<serde_json::Value>> {
-    applicable(path, files)
-        .map(|(path, text)| {
-            let _ = parse(text).with_context(|| format!("invalid {path}"))?;
-            let definition: serde_yaml::Value = serde_yaml::from_str(text)?;
-            Ok(serde_json::json!({"path": path, "definition": definition}))
-        })
-        .transpose()
-}
-
-pub(crate) fn validate_corpus(
-    pages: &HashMap<String, String>,
-    files: &HashMap<String, String>,
+    text: &str,
+    page: &crate::markdown::ParsedPage,
+    template_path: &str,
+    entry: &CompiledTemplate,
     findings: &mut Vec<Finding>,
 ) {
-    let mut templates = HashMap::new();
-    for (path, text) in files.iter().filter(|(path, _)| is_template(path)) {
-        match parse(text) {
-            Ok(template) => {
-                templates.insert(path.clone(), template);
-            }
-            Err(error) => findings.push(Finding {
-                path: path.clone(),
-                line: None,
-                message: format!("invalid template: {error}"),
-            }),
-        }
-    }
-    let schemas: HashMap<_, _> = templates
-        .iter()
-        .filter_map(|(path, template)| {
-            template.frontmatter.as_ref().map(|schema| {
-                (
-                    path.clone(),
-                    jsonschema::validator_for(schema).expect("validated schema"),
-                )
-            })
-        })
-        .collect();
-    for (path, text) in pages {
-        let Some((template_path, _)) = applicable(path, files) else {
-            continue;
-        };
-        let Some(template) = templates.get(&template_path) else {
-            continue;
-        };
-        let Ok(page) = crate::markdown::parse_page(text, &crate::LinkConfig::default()) else {
-            continue;
-        };
-        if let Some(validator) = schemas.get(&template_path) {
-            for error in validator.iter_errors(&page.frontmatter) {
-                findings.push(Finding {
-                    path: path.clone(),
-                    line: Some(1),
-                    message: format!(
-                        "{template_path}: frontmatter{}: {error}",
-                        error.instance_path
-                    ),
-                });
-            }
-        }
-        let mut offsets = vec![0];
-        offsets.extend(text.match_indices('\n').map(|(offset, _)| offset + 1));
-        let body_start = offsets
-            .get(page.body_start_line - 1)
-            .copied()
-            .unwrap_or(text.len());
-        let body = &text[body_start..];
-        let events: Vec<_> = Parser::new_ext(body, Options::all())
-            .into_offset_iter()
-            .map(|(event, range)| (event, body_start + range.start..body_start + range.end))
-            .collect();
-        let mut headings = Vec::new();
-        let mut depth = 0_usize;
-        for (event, range) in &events {
-            match event {
-                Event::Start(tag) => {
-                    if let Tag::Heading { level, .. } = tag
-                        && depth == 0
-                    {
-                        let line = offsets.partition_point(|offset| *offset <= range.start);
-                        if let Some(heading) =
-                            page.headings.iter().find(|heading| heading.line == line)
-                        {
-                            headings.push((
-                                *level as u8,
-                                heading.text.clone(),
-                                range.start,
-                                range.end,
-                            ));
-                        }
-                    }
-                    depth += 1;
-                }
-                Event::End(_) => depth -= 1,
-                _ => {}
-            }
-        }
-        let mut report = |offset: usize, message: String| {
+    let template = &entry.template;
+    if let Some(validator) = &entry.schema {
+        for error in validator.iter_errors(&page.frontmatter) {
             findings.push(Finding {
-                path: path.clone(),
-                line: Some(offsets.partition_point(|start| *start <= offset)),
-                message: format!("{template_path}: {message}"),
-            })
-        };
-        let first_section = headings
-            .iter()
-            .position(|heading| heading.0 >= template.structure.level.unwrap_or(1))
-            .unwrap_or(headings.len());
-        check_sections(
-            text,
-            &events,
-            &headings[first_section..],
-            body_start,
-            text.len(),
-            &template.structure,
-            &template.sections,
-            &template.preamble,
-            0,
-            &offsets,
-            &mut report,
-        );
+                path: path.to_owned(),
+                line: Some(1),
+                message: format!(
+                    "{template_path}: frontmatter{}: {error}",
+                    error.instance_path
+                ),
+            });
+        }
     }
+    let mut offsets = vec![0];
+    offsets.extend(text.match_indices('\n').map(|(offset, _)| offset + 1));
+    let body_start = offsets
+        .get(page.body_start_line - 1)
+        .copied()
+        .unwrap_or(text.len());
+    let body = &text[body_start..];
+    let events: Vec<_> = Parser::new_ext(body, Options::all())
+        .into_offset_iter()
+        .map(|(event, range)| (event, body_start + range.start..body_start + range.end))
+        .collect();
+    let mut headings = Vec::new();
+    let mut depth = 0_usize;
+    for (event, range) in &events {
+        match event {
+            Event::Start(tag) => {
+                if let Tag::Heading { level, .. } = tag
+                    && depth == 0
+                {
+                    let line = offsets.partition_point(|offset| *offset <= range.start);
+                    if let Some(heading) = page.headings.iter().find(|heading| heading.line == line)
+                    {
+                        headings.push((*level as u8, heading.text.clone(), range.start, range.end));
+                    }
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+    }
+    let mut report = |offset: usize, message: String| {
+        findings.push(Finding {
+            path: path.to_owned(),
+            line: Some(offsets.partition_point(|start| *start <= offset)),
+            message: format!("{template_path}: {message}"),
+        })
+    };
+    let first_section = headings
+        .iter()
+        .position(|heading| heading.0 >= template.structure.level.unwrap_or(1))
+        .unwrap_or(headings.len());
+    check_sections(
+        text,
+        &events,
+        &headings[first_section..],
+        body_start,
+        text.len(),
+        &template.structure,
+        &template.sections,
+        &template.preamble,
+        0,
+        &offsets,
+        &mut report,
+    );
 }
 
 type Heading = (u8, String, usize, usize);
@@ -534,19 +555,48 @@ fn check_content(
 }
 
 #[cfg(test)]
+pub(crate) fn test_templates(text: &str) -> Result<Templates, Vec<Finding>> {
+    Templates::compile(&HashMap::from([("template.yaml".into(), text.into())]))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn template_with_relations(relations: &str) -> String {
+        format!("relations:\n{relations}\n")
+    }
+
+    #[test]
+    fn relation_names_and_reciprocals_are_closed() {
+        let duplicate = template_with_relations(
+            "  - name: related\n    selector: {kind: markdown_links}\n  - name: related\n    selector: {kind: markdown_links}",
+        );
+        assert!(test_templates(&duplicate).is_err());
+        let unknown = template_with_relations(
+            "  - name: parent\n    reciprocal: child\n    selector: {kind: markdown_links}",
+        );
+        assert!(test_templates(&unknown).is_err());
+    }
+
+    #[test]
+    fn wiki_link_patterns_define_their_grammar() {
+        let config = |wiki: &str| test_templates(&format!("links:\n  wiki: [{wiki:?}]"));
+        assert!(config(r"\{\{(?P<target>[^}]+)\}\}").is_ok());
+        assert!(config("[").is_err());
+        assert!(config(r"\{\{([^}]+)\}\}").is_err());
+    }
 
     const PEOPLE: &str = "instructions: Write established facts.\nstructure: {level: 2, order: enforced, additional_sections: false}\nsections:\n- heading: Summary\n  instructions: One concise paragraph.\n  rules:\n    required: true\n    content: paragraphs\n    paragraphs: {minimum: 1, maximum: 1}\n    words: {maximum: 5}\n- heading: Timeline\n  rules:\n    required: true\n    list: {minimum_items: 1, date_order: descending}\n";
 
     fn check(text: &str, template: &str) -> Vec<Finding> {
-        let mut findings = Vec::new();
-        validate_corpus(
+        let templates = test_templates(template).unwrap();
+        crate::markdown::validate_corpus(
             &HashMap::from([("people/a.md".into(), text.into())]),
-            &HashMap::from([("people/template.yaml".into(), template.into())]),
-            &mut findings,
-        );
-        findings
+            &templates,
+        )
+        .err()
+        .unwrap_or_default()
     }
 
     #[test]
@@ -578,19 +628,21 @@ mod tests {
                 "instructions: Different.\nstructure: {additional_sections: true}".into(),
             ),
         ]);
-        let discovery = discovery("people/new.md", &files).unwrap().unwrap();
+        let templates = Templates::compile(&files).unwrap();
+        let discovery = templates.discovery("people/new.md").unwrap();
         assert_eq!(discovery["path"], "people/template.yaml");
         assert_eq!(discovery["definition"]["instructions"], "Different.");
-        let mut findings = Vec::new();
-        validate_corpus(
-            &HashMap::from([("people/new.md".into(), "# Any\n".into())]),
-            &files,
-            &mut findings,
-        );
-        assert!(findings.is_empty());
         assert!(
-            super::discovery("new.md", &HashMap::new())
+            crate::markdown::validate_corpus(
+                &HashMap::from([("people/new.md".into(), "# Any\n".into())]),
+                &templates,
+            )
+            .is_ok()
+        );
+        assert!(
+            Templates::compile(&HashMap::new())
                 .unwrap()
+                .discovery("new.md")
                 .is_none()
         );
     }
@@ -616,6 +668,7 @@ mod tests {
             "sections: [{heading: A, rules: {words: {minimum: 4, maximum: 1}}}]",
             "structure: {level: 7}",
             "unknown: true",
+            "instructions: first\ninstructions: second",
         ] {
             assert!(parse(template).is_err());
         }

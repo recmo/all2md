@@ -1,13 +1,7 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    fs,
-    net::SocketAddr,
-    path::Path,
-};
+use std::{fs, net::SocketAddr, path::Path};
 
 use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool {
@@ -72,28 +66,10 @@ fn default_listen() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Effective operational settings and document policy used by validation.
+/// Repository operational settings.
 pub struct Config {
     /// Markdown corpus selection rules.
     pub documents: DocumentConfig,
-    #[serde(default)]
-    /// Frontmatter schema assignments.
-    pub schemas: Vec<SchemaRule>,
-    #[serde(default)]
-    /// Required or bounded heading rules.
-    pub sections: Vec<SectionRule>,
-    #[serde(default)]
-    /// Optional Markdown syntax and style requirements.
-    pub markdown: MarkdownConfig,
-    #[serde(default)]
-    /// Output metadata names mapped to JSON pointers.
-    pub metadata: BTreeMap<String, String>,
-    #[serde(default)]
-    /// Enabled Markdown and wiki-link syntaxes.
-    pub links: LinkConfig,
-    #[serde(default)]
-    /// Typed relation projections and reciprocal rules.
-    pub relations: Vec<RelationRule>,
     #[serde(default)]
     /// Chunk construction settings.
     pub chunking: ChunkConfig,
@@ -136,24 +112,7 @@ pub struct MarkdownConfig {
 }
 
 impl Config {
-    /// Parses the operational root config, rejecting document policy fields.
-    pub fn from_root_yaml(text: &str) -> Result<Self> {
-        let value: serde_yaml::Value = serde_yaml::from_str(text)?;
-        for key in [
-            "schemas",
-            "sections",
-            "markdown",
-            "links",
-            "relations",
-            "metadata",
-        ] {
-            if value.get(key).is_some() {
-                bail!("{key} is document policy and belongs in template.yaml");
-            }
-        }
-        Self::from_yaml(text)
-    }
-    /// Parses effective settings, including policy. Repository roots use `from_root_yaml`.
+    /// Parses and validates root config.yaml.
     pub fn from_yaml(text: &str) -> Result<Self> {
         let value: Self = serde_yaml::from_str(text).context("parse config.yaml")?;
         value.validate()?;
@@ -166,49 +125,6 @@ impl Config {
             bail!("documents.include must contain at least one glob");
         }
         let _ = self.document_globs()?;
-        if self.markdown.max_line_length == Some(0) {
-            bail!("markdown.max_line_length must be greater than zero");
-        }
-        for schema in &self.schemas {
-            let _ = compile_globs(std::slice::from_ref(&schema.include))?;
-            validate_repo_path(&schema.schema)?;
-        }
-        for section in &self.sections {
-            if section.level.is_some_and(|level| !(1..=6).contains(&level)) {
-                bail!("section level must be between 1 and 6");
-            }
-            if let Some(pattern) = section
-                .list
-                .as_ref()
-                .and_then(|list| list.item_pattern.as_ref())
-            {
-                let _ = Regex::new(pattern).context("invalid section list item_pattern")?;
-            }
-            if let Some(include) = &section.include {
-                let _ = compile_globs(std::slice::from_ref(include))?;
-            }
-            let minimum = section.minimum();
-            if section.maximum.is_some_and(|maximum| maximum < minimum) {
-                bail!(
-                    "section {:?} maximum must be at least its effective minimum {minimum}",
-                    section.heading
-                );
-            }
-        }
-        for wiki in &self.links.wiki {
-            let pattern =
-                Regex::new(wiki).with_context(|| format!("invalid wiki-link pattern {wiki:?}"))?;
-            if !pattern
-                .capture_names()
-                .flatten()
-                .any(|name| name == "target")
-            {
-                bail!("wiki-link pattern must define a named target capture");
-            }
-        }
-        for pointer in self.metadata.values() {
-            validate_json_pointer(pointer, "metadata")?;
-        }
         for pointer in &self.chunking.context_pointers {
             validate_json_pointer(pointer, "chunking context")?;
         }
@@ -244,26 +160,6 @@ impl Config {
         if listen.port() == 0 {
             bail!("server.listen port must be non-zero");
         }
-        let mut relation_names = HashSet::new();
-        for relation in &self.relations {
-            if relation.name.trim().is_empty() {
-                bail!("relation names must be non-empty");
-            }
-            if !relation_names.insert(relation.name.as_str()) {
-                bail!("duplicate relation name: {}", relation.name);
-            }
-            relation.selector.validate()?;
-        }
-        for relation in &self.relations {
-            if let Some(reciprocal) = &relation.reciprocal
-                && !relation_names.contains(reciprocal.as_str())
-            {
-                bail!(
-                    "relation {} references unknown reciprocal relation {reciprocal}",
-                    relation.name
-                );
-            }
-        }
         Ok(())
     }
 
@@ -284,7 +180,7 @@ fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
     builder.build().context("compile glob set")
 }
 
-fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
+pub(crate) fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
     if pointer.is_empty() {
         return Ok(());
     }
@@ -349,42 +245,6 @@ pub struct DocumentConfig {
     pub exclude: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-/// Assigns a JSON Schema resource to matching pages.
-pub struct SchemaRule {
-    /// Glob pattern selecting pages governed by the schema.
-    pub include: String,
-    /// Repository-relative JSON Schema resource path.
-    pub schema: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-/// Constrains occurrences of a heading in selected pages.
-pub struct SectionRule {
-    #[serde(default)]
-    /// Optional glob selecting pages governed by the rule.
-    pub include: Option<String>,
-    /// Exact heading text to count.
-    pub heading: String,
-    #[serde(default)]
-    /// Requires at least one occurrence when true.
-    pub required: bool,
-    #[serde(default)]
-    /// Explicit minimum occurrence count.
-    pub minimum: Option<usize>,
-    #[serde(default)]
-    /// Optional maximum occurrence count.
-    pub maximum: Option<usize>,
-    #[serde(default)]
-    /// Required level of each matching heading, if specified.
-    pub level: Option<u8>,
-    #[serde(default)]
-    /// Require the section body to consist of lists satisfying these rules.
-    pub list: Option<SectionListRule>,
-}
-
 /// Constraints on top-level items in a section containing only lists.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -407,14 +267,6 @@ pub enum DateOrder {
     Ascending,
     /// Newest date first.
     Descending,
-}
-
-impl SectionRule {
-    pub(crate) fn minimum(&self) -> usize {
-        self.minimum
-            .unwrap_or_default()
-            .max(usize::from(self.required))
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -483,7 +335,7 @@ pub enum RelationSelector {
 }
 
 impl RelationSelector {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         match self {
             Self::MarkdownLinks { include, .. } => {
                 if let Some(include) = include {
@@ -682,12 +534,6 @@ impl Default for ServerConfig {
 mod tests {
     use super::*;
 
-    fn config_with_relations(relations: &str) -> String {
-        format!(
-            "documents:\n  include: ['**/*.md']\nrelations:\n{relations}\nprovider:\n  dimensions: 2\n"
-        )
-    }
-
     #[test]
     fn rejects_git_metadata_and_non_normal_paths() {
         for path in [
@@ -701,18 +547,6 @@ mod tests {
             assert!(validate_repo_path(path).is_err(), "accepted {path:?}");
         }
         assert!(validate_repo_path("notes/page.md").is_ok());
-    }
-
-    #[test]
-    fn relation_names_and_reciprocals_are_closed() {
-        let duplicate = config_with_relations(
-            "  - name: related\n    selector: {kind: markdown_links}\n  - name: related\n    selector: {kind: markdown_links}",
-        );
-        assert!(Config::from_yaml(&duplicate).is_err());
-        let unknown = config_with_relations(
-            "  - name: parent\n    reciprocal: child\n    selector: {kind: markdown_links}",
-        );
-        assert!(Config::from_yaml(&unknown).is_err());
     }
 
     #[test]
@@ -750,30 +584,6 @@ mod tests {
         assert!(config("title").is_err());
         assert!(config("/bad~2escape").is_err());
         assert!(config("/trailing~").is_err());
-    }
-
-    #[test]
-    fn section_bounds_are_coherent() {
-        let config = |section: &str| {
-            Config::from_yaml(&format!(
-                "documents:\n  include: ['**/*.md']\nsections:\n  - heading: Notes\n{section}\nprovider:\n  dimensions: 2\n"
-            ))
-        };
-        assert!(config("    required: true\n    minimum: 0\n    maximum: 1").is_ok());
-        assert!(config("    minimum: 2\n    maximum: 1").is_err());
-        assert!(config("    required: true\n    maximum: 0").is_err());
-    }
-
-    #[test]
-    fn wiki_link_patterns_define_their_grammar() {
-        let config = |wiki: &str| {
-            Config::from_yaml(&format!(
-                "documents:\n  include: ['**/*.md']\nlinks:\n  wiki: [{wiki:?}]\nprovider:\n  dimensions: 2\n"
-            ))
-        };
-        assert!(config(r"\{\{(?P<target>[^}]+)\}\}").is_ok());
-        assert!(config("[").is_err());
-        assert!(config(r"\{\{([^}]+)\}\}").is_err());
     }
 
     #[test]

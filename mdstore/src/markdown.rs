@@ -5,7 +5,8 @@ use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use serde::Serialize;
 
-use crate::config::{Config, RelationLinkSyntax, RelationSelector};
+use crate::config::{RelationLinkSyntax, RelationSelector};
+use crate::template::{Template, Templates};
 
 #[derive(Debug, Clone, Serialize)]
 /// Parsed structural and authored-link information for one page.
@@ -330,35 +331,21 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
 /// Successful parsed corpus and relation graph, or all validation findings.
 pub(crate) type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
 
-struct CompiledSchema {
-    matcher: globset::GlobMatcher,
-    validator: jsonschema::Validator,
-}
-
 /// Parses and validates the complete corpus and its configured resources.
 pub(crate) fn validate_corpus(
-    config: &Config,
     pages: &HashMap<String, String>,
-    extra_files: &HashMap<String, String>,
+    templates: &Templates,
 ) -> CorpusValidation {
     let mut findings = Vec::new();
-    let schemas = compile_schemas(config, extra_files, &mut findings);
-    crate::template::validate_corpus(pages, extra_files, &mut findings);
     let mut parsed = HashMap::new();
-    let templates = crate::template::compile_policies(config, extra_files);
     let mut policies = HashMap::new();
     for (path, text) in pages {
-        let Ok(policy) = crate::template::page_policy(config, path, extra_files, &templates) else {
-            continue;
-        };
-        policies.insert(path.clone(), policy);
-        let config = &policies[path];
+        let config = templates.policy(path);
+        policies.insert(path.clone(), config);
         match parse_page(text, &config.links) {
             Ok(mut page) => {
                 page.metadata = project_metadata(config, &page.frontmatter);
-                validate_schema(&schemas, path, &page.frontmatter, &mut findings);
-                validate_sections(config, path, &page, &mut findings);
-                crate::structure::validate(config, path, text, &page, &mut findings);
+                templates.validate_page(path, text, &page, &mut findings);
                 crate::markdown_style::validate(&config.markdown, path, text, &page, &mut findings);
                 parsed.insert(path.clone(), page);
             }
@@ -486,114 +473,8 @@ pub(crate) fn validate_corpus(
     }
 }
 
-fn compile_schemas(
-    config: &Config,
-    extra_files: &HashMap<String, String>,
-    findings: &mut Vec<Finding>,
-) -> Vec<CompiledSchema> {
-    let mut compiled = Vec::new();
-    for rule in &config.schemas {
-        let matcher = globset::Glob::new(&rule.include)
-            .expect("schema glob was validated")
-            .compile_matcher();
-        let Some(schema_text) = extra_files.get(&rule.schema) else {
-            findings.push(Finding {
-                path: rule.schema.clone(),
-                message: format!("schema file not found: {}", rule.schema),
-                line: None,
-            });
-            continue;
-        };
-        let schema: serde_json::Value = match serde_json::from_str(schema_text) {
-            Ok(value) => value,
-            Err(error) => {
-                findings.push(Finding {
-                    path: rule.schema.clone(),
-                    message: format!("invalid JSON schema: {error}"),
-                    line: None,
-                });
-                continue;
-            }
-        };
-        let validator = match jsonschema::validator_for(&schema) {
-            Ok(value) => value,
-            Err(error) => {
-                findings.push(Finding {
-                    path: rule.schema.clone(),
-                    message: format!("invalid JSON schema: {error}"),
-                    line: None,
-                });
-                continue;
-            }
-        };
-        compiled.push(CompiledSchema { matcher, validator });
-    }
-    compiled
-}
-
-fn validate_schema(
-    schemas: &[CompiledSchema],
-    path: &str,
-    frontmatter: &serde_json::Value,
-    findings: &mut Vec<Finding>,
-) {
-    for schema in schemas {
-        if !schema.matcher.is_match(path) {
-            continue;
-        }
-        for error in schema.validator.iter_errors(frontmatter) {
-            findings.push(Finding {
-                path: path.into(),
-                message: format!("frontmatter{}: {error}", error.instance_path),
-                line: Some(1),
-            });
-        }
-    }
-}
-
-fn validate_sections(config: &Config, path: &str, page: &ParsedPage, findings: &mut Vec<Finding>) {
-    for rule in &config.sections {
-        if rule.include.as_ref().is_some_and(|pattern| {
-            !globset::Glob::new(pattern)
-                .expect("section glob was validated")
-                .compile_matcher()
-                .is_match(path)
-        }) {
-            continue;
-        }
-        let count = page
-            .headings
-            .iter()
-            .filter(|heading| heading.text == rule.heading)
-            .count();
-        let minimum = rule.minimum();
-        if count < minimum {
-            findings.push(Finding {
-                path: path.into(),
-                message: format!(
-                    "section {:?} occurs {count} times; minimum is {minimum}",
-                    rule.heading
-                ),
-                line: None,
-            });
-        }
-        if let Some(maximum) = rule.maximum
-            && count > maximum
-        {
-            findings.push(Finding {
-                path: path.into(),
-                message: format!(
-                    "section {:?} occurs {count} times; maximum is {maximum}",
-                    rule.heading
-                ),
-                line: None,
-            });
-        }
-    }
-}
-
 fn validate_reciprocals(
-    policies: &HashMap<String, Config>,
+    policies: &HashMap<String, &Template>,
     edges: &[Edge],
     findings: &mut Vec<Finding>,
 ) {
@@ -788,7 +669,7 @@ fn normalize_path(path: &Path) -> Result<String, String> {
 /// Projects configured frontmatter fields into search result metadata.
 #[must_use]
 pub(crate) fn project_metadata(
-    config: &Config,
+    config: &Template,
     frontmatter: &serde_json::Value,
 ) -> serde_json::Value {
     let mut output = serde_json::Map::new();
@@ -804,6 +685,7 @@ pub(crate) fn project_metadata(
 mod tests {
     use super::*;
     use crate::config::LinkConfig;
+    use crate::template::test_templates;
 
     #[test]
     fn wiki_links_ignore_code_and_escaped_examples() {
@@ -826,9 +708,8 @@ mod tests {
 
     #[test]
     fn configured_wiki_links_take_precedence_over_markdown_parsing() {
-        let config = Config::from_yaml(
-            r#"documents:
-  include: ["**/*.md"]
+        let templates = test_templates(
+            r#"structure: {additional_sections: true}
 links:
   markdown: true
   wiki: ['\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]']
@@ -837,7 +718,6 @@ relations:
     selector: {kind: markdown_links, syntax: markdown}
   - name: wiki
     selector: {kind: markdown_links, syntax: wiki}
-provider: {dimensions: 2}
 "#,
         )
         .unwrap();
@@ -845,7 +725,7 @@ provider: {dimensions: 2}
             ("a.md".into(), "[[b#Part|Bee]]\n".into()),
             ("b.md".into(), "B\n".into()),
         ]);
-        let (_, edges) = validate_corpus(&config, &pages, &HashMap::new()).unwrap();
+        let (_, edges) = validate_corpus(&pages, &templates).unwrap();
         assert_eq!(
             edges,
             [Edge {
@@ -858,9 +738,8 @@ provider: {dimensions: 2}
 
     #[test]
     fn markdown_relation_selectors_keep_types_separate() {
-        let config = Config::from_yaml(
-            r#"documents:
-  include: ["**/*.md"]
+        let templates = test_templates(
+            r#"structure: {additional_sections: true}
 links: {markdown: true}
 relations:
   - name: friend
@@ -869,7 +748,6 @@ relations:
   - name: source
     reciprocal: source
     selector: {kind: markdown_links, section: Sources}
-provider: {dimensions: 2}
 "#,
         )
         .unwrap();
@@ -881,7 +759,7 @@ provider: {dimensions: 2}
             ("b.md".into(), "# Friends\n\n[A](a.md)\n".into()),
             ("c.md".into(), "# Sources\n\n[A](a.md)\n".into()),
         ]);
-        let (_, edges) = validate_corpus(&config, &pages, &HashMap::new()).unwrap();
+        let (_, edges) = validate_corpus(&pages, &templates).unwrap();
         assert_eq!(edges.len(), 4);
         assert!(edges.iter().all(|edge| {
             (edge.relation == "friend" && edge.source != "c.md" && edge.target != "c.md")
@@ -890,56 +768,38 @@ provider: {dimensions: 2}
     }
 
     #[test]
-    fn required_sections_cannot_be_disabled_by_zero_minimum() {
-        let config = Config::from_yaml(
-            r#"documents:
-  include: ["**/*.md"]
-sections:
-  - heading: Notes
-    required: true
-    minimum: 0
-provider: {dimensions: 2}
-"#,
-        )
-        .unwrap();
+    fn required_sections_are_enforced_by_templates() {
+        let templates = test_templates("structure: {additional_sections: true}\nsections: [{heading: Notes, rules: {required: true}}]").unwrap();
         let pages = HashMap::from([("page.md".into(), "# Other\n".into())]);
-        let findings = validate_corpus(&config, &pages, &HashMap::new()).unwrap_err();
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.message.contains("minimum is 1"))
-        );
+        assert!(validate_corpus(&pages, &templates).is_err());
     }
 
     #[test]
-    fn section_rules_select_heterogeneous_page_types() {
-        let config = Config::from_yaml(
-            r#"documents:
-  include: ["**/*.md"]
-sections:
-  - include: "people/**"
-    heading: Biography
-    required: true
-  - include: "tasks/**"
-    heading: Status
-    required: true
-provider: {dimensions: 2}
-"#,
-        )
+    fn directory_templates_select_heterogeneous_page_types() {
+        let templates = Templates::compile(&HashMap::from([
+            (
+                "people/template.yaml".into(),
+                "sections: [{heading: Biography, rules: {required: true}}]".into(),
+            ),
+            (
+                "tasks/template.yaml".into(),
+                "sections: [{heading: Status, rules: {required: true}}]".into(),
+            ),
+        ]))
         .unwrap();
-        let pages = HashMap::from([
+        let mut pages = HashMap::from([
             ("people/alice.md".into(), "# Biography\n\nPerson.\n".into()),
             ("tasks/one.md".into(), "# Status\n\nOpen.\n".into()),
         ]);
-        assert!(validate_corpus(&config, &pages, &HashMap::new()).is_ok());
-
-        let invalid = HashMap::from([
-            ("people/alice.md".into(), "# Status\n\nActive.\n".into()),
-            ("tasks/one.md".into(), "# Status\n\nOpen.\n".into()),
-        ]);
-        let findings = validate_corpus(&config, &invalid, &HashMap::new()).unwrap_err();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].path, "people/alice.md");
+        assert!(validate_corpus(&pages, &templates).is_ok());
+        pages.insert("people/alice.md".into(), "# Status\n\nActive.\n".into());
+        let findings = validate_corpus(&pages, &templates).unwrap_err();
+        assert!(!findings.is_empty());
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.path == "people/alice.md")
+        );
     }
 
     #[test]
@@ -990,9 +850,7 @@ provider: {dimensions: 2}
             Ok(Some("notes/wiki%20name.md".into()))
         );
 
-        let config =
-            Config::from_yaml("documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\n")
-                .unwrap();
+        let templates = Templates::compile(&HashMap::new()).unwrap();
         let pages = HashMap::from([
             (
                 "notes/page.md".into(),
@@ -1000,7 +858,7 @@ provider: {dimensions: 2}
             ),
             ("notes/other note.md".into(), "Other.\n".into()),
         ]);
-        assert!(validate_corpus(&config, &pages, &HashMap::new()).is_ok());
+        assert!(validate_corpus(&pages, &templates).is_ok());
     }
 
     #[test]
@@ -1037,26 +895,21 @@ provider: {dimensions: 2}
     }
 
     #[test]
-    fn schema_resources_are_compiled_once_per_validation() {
-        let config = Config::from_yaml(
-            "documents:\n  include: ['**/*.md']\nschemas:\n  - include: '**/*.md'\n    schema: .mdstore/schemas/page.json\nprovider:\n  dimensions: 2\n",
-        )
-        .unwrap();
+    fn template_schema_errors_are_reported_once_and_page_errors_per_page() {
+        let invalid = test_templates("frontmatter: {type: not_a_type}")
+            .err()
+            .unwrap();
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].path, "template.yaml");
+        let templates =
+            test_templates("frontmatter: {type: object, required: [required]}").unwrap();
         let pages = HashMap::from([
             ("one.md".into(), "---\nvalue: one\n---\n".into()),
             ("two.md".into(), "---\nvalue: two\n---\n".into()),
         ]);
-        let missing = validate_corpus(&config, &pages, &HashMap::new()).unwrap_err();
-        assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0].path, ".mdstore/schemas/page.json");
-
-        let extra = HashMap::from([(
-            ".mdstore/schemas/page.json".into(),
-            r#"{"type":"object","required":["required"]}"#.into(),
-        )]);
-        let invalid_pages = validate_corpus(&config, &pages, &extra).unwrap_err();
-        assert_eq!(invalid_pages.len(), 2);
-        assert!(invalid_pages.iter().any(|finding| finding.path == "one.md"));
-        assert!(invalid_pages.iter().any(|finding| finding.path == "two.md"));
+        let findings = validate_corpus(&pages, &templates).unwrap_err();
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().any(|finding| finding.path == "one.md"));
+        assert!(findings.iter().any(|finding| finding.path == "two.md"));
     }
 }
