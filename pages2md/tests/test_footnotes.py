@@ -6,8 +6,13 @@ from pages2md.footnotes import footnote_definitions, normalize_footnotes, place_
 from pages2md.formatting import format_and_lint, format_markdown
 from pages2md.markdown import strict_page_markdown, write_markdown
 from pages2md.model import Block, Chapter, Comparison, EmbeddedEvidence, PageResult
-from pages2md.pipeline import _normalize_document_blocks, _semantic_math_projection as project
-from pages2md.mathlint import math_spans
+from pages2md.document import (
+    normalize_document,
+)
+from pages2md.alignment import (
+    semantic_math_projection as project,
+)
+from pages2md.syntax import math_spans
 from test_alignment import evidence
 
 
@@ -88,7 +93,7 @@ def test_cross_page_prose_can_join_without_swallowing_note():
     p = page()
     q = PageResult(2, "p.png", "continued here.", [Block("paragraph", "continued here.")], EmbeddedEvidence(), Comparison())
     normalize_footnotes([p, q], project)
-    _normalize_document_blocks([p, q])
+    normalize_document([p, q])
     assert p.blocks[0].markdown.endswith("with a note continued here.")
     assert p.blocks[1].markdown == "A detailed explanatory note."
 

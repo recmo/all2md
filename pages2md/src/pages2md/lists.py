@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from .compare import compare_text
-from .model import Block, PageResult
+from .model import FORMULA_KINDS, Block, PageResult
 
 
 LIST_KINDS = {"list", "list_item", "bullet", "bulleted_list", "enumeration", "ordered_list"}
-FORMULA_KINDS = {"formula", "equation", "display_formula"}
 BREAK_KINDS = {
     "heading", "title", "page_title", "section_header", "table", "figure",
     "caption", "formula", "equation", "display_formula",
@@ -23,6 +23,42 @@ ENUMERATOR = re.compile(
     r")\s+(?P<text>\S.*)$"
 )
 ROMAN = frozenset("ivxlcdm")
+
+
+@contextmanager
+def editable_leaves(blocks: list[Block]):
+    """Expose list item bodies and ordinary blocks through the same interface.
+
+    List dictionaries are the checkpoint representation; their Markdown is
+    derived here after editing, never an independent repair target.
+    """
+    leaves = []
+    bindings = []
+    containers = []
+
+    def visit(node, owner):
+        for item in node.get("items", []):
+            for child in item.get("blocks", []):
+                leaf = Block(child.get("kind", "paragraph"), child.get("markdown", ""),
+                             bbox=child.get("bbox") or owner.bbox,
+                             metadata=child.setdefault("metadata", {}))
+                leaves.append(leaf)
+                bindings.append((child, leaf))
+            for child in item.get("children", []):
+                visit(child, owner)
+
+    for block in blocks:
+        node = block.metadata.get("list")
+        if isinstance(node, dict):
+            containers.append(block)
+            visit(node, block)
+        else:
+            leaves.append(block)
+    yield leaves
+    for child, leaf in bindings:
+        child["markdown"] = leaf.markdown
+    for block in containers:
+        block.markdown = render_list(block.metadata["list"])
 
 
 @dataclass
@@ -85,7 +121,7 @@ def normalize_lists(pages: list[PageResult]) -> None:
     """Normalize OCR structure before rendering list nodes."""
     _filter_unsupported_ungrounded_blocks(pages)
     for page in pages:
-        page.blocks = _normalize_page_blocks(page.blocks)
+        page.blocks = normalize_page_blocks(page.blocks)
     _continue_items_across_pages(pages)
     _stitch_list_hierarchy(pages)
     _link_lists_across_pages(pages)
@@ -193,7 +229,7 @@ def validate_list_node(node: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _normalize_page_blocks(blocks: list[Block]) -> list[Block]:
+def normalize_page_blocks(blocks: list[Block]) -> list[Block]:
     for block in blocks:
         if not isinstance(block.metadata.get("list"), dict):
             annotate_native_list_block(block)

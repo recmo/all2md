@@ -6,10 +6,11 @@ from collections import Counter
 from statistics import median
 from markdown_it import MarkdownIt
 
-from .alignment import Projection, _baseline, _em, align_glyphs
+from .alignment import Projection, glyph_baseline, glyph_em, align_glyphs
 from .embedded import assess_embedded, embedded_characters_for_bbox
 from .model import Block, PageResult
-from .semantics import _math_letter, protected_ranges
+from .alignment import math_letter
+from .syntax import protected_ranges
 
 
 MARK = r"(?:\d{1,3}|\*{1,3}|†|‡|§|¶|\\dagger|\\ddagger)"
@@ -42,16 +43,16 @@ def _raised_reference(page: PageResult, block: Block, match: re.Match, project: 
     if native is None:
         return False
     base = aligned.glyphs[native]
-    if _math_letter(base) or not base.get("origin"):
+    if math_letter(base) or not base.get("origin"):
         return False
-    ex, ey = _em(base)
+    ex, ey = glyph_em(base)
     label = _label(match)
     candidates = []
     for glyph in _glyphs(page, block):
         if glyph["text"].replace("∗", "*") not in label or not glyph.get("origin"):
             continue
         dx = glyph["bbox"][0] - base["bbox"][2]
-        dy = _baseline(glyph) - _baseline(base)
+        dy = glyph_baseline(glyph) - glyph_baseline(base)
         if -.2 * ex <= dx <= 1.5 * ex and -.9 * ey <= dy <= -.12 * ey:
             candidates.append(glyph)
     return "".join(g["text"].replace("∗", "*") for g in sorted(candidates, key=lambda g: g["bbox"][0])) == label

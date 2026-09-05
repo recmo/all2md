@@ -3,7 +3,10 @@ from mdit_py_plugins.footnote import footnote_plugin
 import pytest
 
 from pages2md.model import Block
-from pages2md.pipeline import _repair_embedded_digit_runs, _repair_embedded_math_structure
+from pages2md.reconciliation import (
+    _repair_embedded_digit_runs,
+    _repair_embedded_math_structure,
+)
 from pages2md.footnotes import normalize_footnotes, place_footnotes
 from pages2md.markdown import strict_page_markdown, title_case_heading
 from test_alignment import evidence, BOX

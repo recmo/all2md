@@ -183,3 +183,24 @@ Before changing the MLX-VLM or model revision, compare the result against the
 reference PyTorch implementation on the representative math/layout corpus and
 record latency, peak unified memory, missing figures, formula structure, and
 repetition failures.
+
+## Implementation boundaries
+
+Raw OCR observations are immutable evidence. Editable content lives in page
+blocks and structured list-item bodies; rendered Markdown is derived from them.
+`lists.editable_leaves` lets repairs visit both through the same interface.
+
+- `pipeline.py` owns conversion, checkpointing, and publication.
+- `document.py` owns document-wide normalization and link application.
+- `reconciliation.py` sequences text repairs; `alignment.py` owns occurrence
+  matching, font decoding, and glyph relationships. Structural edits require
+  native baselines; incomplete legacy geometry cannot establish a script.
+- `syntax.py` owns source-mapped math and protected Markdown ranges.
+- `edits.py` applies source-offset changes and records their evidence. Conflicting
+  edits abstain rather than depending on rule order.
+- `formatting.py` protects literal math and local footnotes before formatting
+  prose. Preservation checks remain a safety net, not the normal formatting path.
+
+Keep regression coverage for alternate math delimiters, protected syntax,
+idempotence, repeated glyph occurrences, and cache-only reassembly. Changes to
+deterministic processing invalidate assembly, not the retained model observations.

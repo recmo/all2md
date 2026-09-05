@@ -7,12 +7,16 @@ from pages2md.adapters import _raw_text_blocks
 from pages2md.alignment import align_glyphs, math_font_role, ordered_glyphs, script_edits, tex_groups
 from pages2md.embedded import assess_embedded, iter_embedded_characters
 from pages2md.model import Block, EmbeddedEvidence
-from pages2md.pipeline import (
+from pages2md.reconciliation import (
     _repair_embedded_math_glyphs,
     _repair_embedded_math_structure,
     _restore_embedded_math_alphabets,
+)
+from pages2md.pipeline import (
     _restore_embedded_proof_marks,
-    _semantic_math_projection,
+)
+from pages2md.alignment import (
+    semantic_math_projection as _semantic_math_projection,
 )
 
 

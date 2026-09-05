@@ -21,7 +21,34 @@ from pages2md.embedded import assess_embedded
 from pages2md.adapters import _link_target, _raw_text_blocks, detect_kind, open_document
 from pages2md.formatting import FormatResult
 from pages2md.mathlint import MathLintResult
-from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _canonicalize_figure_blocks, _convert_workspace, _has_embedded_coverage_gap, _intermediate_root, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, _repair_embedded_delimiters, _repair_embedded_digit_runs, _repair_embedded_math_glyphs, _repair_embedded_math_structure, _repair_embedded_short_insertions, _repair_embedded_word_tokens, _repair_malformed_math_syntax, _repair_runaway_repetition, _restore_embedded_math_alphabets, _restore_embedded_proof_marks, _strip_review_metadata, convert
+from pages2md.pipeline import (
+    _align_multi_results,
+    _canonicalize_figure_blocks,
+    _convert_workspace,
+    _has_embedded_coverage_gap,
+    _intermediate_root,
+    _is_visually_blank,
+    _ocr_groups,
+    _repair_runaway_repetition,
+    _restore_embedded_proof_marks,
+    _strip_review_metadata,
+    convert,
+)
+from pages2md.document import (
+    apply_links_to_blocks,
+    merge_continued_tables,
+    normalize_document,
+)
+from pages2md.reconciliation import (
+    _repair_embedded_delimiters,
+    _repair_embedded_digit_runs,
+    _repair_embedded_math_glyphs,
+    _repair_embedded_math_structure,
+    _repair_embedded_short_insertions,
+    _repair_embedded_word_tokens,
+    _repair_malformed_math_syntax,
+    _restore_embedded_math_alphabets,
+)
 from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from pages2md.verify import verify_bundle
 
@@ -645,7 +672,7 @@ def test_repeated_headers_are_removed_and_cross_page_paragraphs_join():
                 comparison=Comparison(),
             )
         )
-    _normalize_document_blocks(pages)
+    normalize_document(pages)
     assert all(all(block.kind != "header" for block in page.blocks) for page in pages)
     assert pages[0].blocks[-1].markdown == "A sentence that continues on the following page."
     assert pages[0].blocks[-1].metadata["cross_page_paragraph"] is True
@@ -961,7 +988,7 @@ def test_document_normalization_drops_running_matter_without_inventing_semantics
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert [(block.kind, block.markdown) for block in page.blocks] == [
         ("paragraph", "1.28. Definition. A ring is a set with two binary operations."),
@@ -986,7 +1013,7 @@ def test_document_normalization_drops_repeated_ungrounded_running_headers():
         for number in (1, 2)
     ]
 
-    _normalize_document_blocks(pages)
+    normalize_document(pages)
 
     assert [[block.markdown for block in page.blocks] for page in pages] == [
         ["Exercise content for page 1."],
@@ -1007,7 +1034,7 @@ def test_document_normalization_drops_unsupported_ungrounded_preamble():
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert [block.markdown for block in page.blocks] == ["Chapter 3"]
     assert "visual_unsupported_ungrounded_text" in page.warnings
@@ -1027,7 +1054,7 @@ def test_document_normalization_keeps_embedded_supported_ungrounded_content():
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert page.blocks[0].markdown == continuation
     assert page.blocks[0].metadata["embedded_token_support"] == 1.0
@@ -1043,7 +1070,7 @@ def test_document_normalization_keeps_ungrounded_only_result_as_best_available_o
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert [block.markdown for block in page.blocks] == ["Only OCR result"]
 
@@ -1065,7 +1092,7 @@ def test_document_normalization_cleans_prose_without_rewriting_math():
         embedded=EmbeddedEvidence(),
         comparison=Comparison(),
     )
-    _normalize_document_blocks([page])
+    normalize_document([page])
     assert page.blocks[0].markdown == r"Proof. Let \( J \) be an ideal and \( J = \langle ra : r \in R \rangle \)."
     assert page.blocks[1].kind == "list"
     assert page.blocks[1].markdown == "- **(i)** First case.\n- **(ii)** Second case."
@@ -1087,7 +1114,7 @@ def test_document_normalization_does_not_infer_caption_from_wording():
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert [block.kind for block in page.blocks] == ["figure", "paragraph"]
     assert page.blocks[1].markdown == "Figure 3 discusses the result."
@@ -1280,7 +1307,7 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
     document.close()
 
     original_page_result = pipeline._page_result
-    original_normalize = pipeline._normalize_document_blocks
+    original_normalize = pipeline.normalize_document
     interrupted = False
     normalized_page_sets = []
 
@@ -1296,7 +1323,7 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
         return original_normalize(pages)
 
     monkeypatch.setattr(pipeline, "_page_result", fail_once)
-    monkeypatch.setattr(pipeline, "_normalize_document_blocks", record_normalization)
+    monkeypatch.setattr(pipeline, "normalize_document", record_normalization)
     backend = FixtureOcr()
     try:
         convert(pdf, backend=backend)
@@ -1504,8 +1531,8 @@ def test_pdf_text_repairs_confirmed_hasse_derivative_brackets():
     warnings = _repair_embedded_delimiters(blocks, embedded)
 
     assert warnings == ["visual_embedded_delimiter_repair"]
-    assert blocks[0].markdown == r"P ^ {[j]} (X)"
-    assert blocks[1].markdown == r"P ^ {[j]} (X)"
+    assert blocks[0].markdown == r"P ^ {[j ]} (X)"
+    assert blocks[1].markdown == r"P ^ {[ j ]} (X)"
     assert blocks[2].markdown == r"P ^ {\lfloor k \rfloor} (X)"
 
 
@@ -1754,18 +1781,13 @@ def test_pdf_math_glyph_ignores_embedded_vector_accent_encoding():
 
 
 def test_pdf_math_structure_uses_script_geometry_and_consistent_binders():
-    embedded = EmbeddedEvidence(blocks=[{
-        "text": "q(T) ≡ 0 mod Tm−db; ∑j=1 (-1)j+1 Tj Yj",
-        "bbox": [100, 100, 900, 220],
-        "lines": [{
-            "spans": [
-                {"text": "T", "size": 11, "bbox": [300, 130, 312, 150]},
-                {"text": "m", "size": 8, "bbox": [313, 122, 322, 136]},
-                {"text": "−", "size": 8, "bbox": [323, 122, 332, 136]},
-                {"text": "db", "size": 8, "bbox": [333, 122, 350, 136]},
-            ],
-        }],
-    }])
+    from test_alignment import evidence
+    embedded = evidence([
+        ("q(T) ≡ 0 mod ", 100, 150, 11, "Times-Roman"),
+        ("T", 300, 150, 11, "Times-Roman"),
+        ("m−db", 313, 143, 8, "Times-Roman"),
+        ("; ∑j=1d (-1)j+1 Tj Yj", 350, 150, 11, "Times-Roman"),
+    ])
     block = Block(
         "formula",
         r"\[q(T) \equiv 0 \pmod {T ^ {m - d} b}; "
@@ -1780,7 +1802,7 @@ def test_pdf_math_structure_uses_script_geometry_and_consistent_binders():
     assert r"\sum_{j=1}^{d}" in block.markdown
 
 
-def test_pdf_math_structure_separates_interleaved_super_and_subscripts():
+def test_pdf_math_structure_abstains_without_native_baselines():
     embedded = EmbeddedEvidence(blocks=[{
         "text": "Yj0 0",
         "bbox": [100, 100, 900, 220],
@@ -1797,30 +1819,17 @@ def test_pdf_math_structure_separates_interleaved_super_and_subscripts():
 
     warnings = _repair_embedded_math_structure([block], embedded)
 
-    assert warnings == ["visual_embedded_math_structure_repair"]
-    assert block.markdown == r"\[Y_{0}^{j_{0}}\]"
+    assert warnings == []
+    assert block.markdown == r"\[Y_{0}^{b_{0}}\]"
 
 
 def test_pdf_math_structure_recovers_ceiling_and_stacked_label():
-    embedded = EmbeddedEvidence(blocks=[{
-        "text": "⌈(1+θ)m⌉ X d−1 = sum",
-        "bbox": [100, 100, 900, 220],
-        "lines": [{
-            "spans": [
-                {
-                    "text": "⌈(1+θ)m⌉", "size": 11, "bbox": [120, 130, 200, 150],
-                    "chars": [
-                        {"text": letter, "bbox": [120 + 10*i, 130, 130 + 10*i, 150]}
-                        for i, letter in enumerate("⌈(1+θ)m⌉")
-                    ],
-                },
-                {"text": "d", "size": 8, "bbox": [300, 122, 308, 136]},
-                {"text": "−", "size": 8, "bbox": [309, 122, 317, 136]},
-                {"text": "1", "size": 8, "bbox": [318, 122, 326, 136]},
-                {"text": "=", "size": 11, "bbox": [306, 132, 320, 152]},
-            ],
-        }],
-    }])
+    from test_alignment import evidence
+    embedded = evidence([
+        ("⌈(1+θ)m⌉ + X ", 120, 150, 11, "Times-Roman"),
+        ("d−1", 300, 136, 8, "Times-Roman"),
+        ("= ∑i Zi", 306, 152, 11, "Times-Roman"),
+    ])
     block = Block(
         "formula",
         r"\[\left[ (1+\theta)m \right] + "
@@ -1959,8 +1968,8 @@ def test_embedded_links_are_geometry_aware_and_idempotent():
         Block("paragraph", "Foo second", bbox=(0, 400, 1000, 600)),
     ]
     links = [Link("Foo", "https://example.com", bbox=(100, 450, 200, 500))]
-    _apply_links_to_blocks(blocks, links)
-    _apply_links_to_blocks(blocks, links)
+    apply_links_to_blocks(blocks, links)
+    apply_links_to_blocks(blocks, links)
     assert blocks[0].markdown == "Foo first"
     assert blocks[1].markdown == "[Foo](https://example.com) second"
 
@@ -1969,7 +1978,7 @@ def test_pdf_page_destinations_are_not_emitted_as_imprecise_heading_links():
     block = Block("paragraph", "See Theorem 1.1.", bbox=(0, 0, 1000, 200))
     link = Link("1.1", "#page-4", bbox=(100, 100, 150, 130), external=False)
 
-    _apply_links_to_blocks([block], [link], page_number=2)
+    apply_links_to_blocks([block], [link], page_number=2)
 
     assert block.markdown == "See Theorem 1.1."
 
@@ -1987,7 +1996,7 @@ def test_embedded_doi_target_repairs_a_fragmented_reference_tail():
         external=True,
     )
 
-    _apply_links_to_blocks([block], [link], page_number=22)
+    apply_links_to_blocks([block], [link], page_number=22)
 
     assert block.markdown == (
         "A reference. DOI: "

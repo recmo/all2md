@@ -10,7 +10,7 @@ from markdown_it.rules_inline import text as inline_text
 from markdown_it.rules_inline.emphasis import tokenize as emphasis
 from markdown_it.rules_inline.strikethrough import tokenize as strikethrough
 
-from .mathlint import mask_math, math_spans
+from .syntax import mask_math, math_spans, non_math_ranges
 
 
 def autolink_urls(markdown: str) -> str:
@@ -18,19 +18,8 @@ def autolink_urls(markdown: str) -> str:
         return markdown
     parser = MarkdownIt("commonmark").enable("strikethrough")
     env = {}
-    tokens = parser.parse(markdown, env)
-    offsets = [0]
-    for line in markdown.splitlines(keepends=True):
-        offsets.append(offsets[-1] + len(line))
-    # Mask only the scanner input, not the serialized document. Block maps and
-    # reference definitions come from the Markdown parser, not URL regexes.
-    excluded = [(offsets[t.map[0]], offsets[t.map[1]]) for t in tokens
-                if t.map and t.type in {"code_block", "fence", "html_block"}]
-    excluded.extend((offsets[r["map"][0]], offsets[r["map"][1]])
-                    for r in env.get("references", {}).values() if "map" in r)
-    excluded.extend((m.start(), m.end()) for m in re.finditer(
-        r"<a\b[^>]*>.*?</a\s*>", markdown, re.I | re.S
-    ))
+    parser.parse(markdown, env)
+    excluded = non_math_ranges(markdown)
     spans, _ = math_spans(markdown)
     masked = list(mask_math(markdown, spans))
     for start, end in excluded:

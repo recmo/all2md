@@ -128,13 +128,19 @@ def embedded_text_for_bbox(
     bbox: tuple[float, float, float, float] | None,
     *,
     minimum_coverage: float = 0.35,
+    either_box: bool = False,
 ) -> str:
     if embedded is None or bbox is None:
         return ""
     selected: list[str] = []
     for block in embedded.blocks:
         block_box = block.get("bbox", [])
-        if len(block_box) != 4 or bbox_coverage(block_box, bbox) < minimum_coverage:
+        if len(block_box) != 4:
+            continue
+        coverage = bbox_coverage(block_box, bbox)
+        if either_box:
+            coverage = max(coverage, bbox_coverage(bbox, block_box))
+        if coverage < minimum_coverage:
             continue
         selected.append(str(block.get("text", "")))
     return "\n".join(value for value in selected if value).strip()

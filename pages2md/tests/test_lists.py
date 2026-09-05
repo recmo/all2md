@@ -11,7 +11,12 @@ from pages2md.lists import normalize_lists, parse_marker, validate_list_node
 from pages2md.markdown import page_markdown, strict_page_markdown
 from pages2md.model import Block, Comparison, EmbeddedEvidence, PageResult
 from pages2md.native import parse_native_observation
-from pages2md.pipeline import _normalize_document_blocks, convert
+from pages2md.document import (
+    normalize_document,
+)
+from pages2md.pipeline import (
+    convert,
+)
 from pages2md.verify import verify_bundle
 
 
@@ -53,7 +58,7 @@ def test_mixed_visual_and_markdown_bullets_become_one_compact_list():
         item("- Zone of Genius", 190),
     ])
 
-    _normalize_document_blocks([result])
+    normalize_document([result])
 
     assert result.blocks[0].markdown == (
         "- Zone of Incompetence\n"

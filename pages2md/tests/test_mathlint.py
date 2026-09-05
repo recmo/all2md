@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from pages2md.formatting import _pymarkdown, format_and_lint
-from pages2md.mathlint import lint_math, mask_math, math_spans, validator_identity
+from pages2md.mathlint import lint_math, validator_identity
+from pages2md.syntax import mask_math, math_spans
 from pages2md.quality import math_syntax_errors
 
 

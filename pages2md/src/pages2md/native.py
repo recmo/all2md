@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from .compare import compare_text, normalize
 from .embedded import assess_embedded, bbox_coverage, bbox_iou, embedded_text_for_bbox
 from .lists import annotate_native_list_block
+from .embedded import bbox_iou as _iou, bbox_coverage as _coverage
 from .model import Block, EmbeddedEvidence, OcrObservation
 from .quality import output_quality_warnings
 
@@ -900,22 +901,6 @@ def _alignment_score(left: Block, right: Block) -> float:
     text = SequenceMatcher(None, normalize(left.markdown), normalize(right.markdown), autojunk=False).ratio()
     geometry = _iou(left.bbox, right.bbox) if left.bbox and right.bbox else 0.5
     return 0.75 * text + 0.25 * geometry
-
-
-def _iou(a, b) -> float:
-    left, top = max(a[0], b[0]), max(a[1], b[1])
-    right, bottom = min(a[2], b[2]), min(a[3], b[3])
-    intersection = max(0.0, right - left) * max(0.0, bottom - top)
-    union = max(1.0, (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - intersection)
-    return intersection / union
-
-
-def _coverage(subject, container) -> float:
-    left, top = max(subject[0], container[0]), max(subject[1], container[1])
-    right, bottom = min(subject[2], container[2]), min(subject[3], container[3])
-    intersection = max(0.0, right - left) * max(0.0, bottom - top)
-    area = max(1.0, (subject[2] - subject[0]) * (subject[3] - subject[1]))
-    return intersection / area
 
 
 def _copy_block(block: Block) -> Block:

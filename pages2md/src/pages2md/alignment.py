@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from statistics import median
 from typing import Callable
@@ -30,8 +30,34 @@ class GlyphAlignment:
     parents: dict[int, tuple[int, str]]
     layout_matches: dict[int, int]
 
+    def with_text_fallback(self, native: str):
+        if self.native:
+            return self
+        matches = _agreed_matches(self.text, native)
+        return replace(self, native=native, matches=matches, layout_matches=matches)
 
-def _em(glyph: dict) -> tuple[float, float]:
+    def substitutions(self, fallback: str = ""):
+        """Yield locally anchored character changes from agreed occurrences.
+
+        Text-only evidence uses the same bidirectional agreement policy, but
+        cannot establish geometry or font semantics.
+        """
+        native = self.native or fallback
+        matches = self.matches if self.native else _agreed_matches(self.text, native)
+        for left, right in matches.items():
+            if self.text[left] == native[right]:
+                continue
+            anchors = []
+            for direction in (-1, 1):
+                length, cursor = 0, left + direction
+                while cursor in matches and self.text[cursor] == native[matches[cursor]]:
+                    length += 1
+                    cursor += direction
+                anchors.append(length)
+            yield left, right, native[right], *anchors
+
+
+def glyph_em(glyph: dict) -> tuple[float, float]:
     if glyph.get("em") and min(glyph["em"]) > 0:
         return tuple(glyph["em"])
     box = glyph["bbox"]
@@ -39,7 +65,7 @@ def _em(glyph: dict) -> tuple[float, float]:
     return height, height
 
 
-def _baseline(glyph: dict) -> float:
+def glyph_baseline(glyph: dict) -> float:
     if "layout_baseline" in glyph:
         return glyph["layout_baseline"]
     return glyph["origin"][1] if glyph.get("origin") else glyph["bbox"][3]
@@ -54,29 +80,29 @@ def ordered_glyphs(glyphs: list[dict]) -> tuple[list[dict], dict[int, tuple[int,
     if not glyphs:
         return [], {}
     glyphs = [dict(g) for g in glyphs]
-    largest = max(float(g.get("size") or _em(g)[1]) for g in glyphs)
-    main = [g for g in glyphs if float(g.get("size") or _em(g)[1]) >= largest * .9]
+    largest = max(float(g.get("size") or glyph_em(g)[1]) for g in glyphs)
+    main = [g for g in glyphs if float(g.get("size") or glyph_em(g)[1]) >= largest * .9]
     main_ids = {id(g) for g in main}
     rows: list[list[dict]] = []
     def center(glyph):
         return (glyph["bbox"][1] + glyph["bbox"][3]) / 2
     for glyph in sorted(main, key=center):
-        if not rows or abs(center(glyph) - median(center(g) for g in rows[-1])) > _em(glyph)[1] * .35:
+        if not rows or abs(center(glyph) - median(center(g) for g in rows[-1])) > glyph_em(glyph)[1] * .35:
             rows.append([])
         rows[-1].append(glyph)
     for row in rows:
-        baseline = median(_baseline(g) for g in row)
+        baseline = median(glyph_baseline(g) for g in row)
         for glyph in row:
             glyph["layout_baseline"] = baseline
     for glyph in glyphs:
         if id(glyph) in main_ids:
             continue
-        row = min(rows, key=lambda r: abs(_baseline(glyph) - _baseline(r[0])))
+        row = min(rows, key=lambda r: abs(glyph_baseline(glyph) - glyph_baseline(r[0])))
         row.append(glyph)
     output: list[dict] = []
     relations: dict[int, tuple[int, str]] = {}
     for row in rows:
-        row.sort(key=lambda g: (g["bbox"][0], _baseline(g)))
+        row.sort(key=lambda g: (g["bbox"][0], glyph_baseline(g)))
         parents: dict[int, tuple[int, str]] = {}
         for child, glyph in enumerate(row):
             if not glyph.get("origin") or tuple(glyph.get("direction", (1, 0))) != (1, 0):
@@ -86,9 +112,17 @@ def ordered_glyphs(glyphs: list[dict]) -> tuple[list[dict], dict[int, tuple[int,
             for parent, base in enumerate(row):
                 if float(base.get("size") or 0) <= size * 1.1 or not base.get("origin"):
                     continue
-                ex, ey = _em(base)
+                ex, ey = glyph_em(base)
                 gap = glyph["bbox"][0] - base["bbox"][2]
-                dy = _baseline(glyph) - _baseline(base)
+                dy = glyph_baseline(glyph) - glyph_baseline(base)
+                # Small labels centered over a relation precede that relation
+                # in textual reading order (e.g. an annotated equality).
+                if (base["text"] in {"=", "≈", "≤", "≥", "→"}
+                    and -1.4 * ey < dy < -.12 * ey
+                    and abs((glyph["bbox"][0] + glyph["bbox"][2]
+                             - base["bbox"][0] - base["bbox"][2]) / 2) < .9 * ex):
+                    candidates.append((0, float(base["size"]), abs(dy) / ey, parent, "over"))
+                    continue
                 if (base["bbox"][0] - .2 * ex <= glyph["bbox"][0]
                     and gap <= 2 * ex and .08 * ey < abs(dy) < 1.4 * ey):
                     candidates.append((max(0, gap), float(base["size"]), abs(dy) / ey,
@@ -100,6 +134,9 @@ def ordered_glyphs(glyphs: list[dict]) -> tuple[list[dict], dict[int, tuple[int,
                     parents[child] = (parent, kind)
 
         def emit(index: int, parent: int | None = None, kind: str = "") -> None:
+            for child, edge in parents.items():
+                if edge == (index, "over"):
+                    emit(child)
             target = len(output)
             output.append(row[index])
             if parent is not None:
@@ -212,9 +249,9 @@ def delimiter_edits(
     ceilings cannot supply evidence for unrelated probability brackets. Only
     endpoint tokens are changed, so a second pass is a no-op.
     """
-    closing = {"⌉": "⌈", "⌋": "⌊"}
+    closing = {"⌉": "⌈", "⌋": "⌊", "]": "["}
     commands = {"⌈": r"\lceil", "⌉": r"\rceil",
-                "⌊": r"\lfloor", "⌋": r"\rfloor"}
+                "⌊": r"\lfloor", "⌋": r"\rfloor", "[": "[", "]": "]"}
     stack: list[int] = []
     native_pairs: set[tuple[int, int]] = set()
     for index, letter in enumerate(alignment.native):
@@ -232,17 +269,17 @@ def delimiter_edits(
     # Align delimiter families before recovering their exact forms. Otherwise
     # adjacent OCR ']]' versus native '⌉]' has no unique character-level match.
     # Original glyphs remain intact and decide the final endpoint spelling.
-    families = str.maketrans({"⌈": "[", "⌉": "]", "⌊": "[", "⌋": "]"})
-    matches, _ = _occurrence_matches(
-        alignment.text.translate(families), alignment.native.translate(families), alignment.glyphs
-    )
+    families = str.maketrans({"⌈": "[", "⌉": "]", "⌊": "[", "⌋": "]", "{": "[", "}": "]"})
+    visual, native = alignment.text.translate(families), alignment.native.translate(families)
+    matches = (_occurrence_matches(visual, native, alignment.glyphs)[0] if alignment.glyphs
+               else _agreed_matches(visual, native))
     identities = {alignment.spans[a]: b for a, b in matches.items()}
-    token = re.compile(r"\\(?P<side>left|right)\b\s*(?P<glyph>\\[A-Za-z]+|\\.|[^\s])")
+    token = re.compile(r"(?:\\(?:left|right)\b\s*)?(?P<glyph>\\(?:lceil|rceil|lfloor|rfloor)\b|\\[{}]|[\[\]()])")
     edits = []
     for start, end in ranges:
         endpoints = []
         for match in token.finditer(markdown, start, end):
-            if match.group("side") == "left":
+            if match.group("glyph") in {"[", "(", r"\{", r"\lceil", r"\lfloor"}:
                 endpoints.append(match)
                 continue
             if not endpoints:
@@ -263,13 +300,13 @@ def delimiter_edits(
                 continue
             # Only repair bracket-like OCR substitutions, never other operators
             # or invisible TeX delimiters whose intent is not established here.
-            allowed = {"[", "]", "(", ")", *commands.values()}
+            allowed = {"[", "]", "(", ")", r"\{", r"\}", *commands.values()}
             if any(endpoint.group("glyph") not in allowed for endpoint in (left, match)):
                 continue
             for endpoint, index in zip((left, match), pair):
                 replacement = commands[alignment.native[index]]
                 if endpoint.group("glyph") != replacement:
-                    if re.match(r"[A-Za-z]", markdown[endpoint.end("glyph"):]):
+                    if replacement.startswith("\\") and re.match(r"[A-Za-z]", markdown[endpoint.end("glyph"):]):
                         replacement += " "  # Terminate the TeX control word.
                     edits.append((*endpoint.span("glyph"), replacement))
     return edits
@@ -394,3 +431,120 @@ def script_edits(markdown: str, alignment: GlyphAlignment) -> list[tuple[int, in
     for root in tex_groups(markdown):
         visit(root)
     return [edit for edit in edits if not any(other[0] < edit[0] and edit[1] < other[1] for other in edits)]
+
+
+def script_substitutions(markdown: str, alignment: GlyphAlignment) -> list[tuple[int, int, str]]:
+    """Resolve a script glyph through its already aligned base occurrence.
+
+    Nested scripts can be interleaved in PDF drawing order. The matched base
+    and its parent edges provide the context; another occurrence cannot lend
+    its superscript to this one.
+    """
+    atom = re.compile(r"(?P<base>[A-Za-z])(?P<scripts>(?:\s*[_^]\s*\{(?:[^{}]|\{[^{}]*\})+\}){1,2})")
+    by_start = {start: i for i, (start, _) in enumerate(alignment.spans)}
+    edits = []
+
+    def descendants(parent, kind=None):
+        result = []
+        for child, (base, script) in alignment.parents.items():
+            if base == parent and (kind is None or script == kind):
+                result.append(child)
+                result.extend(descendants(child))
+        return result
+
+    for match in atom.finditer(markdown):
+        base = alignment.matches.get(by_start.get(match.start("base")))
+        if base is None or alignment.native[base] != match["base"]:
+            continue
+        offset = match.start("scripts")
+        for group in tex_groups(match["scripts"]):
+            if group.end < 0 or not group.script:
+                continue
+            ids = descendants(base, group.script)
+            target = "".join(alignment.native[i] for i in ids)
+            source = markdown[offset + group.start:offset + group.end]
+            text, spans = semantic_math_projection(source)
+            if len(text) != len(target) or not text:
+                continue
+            differences = [i for i in range(len(text)) if text[i] != target[i]]
+            if len(differences) != 1:
+                continue
+            i = differences[0]
+            if not (text[i].isascii() and text[i].isalpha() and target[i].isascii() and target[i].isalpha()):
+                continue
+            start, end = spans[i]
+            edits.append((offset + group.start + start, offset + group.start + end, target[i]))
+    return edits
+
+
+_MATH_COMMAND_CHARACTERS = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ",
+    "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ", "eta": "η",
+    "theta": "θ", "vartheta": "θ", "iota": "ι", "kappa": "κ",
+    "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "pi": "π",
+    "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ",
+    "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ",
+    "Xi": "Ξ", "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ",
+    "Psi": "Ψ", "Omega": "Ω", "leq": "≤", "le": "≤", "geq": "≥",
+    "ge": "≥", "lceil": "⌈", "rceil": "⌉", "lfloor": "⌊",
+    "rfloor": "⌋", "in": "∈", "equiv": "≡", "approx": "≈",
+    "pm": "±", "times": "×", "cdot": "·", "sum": "∑", "prod": "∏",
+    "mid": "|", "vert": "|",
+}
+MATH_CHARACTER_COMMANDS = {
+    character: command
+    for command, character in _MATH_COMMAND_CHARACTERS.items()
+    if command not in {"epsilon", "vartheta", "varphi", "le", "ge", "vert"}
+}
+def semantic_math_projection(value: str) -> tuple[str, list[tuple[int, int]]]:
+    """Project TeX or PDF Unicode text to comparable mathematical characters."""
+    projected: list[str] = []
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character == "\\":
+            if index + 1 < len(value) and value[index + 1] in "{}[]()|":
+                if value[index + 1] in "{}|":
+                    projected.append(value[index + 1])
+                    spans.append((index, index + 2))
+                index += 2
+                continue
+            command = re.match(r"\\([A-Za-z]+)", value[index:])
+            if command:
+                name = command.group(1)
+                end = index + len(command.group(0))
+                if name in _MATH_COMMAND_CHARACTERS:
+                    projected.append(_MATH_COMMAND_CHARACTERS[name])
+                    spans.append((index, end))
+                elif name in {"dots", "ldots", "cdots"}:
+                    projected.append("…")
+                    spans.append((index, end))
+                index = end
+                continue
+            index += 1
+            continue
+        normalized = unicodedata.normalize("NFKC", character)
+        for visible in normalized:
+            if visible.isspace() or visible in "{}_^$*`®©ª«¬︁︂︃︄":
+                continue
+            if visible in "−–—":
+                visible = "-"
+            if visible.isprintable():
+                projected.append(visible)
+                spans.append((index, index + 1))
+        index += 1
+    return "".join(projected), spans
+
+
+def math_letter(glyph: dict) -> bool:
+    value = glyph["text"]
+    if len(value) != 1 or not re.fullmatch("[A-Za-z]", unicodedata.normalize("NFKC", value)):
+        return False
+    if unicodedata.name(value, "").startswith("MATHEMATICAL "):
+        return True
+    if math_font_role(glyph) in {"mathbb", "mathcal"}:
+        return True
+    font = re.sub(r"^[A-Z]{6}\+", "", glyph.get("font", "")).casefold()
+    return bool(re.fullmatch(r"(?:newtxmi|cmmi|stixmathitalic)\d*", font))

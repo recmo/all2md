@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from pages2md.model import Block
-from pages2md.pipeline import _semantic_math_projection as project
+from pages2md.alignment import (
+    semantic_math_projection as project,
+)
 from pages2md.semantics import accent_identity, repair_accents, restore_inline_math
 from test_alignment import BOX, evidence
 

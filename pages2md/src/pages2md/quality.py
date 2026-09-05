@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from bs4 import BeautifulSoup
 
 from .compare import normalize
-from .mathlint import math_spans
+from .syntax import math_spans
 
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")

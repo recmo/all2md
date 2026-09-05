@@ -4,11 +4,13 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from .alignment import Projection, _baseline, _em, align_glyphs, math_font_role
+from .alignment import math_letter, Projection, glyph_baseline, glyph_em, align_glyphs
 from .embedded import iter_embedded_characters
-from .mathlint import math_spans
+from .syntax import math_spans
 from .model import Block, EmbeddedEvidence
-from .lists import render_list
+from .lists import editable_leaves
+from .edits import apply_edits
+from .syntax import protected_ranges
 
 
 ACCENTS = {"\u20d7": "vec", "\u0302": "hat", "\u0303": "tilde",
@@ -49,8 +51,8 @@ def accent_attachments(glyphs: list[dict]) -> dict[tuple, str]:
                 continue
             if tuple(base.get("direction", (1, 0))) != (1, 0):
                 continue
-            ex, ey = _em(base)
-            if not .8 <= _em(accent)[1] / ey <= 1.2:
+            ex, ey = glyph_em(base)
+            if not .8 <= glyph_em(accent)[1] / ey <= 1.2:
                 continue
             a, b = accent["bbox"], base["bbox"]
             overlap = min(a[2], b[2]) - max(a[0], b[0])
@@ -58,7 +60,7 @@ def accent_attachments(glyphs: list[dict]) -> dict[tuple, str]:
                 continue
             if abs((a[0] + a[2] - b[0] - b[2]) / 2) > .35 * ex:
                 continue
-            if not -.8 * ey <= _baseline(accent) - _baseline(base) <= .1 * ey:
+            if not -.8 * ey <= glyph_baseline(accent) - glyph_baseline(base) <= .1 * ey:
                 continue
             candidates.append(base)
         if len(candidates) == 1:
@@ -86,92 +88,42 @@ def repair_accents(blocks: list[Block], embedded: EmbeddedEvidence, project: Pro
             identity = attachments.get(aligned.glyphs[native]["order"])
             if identity and match[1].removeprefix("wide") != identity:
                 edits.append((match.start(1), match.end(1), identity))
-        changed |= _apply_edits(block, edits, "accent")
+        changed |= apply_edits(block, edits, "accent")
     return ["visual_embedded_accent_repair"] if changed else []
-
-
-def _math_letter(glyph: dict) -> bool:
-    value = glyph["text"]
-    if len(value) != 1 or not re.fullmatch("[A-Za-z]", unicodedata.normalize("NFKC", value)):
-        return False
-    if unicodedata.name(value, "").startswith("MATHEMATICAL "):
-        return True
-    if math_font_role(glyph) in {"mathbb", "mathcal"}:
-        return True
-    font = re.sub(r"^[A-Z]{6}\+", "", glyph.get("font", "")).casefold()
-    return bool(re.fullmatch(r"(?:newtxmi|cmmi|stixmathitalic)\d*", font))
-
-
-def protected_ranges(text: str) -> list[tuple[int, int]]:
-    spans, _ = math_spans(text)
-    ranges = [(s.start, s.end) for s in spans]
-    # Do not rewrite code, links (including their labels), tags, or references.
-    ranges.extend(m.span() for m in re.finditer(
-        r"```.*?(?:```|\Z)|~~~.*?(?:~~~|\Z)|`+[^`]*`+|!?\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])?|<[^>]*>|\\[A-Za-z]+",
-        text, re.S))
-    return ranges
 
 
 def restore_inline_math(blocks: list[Block], embedded: EmbeddedEvidence, project: Projection) -> list[str]:
     changed = False
-    for block in blocks:
-        if isinstance(block.metadata.get("list"), dict):
-            list_changed = False
-            def visit(node):
-                nonlocal changed, list_changed
-                for item in node.get("items", []):
-                    for child in item.get("blocks", []):
-                        leaf = Block(child.get("kind", "paragraph"), child.get("markdown", ""),
-                                     bbox=child.get("bbox") or block.bbox)
-                        if restore_inline_math([leaf], embedded, project):
-                            child["markdown"] = leaf.markdown
-                            block.metadata.setdefault("embedded_text_repairs", []).extend(
-                                leaf.metadata.get("embedded_text_repairs", []))
-                            changed = True
-                            list_changed = True
-                    for child in item.get("children", []):
-                        visit(child)
-            visit(block.metadata["list"])
-            if list_changed:
-                block.markdown = render_list(block.metadata["list"])
-            continue
-        if not block.bbox or block.kind in NON_PROSE or "list" in block.metadata:
-            continue
-        aligned = align_glyphs(block.markdown, embedded, block.bbox, project)
-        by_start = {start: i for i, (start, _) in enumerate(aligned.spans)}
-        protected = protected_ranges(block.markdown)
-        edits = []
-        # Whole tokens only: never turn one letter inside an ordinary word into math.
-        for match in re.finditer(r"(?<![\w\\])(?:[A-Za-z]+|\d+)(?:\s*(?::=|[=+−/<>-])\s*(?:[A-Za-z]+|\d+))*(?!\w)", block.markdown):
-            if not any(c.isalpha() for c in match[0]):
+    with editable_leaves(blocks) as leaves:
+        for block in leaves:
+            if not block.bbox or block.kind in NON_PROSE or "list" in block.metadata:
                 continue
-            if any(a < match.end() and match.start() < b for a, b in protected):
-                continue
-            glyphs = []
-            for offset in range(match.start(), match.end()):
-                if block.markdown[offset].isspace():
+            aligned = align_glyphs(block.markdown, embedded, block.bbox, project)
+            by_start = {start: i for i, (start, _) in enumerate(aligned.spans)}
+            protected = protected_ranges(block.markdown)
+            edits = []
+            # Whole tokens only: never turn one letter inside an ordinary word into math.
+            for match in re.finditer(r"(?<![\w\\])(?:[A-Za-z]+|\d+)(?:\s*(?::=|[=+−/<>-])\s*(?:[A-Za-z]+|\d+))*(?!\w)", block.markdown):
+                if not any(c.isalpha() for c in match[0]):
                     continue
-                native = aligned.matches.get(by_start.get(offset))
-                expected, _ = project(block.markdown[offset])
-                if native is None or aligned.native[native] != expected:
-                    break
-                glyph = aligned.glyphs[native]
-                if (block.markdown[offset].isalpha() and not _math_letter(glyph)) or native in aligned.parents:
-                    break
-                glyphs.append(glyph)
-            if len(glyphs) != sum(not c.isspace() for c in match[0]):
-                continue
-            if any(abs(_baseline(g) - _baseline(glyphs[0])) > .1 * _em(g)[1] for g in glyphs):
-                continue
-            edits.append((match.start(), match.end(), rf"\({match[0]}\)"))
-        changed |= _apply_edits(block, edits, "inline_math")
+                if any(a < match.end() and match.start() < b for a, b in protected):
+                    continue
+                glyphs = []
+                for offset in range(match.start(), match.end()):
+                    if block.markdown[offset].isspace():
+                        continue
+                    native = aligned.matches.get(by_start.get(offset))
+                    expected, _ = project(block.markdown[offset])
+                    if native is None or aligned.native[native] != expected:
+                        break
+                    glyph = aligned.glyphs[native]
+                    if (block.markdown[offset].isalpha() and not math_letter(glyph)) or native in aligned.parents:
+                        break
+                    glyphs.append(glyph)
+                if len(glyphs) != sum(not c.isspace() for c in match[0]):
+                    continue
+                if any(abs(glyph_baseline(g) - glyph_baseline(glyphs[0])) > .1 * glyph_em(g)[1] for g in glyphs):
+                    continue
+                edits.append((match.start(), match.end(), rf"\({match[0]}\)"))
+            changed |= apply_edits(block, edits, "inline_math")
     return ["visual_embedded_inline_math_repair"] if changed else []
-
-
-def _apply_edits(block: Block, edits: list[tuple[int, int, str]], kind: str) -> bool:
-    for start, end, replacement in sorted(edits, reverse=True):
-        block.metadata.setdefault("embedded_text_repairs", []).append({
-            "kind": kind, "visual": block.markdown[start:end], "embedded": replacement,
-        })
-        block.markdown = block.markdown[:start] + replacement + block.markdown[end:]
-    return bool(edits)

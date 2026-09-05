@@ -8,7 +8,8 @@ from pathlib import Path
 
 import mdformat
 
-from .mathlint import MathLintResult, lint_math, mask_math, math_spans
+from .mathlint import MathLintResult, lint_math
+from .syntax import formatting_spans, mask_math, math_spans
 from .util import atomic_text
 
 DISABLED_LINT_RULES = ",".join(
@@ -30,11 +31,27 @@ class FormatResult:
 
 
 def format_markdown(text: str) -> str:
-    return mdformat.text(
-        text,
+    # The formatter owns prose layout, not TeX spelling or note placement.
+    # Opaque slots keep those contracts intact before formatting, rather than
+    # rejecting formatting for the entire document afterwards.
+    prefix = "PAGES2MDPROTECTED"
+    while prefix in text:
+        prefix += "X"
+    replacements = []
+    masked = text
+    for index, (start, end, block) in reversed(list(enumerate(formatting_spans(text)))):
+        key = f"{prefix}{index}TOKEN"
+        marker = f"<!-- {key} -->" if block else key
+        replacements.append((marker, text[start:end].rstrip("\n") if block else text[start:end]))
+        masked = masked[:start] + marker + ("\n\n" if block else "") + masked[end:]
+    formatted = mdformat.text(
+        masked,
         options={"wrap": "keep", "number": True},
         extensions={"gfm", "footnote"},
     )
+    for marker, original in replacements:
+        formatted = formatted.replace(marker, original)
+    return formatted
 
 
 def format_and_lint(paths: list[Path]) -> FormatResult:
