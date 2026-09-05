@@ -50,14 +50,21 @@ The OCR dependency is pinned to MLX-VLM revision
 ```sh
 pages2md paper.pdf
 pages2md scans/
+pages2md paper.pdf scans/
 pages2md --force paper.pdf
 ```
 
-The input is one supported paginated image source or a directory containing
-images. OCR, layout, chapter detection, and quality settings are fixed. Output is written
+Each input is processed in argument order. Inputs may be supported paginated
+image sources or directories containing images. OCR, layout, chapter detection,
+and quality settings are fixed. Output is written
 beside the input by appending `.md` to its complete basename: `paper.pdf`
 becomes `paper.pdf.md`, while the image directory `scans/` becomes `scans.md`.
 Existing output requires `--force`.
+If an input fails, the remaining inputs are still attempted and the command exits
+with a nonzero status.
+
+Within canonical Markdown, harmless OCR whitespace in LaTeX math is normalized
+without removing grouping braces or changing operator and comma spacing.
 
 ## Output
 

@@ -21,6 +21,7 @@ from .chapters import detect_chapters
 from .compare import compare_text
 from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, SCHEMA_VERSION, commit_version
 from .formatting import format_and_lint
+from .latex import clean_latex
 from .lists import normalize_lists
 from .markdown import (
     merge_html_tables,
@@ -1070,6 +1071,8 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
 
     for page in pages:
         for block in page.blocks:
+            if block.kind not in FIGURE_KINDS | {"table"}:
+                block.markdown = clean_latex(block.markdown, assume_math=block.kind in FORMULA_KINDS)
             if block.kind == "paragraph":
                 block.markdown = _clean_prose(block.markdown)
 

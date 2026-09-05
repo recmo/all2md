@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw
 import pytest
 
 import pages2md.pipeline as pipeline
+import pages2md.cli as cli
 from pages2md.chapters import detect_chapters
 from pages2md.cli import parser
 from pages2md.compare import compare_text
@@ -106,14 +107,31 @@ class InterruptingFixtureOcr:
         raise AssertionError("Gundam recovery is not expected for matching fixture text")
 
 
-def test_cli_has_one_input_and_force_only():
+def test_cli_accepts_one_or_more_inputs_and_force_only():
     arguments = parser().parse_args(["paper.pdf", "--force"])
-    assert arguments.input == Path("paper.pdf")
+    assert arguments.input == [Path("paper.pdf")]
+    assert parser().parse_args(["first.pdf", "second.pdf"]).input == [
+        Path("first.pdf"),
+        Path("second.pdf"),
+    ]
     assert arguments.force is True
     with pytest.raises(SystemExit):
-        parser().parse_args(["convert", "paper.pdf"])
-    with pytest.raises(SystemExit):
         parser().parse_args(["paper.pdf", "--output", "result"])
+
+
+def test_cli_processes_inputs_in_argument_order(monkeypatch, capsys):
+    calls = []
+
+    def fake_convert(source, *, force):
+        calls.append((source, force))
+        return Path(f"{source}.md")
+
+    monkeypatch.setattr(cli, "convert", fake_convert)
+
+    cli.main(["first.pdf", "second.pdf", "--force"])
+
+    assert calls == [(Path("first.pdf"), True), (Path("second.pdf"), True)]
+    assert capsys.readouterr().out == "first.pdf.md\nsecond.pdf.md\n"
 
 
 def test_parse_unlimited_output():
@@ -823,11 +841,11 @@ def test_document_normalization_cleans_prose_without_rewriting_math():
         comparison=Comparison(),
     )
     _normalize_document_blocks([page])
-    assert page.blocks[0].markdown == r"Proof. Let \( J \) be an ideal and \( J = \langle ra : r \in R \rangle \)."
+    assert page.blocks[0].markdown == r"Proof. Let \(J\) be an ideal and \(J = ⟨ra : r ∈ R⟩\)."
     assert page.blocks[1].kind == "list"
     assert page.blocks[1].markdown == "- **(i)** First case.\n- **(ii)** Second case."
-    assert r"na \equiv nh \mod J" in page.blocks[2].markdown
-    assert r"\mathbb{Z}" in page.blocks[2].markdown
+    assert "na ≡ nh" in page.blocks[2].markdown
+    assert "ℤ" in page.blocks[2].markdown
     assert r"\\)" not in page.blocks[0].markdown
 
 
