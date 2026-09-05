@@ -18,23 +18,22 @@ _MATH_FONT_GROUP = re.compile(
     r"\{(?P<content>[A-Za-z0-9 \t\n]+)\}"
 )
 _UNICODE_COMMANDS = {
-    # Greek letters, including the distinct LaTeX variant forms.
+    # Standard Greek letters.
     "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
-    "varepsilon": "ϵ", "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "ϑ",
-    "iota": "ι", "kappa": "κ", "varkappa": "ϰ", "lambda": "λ", "mu": "μ",
-    "nu": "ν", "xi": "ξ", "omicron": "ο", "pi": "π", "varpi": "ϖ",
-    "rho": "ρ", "varrho": "ϱ", "sigma": "σ", "varsigma": "ς", "tau": "τ",
-    "upsilon": "υ", "phi": "φ", "varphi": "ϕ", "chi": "χ", "psi": "ψ", "omega": "ω",
+    "zeta": "ζ", "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ",
+    "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "omicron": "ο",
+    "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ",
+    "phi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
     "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ",
     "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
     # Unambiguous relations, operators, and common symbols.
-    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
-    "equiv": "≡", "approx": "≈", "sim": "∼", "pm": "±", "times": "×", "cdot": "⋅",
+    "leq": "≤", "geq": "≥", "neq": "≠", "equiv": "≡", "approx": "≈", "pm": "±",
+    "times": "×", "cdot": "⋅",
     "in": "∈", "notin": "∉", "subset": "⊂", "subseteq": "⊆", "supset": "⊃", "supseteq": "⊇",
-    "cup": "∪", "cap": "∩", "setminus": "∖", "to": "→", "rightarrow": "→", "leftarrow": "←",
+    "cup": "∪", "cap": "∩", "setminus": "∖", "rightarrow": "→", "leftarrow": "←",
     "mapsto": "↦", "Rightarrow": "⇒", "Leftarrow": "⇐", "Leftrightarrow": "⇔",
     "forall": "∀", "exists": "∃", "infty": "∞", "partial": "∂", "nabla": "∇",
-    "dots": "…", "ldots": "…", "cdots": "⋯", "vdots": "⋮", "ddots": "⋱",
+    "dots": "…", "cdots": "⋯", "vdots": "⋮", "ddots": "⋱",
     "langle": "⟨", "rangle": "⟩", "lfloor": "⌊", "rfloor": "⌋", "lceil": "⌈", "rceil": "⌉",
     "mid": "∣", "vert": "∣", "Vert": "‖", "parallel": "∥",
 }
