@@ -610,10 +610,20 @@ impl Store {
     }
 
     pub(crate) async fn maintain_embeddings(self: Arc<Self>) {
+        let mut retry_ceiling_ms = 1_000;
         self.reindex_notify.notify_one();
+        self.reindex_notify.notified().await;
         loop {
-            self.reindex_notify.notified().await;
-            let _ = self.reindex_missing().await;
+            if self.reindex_missing().await.is_ok() {
+                retry_ceiling_ms = 1_000;
+                self.reindex_notify.notified().await;
+            } else {
+                let delay = embedding_retry_delay(&mut retry_ceiling_ms);
+                tokio::select! {
+                    _ = self.reindex_notify.notified() => {},
+                    _ = tokio::time::sleep(delay) => {},
+                }
+            }
         }
     }
 
@@ -1417,6 +1427,13 @@ fn rollback_failure(root: &Path, paths: &[String], error: anyhow::Error) -> anyh
     }
 }
 
+fn embedding_retry_delay(ceiling_ms: &mut u64) -> Duration {
+    // Equal jitter avoids both synchronized retries and near-zero retry loops.
+    let delay = fastrand::u64(*ceiling_ms / 2..=*ceiling_ms);
+    *ceiling_ms = ceiling_ms.saturating_mul(2).min(3_600_000);
+    Duration::from_millis(delay)
+}
+
 fn request_digest(request: &ApplyEditsRequest) -> Result<String> {
     let bytes = serde_json::to_vec(request)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -1430,6 +1447,19 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn embedding_backoff_grows_with_jitter_and_caps_at_one_hour() {
+        let mut ceiling = 1_000;
+        for _ in 0..64 {
+            let previous = ceiling;
+            let delay = embedding_retry_delay(&mut ceiling);
+            assert!(delay >= Duration::from_millis(previous / 2));
+            assert!(delay <= Duration::from_millis(previous));
+            assert_eq!(ceiling, (previous * 2).min(3_600_000));
+        }
+        assert_eq!(ceiling, 3_600_000);
+    }
 
     fn run_git(root: &Path, arguments: &[&str]) -> String {
         let output = Command::new("git")

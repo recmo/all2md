@@ -203,6 +203,45 @@ impl RetrievalProvider for BlockingProvider {
     }
 }
 
+struct RecoveringProvider {
+    failures: AtomicUsize,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl RetrievalProvider for RecoveringProvider {
+    async fn embed(&self, input_type: InputType, input: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self
+            .failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            anyhow::bail!("temporary embedding outage");
+        }
+        FakeProvider.embed(input_type, input).await
+    }
+
+    async fn rerank(
+        &self,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> Result<Vec<RerankResult>> {
+        FakeProvider.rerank(query, documents, top_n).await
+    }
+
+    fn model(&self) -> &str {
+        "fake-embed"
+    }
+    fn dimensions(&self) -> usize {
+        2
+    }
+    fn embedding_provider_identity(&self) -> String {
+        "fake-provider".into()
+    }
+}
+
 struct Repository {
     _temporary: tempfile::TempDir,
     root: PathBuf,
@@ -2528,6 +2567,76 @@ async fn detached_reindex_failure_is_logged() {
     })
     .await
     .expect("detached failure must be logged");
+}
+
+#[tokio::test]
+async fn embedding_worker_recovers_without_another_edit() {
+    let repository = Repository::new();
+    let provider = Arc::new(RecoveringProvider {
+        failures: AtomicUsize::new(1),
+        calls: AtomicUsize::new(0),
+    });
+    let store = repository.store_with_provider(provider.clone());
+    let (_, server) = start_daemon(store.clone(), None).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = store.status().unwrap();
+            if status.vectors_ready == status.vectors_total && status.vectors_total > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("embedding worker must recover without an edit or explicit reindex");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        3,
+        "successful indexing returns to idle"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn new_edits_interrupt_embedding_backoff() {
+    let repository = Repository::new();
+    let provider = Arc::new(RecoveringProvider {
+        failures: AtomicUsize::new(3),
+        calls: AtomicUsize::new(0),
+    });
+    let store = repository.store_with_provider(provider.clone());
+    let (_, server) = start_daemon(store.clone(), None).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while provider.calls.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "wake embedding retry".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "Alice updated during backoff.".into(),
+            }],
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let status = store.status().unwrap();
+            if status.vectors_ready == status.vectors_total && status.vectors_total > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("new edit must interrupt the 2–4 second retry delay");
+    server.abort();
 }
 
 #[tokio::test]

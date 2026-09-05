@@ -11,6 +11,7 @@ async-trait = "0.1"
 axum = "0.8"
 clap = { version = "4.5", features = ["derive", "env"] }
 fs2 = "0.4"
+fastrand = "2.3"
 globset = "0.4"
 jsonschema = "0.33"
 parking_lot = "0.12"
