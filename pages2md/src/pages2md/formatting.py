@@ -8,6 +8,7 @@ from pathlib import Path
 
 import mdformat
 
+from .mathlint import MathLintResult, lint_math, mask_math, math_spans
 from .util import atomic_text
 
 DISABLED_LINT_RULES = ",".join(
@@ -25,18 +26,20 @@ class FormatResult:
     idempotent: bool = True
     lint_errors: list[str] = field(default_factory=list)
     preservation_skips: list[str] = field(default_factory=list)
+    math_validation: MathLintResult = field(default_factory=MathLintResult)
 
 
 def format_markdown(text: str) -> str:
     return mdformat.text(
         text,
         options={"wrap": "keep", "number": True},
-        extensions={"gfm"},
+        extensions={"gfm", "footnote"},
     )
 
 
 def format_and_lint(paths: list[Path]) -> FormatResult:
     result = FormatResult()
+    documents = []
     for path in paths:
         source = path.read_text(encoding="utf-8")
         formatted = format_markdown(source)
@@ -49,9 +52,17 @@ def format_and_lint(paths: list[Path]) -> FormatResult:
             reformatted = format_markdown(formatted)
             if _structural_signature(reformatted) == _structural_signature(formatted):
                 result.idempotent = False
-    scan = _pymarkdown("scan", paths, check=False)
-    if scan.returncode:
-        result.lint_errors = [line for line in scan.stdout.splitlines() if line.strip()]
+        spans, unclosed = math_spans(formatted)
+        documents.append((path, formatted, spans, unclosed))
+        scan = _pymarkdown(mask_math(formatted, spans))
+        if scan.returncode:
+            result.lint_errors.extend(
+                str(path) + line[len("stdin"):] if line.startswith("stdin:") else line
+                for line in scan.stdout.splitlines() if line.strip()
+            )
+            if scan.returncode != 1 or not scan.stdout.strip():
+                result.lint_errors.append(f"{path}: Markdown linter failed (exit {scan.returncode})")
+    result.math_validation = lint_math(documents)
     return result
 
 
@@ -62,14 +73,17 @@ def is_formatted_idempotently(text: str) -> bool:
     return once == text and format_markdown(once) == once
 
 
-def _structural_signature(text: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+def _structural_signature(text: str) -> tuple:
     pages = tuple(re.findall(r"<!-- page: (\d+) -->", text))
     images = tuple(re.findall(r"!\[[^\]]*\]\(([^)]+)\)", text))
     tokens = tuple(re.findall(r"[\w]+|[^\w\s]", text, re.UNICODE))
-    return pages, images, tokens
+    # Formatting may not alter a formula, including significant TeX spaces.
+    spans, _ = math_spans(text)
+    math = tuple(text[span.start:span.end] for span in spans)
+    return pages, images, tokens, math
 
 
-def _pymarkdown(command: str, paths: list[Path], *, check: bool):
+def _pymarkdown(text: str):
     return subprocess.run(
         [
             sys.executable,
@@ -77,10 +91,10 @@ def _pymarkdown(command: str, paths: list[Path], *, check: bool):
             "pymarkdown",
             "-d",
             DISABLED_LINT_RULES,
-            command,
-            *map(str, paths),
+            "scan-stdin",
         ],
-        check=check,
+        check=False,
+        input=text,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

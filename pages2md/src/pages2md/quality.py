@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 from bs4 import BeautifulSoup
 
 from .compare import normalize
+from .mathlint import math_spans
 
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
@@ -186,18 +187,16 @@ def _gfm_cells(row: str) -> list[str]:
 def math_syntax_errors(markdown: str) -> list[str]:
     """Validate math delimiters and braces without interpreting the mathematics."""
     errors: list[str] = []
-    pairs = ((r"\(", r"\)"), (r"\[", r"\]"))
-    for opening, closing in pairs:
-        if markdown.count(opening) != markdown.count(closing):
+    spans, unmatched = math_spans(markdown)
+    for offset in unmatched:
+        delimiter = markdown[offset:offset + 2]
+        if delimiter == "$$":
+            errors.append("unbalanced display-math delimiter")
+        else:
+            opening = {r"\)": r"\(", r"\]": r"\["}.get(delimiter, delimiter)
             errors.append(f"unbalanced math delimiter {opening}")
-    if markdown.count("$$") % 2:
-        errors.append("unbalanced display-math delimiter")
-
-    spans = []
-    spans.extend(match.group(1) for match in re.finditer(r"\\\((.*?)\\\)", markdown, re.DOTALL))
-    spans.extend(match.group(1) for match in re.finditer(r"\\\[(.*?)\\\]", markdown, re.DOTALL))
-    spans.extend(match.group(1) for match in re.finditer(r"\$\$(.*?)\$\$", markdown, re.DOTALL))
-    for index, span in enumerate(spans, 1):
+    for index, region in enumerate(spans, 1):
+        span = markdown[region.content_start:region.content_end]
         if not _balanced_braces(span):
             errors.append(f"math span {index} has unbalanced braces")
         if not _balanced_environments(span):

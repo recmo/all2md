@@ -9,6 +9,7 @@ from .model import Block, PageResult
 
 
 LIST_KINDS = {"list", "list_item", "bullet", "bulleted_list", "enumeration", "ordered_list"}
+FORMULA_KINDS = {"formula", "equation", "display_formula"}
 BREAK_KINDS = {
     "heading", "title", "page_title", "section_header", "table", "figure",
     "caption", "formula", "equation", "display_formula",
@@ -153,7 +154,7 @@ def validate_list_node(node: dict[str, Any]) -> list[str]:
         else:
             paragraphs = item["blocks"]
             for left, right in zip(paragraphs, paragraphs[1:]):
-                if _is_soft_continuation(
+                if left.get("kind") == right.get("kind") == "paragraph" and _is_soft_continuation(
                     left.get("markdown", ""), right.get("markdown", "")
                 ):
                     errors.append(f"item {index + 1} has unresolved sentence continuation")
@@ -163,6 +164,8 @@ def validate_list_node(node: dict[str, Any]) -> list[str]:
                 target_blocks = target.get("blocks", []) if target else []
                 if (
                     target_blocks
+                    and paragraphs[-2].get("kind") == paragraphs[-1].get("kind") == "paragraph"
+                    and target_blocks[-1].get("kind") == "paragraph"
                     and _sentence_is_complete(paragraphs[-2].get("markdown", ""))
                     and _is_soft_continuation(
                         target_blocks[-1].get("markdown", ""),
@@ -192,7 +195,8 @@ def validate_list_node(node: dict[str, Any]) -> list[str]:
 
 def _normalize_page_blocks(blocks: list[Block]) -> list[Block]:
     for block in blocks:
-        annotate_native_list_block(block)
+        if not isinstance(block.metadata.get("list"), dict):
+            annotate_native_list_block(block)
     blocks = [block for block in blocks if not _is_empty_marker_artifact(block.markdown)]
     output: list[Block] = []
     index = 0
@@ -224,6 +228,14 @@ def _normalize_page_blocks(blocks: list[Block]) -> list[Block]:
         cursor = start
         while cursor < len(blocks):
             block = blocks[cursor]
+            if flat_items:
+                sibling = _enclosed_continuations(blocks, cursor, flat_items[-1])
+                if sibling is not None:
+                    for continuation in blocks[cursor:sibling]:
+                        _append_continuation(flat_items[-1], continuation)
+                        run_blocks.append(continuation)
+                    cursor = sibling
+                    continue
             if block.kind in BREAK_KINDS:
                 break
             items = _items_from_block(block)
@@ -341,6 +353,8 @@ def _repair_node_continuations(node: dict[str, Any]) -> None:
             target_text = target_blocks[-1].get("markdown", "").strip() if target_blocks else ""
             if (
                 fragment
+                and blocks[-2].get("kind") == blocks[-1].get("kind") == "paragraph"
+                and target_blocks and target_blocks[-1].get("kind") == "paragraph"
                 and _sentence_is_complete(parent_text)
                 and _is_soft_continuation(target_text, fragment)
             ):
@@ -352,7 +366,8 @@ def _repair_node_continuations(node: dict[str, Any]) -> None:
         while index < len(blocks):
             previous = blocks[index - 1].get("markdown", "").strip()
             continuation = blocks[index].get("markdown", "").strip()
-            if _is_soft_continuation(previous, continuation):
+            if (blocks[index - 1].get("kind") == blocks[index].get("kind") == "paragraph"
+                and _is_soft_continuation(previous, continuation)):
                 blocks[index - 1]["markdown"] = f"{previous} {continuation}".strip()
                 blocks.pop(index)
                 repairs += 1
@@ -572,12 +587,11 @@ def _finish_node(node: dict[str, Any]) -> None:
 
 
 def _node_block(node: dict[str, Any], blocks: list[Block], container: Block | None) -> Block:
-    sources = [container, *blocks] if container else blocks
     metadata: dict[str, Any] = {"list": node}
-    review = [block for block in sources if block and block.metadata.get("review_required")]
-    if review:
-        metadata["review_required"] = True
-        metadata["review_reason"] = review[0].metadata.get("review_reason")
+    repairs = [repair for block in blocks
+               for repair in block.metadata.get("embedded_text_repairs", [])]
+    if repairs:
+        metadata["embedded_text_repairs"] = repairs
     return Block(
         kind="list",
         markdown=render_list(node),
@@ -599,9 +613,67 @@ def _is_continuation(block: Block, previous: dict[str, Any]) -> bool:
 
 
 def _append_continuation(item: dict[str, Any], block: Block) -> None:
-    item["continuation_paragraphs"].append(" ".join(block.markdown.split()))
+    # Preserve block boundaries and formula source, including TeX line breaks.
+    for paragraph in item.pop("continuation_paragraphs", []):
+        item["blocks"].append({"kind": "paragraph", "markdown": paragraph})
+    item["continuation_paragraphs"] = []
+    item["blocks"].append({"kind": block.kind, "markdown": block.markdown.strip(),
+                           "bbox": list(block.bbox) if block.bbox else None,
+                           "source_pages": list(block.source_pages),
+                           "provenance": list(block.provenance)})
     item["source_pages"] = sorted(set([*item["source_pages"], *block.source_pages]))
     item["provenance"].extend(block.provenance)
+    if item.get("bbox") and block.bbox:
+        a, b = item["bbox"], block.bbox
+        item["bbox"] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+
+
+def _enclosed_continuations(blocks: list[Block], start: int, previous: dict[str, Any]) -> int | None:
+    """Confirm item-body blocks by indentation AND a following sibling marker.
+
+    A display equation alone cannot extend a list. All intervening blocks must
+    stay inside the item indentation, in reading order, up to a compatible next
+    item at the original margin. Headings/tables/figures and ambiguous geometry
+    remain boundaries; no document vocabulary is involved.
+    """
+    box = previous.get("bbox")
+    if not box:
+        return None
+    bottom = box[3]
+    for index in range(start, len(blocks)):
+        block = blocks[index]
+        if block.kind not in {"paragraph", *FORMULA_KINDS, *LIST_KINDS} or not block.bbox:
+            return None
+        left, top, _, end = block.bbox
+        if not -10 <= top - bottom <= 120:
+            return None
+        candidates = _items_from_block(block) if block.kind not in FORMULA_KINDS else []
+        if candidates:
+            following = candidates[0]
+            if index == start or abs(following["geometry_indent"] - previous["geometry_indent"]) > 12:
+                return None
+            return index if _successive_markers(previous, following) else None
+        if left < box[0] + 14 or not block.markdown.strip():
+            return None
+        bottom = end
+    return None
+
+
+def _successive_markers(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    a, b = left["marker_style"], right["marker_style"]
+    if a == b == "decimal":
+        return right["source_ordinal"] == left["source_ordinal"] + 1
+    if a == b == "bullet":
+        return True
+    if a not in {"ambiguous", "alpha", "roman"} or b not in {"ambiguous", "alpha", "roman"}:
+        return False
+    if left.get("marker_case") != right.get("marker_case"):
+        return False
+    for decode in (_alpha_value, _roman_value):
+        x, y = decode(left["source_label"]), decode(right["source_label"])
+        if x is not None and y is not None and y == x + 1:
+            return True
+    return False
 
 
 def _continue_items_across_pages(pages: list[PageResult]) -> None:
