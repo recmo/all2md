@@ -134,6 +134,25 @@ def test_cli_processes_inputs_in_argument_order(monkeypatch, capsys):
     assert capsys.readouterr().out == "first.pdf.md\nsecond.pdf.md\n"
 
 
+def test_cli_continues_after_an_input_fails(monkeypatch, capsys):
+    calls = []
+
+    def fake_convert(source, *, force):
+        calls.append(source)
+        if source == Path("first.pdf"):
+            raise ValueError("bad input")
+        return Path(f"{source}.md")
+
+    monkeypatch.setattr(cli, "convert", fake_convert)
+
+    with pytest.raises(SystemExit) as error:
+        cli.main(["first.pdf", "second.pdf"])
+
+    assert error.value.code == 1
+    assert calls == [Path("first.pdf"), Path("second.pdf")]
+    assert capsys.readouterr().err == "pages2md: bad input\n"
+
+
 def test_parse_unlimited_output():
     markdown, blocks = parse_output(
         "<|det|>title [1, 2, 3, 4]<|/det|>Hello\n<|det|>text [5,6,7,8]<|/det|>World"

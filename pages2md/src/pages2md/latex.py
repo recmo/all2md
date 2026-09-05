@@ -14,7 +14,8 @@ _TEXT_GROUP = re.compile(
     r"\\(?:text|textbf|textit|textrm|textsf|texttt|operatorname)\{[^{}]*\}"
 )
 _MATH_FONT_GROUP = re.compile(
-    r"(\\(?:mathbb|mathbf|mathsf|mathrm|mathcal|mathit|mathtt)\{)([A-Za-z0-9 \t\n]+)(\})"
+    r"\\(?P<command>mathbb|mathbf|mathsf|mathrm|mathcal|mathit|mathtt)"
+    r"\{(?P<content>[A-Za-z0-9 \t\n]+)\}"
 )
 _UNICODE_COMMANDS = {
     # Greek letters, including the distinct LaTeX variant forms.
@@ -40,7 +41,6 @@ _UNICODE_COMMANDS = {
 _UNICODE_COMMAND = re.compile(
     r"\\(?:" + "|".join(sorted(map(re.escape, _UNICODE_COMMANDS), key=len, reverse=True)) + r")(?![A-Za-z])"
 )
-_MATHBB_GROUP = re.compile(r"\\mathbb\{([A-Za-z])\}")
 _SINGLE_SCRIPT = re.compile(r"([_^])\{([A-Za-z0-9α-ωΑ-Ω])\}")
 _DOUBLE_STRUCK = {
     **dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "𝔸𝔹ℂ𝔻𝔼𝔽𝔾ℍ𝕀𝕁𝕂𝕃𝕄ℕ𝕆ℙℚℝ𝕊𝕋𝕌𝕍𝕎𝕏𝕐ℤ")),
@@ -101,7 +101,6 @@ def _clean_math(value: str) -> str:
     value = re.sub(r"(?<!\\)\{[ \t]+", "{", value)
     value = re.sub(r"[ \t]+\}(?!\})", "}", value)
     value = _MATH_FONT_GROUP.sub(_clean_math_font_group, value)
-    value = _MATHBB_GROUP.sub(lambda match: _DOUBLE_STRUCK[match.group(1)], value)
     value = _UNICODE_COMMAND.sub(lambda match: _UNICODE_COMMANDS[match.group(0)[1:]], value)
     value = re.sub(r"([⟨⌊⌈])[ \t]+", r"\1", value)
     value = re.sub(r"[ \t]+([⟩⌋⌉])", r"\1", value)
@@ -114,5 +113,7 @@ def _clean_math(value: str) -> str:
 
 
 def _clean_math_font_group(match: re.Match[str]) -> str:
-    content = re.sub(r"[ \t\n]+", "", match.group(2))
-    return f"{match.group(1)}{content}{match.group(3)}"
+    content = re.sub(r"[ \t\n]+", "", match.group("content"))
+    if match.group("command") == "mathbb" and len(content) == 1:
+        return _DOUBLE_STRUCK.get(content, match.group(0))
+    return f"\\{match.group('command')}{{{content}}}"
