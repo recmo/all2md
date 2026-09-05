@@ -4,7 +4,9 @@ import fitz
 
 from pages2md.adapters import _is_page_backing_image
 from pages2md.model import Block, Link
-from pages2md.pipeline import _apply_links_to_blocks
+from pages2md.document import (
+    apply_links_to_blocks,
+)
 from pages2md.quality import (
     adjacent_overlap,
     math_syntax_errors,
@@ -93,9 +95,9 @@ def test_embedded_links_only_wrap_plain_text_nodes():
         "paragraph",
         "See [42](#page-57), not 142, then see 42 again.",
     )
-    _apply_links_to_blocks([block], [Link(text="42", target="#page-42")])
+    apply_links_to_blocks([block], [Link(text="42", target="#page-42")])
     assert block.markdown == "See [42](#page-57), not 142, then see [42](#page-42) again."
-    _apply_links_to_blocks([block], [Link(text="42", target="#page-42")])
+    apply_links_to_blocks([block], [Link(text="42", target="#page-42")])
     assert block.markdown.count("#page-42") == 1
 
 

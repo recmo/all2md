@@ -6,6 +6,8 @@ from typing import Any
 
 
 Box = tuple[float, float, float, float]
+FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
+FORMULA_KINDS = {"formula", "equation", "display_formula"}
 
 
 @dataclass
@@ -62,7 +64,7 @@ class Comparison:
 class PageResult:
     number: int
     image: str
-    visual_markdown: str
+    visual_markdown: str  # Rendered output cache; transformations edit blocks.
     blocks: list[Block]
     embedded: EmbeddedEvidence
     comparison: Comparison
@@ -74,7 +76,11 @@ class PageResult:
     recovery: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        canonical = value["visual"].get("canonical", {})
+        canonical.pop("blocks", None)
+        canonical.pop("markdown", None)
+        return value
 
 
 @dataclass

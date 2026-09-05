@@ -183,6 +183,10 @@ def verify_bundle(root: Path) -> Verification:
     if lint_errors:
         warnings.append("metadata reports Markdown lint failures")
         warnings.extend(f"markdown lint: {error}" for error in lint_errors)
+    for finding in metadata.get("math_validation", {}).get("diagnostics", []):
+        location = (f"{finding['path']}:{finding['line']}:{finding['column']}: "
+                    if "path" in finding else "")
+        warnings.append(f"latex {finding['category']}: {location}{finding['message']}")
     for failed in metadata.get("failed_pages", []):
         warnings.append(f"page {failed.get('page')} failed: {failed.get('error')}")
     warnings.extend(metadata.get("warnings", []))

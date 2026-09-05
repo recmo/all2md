@@ -11,7 +11,12 @@ from pages2md.lists import normalize_lists, parse_marker, validate_list_node
 from pages2md.markdown import page_markdown, strict_page_markdown
 from pages2md.model import Block, Comparison, EmbeddedEvidence, PageResult
 from pages2md.native import parse_native_observation
-from pages2md.pipeline import _normalize_document_blocks, convert
+from pages2md.document import (
+    normalize_document,
+)
+from pages2md.pipeline import (
+    convert,
+)
 from pages2md.verify import verify_bundle
 
 
@@ -36,6 +41,15 @@ def list_node(result: PageResult) -> dict:
     return result.blocks[0].metadata["list"]
 
 
+def test_list_grouping_preserves_embedded_repair_audit():
+    block = item(r"1. Use \(x\).", 100)
+    repair = {"kind": "inline_math", "visual": "x", "embedded": r"\(x\)"}
+    block.metadata["embedded_text_repairs"] = [repair]
+    result = page(1, [block])
+    normalize_lists([result])
+    assert result.blocks[0].metadata["embedded_text_repairs"] == [repair]
+
+
 def test_mixed_visual_and_markdown_bullets_become_one_compact_list():
     result = page(1, [
         item("• Zone of Incompetence", 100),
@@ -44,7 +58,7 @@ def test_mixed_visual_and_markdown_bullets_become_one_compact_list():
         item("- Zone of Genius", 190),
     ])
 
-    _normalize_document_blocks([result])
+    normalize_document([result])
 
     assert result.blocks[0].markdown == (
         "- Zone of Incompetence\n"
@@ -474,6 +488,69 @@ def test_marker_parser_rejects_embedded_or_word_like_markers():
     assert parse_marker("(a) A condition") is not None
 
 
+def test_equations_and_paragraphs_stay_inside_their_enclosing_list_item(tmp_path):
+    first_math = "\\[\n\\begin{aligned}\nx &= y \\\\\n  &= z\n\\end{aligned}\n\\]"
+    second_math = r"\[f(x)=0\]"
+    result = page(1, [
+        item("1. Construct an object,", 100),
+        Block("formula", first_math, (200, 130, 600, 170), source_pages=[1]),
+        item("Consequently, the object satisfies", 180, left=120),
+        Block("formula", second_math, (200, 210, 600, 230), source_pages=[1]),
+        item("This finishes the construction.", 240, left=120),
+        item("2. Recover the answer.", 270),
+        item("The following discussion is outside the list.", 310, left=80),
+    ])
+    normalize_lists([result])
+    assert len(result.blocks) == 2
+    node = result.blocks[0].metadata["list"]
+    assert [i["source_ordinal"] for i in node["items"]] == [1, 2]
+    body = node["items"][0]["blocks"]
+    assert [b["kind"] for b in body] == ["paragraph", "formula", "paragraph", "formula", "paragraph"]
+    assert body[1]["markdown"] == first_math
+    assert body[3]["markdown"] == second_math
+    assert body[1]["bbox"] == [200, 130, 600, 170]
+    assert node["items"][0]["bbox"] == [100, 100, 800, 264]
+    assert not validate_list_node(node)
+    before = deepcopy(result.blocks)
+    normalize_lists([result])
+    assert result.blocks == before
+    path = tmp_path / "book.md"
+    path.write_text("# Results\n\n" + strict_page_markdown(result, []) + "\n")
+    lint = format_and_lint([path])
+    assert not lint.lint_errors
+    if lint.math_validation.status == "checked":
+        assert lint.math_validation.checked == 2
+        assert not lint.math_validation.diagnostics
+
+
+@pytest.mark.parametrize("change", ["no_sibling", "heading", "outdent", "wrong_ordinal", "other_margin", "missing_geometry"])
+def test_formula_does_not_extend_a_list_without_enclosing_structural_evidence(change):
+    blocks = [item("1. First item.", 100),
+              Block("formula", r"\[x=y\]", (200, 130, 600, 150)),
+              item("An explanation.", 160, left=120),
+              item("2. Second item.", 190)]
+    if change == "no_sibling": blocks.pop()
+    elif change == "heading": blocks[2].kind = "heading"
+    elif change == "outdent": blocks[2].bbox = (80, 160, 800, 184)
+    elif change == "wrong_ordinal": blocks[-1].markdown = "4. A different sequence."
+    elif change == "other_margin": blocks[-1].bbox = (200, 190, 800, 214)
+    elif change == "missing_geometry": blocks[1].bbox = None
+    result = page(1, blocks)
+    normalize_lists([result])
+    assert any(block.kind == "formula" for block in result.blocks)
+
+
+@pytest.mark.parametrize(("first", "second"), [("100.", "101."), ("(a)", "(b)"), ("(i)", "(ii)"), ("•", "•")])
+def test_enclosed_math_is_not_specific_to_decimal_two_item_lists(first, second):
+    result = page(1, [item(f"{first} First.", 100),
+                      Block("formula", r"\[a=b\]", (200, 130, 600, 150)),
+                      item(f"{second} Second.", 160)])
+    normalize_lists([result])
+    node = list_node(result)
+    assert node["items"][0]["blocks"][1]["kind"] == "formula"
+    assert len(node["items"]) == 2
+
+
 def test_list_output_is_stable_without_publishing_intermediates(tmp_path):
     class ListOcr:
         identity = {"engine": "fixture-list", "model": "fixture", "revision": "1"}
@@ -505,7 +582,7 @@ def test_list_output_is_stable_without_publishing_intermediates(tmp_path):
         convert(source, backend=backend)
     repeated = convert(source, force=True, backend=backend)
 
-    assert backend.calls >= 2
+    assert backend.calls == 1
     assert repeated.read_bytes() == first
     assert "•" not in first.decode()
     assert bundle == tmp_path / "fixture.md"

@@ -1,0 +1,7 @@
+{
+  "name": "pages2md-math-validation",
+  "private": true,
+  "dependencies": {
+    "katex": "0.16.28"
+  }
+}

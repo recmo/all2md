@@ -11,14 +11,42 @@ from PIL import Image, ImageDraw
 import pytest
 
 import pages2md.pipeline as pipeline
+from pages2md.assets import AssetStore
 from pages2md.chapters import detect_chapters
-from pages2md.cli import parser
+from pages2md.cli import main as cli_main, parser
 from pages2md.compare import compare_text
 from pages2md.ocr import GUNDAM_PROMPT, MULTI_PAGE_PROMPT, MlxUnlimitedOcr, _align_token_confidence, parse_output, split_multi_page_output
 from pages2md.native import parse_native_observation, reconcile_observations
-from pages2md.adapters import _link_target, detect_kind
+from pages2md.embedded import assess_embedded
+from pages2md.adapters import _link_target, _raw_text_blocks, detect_kind, open_document
 from pages2md.formatting import FormatResult
-from pages2md.pipeline import _align_multi_results, _apply_links_to_blocks, _canonicalize_figure_blocks, _convert_workspace, _intermediate_root, _is_visually_blank, _merge_continued_tables, _normalize_document_blocks, _ocr_groups, _repair_runaway_repetition, convert
+from pages2md.mathlint import MathLintResult
+from pages2md.pipeline import (
+    _align_multi_results,
+    _canonicalize_figure_blocks,
+    _convert_workspace,
+    _has_embedded_coverage_gap,
+    _intermediate_root,
+    _is_visually_blank,
+    _ocr_groups,
+    _repair_runaway_repetition,
+    _restore_embedded_proof_marks,
+    _strip_review_metadata,
+    convert,
+)
+from pages2md.document import (
+    apply_links_to_blocks,
+    merge_continued_tables,
+    normalize_document,
+)
+from pages2md.reconciliation import (
+    _repair_embedded_digit_runs,
+    _repair_embedded_math_structure,
+    _repair_embedded_short_insertions,
+    _repair_embedded_word_tokens,
+    _repair_malformed_math_syntax,
+    _restore_embedded_math_alphabets,
+)
 from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult, SourceDocument, SourcePage
 from pages2md.verify import verify_bundle
 
@@ -106,14 +134,49 @@ class InterruptingFixtureOcr:
         raise AssertionError("Gundam recovery is not expected for matching fixture text")
 
 
-def test_cli_has_one_input_and_force_only():
-    arguments = parser().parse_args(["paper.pdf", "--force"])
+def test_cli_has_one_input_force_and_embedded_text_opt_out():
+    arguments = parser().parse_args(
+        ["paper.pdf", "--force", "--ignore-embedded-text"]
+    )
     assert arguments.input == Path("paper.pdf")
     assert arguments.force is True
+    assert arguments.ignore_embedded_text is True
     with pytest.raises(SystemExit):
         parser().parse_args(["convert", "paper.pdf"])
     with pytest.raises(SystemExit):
         parser().parse_args(["paper.pdf", "--output", "result"])
+
+
+def test_cli_passes_embedded_text_opt_out_to_conversion(monkeypatch, capsys):
+    captured = {}
+
+    def fake_convert(source, *, force, ignore_embedded_text):
+        captured.update({
+            "source": source,
+            "force": force,
+            "ignore_embedded_text": ignore_embedded_text,
+        })
+        return Path("output.md")
+
+    monkeypatch.setattr("pages2md.cli.convert", fake_convert)
+    cli_main(["paper.pdf", "--ignore-embedded-text"])
+
+    assert captured == {
+        "source": Path("paper.pdf"),
+        "force": False,
+        "ignore_embedded_text": True,
+    }
+    assert capsys.readouterr().out == "output.md\n"
+
+
+def test_intermediate_root_discovers_legacy_direct_bundle(tmp_path: Path):
+    pdf = tmp_path / "paper.pdf"
+    pdf.touch()
+    legacy = tmp_path / "paper.pages2md"
+    legacy.mkdir()
+    (legacy / "metadata.json").write_text(json.dumps({"source": str(pdf.resolve())}))
+
+    assert _intermediate_root(pdf) == legacy
 
 
 def test_file_workspace_name_strips_one_extension(tmp_path: Path):
@@ -189,7 +252,7 @@ def test_clean_gundam_replaces_a_table_from_a_truncated_primary():
     assert "visual_truncated" in warnings
 
 
-def test_three_pass_consensus_selects_majority_and_marks_disagreement():
+def test_three_pass_consensus_selects_majority_and_warns_on_disagreement():
     primary = parse_native_observation(
         r"<|det|>text [10,10,900,200]<|/det|>The value is \( a, a = e \).",
         mode="multi_base",
@@ -205,9 +268,31 @@ def test_three_pass_consensus_selects_majority_and_marks_disagreement():
     ]
     blocks, provenance, warnings = reconcile_observations(primary, candidates)
     assert r"a_i a = e" in blocks[0].markdown
-    assert blocks[0].metadata["review_required"] is True
+    assert not any(key.startswith("review_") for key in blocks[0].metadata)
     assert provenance[0]["action"] == "selected_ocr_consensus"
     assert "visual_ocr_disagreement" in warnings
+
+
+def test_review_metadata_is_not_published():
+    block = Block(
+        "paragraph",
+        "Uncertain text.",
+        metadata={
+            "review_required": True,
+            "review_reason": "targeted_ocr_unresolved",
+            "review_confidence": 0.4,
+            "review_consensus": 0.8,
+            "review_candidates": ["base", "detail"],
+            "review_base": "text",
+            "review_detail": "test",
+            "uncertain_spans": [{"start": 0, "end": 9}],
+        },
+    )
+
+    _strip_review_metadata([block])
+
+    assert not any(key.startswith("review_") for key in block.metadata)
+    assert block.metadata["uncertain_spans"] == [{"start": 0, "end": 9}]
 
 
 def test_token_confidence_is_aligned_to_exact_decoded_pieces():
@@ -250,6 +335,93 @@ def test_targeted_detail_uses_embedded_evidence_for_confident_base_error():
     assert provenance[0]["action"] == "selected_targeted_detail"
     assert not blocks[0].metadata.get("review_required")
     assert "visual_targeted_ocr_unresolved" not in warnings
+
+
+def test_targeted_detail_splices_only_native_supported_difference():
+    primary = parse_native_observation(
+        r"<|det|>text [100,100,900,200]<|/det|>Correct prose; \(q(T) = 0 \mod T^{m-d} b\).",
+        mode="multi_base",
+        source_pages=[5],
+    )
+    primary.blocks[0].metadata["uncertain_spans"] = [
+        {"start": 30, "end": 39, "text": "T^{m-d} b", "confidence": 0.4}
+    ]
+    detail = parse_native_observation(
+        r"<|det|>text [100,100,900,200]<|/det|>Wrong prose; \(q(T) = 0 \mod T^{m-db}\).",
+        mode="gundam_detail",
+        source_pages=[5],
+        generation={"target_block_indices": [0]},
+    )
+
+    blocks, provenance, _ = reconcile_observations(
+        primary,
+        [detail],
+        embedded_text="Correct prose; q(T) = 0 mod Tm-db.",
+    )
+
+    assert blocks[0].markdown.startswith("Correct prose")
+    assert r"T^{m-db}" in blocks[0].markdown
+    assert provenance[0]["action"] == "selected_targeted_spans"
+
+
+def test_clean_candidate_recovers_reliably_covered_missing_region():
+    primary = parse_native_observation(
+        "<|det|>text [100,300,900,360]<|/det|>The following paragraph remains.",
+        mode="multi_base",
+        source_pages=[9],
+    )
+    failed_detail = parse_native_observation(
+        "loop phrase " * 20,
+        mode="gundam_detail",
+        source_pages=[9],
+        generation={"target_block_indices": [0], "finish_reason": "length"},
+    )
+    recovery = parse_native_observation(
+        "loop phrase " * 20
+        + "<|det|>text [100,100,900,160]<|/det|>The omitted transition paragraph."
+        "<|det|>text [100,300,900,360]<|/det|>The following paragraph remains.",
+        mode="single_page_base",
+        source_pages=[9],
+    )
+    embedded = EmbeddedEvidence(
+        text="The omitted transition paragraph. The following paragraph remains.",
+        extractor="pymupdf",
+        blocks=[
+            {
+                "text": "The omitted transition paragraph.",
+                "bbox": [100, 100, 900, 160],
+                "lines": [{
+                    "text": "The omitted transition paragraph.",
+                    "bbox": [100, 100, 900, 160],
+                    "spans": [{
+                        "font": "Times",
+                        "chars": [
+                            {"text": character, "bbox": [110 + index * 8, 110, 117 + index * 8, 130]}
+                            for index, character in enumerate("The omitted transition paragraph.")
+                        ],
+                    }],
+                }],
+            },
+            {
+                "text": "The following paragraph remains.",
+                "bbox": [100, 300, 900, 360],
+                "lines": [{"text": "The following paragraph remains.", "bbox": [100, 300, 900, 360], "spans": []}],
+            },
+        ],
+    )
+
+    blocks, provenance, warnings = reconcile_observations(
+        primary,
+        [failed_detail, recovery],
+        embedded=embedded,
+    )
+
+    assert [block.markdown for block in blocks] == [
+        "The omitted transition paragraph.",
+        "The following paragraph remains.",
+    ]
+    assert provenance[0]["action"] == "recovered_uncovered_region"
+    assert "visual_uncovered_region_recovered" in warnings
 
 
 def test_recovery_keeps_ungrounded_content_until_document_evidence_filtering():
@@ -498,7 +670,7 @@ def test_repeated_headers_are_removed_and_cross_page_paragraphs_join():
                 comparison=Comparison(),
             )
         )
-    _normalize_document_blocks(pages)
+    normalize_document(pages)
     assert all(all(block.kind != "header" for block in page.blocks) for page in pages)
     assert pages[0].blocks[-1].markdown == "A sentence that continues on the following page."
     assert pages[0].blocks[-1].metadata["cross_page_paragraph"] is True
@@ -633,6 +805,92 @@ def test_pdf_link_targets_accept_string_page_numbers():
     assert _link_target({"page": "named-destination"}) == ""
 
 
+def test_pdf_embedded_text_retains_character_and_font_geometry():
+    document = fitz.open()
+    page = document.new_page(width=600, height=800)
+    page.insert_text((60, 80), "Proof done")
+
+    blocks = _raw_text_blocks(page)
+
+    assert blocks[0]["text"] == "Proof done"
+    span = blocks[0]["lines"][0]["spans"][0]
+    assert span["font"]
+    assert span["size"] > 0
+    assert "".join(character["text"] for character in span["chars"]) == "Proof done"
+    assert all(len(character["bbox"]) == 4 for character in span["chars"])
+    document.close()
+
+
+def test_ignore_embedded_text_keeps_pdf_images_metadata_and_outline(tmp_path: Path):
+    pdf = tmp_path / "scan.pdf"
+    image_path = tmp_path / "source.png"
+    Image.new("RGB", (100, 100), "navy").save(image_path)
+    source = fitz.open()
+    page = source.new_page(width=612, height=792)
+    page.insert_text((72, 72), "stale OCR text layer")
+    page.insert_image(fitz.Rect(100, 300, 250, 450), filename=str(image_path))
+    source.set_metadata({"title": "Scanned report"})
+    source.set_toc([[1, "Report", 1]])
+    source.save(pdf)
+    source.close()
+
+    opened = open_document(
+        pdf,
+        tmp_path / "work",
+        AssetStore(tmp_path / "assets"),
+        dpi=72,
+        ignore_embedded_text=True,
+    )
+
+    assert opened.metadata["title"] == "Scanned report"
+    assert opened.outline == [{"level": 1, "title": "Report", "page": 1}]
+    assert opened.pages[0].embedded == EmbeddedEvidence(extractor="ignored")
+    assert len(opened.pages[0].source_assets) == 1
+
+
+def test_ignore_embedded_text_reassembles_cached_ocr_without_model_call(tmp_path: Path):
+    class CountingFixture(FixtureOcr):
+        def __init__(self):
+            self.calls = 0
+
+        def recognize(self, image: Path):
+            self.calls += 1
+            return super().recognize(image)
+
+    pdf = tmp_path / "mode.pdf"
+    source = fitz.open()
+    page = source.new_page(width=612, height=792)
+    page.insert_text((72, 72), "stale OCR text layer")
+    source.save(pdf)
+    source.close()
+    backend = CountingFixture()
+    output = tmp_path / "workspace"
+
+    first = _convert_workspace(pdf, output, backend=backend)
+    assert backend.calls == 1
+    second = _convert_workspace(
+        pdf,
+        output,
+        backend=backend,
+        ignore_embedded_text=True,
+    )
+
+    assert second == first
+    assert backend.calls == 1
+    metadata = json.loads((second / "metadata.json").read_text())
+    page_data = json.loads((second / "pages/page-0001.json").read_text())
+    assert metadata["ignore_embedded_text"] is True
+    assert "embedded_text" not in metadata["ocr_fingerprint"]
+    assert metadata["assembly_fingerprint"]["embedded_text"] == "ignored"
+    assert page_data["embedded"] == {
+        "text": "",
+        "blocks": [],
+        "links": [],
+        "extractor": "ignored",
+    }
+    assert "embedded_text_absent" not in metadata["warnings"]
+
+
 def test_blank_pages_are_not_grouped_with_content(tmp_path: Path):
     blank = tmp_path / "blank.png"
     content = tmp_path / "content.png"
@@ -728,7 +986,7 @@ def test_document_normalization_drops_running_matter_without_inventing_semantics
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert [(block.kind, block.markdown) for block in page.blocks] == [
         ("paragraph", "1.28. Definition. A ring is a set with two binary operations."),
@@ -753,7 +1011,7 @@ def test_document_normalization_drops_repeated_ungrounded_running_headers():
         for number in (1, 2)
     ]
 
-    _normalize_document_blocks(pages)
+    normalize_document(pages)
 
     assert [[block.markdown for block in page.blocks] for page in pages] == [
         ["Exercise content for page 1."],
@@ -774,7 +1032,7 @@ def test_document_normalization_drops_unsupported_ungrounded_preamble():
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert [block.markdown for block in page.blocks] == ["Chapter 3"]
     assert "visual_unsupported_ungrounded_text" in page.warnings
@@ -794,7 +1052,7 @@ def test_document_normalization_keeps_embedded_supported_ungrounded_content():
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert page.blocks[0].markdown == continuation
     assert page.blocks[0].metadata["embedded_token_support"] == 1.0
@@ -810,7 +1068,7 @@ def test_document_normalization_keeps_ungrounded_only_result_as_best_available_o
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert [block.markdown for block in page.blocks] == ["Only OCR result"]
 
@@ -832,7 +1090,7 @@ def test_document_normalization_cleans_prose_without_rewriting_math():
         embedded=EmbeddedEvidence(),
         comparison=Comparison(),
     )
-    _normalize_document_blocks([page])
+    normalize_document([page])
     assert page.blocks[0].markdown == r"Proof. Let \( J \) be an ideal and \( J = \langle ra : r \in R \rangle \)."
     assert page.blocks[1].kind == "list"
     assert page.blocks[1].markdown == "- **(i)** First case.\n- **(ii)** Second case."
@@ -854,7 +1112,7 @@ def test_document_normalization_does_not_infer_caption_from_wording():
         comparison=Comparison(),
     )
 
-    _normalize_document_blocks([page])
+    normalize_document([page])
 
     assert [block.kind for block in page.blocks] == ["figure", "paragraph"]
     assert page.blocks[1].markdown == "Figure 3 discusses the result."
@@ -1047,7 +1305,7 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
     document.close()
 
     original_page_result = pipeline._page_result
-    original_normalize = pipeline._normalize_document_blocks
+    original_normalize = pipeline.normalize_document
     interrupted = False
     normalized_page_sets = []
 
@@ -1063,7 +1321,7 @@ def test_page_checkpoint_survives_interruption_and_resume(tmp_path: Path, monkey
         return original_normalize(pages)
 
     monkeypatch.setattr(pipeline, "_page_result", fail_once)
-    monkeypatch.setattr(pipeline, "_normalize_document_blocks", record_normalization)
+    monkeypatch.setattr(pipeline, "normalize_document", record_normalization)
     backend = FixtureOcr()
     try:
         convert(pdf, backend=backend)
@@ -1141,6 +1399,27 @@ def test_markdown_lint_findings_are_warnings_and_do_not_suppress_output(tmp_path
     assert "markdown lint: book.md:1: MD999 test finding" in captured.err
 
 
+@pytest.mark.parametrize("category", ["syntax", "unsupported", "validator_unavailable"])
+def test_latex_diagnostics_are_metadata_warnings_not_review_markers(tmp_path, monkeypatch, capsys, category):
+    pdf = tmp_path / "math-linted.pdf"
+    with fitz.open() as document:
+        document.new_page().insert_text((72, 72), "A formula.")
+        document.save(pdf)
+    finding = {"path": "book.md", "line": 3, "column": 5,
+               "category": category, "message": "test finding"}
+    validation = MathLintResult(status="checked", engine="katex-test", checked=1,
+                                diagnostics=[finding])
+    monkeypatch.setattr("pages2md.pipeline.format_and_lint",
+                        lambda paths: FormatResult(math_validation=validation))
+    output = convert(pdf, backend=FixtureOcr())
+    assert output.is_file()
+    assert "pages2md-review" not in output.read_text()
+    metadata_path, = _intermediate_root(pdf).rglob("metadata.json")
+    metadata = json.loads(metadata_path.read_text())
+    assert metadata["math_validation"]["diagnostics"] == [finding]
+    assert f"latex {category}: book.md:3:5: test finding" in capsys.readouterr().err
+
+
 def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path):
     image_path = tmp_path / "page.png"
     image = Image.new("RGB", (1000, 1000), "white")
@@ -1159,12 +1438,462 @@ def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path)
     assert blocks[0].bbox == (284.0, 284.0, 716.0, 716.0)
     assert blocks[0].markdown == "Important caption"
     assert blocks[1].bbox == (342.0, 342.0, 658.0, 658.0)
-    assert blocks[1].metadata["review_reason"] == "figure_crop_touches_edge"
+    assert not any(key.startswith("review_") for block in blocks for key in block.metadata)
     assert warnings == [
         "visual_blank_figure_crop_rejected",
         "visual_duplicate_figure_crop_rejected",
         "visual_figure_crop_may_be_clipped",
     ]
+
+
+def test_pdf_proof_glyph_is_reclassified_instead_of_cropped_as_figure(tmp_path: Path):
+    image_path = tmp_path / "page.png"
+    image = Image.new("RGB", (1000, 1000), "white")
+    ImageDraw.Draw(image).rectangle((880, 500, 892, 514), outline="black", width=2)
+    image.save(image_path)
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "□",
+        "bbox": [880, 500, 892, 514],
+        "lines": [{
+            "spans": [{
+                "font": "txsym",
+                "chars": [{"text": "□", "bbox": [880, 500, 892, 514]}],
+            }],
+        }],
+    }])
+    blocks = [Block("figure", "", bbox=(878, 498, 894, 516))]
+
+    warnings = _canonicalize_figure_blocks(blocks, image_path, embedded)
+
+    assert warnings == ["visual_text_glyph_figure_reclassified"]
+    assert blocks[0].kind == "paragraph"
+    assert blocks[0].markdown == r"\(\square\)"
+    assert blocks[0].asset_id is None
+    assert blocks[0].metadata["reclassification_reason"] == "pdf_text_glyph_geometry"
+
+
+def test_omitted_pdf_proof_glyph_is_inserted_in_reading_order():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "Proof. Done. □",
+        "bbox": [100, 100, 900, 220],
+        "lines": [{
+            "spans": [{
+                "font": "txsym",
+                "chars": [{"text": "□", "bbox": [880, 190, 892, 204]}],
+            }],
+        }],
+    }])
+    blocks = [
+        Block("paragraph", "Proof. Done.", bbox=(100, 100, 870, 205)),
+        Block("heading", "Next", bbox=(100, 250, 400, 280)),
+    ]
+
+    warnings = _restore_embedded_proof_marks(blocks, embedded, 7)
+
+    assert warnings == ["visual_embedded_proof_mark_recovered"]
+    assert [block.markdown for block in blocks] == ["Proof. Done.", r"\(\square\)", "Next"]
+    assert blocks[1].source_pages == [7]
+
+
+def test_pdf_text_repairs_only_confirmed_split_numeric_literals():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "76790 / 2^18 is approximately 0.2929306",
+        "bbox": [100, 100, 900, 200],
+    }])
+    block = Block(
+        "formula",
+        r"\frac {7 6 7 9 0}{2 ^ {1 8}} \approx 0. 2 9 2 9 3 0 6; unrelated 4 2",
+        bbox=(100, 100, 900, 200),
+    )
+
+    warnings = _repair_embedded_digit_runs([block], embedded)
+
+    assert warnings == ["visual_embedded_numeric_repair"]
+    assert "76790" in block.markdown
+    assert "{18}" in block.markdown
+    assert "0.2929306" in block.markdown
+    assert "unrelated 4 2" in block.markdown
+
+
+def test_pdf_text_repairs_confirmed_hasse_derivative_brackets():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "P[j](X)",
+        "bbox": [100, 100, 900, 200],
+    }])
+    blocks = [
+        Block("formula", r"P ^ {\{j \}} (X)", bbox=(100, 100, 900, 200)),
+        Block("formula", r"P ^ {\lfloor j \rfloor} (X)", bbox=(100, 100, 900, 200)),
+        Block("formula", r"P ^ {\lfloor k \rfloor} (X)", bbox=(100, 100, 900, 200)),
+    ]
+
+    warnings = _repair_embedded_math_structure(blocks, embedded)
+
+    assert warnings == ["visual_embedded_math_structure_repair"]
+    assert blocks[0].markdown == r"P ^ {[j ]} (X)"
+    assert blocks[1].markdown == r"P ^ {[ j ]} (X)"
+    assert blocks[2].markdown == r"P ^ {\lfloor k \rfloor} (X)"
+
+
+def test_pdf_text_repairs_close_prose_tokens_but_not_inline_math():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "Kopparty [ACFY25] proves the claim for Q.",
+        "bbox": [100, 100, 900, 200],
+    }])
+    block = Block(
+        "ref_text",
+        r"Kopparaty [ACY25] proves the claim for \(P\).",
+        bbox=(100, 100, 900, 200),
+    )
+
+    warnings = _repair_embedded_word_tokens([block], embedded)
+
+    assert warnings == ["visual_embedded_lexical_repair"]
+    assert block.markdown == r"Kopparty [ACFY25] proves the claim for \(P\)."
+
+    lower = Block("paragraph", "The folded result.", bbox=(100, 100, 900, 200))
+    typo = EmbeddedEvidence(blocks=[{
+        "text": "The foleded result.",
+        "bbox": [100, 100, 900, 200],
+    }])
+    assert _repair_embedded_word_tokens([lower], typo) == []
+    assert lower.markdown == "The folded result."
+
+
+def test_pdf_text_restores_short_anchored_omission_near_uncertain_ocr():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "4 Invoke Theorem 2.1 to find a list L of polynomials P of degree at most k - 1 for which",
+        "bbox": [100, 400, 900, 450],
+        "lines": [{
+            "spans": [{
+                "font": "txsys",
+                "chars": [{"text": "L", "bbox": [370, 410, 385, 440]}],
+            }],
+        }],
+    }])
+    target = Block(
+        "paragraph",
+        r"4 Invoke Theorem 2.1 to find a polynomials \(P\) of degree at most \(k - 1\) for which",
+        bbox=(100, 400, 900, 450),
+        metadata={
+            "uncertain_spans": [{"start": 30, "end": 42, "confidence": 0.68}],
+        },
+    )
+    support = Block("paragraph", r"6 return \(\mathcal{L}\)", bbox=(100, 500, 300, 530))
+
+    warnings = _repair_embedded_short_insertions([target, support], embedded)
+
+    assert warnings == ["visual_embedded_insertion_repair"]
+    assert target.markdown == (
+        r"4 Invoke Theorem 2.1 to find a list \(\mathcal {L}\) of polynomials "
+        r"\(P\) of degree at most \(k - 1\) for which"
+    )
+    assert not any(key.startswith("review_") for key in target.metadata)
+    assert "uncertain_spans" not in target.metadata
+
+
+def test_pdf_text_does_not_insert_into_confident_or_weakly_anchored_ocr():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "The trusted embedded layer adds several unsupported words before the result.",
+        "bbox": [100, 100, 900, 200],
+    }])
+    confident = Block(
+        "paragraph",
+        "The result.",
+        bbox=(100, 100, 900, 200),
+    )
+    uncertain = Block(
+        "paragraph",
+        "The result.",
+        bbox=(100, 100, 900, 200),
+        metadata={"uncertain_spans": [{"start": 4, "end": 10, "confidence": 0.5}]},
+    )
+
+    assert _repair_embedded_short_insertions([confident], embedded) == []
+    assert _repair_embedded_short_insertions([uncertain], embedded) == []
+    assert confident.markdown == "The result."
+    assert uncertain.markdown == "The result."
+
+    glyph = EmbeddedEvidence(blocks=[{
+        "text": "The stable ε result remains valid.",
+        "bbox": [100, 100, 900, 200],
+    }])
+    missing_glyph = Block(
+        "paragraph",
+        "The stable result remains valid.",
+        bbox=(100, 100, 900, 200),
+        metadata={"uncertain_spans": [{"start": 10, "end": 18, "confidence": 0.5}]},
+    )
+    assert _repair_embedded_short_insertions([missing_glyph], glyph) == []
+    assert missing_glyph.markdown == "The stable result remains valid."
+
+    spelling = EmbeddedEvidence(blocks=[{
+        "text": "Explicit folded reed-solomon codes achieve the bound.",
+        "bbox": [100, 100, 900, 200],
+    }])
+    misspelled = Block(
+        "reference",
+        "Explicit folded red-solomon codes achieve the bound.",
+        bbox=(100, 100, 900, 200),
+        metadata={"uncertain_spans": [{"start": 16, "end": 27, "confidence": 0.5}]},
+    )
+    assert _repair_embedded_short_insertions([misspelled], spelling) == [
+        "visual_embedded_insertion_repair"
+    ]
+    assert misspelled.markdown == "Explicit folded reed-solomon codes achieve the bound."
+
+
+def test_pdf_math_font_restores_only_unambiguous_calligraphic_letters():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "Q = B + F",
+        "bbox": [100, 100, 900, 200],
+        "lines": [{
+            "spans": [
+                {"font": "txsys", "chars": [{"text": "Q", "bbox": [120, 120, 140, 150]}]},
+                {"font": "txsys", "chars": [{"text": "B", "bbox": [300, 120, 320, 150]}]},
+                {"font": "NewTXMI", "chars": [{"text": "F", "bbox": [480, 120, 500, 150]}]},
+            ],
+        }],
+    }])
+    block = Block("formula", r"\(Q = B + F\)", bbox=(100, 100, 900, 200))
+
+    warnings = _restore_embedded_math_alphabets([block], embedded)
+
+    assert warnings == ["visual_embedded_math_alphabet_repair"]
+    assert block.markdown == r"\(\mathcal {Q} = \mathcal {B} + F\)"
+
+
+def test_pdf_math_font_repairs_the_aligned_occurrence_only():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "Q(Q)",
+        "bbox": [100, 100, 900, 200],
+        "lines": [{
+            "spans": [
+                {"font": "txsys", "chars": [{"text": "Q", "bbox": [120, 120, 140, 150]}]},
+                {"font": "NewTXMI", "chars": [{"text": "𝑄", "bbox": [180, 120, 200, 150]}]},
+            ],
+        }],
+    }])
+    block = Block("formula", r"\(Q(Q)\)", bbox=(100, 100, 900, 200))
+
+    _restore_embedded_math_alphabets([block], embedded)
+
+    assert block.markdown == r"\(\mathcal {Q}(Q)\)"
+
+
+def test_pdf_math_font_removes_ocr_style_from_ordinary_math_letters():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "Q(T,Y,E)",
+        "bbox": [100, 100, 900, 200],
+        "lines": [{
+            "spans": [{
+                "font": "NewTXMI",
+                "chars": [
+                    {"text": letter, "bbox": [120 + index * 30, 120, 140 + index * 30, 150]}
+                    for index, letter in enumerate("QTYE")
+                ],
+            }],
+        }],
+    }])
+    block = Block(
+        "formula",
+        r"\(\mathcal {Q}(\mathcal {T},\mathcal {Y},\mathcal {E})\)",
+        bbox=(100, 100, 900, 200),
+    )
+
+    warnings = _restore_embedded_math_alphabets([block], embedded)
+
+    assert warnings == ["visual_embedded_math_alphabet_repair"]
+    assert block.markdown == r"\(Q(T,Y,E)\)"
+
+
+def test_pdf_math_font_abstains_from_letter_changes_without_context():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "F I",
+        "bbox": [100, 100, 900, 200],
+        "lines": [{
+            "spans": [
+                {"font": "NewTXMI", "chars": [{"text": "F", "bbox": [120, 120, 140, 150]}]},
+                {"font": "txsys", "chars": [{"text": "I", "bbox": [180, 120, 200, 150]}]},
+            ],
+        }],
+    }])
+    block = Block("formula", r"\(F^T\)", bbox=(100, 100, 900, 200))
+
+    warnings = _restore_embedded_math_alphabets([block], embedded)
+
+    assert warnings == []
+    assert block.markdown == r"\(F^T\)"
+
+
+def test_pdf_math_glyph_repairs_use_local_anchors_and_stay_inside_math():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "The prose typo stays. (-1)j+1 Tj Yj and k > ⌈ε−3/θ⌉.",
+        "bbox": [100, 100, 900, 200],
+    }])
+    block = Block(
+        "paragraph",
+        r"The prose typu stays. \((-1)^{i+1} T^j Y_j\) and \(k > \lfloor \varepsilon^{-3/\theta} \rfloor\).",
+        bbox=(100, 100, 900, 200),
+        metadata={"uncertain_spans": [{"start": 31, "end": 32, "confidence": 0.5}]},
+    )
+
+    warnings = _repair_embedded_math_structure([block], embedded)
+
+    assert warnings == ["visual_embedded_math_structure_repair"]
+    assert block.markdown == (
+        r"The prose typu stays. \((-1)^{j+1} T^j Y_j\) and "
+        r"\(k > \lceil \varepsilon^{-3/\theta} \rceil\)."
+    )
+
+
+def test_pdf_math_glyph_does_not_turn_operator_commands_into_pdf_font_letters():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "P(X)=l i=0 ai Xi",
+        "bbox": [100, 100, 900, 200],
+    }])
+    block = Block(
+        "formula",
+        r"\[P(X)=\sum_{i=0} a_i X^i\]",
+        bbox=(100, 100, 900, 200),
+    )
+
+    assert _repair_embedded_math_structure([block], embedded) == []
+    assert r"\sum" in block.markdown
+
+
+def test_pdf_math_glyph_ignores_embedded_vector_accent_encoding():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "q b, ®e (T) is a coefficient",
+        "bbox": [100, 100, 900, 200],
+    }])
+    block = Block(
+        "formula",
+        r"\[q_{b, \vec {c}}(T)\text{ is a coefficient}\]",
+        bbox=(100, 100, 900, 200),
+    )
+
+    warnings = _repair_embedded_math_structure([block], embedded)
+
+    assert warnings == ["visual_embedded_math_structure_repair"]
+    assert r"\vec {e}" in block.markdown
+
+
+def test_pdf_math_structure_uses_script_geometry_and_consistent_binders():
+    from test_alignment import evidence
+    embedded = evidence([
+        ("q(T) ≡ 0 mod ", 100, 150, 11, "Times-Roman"),
+        ("T", 300, 150, 11, "Times-Roman"),
+        ("m−db", 313, 143, 8, "Times-Roman"),
+        ("; ∑j=1d (-1)j+1 Tj Yj", 350, 150, 11, "Times-Roman"),
+    ])
+    block = Block(
+        "formula",
+        r"\[q(T) \equiv 0 \pmod {T ^ {m - d} b}; "
+        r"\sum_{i=1}^{d} (-1)^{j+1} T^j Y_j\]",
+        bbox=(100, 100, 900, 220),
+    )
+
+    warnings = _repair_embedded_math_structure([block], embedded)
+
+    assert warnings == ["visual_embedded_math_structure_repair"]
+    assert r"T ^ {m - d b}" in block.markdown
+    assert r"\sum_{j=1}^{d}" in block.markdown
+
+
+def test_pdf_math_structure_abstains_without_native_baselines():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "Yj0 0",
+        "bbox": [100, 100, 900, 220],
+        "lines": [{
+            "spans": [
+                {"size": 11, "chars": [{"text": "Y", "bbox": [200, 130, 212, 150]}]},
+                {"size": 8, "chars": [{"text": "j", "bbox": [214, 125, 220, 141]}]},
+                {"size": 6, "chars": [{"text": "0", "bbox": [221, 128, 226, 140]}]},
+                {"size": 8, "chars": [{"text": "0", "bbox": [212, 139, 219, 153]}]},
+            ],
+        }],
+    }])
+    block = Block("formula", r"\[Y_{0}^{b_{0}}\]", bbox=(100, 100, 900, 220))
+
+    warnings = _repair_embedded_math_structure([block], embedded)
+
+    assert warnings == []
+    assert block.markdown == r"\[Y_{0}^{b_{0}}\]"
+
+
+def test_pdf_math_structure_recovers_ceiling_and_stacked_label():
+    from test_alignment import evidence
+    embedded = evidence([
+        ("⌈(1+θ)m⌉ + X ", 120, 150, 11, "Times-Roman"),
+        ("d−1", 300, 136, 8, "Times-Roman"),
+        ("= ∑i Zi", 306, 152, 11, "Times-Roman"),
+    ])
+    block = Block(
+        "formula",
+        r"\[\left[ (1+\theta)m \right] + "
+        r"X \stackrel {\mathrm{d} = 1} {=} \sum_i Z_i\]",
+        bbox=(100, 100, 900, 220),
+    )
+
+    warnings = _repair_embedded_math_structure([block], embedded)
+
+    assert warnings == ["visual_embedded_math_structure_repair"]
+    assert r"\left\lceil (1+\theta)m \right\rceil" in block.markdown
+    assert r"\mathrm{d} - 1" in block.markdown
+
+
+def test_embedded_decimal_can_correct_one_close_spaced_ocr_literal():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "76790 / 2^18 ≈ 0.2929306",
+        "bbox": [100, 100, 900, 200],
+    }])
+    block = Block(
+        "formula",
+        r"\[\frac{76790}{2^{18}} \approx 0. 2 2 9 2 3 0 6\]",
+        bbox=(100, 100, 900, 200),
+    )
+
+    warnings = _repair_embedded_digit_runs([block], embedded)
+
+    assert warnings == ["visual_embedded_numeric_repair"]
+    assert "0.2929306" in block.markdown
+
+
+def test_malformed_empty_exponent_is_removed_before_real_exponent():
+    block = Block("formula", r"\[((d-1)!)^{}^2\]")
+
+    warnings = _repair_malformed_math_syntax([block])
+
+    assert warnings == ["visual_math_syntax_repair"]
+    assert block.markdown == r"\[((d-1)!)^2\]"
+
+
+def test_embedded_trust_rejects_repetitive_or_visually_unrelated_layers():
+    repetitive = EmbeddedEvidence(
+        text="bad layer " * 30,
+        extractor="pymupdf",
+    )
+    unrelated = EmbeddedEvidence(
+        text="Completely unrelated hidden text from another scan " * 3,
+        extractor="pymupdf",
+    )
+
+    assert assess_embedded(repetitive, "A valid visual transcription.").state == "untrusted"
+    assert assess_embedded(unrelated, "The mathematical paper discusses interpolation constraints." * 3).state == "untrusted"
+
+
+def test_embedded_geometry_detects_a_meaningful_uncovered_line():
+    embedded = EmbeddedEvidence(blocks=[{
+        "text": "Missing proof opening. Covered continuation.",
+        "bbox": [100, 100, 900, 300],
+        "lines": [
+            {"text": "Missing proof opening.", "bbox": [100, 100, 900, 125], "spans": []},
+            {"text": "Covered continuation.", "bbox": [100, 200, 900, 225], "spans": []},
+        ],
+    }])
+    blocks = [Block("paragraph", "Covered continuation.", bbox=(100, 195, 900, 230))]
+
+    assert _has_embedded_coverage_gap(blocks, embedded)
 
 
 def test_figure_crops_retain_full_bleed_text_heavy_and_margin_images(tmp_path: Path):
@@ -1188,7 +1917,7 @@ def test_figure_crops_retain_full_bleed_text_heavy_and_margin_images(tmp_path: P
 
     assert len(blocks) == 4
     assert blocks[3].markdown == "Faint diagram"
-    assert blocks[0].metadata["review_reason"] == "figure_crop_touches_edge"
+    assert not any(key.startswith("review_") for block in blocks for key in block.metadata)
     assert warnings == ["visual_figure_crop_may_be_clipped"]
 
 
@@ -1227,7 +1956,7 @@ def test_blank_figure_does_not_create_a_full_page_fallback(tmp_path: Path):
     assert blocks[0].kind == "paragraph"
     assert blocks[0].markdown == "Important caption"
     assert blocks[0].bbox is None
-    assert blocks[0].metadata["review_reason"] == "blank_figure_crop_caption_preserved"
+    assert not any(key.startswith("review_") for block in blocks for key in block.metadata)
     assert warnings == ["visual_blank_figure_crop_rejected"]
 
 
@@ -1237,10 +1966,40 @@ def test_embedded_links_are_geometry_aware_and_idempotent():
         Block("paragraph", "Foo second", bbox=(0, 400, 1000, 600)),
     ]
     links = [Link("Foo", "https://example.com", bbox=(100, 450, 200, 500))]
-    _apply_links_to_blocks(blocks, links)
-    _apply_links_to_blocks(blocks, links)
+    apply_links_to_blocks(blocks, links)
+    apply_links_to_blocks(blocks, links)
     assert blocks[0].markdown == "Foo first"
     assert blocks[1].markdown == "[Foo](https://example.com) second"
+
+
+def test_pdf_page_destinations_are_not_emitted_as_imprecise_heading_links():
+    block = Block("paragraph", "See Theorem 1.1.", bbox=(0, 0, 1000, 200))
+    link = Link("1.1", "#page-4", bbox=(100, 100, 150, 130), external=False)
+
+    apply_links_to_blocks([block], [link], page_number=2)
+
+    assert block.markdown == "See Theorem 1.1."
+
+
+def test_embedded_doi_target_repairs_a_fragmented_reference_tail():
+    block = Block(
+        "ref_text",
+        "A reference. DOI: 10.1145/3798129. 3800827.",
+        bbox=(0, 0, 1000, 200),
+    )
+    link = Link(
+        "10.1145/3798129.3800827",
+        "https://doi.org/10.1145/3798129.3800827",
+        bbox=(600, 100, 950, 150),
+        external=True,
+    )
+
+    apply_links_to_blocks([block], [link], page_number=22)
+
+    assert block.markdown == (
+        "A reference. DOI: "
+        "[10.1145/3798129.3800827](https://doi.org/10.1145/3798129.3800827)."
+    )
 
 
 def test_embedded_table_image_does_not_create_a_figure_without_ocr_claim(tmp_path: Path):

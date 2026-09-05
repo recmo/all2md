@@ -10,6 +10,8 @@ from bs4 import BeautifulSoup
 
 from .model import Block, Chapter, PageResult
 from .util import atomic_text, slugify
+from .urls import autolink_urls
+from .footnotes import place_footnotes
 
 LOCAL_LINK = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)")
 IMAGE_LINK = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
@@ -44,12 +46,15 @@ def page_markdown(
     chapter: bool,
     suppress_title: str | None = None,
     heading_delta: int = 0,
+    infer_heading_levels: bool = False,
 ) -> str:
     body = page.visual_markdown.strip("\n")
     if suppress_title:
         body = _remove_duplicate_heading(body, suppress_title)
     if heading_delta:
         body = _relevel_headings(body, heading_delta)
+    if infer_heading_levels:
+        body = normalize_heading_levels(body)
     body = normalize_heading_case(body)
     if chapter:
         body = body.replace("](assets/", "](../assets/")
@@ -104,6 +109,8 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
         title = title_case_heading(boundary["title"].strip())
         pieces.append(f"{'#' * min(6, max(1, boundary.get('level', 1)))} {title}")
     for block in blocks:
+        if block.metadata.get("footnote"):
+            continue
         content = _strip_grounding_artifacts(block.markdown).strip()
         if not content:
             continue
@@ -127,6 +134,8 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
     rendered = "\n\n".join(pieces).strip("\n")
     if rendered:
         return rendered
+    if any(block.metadata.get("footnote") for block in blocks):
+        return ""
     if "visual_unsupported_ungrounded_text" in page.warnings:
         return ""
     return normalize_heading_case(fallback)
@@ -149,6 +158,27 @@ def normalize_heading_case(markdown: str) -> str:
     )
 
 
+def normalize_heading_levels(markdown: str) -> str:
+    """Recover conventional section depth from numbered OCR headings."""
+    def replace(match: re.Match[str]) -> str:
+        value = match.group(2).strip()
+        visible = MARKDOWN_LINK.sub(lambda item: item.group(1), value)
+        numbered = re.match(r"^(\d+(?:\.\d+)*)\.?\s+", visible)
+        if numbered:
+            level = min(6, numbered.group(1).count(".") + 2)
+        elif re.match(r"^[A-Z]\.?\s+(?:[A-Z]|\d)", visible):
+            level = 2
+        elif re.match(r"^(?:abstract|acknowledg(?:e)?ments?|references)\b", visible, re.I):
+            level = 2
+        elif re.match(r"^algorithm\s+\d+\b", visible, re.I):
+            level = 4
+        else:
+            return match.group(0)
+        return f"{'#' * level} {value}"
+
+    return HEADING.sub(replace, markdown)
+
+
 def title_case_heading(value: str) -> str:
     visible = MARKDOWN_LINK.sub(lambda match: match.group(1), value)
     if not any(character.isalpha() for character in visible):
@@ -158,6 +188,12 @@ def title_case_heading(value: str) -> str:
         words = re.split(r"(\s+)", text)
         word_indexes = [index for index, word in enumerate(words) if word and not word.isspace()]
         last = word_indexes[-1] if word_indexes else -1
+        first = word_indexes[0] if word_indexes else -1
+        if len(word_indexes) > 1 and re.fullmatch(
+            r"(?:\d+(?:\.\d+)*\.?|[A-Z]\.?)",
+            words[first].strip("*_`[](){}"),
+        ):
+            first = word_indexes[1]
         normalized: list[str] = []
         capitalize_next = True
         for index, word in enumerate(words):
@@ -166,7 +202,7 @@ def title_case_heading(value: str) -> str:
                 continue
             rendered = _title_case_token(
                 word,
-                first=index == word_indexes[0] or capitalize_next,
+                first=index == first or capitalize_next,
                 last=index == last,
             )
             normalized.append(rendered)
@@ -175,13 +211,18 @@ def title_case_heading(value: str) -> str:
 
     links: list[str] = []
 
+    def protect_reference(match: re.Match) -> str:
+        links.append(match.group(0))
+        return f"§{len(links) - 1}§"
+
     def protect_link(match: re.Match) -> str:
         links.append(f"[{normalize_text(match.group(1))}]({match.group(2)})")
         return f"§{len(links) - 1}§"
 
-    protected = MARKDOWN_LINK.sub(protect_link, value)
+    protected = re.sub(r"\[\^[^\]]+\]", protect_reference, value)
+    protected = MARKDOWN_LINK.sub(protect_link, protected)
     normalized = normalize_text(protected)
-    for index, link in enumerate(links):
+    for index, link in reversed(list(enumerate(links))):
         normalized = normalized.replace(f"§{index}§", link)
     return normalized
 
@@ -391,7 +432,12 @@ def write_markdown(
                 page,
                 chapter=False,
                 heading_delta=1,
-                suppress_title=context[-1]["title"] if index == 0 and context else None,
+                suppress_title=(
+                    context[-1]["title"]
+                    if index == 0 and context
+                    else title if index == 0 else None
+                ),
+                infer_heading_levels=not outline,
             )
             for index, page in enumerate(pages)
         )
@@ -399,13 +445,14 @@ def write_markdown(
         if context_markdown:
             preamble += f"\n\n{context_markdown}"
         content = f"{preamble}\n\n{rendered_pages}"
+        content = place_footnotes(content, pages)
         targets = _rendered_page_targets({"book.md": content})
         content = _rewrite_page_links(
             content,
             targets,
             "book.md",
         )
-        atomic_text(root / "book.md", content.rstrip() + "\n")
+        atomic_text(root / "book.md", autolink_urls(content.rstrip() + "\n"))
         return ["book.md"]
 
     chapter_dir = root / "chapters"
@@ -431,17 +478,21 @@ def write_markdown(
                 chapter=True,
                 suppress_title=chapter.title if page.number == chapter.start_page else None,
                 heading_delta=heading_delta,
+                infer_heading_levels=not outline,
             )
             for page in selected
         )
+        # A paragraph can move across a page/chapter boundary during assembly.
+        # Carry its referenced notes into the same standalone Markdown file.
+        content = place_footnotes(content, pages, chapter=True)
         chapter_contents[filename] = content
         index_lines.append(f"- [{chapter_title}](chapters/{filename})")
         written.append(f"chapters/{filename}")
     targets = _rendered_page_targets(chapter_contents, first_page_uses_file_heading=True)
     for filename, content in chapter_contents.items():
         content = _rewrite_page_links(content, targets, filename)
-        atomic_text(chapter_dir / filename, content.rstrip() + "\n")
-    atomic_text(root / "book.md", "\n".join(index_lines) + "\n")
+        atomic_text(chapter_dir / filename, autolink_urls(content.rstrip() + "\n"))
+    atomic_text(root / "book.md", autolink_urls("\n".join(index_lines) + "\n"))
     return ["book.md", *written]
 
 

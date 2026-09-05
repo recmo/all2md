@@ -104,26 +104,24 @@
         name = "speech-review";
         project = reviewProject;
       };
-      testPython = pkgs.python3.withPackages (
-        ps: with ps; [
-          beautifulsoup4
-          mdformat
-          mdformat-gfm
-          mlx
-          pillow
-          pymupdf
-          pytest
-          tqdm
-        ]
-      );
+      pagesTestEnvironment = mkPythonEnvironment {
+        name = "pages2md";
+        project = pagesProject;
+        extras = [
+          "ocr"
+          "dev"
+        ];
+      };
       pages2md = pkgs.writeShellApplication {
         name = "pages2md";
         runtimeInputs = [
           pkgs.djvulibre
           pkgs.poppler-utils
+          pkgs.nodejs
         ];
         text = ''
           export PAGES2MD_VERSION=${pagesVersion}
+          export PAGES2MD_KATEX_MODULE=${pkgs.katex}/lib/node_modules/katex
           exec ${pagesEnvironment}/bin/pages2md "$@"
         '';
       };
@@ -327,13 +325,17 @@
             pages2md-tests =
               pkgs.runCommand "pages2md-tests"
                 {
-                  nativeBuildInputs = [ testPython ];
+                  nativeBuildInputs = [
+                    pagesTestEnvironment
+                    pkgs.nodejs
+                  ];
                   PAGES2MD_VERSION = pagesVersion;
+                  PAGES2MD_KATEX_MODULE = "${pkgs.katex}/lib/node_modules/katex";
                 }
                 ''
                   export PYTHONPATH=${pagesProject}/src
                   export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-                  pytest -q ${pagesProject}/tests
+                  pytest -q -o cache_dir="$TMPDIR/pytest-cache" ${pagesProject}/tests
                   touch "$out"
                 '';
             speech2md-source =
@@ -438,11 +440,13 @@
         // {
           ${system} = rec {
             pages2md = pkgs.mkShell {
+              PAGES2MD_KATEX_MODULE = "${pkgs.katex}/lib/node_modules/katex";
               packages = [
                 pkgs.djvulibre
                 pkgs.poppler-utils
                 pkgs.python3
                 pkgs.uv
+                pkgs.nodejs
               ];
               shellHook = ''
                 echo "Run: uv sync --project pages2md --extra dev --extra ocr"
