@@ -114,6 +114,51 @@ pub(crate) fn ensure_ignored<'a>(
     root: &Path,
     paths: impl IntoIterator<Item = &'a str>,
 ) -> Result<()> {
+    let mut command = Command::new("git");
+    command
+        .current_dir(root)
+        .args(["check-ignore", "--stdin", "-z"]);
+    check_ignored(command, paths)
+}
+
+/// Checks a candidate's tracked files and ignore rules before checkout activation.
+pub(crate) fn ensure_ignored_at<'a>(
+    root: &Path,
+    revision: &str,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let paths: Vec<_> = paths.into_iter().collect();
+    let tree = checked(root, ["ls-tree", "-r", "--name-only", "-z", revision])?;
+    let temporary = tempfile::tempdir()?;
+    for name in tree
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+    {
+        let name = std::str::from_utf8(name)?;
+        if paths.contains(&name) {
+            bail!("incoming tree tracks derived sidecar {name}");
+        }
+        if Path::new(name)
+            .file_name()
+            .is_some_and(|name| name == ".gitignore")
+        {
+            validate_repo_path(name)?;
+            let path = temporary.path().join(name);
+            fs::create_dir_all(path.parent().context("ignore file parent")?)?;
+            fs::write(path, read_text(root, revision, name)?)?;
+        }
+    }
+    let mut command = Command::new("git");
+    command
+        .current_dir(temporary.path())
+        .env("GIT_DIR", git_dir(root)?)
+        .env("GIT_WORK_TREE", temporary.path())
+        .args(["check-ignore", "--no-index", "--stdin", "-z"]);
+    check_ignored(command, paths)
+}
+
+fn check_ignored<'a>(mut command: Command, paths: impl IntoIterator<Item = &'a str>) -> Result<()> {
     let paths: BTreeSet<&str> = paths.into_iter().collect();
     if paths.is_empty() {
         return Ok(());
@@ -126,9 +171,7 @@ pub(crate) fn ensure_ignored<'a>(
         input.extend_from_slice(path.as_bytes());
         input.push(0);
     }
-    let mut child = Command::new("git")
-        .current_dir(root)
-        .args(["check-ignore", "--stdin", "-z"])
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -557,33 +600,11 @@ pub(crate) fn rollback(root: &Path, paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Attempts one bounded, ordered push.
-#[must_use]
-pub(crate) fn push(root: &Path, config: &Config) -> PushState {
-    if !config.git.push {
-        return PushState::Disabled;
-    }
-    let mut command = Command::new("git");
-    command.current_dir(root).arg("push");
-    if let Some(remote) = &config.git.remote {
-        command.arg("--set-upstream").arg(remote).arg("HEAD");
-    }
-    let Ok(Some(output)) = output_with_timeout(
-        &mut command,
-        Duration::from_secs(config.git.push_timeout_seconds),
-    ) else {
-        return PushState::Queued;
-    };
-    if output.status.success() {
-        return PushState::Pushed;
-    }
-    push_failure_state(&String::from_utf8_lossy(&output.stderr))
-}
-
 fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Option<Output>> {
+    let stdout = tempfile::NamedTempFile::new()?;
     let stderr = tempfile::NamedTempFile::new()?;
     command
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(stdout.reopen()?))
         .stderr(Stdio::from(stderr.reopen()?));
     let mut child = command.spawn()?;
     let started = Instant::now();
@@ -601,34 +622,167 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Optio
     let error = fs::read(stderr.path())?;
     Ok(Some(Output {
         status,
-        stdout: Vec::new(),
+        stdout: fs::read(stdout.path())?,
         stderr: error,
     }))
 }
 
-fn push_failure_state(stderr: &str) -> PushState {
-    let stderr = stderr.to_lowercase();
-    if stderr.contains("non-fast-forward") || stderr.contains("fetch first") {
-        PushState::Diverged
+pub(crate) struct SyncTarget {
+    remote: String,
+    branch: String,
+}
+
+pub(crate) fn sync_target(root: &Path, config: &Config) -> Result<SyncTarget> {
+    let branch = checked(root, ["symbolic-ref", "--short", "HEAD"])?;
+    let branch = String::from_utf8(branch.stdout)?.trim().to_owned();
+    let setting = |key: &str| -> Result<Option<String>> {
+        let output = run(root, ["config", "--get", key])?;
+        Ok(output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
+    };
+    let upstream_remote = setting(&format!("branch.{branch}.remote"))?;
+    let remote = config
+        .git
+        .remote
+        .clone()
+        .or_else(|| upstream_remote.clone())
+        .context("Git synchronization requires a remote or configured upstream")?;
+    let destination = if upstream_remote.as_ref() == Some(&remote) {
+        setting(&format!("branch.{branch}.merge"))?
+            .unwrap_or_else(|| format!("refs/heads/{branch}"))
     } else {
-        PushState::Queued
+        format!("refs/heads/{branch}")
+    };
+    if !destination.starts_with("refs/heads/") {
+        bail!("sync destination must be a branch");
     }
+    Ok(SyncTarget {
+        remote,
+        branch: destination,
+    })
+}
+
+fn network_output(command: &mut Command, timeout: u64) -> Result<Output> {
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    output_with_timeout(command, Duration::from_secs(timeout))?
+        .context("Git synchronization timed out")
+}
+
+/// Fetches a remote candidate without changing the live branch or checkout.
+pub(crate) fn fetch_candidate(
+    root: &Path,
+    target: &SyncTarget,
+    timeout: u64,
+) -> Result<Option<String>> {
+    let output = network_output(
+        Command::new("git").current_dir(root).args([
+            "ls-remote",
+            "--exit-code",
+            "--",
+            &target.remote,
+            &target.branch,
+        ]),
+        timeout,
+    )?;
+    if output.status.code() == Some(2) {
+        return Ok(None);
+    }
+    if !output.status.success() {
+        bail!(
+            "Git remote lookup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let refspec = format!("+{}:refs/mdstore/incoming", target.branch);
+    let output = network_output(
+        Command::new("git").current_dir(root).args([
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--",
+            &target.remote,
+            &refspec,
+        ]),
+        timeout,
+    )?;
+    if !output.status.success() {
+        bail!(
+            "Git fetch failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = checked(root, ["rev-parse", "refs/mdstore/incoming^{commit}"])?;
+    Ok(Some(String::from_utf8(output.stdout)?.trim().into()))
+}
+
+pub(crate) fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let output = run(root, ["merge-base", "--is-ancestor", ancestor, descendant])?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("could not compare Git histories"),
+    }
+}
+
+pub(crate) fn acknowledge_remote(root: &Path, revision: &str) -> Result<()> {
+    checked(root, ["update-ref", "refs/mdstore/replicated", revision])?;
+    Ok(())
+}
+
+/// Pushes an immutable local snapshot, never a moving HEAD.
+pub(crate) fn push_snapshot(
+    root: &Path,
+    target: &SyncTarget,
+    revision: &str,
+    timeout: u64,
+) -> Result<()> {
+    let refspec = format!("{revision}:{}", target.branch);
+    let output = network_output(
+        Command::new("git")
+            .current_dir(root)
+            .args(["push", "--", &target.remote, &refspec]),
+        timeout,
+    )?;
+    if !output.status.success() {
+        bail!(
+            "Git push failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    acknowledge_remote(root, revision)
+}
+
+pub(crate) fn activate_candidate(root: &Path, expected: &str, candidate: &str) -> Result<()> {
+    let reference = checked(root, ["symbolic-ref", "HEAD"])?;
+    let reference = String::from_utf8(reference.stdout)?;
+    checked(root, ["update-ref", reference.trim(), candidate, expected])?;
+    recover_worktree(root)?;
+    Ok(())
+}
+
+pub(crate) fn pending_commits(root: &Path) -> Result<usize> {
+    let reference = if run(root, ["rev-parse", "--verify", "refs/mdstore/replicated"])?
+        .status
+        .success()
+    {
+        Some("refs/mdstore/replicated")
+    } else if run(root, ["rev-parse", "--verify", "@{upstream}"])?
+        .status
+        .success()
+    {
+        Some("@{upstream}")
+    } else {
+        None
+    };
+    let range = reference.map_or_else(|| "HEAD".into(), |reference| format!("{reference}..HEAD"));
+    let output = checked(root, ["rev-list", "--count", &range])?;
+    Ok(String::from_utf8(output.stdout)?.trim().parse()?)
 }
 
 fn literal_pathspec(path: &str) -> String {
     format!(":(literal){path}")
-}
-
-/// Returns whether `HEAD` contains commits absent from its upstream.
-pub(crate) fn has_unpushed(root: &Path) -> Result<bool> {
-    if !run(root, ["rev-parse", "--verify", "@{upstream}"])?
-        .status
-        .success()
-    {
-        return Ok(true);
-    }
-    let output = checked(root, ["rev-list", "--count", "@{upstream}..HEAD"])?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim() != "0")
 }
 
 fn run<I, S>(root: &Path, args: I) -> Result<Output>
@@ -885,18 +1039,6 @@ mod tests {
     }
 
     #[test]
-    fn only_history_rejections_are_divergence() {
-        assert_eq!(
-            push_failure_state("! [rejected] main -> main (non-fast-forward)"),
-            PushState::Diverged
-        );
-        assert_eq!(
-            push_failure_state("! [remote rejected] main -> main (protected branch hook declined)"),
-            PushState::Queued
-        );
-    }
-
-    #[test]
     fn command_timeout_terminates_a_stalled_push_process() {
         let mut command = Command::new("git");
         command
@@ -921,18 +1063,18 @@ mod tests {
     }
 
     #[test]
-    fn local_push_execution_failures_are_queued() {
+    fn local_sync_execution_failures_are_errors() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().to_owned();
         drop(directory);
         let config =
             Config::from_yaml("documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\n")
                 .unwrap();
-        assert_eq!(push(&root, &config), PushState::Queued);
+        assert!(sync_target(&root, &config).is_err());
     }
 
     #[test]
-    fn configured_push_establishes_upstream_and_tracks_unpushed_commits() {
+    fn snapshot_push_tracks_replicated_commits_without_an_upstream() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
         fs::create_dir(&root).unwrap();
@@ -945,25 +1087,22 @@ mod tests {
         fs::write(root.join("note.md"), "one\n").unwrap();
         checked(&root, ["add", "note.md"]).unwrap();
         checked(&root, ["commit", "-m", "initial"]).unwrap();
-        assert!(has_unpushed(&root).unwrap());
+        assert_eq!(pending_commits(&root).unwrap(), 1);
 
         let config = Config::from_yaml(
             "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push: true\n  remote: origin\n",
         )
         .unwrap();
-        assert_eq!(push(&root, &config), PushState::Pushed);
-        let upstream = checked(&root, ["rev-parse", "--abbrev-ref", "@{upstream}"]).unwrap();
-        assert_eq!(
-            String::from_utf8(upstream.stdout).unwrap().trim(),
-            "origin/main"
-        );
-        assert!(!has_unpushed(&root).unwrap());
+        let target = sync_target(&root, &config).unwrap();
+        assert!(fetch_candidate(&root, &target, 5).unwrap().is_none());
+        push_snapshot(&root, &target, &head(&root).unwrap(), 5).unwrap();
+        assert_eq!(pending_commits(&root).unwrap(), 0);
 
         fs::write(root.join("note.md"), "two\n").unwrap();
         checked(&root, ["commit", "-am", "second"]).unwrap();
-        assert!(has_unpushed(&root).unwrap());
-        assert_eq!(push(&root, &config), PushState::Pushed);
-        assert!(!has_unpushed(&root).unwrap());
+        assert_eq!(pending_commits(&root).unwrap(), 1);
+        push_snapshot(&root, &target, &head(&root).unwrap(), 5).unwrap();
+        assert_eq!(pending_commits(&root).unwrap(), 0);
     }
 
     #[test]

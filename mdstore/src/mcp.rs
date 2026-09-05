@@ -64,11 +64,16 @@ pub async fn serve_listener(
         bail!("a bearer token is required when listening beyond loopback");
     }
     tracing::info!(%listen, "mdstore listening");
-    axum::serve(listener, router(store, bearer_token))
+    let sync = Arc::clone(&store).synchronize();
+    let server = axum::serve(listener, router(store, bearer_token))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
-        .await?;
+        .into_future();
+    tokio::select! {
+        result = server => result?,
+        _ = sync => bail!("synchronization worker stopped"),
+    }
     Ok(())
 }
 

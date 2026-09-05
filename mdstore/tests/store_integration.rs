@@ -531,7 +531,7 @@ fn partially_reverted_batch_requires_fresh_atomic_edits() {
 }
 
 #[test]
-fn no_op_edit_retries_queued_pushes() {
+fn no_op_edit_reports_queued_pushes_without_network() {
     let repository = Repository::new();
     let config_path = repository.root.join(".mdstore/config.yaml");
     let config = fs::read_to_string(&config_path)
@@ -574,7 +574,8 @@ fn no_op_edit_retries_queued_pushes() {
         .unwrap();
 
     assert!(matches!(response.status, ApplyStatus::AlreadyApplied));
-    assert_eq!(response.push, PushState::Pushed);
+    assert_eq!(response.push, PushState::Queued);
+    assert_eq!(store.push().unwrap(), PushState::Pushed);
     assert_eq!(
         command(&repository.root, &["rev-parse", "HEAD"]).trim(),
         command(&remote, &["rev-parse", "HEAD"]).trim()
@@ -2028,6 +2029,24 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
     .expect("health must remain responsive during push")
     .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
+    let second_store = store.clone();
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        tokio::task::spawn_blocking(move || {
+            second_store.apply_edits(&ApplyEditsRequest {
+                edit_summary: "edit while push is stalled".into(),
+                edits: vec![EditOperation::Replace {
+                    path: "bob.md".into(),
+                    anchor: format!("6:{}", short_hash("Bob profile.")),
+                    content: "Bob updated concurrently.".into(),
+                }],
+            })
+        }),
+    )
+    .await
+    .expect("network push must not hold the edit lock")
+    .unwrap()
+    .unwrap();
     tokio::time::timeout(Duration::from_millis(500), store.reindex_missing())
         .await
         .expect("reindex must publish while push waits")
@@ -2038,6 +2057,213 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
         .unwrap()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    server.abort();
+}
+
+fn sync_repository() -> (Repository, tempfile::TempDir) {
+    let repository = Repository::new();
+    let remote = tempfile::tempdir().unwrap();
+    command(remote.path(), &["init", "--bare", "."]);
+    command(
+        &repository.root,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    let config_path = repository.root.join(".mdstore/config.yaml");
+    let config = fs::read_to_string(&config_path).unwrap().replace(
+        "  push: false",
+        "  push: true\n  remote: origin\n  push_timeout_seconds: 2",
+    );
+    fs::write(config_path, config).unwrap();
+    command(&repository.root, &["add", ".mdstore/config.yaml"]);
+    command(&repository.root, &["commit", "-qm", "enable sync"]);
+    (repository, remote)
+}
+
+fn external_clone(repository: &Repository, remote: &Path, directory: &Path) -> PathBuf {
+    let clone = directory.join("external");
+    let branch = command(&repository.root, &["branch", "--show-current"]);
+    command(
+        directory,
+        &[
+            "clone",
+            "-b",
+            branch.trim(),
+            remote.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    command(&clone, &["config", "user.name", "mdstore tests"]);
+    command(&clone, &["config", "user.email", "mdstore@example.invalid"]);
+    command(&clone, &["config", "commit.gpgsign", "false"]);
+    clone
+}
+
+#[test]
+fn incoming_commits_are_validated_before_live_activation() {
+    let (repository, remote) = sync_repository();
+    let store = repository.store();
+    assert_eq!(store.push().unwrap(), PushState::Pushed);
+    let temporary = tempfile::tempdir().unwrap();
+    let external = external_clone(&repository, remote.path(), temporary.path());
+    fs::write(
+        external.join("alice.md"),
+        "# Missing required frontmatter\n",
+    )
+    .unwrap();
+    command(&external, &["commit", "-am", "invalid incoming page"]);
+    command(&external, &["push"]);
+    let accepted = command(&repository.root, &["rev-parse", "HEAD"]);
+    assert!(store.push().is_err());
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), accepted);
+    assert_eq!(
+        fs::read_to_string(repository.root.join("alice.md")).unwrap(),
+        page("Alice")
+    );
+    assert!(
+        store
+            .get_page("alice.md", None)
+            .unwrap()
+            .content
+            .contains("Alice profile.")
+    );
+    assert!(store.status().unwrap().replication.last_error.is_some());
+    assert!(store.status().unwrap().blocked.is_none());
+    fs::write(external.join("alice.md"), page("Alice")).unwrap();
+    fs::write(external.join(".gitignore"), "").unwrap();
+    command(
+        &external,
+        &["commit", "-am", "invalid incoming ignore rules"],
+    );
+    command(&external, &["push"]);
+    assert!(store.push().is_err());
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), accepted);
+    assert!(
+        fs::read_to_string(repository.root.join(".gitignore"))
+            .unwrap()
+            .contains("*.mdstore")
+    );
+    fs::write(external.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
+    fs::write(
+        external.join("alice.md"),
+        page("Alice").replace("Alice profile.", "Alice from upstream."),
+    )
+    .unwrap();
+    command(
+        &external,
+        &["commit", "-am", "valid incoming page and ignores"],
+    );
+    command(&external, &["push"]);
+    assert_eq!(store.push().unwrap(), PushState::Pushed);
+    assert!(
+        store
+            .get_page("alice.md", None)
+            .unwrap()
+            .content
+            .contains("Alice from upstream.")
+    );
+    assert_eq!(
+        command(&repository.root, &["rev-parse", "HEAD"]),
+        command(&external, &["rev-parse", "HEAD"])
+    );
+    let status = store.status().unwrap().replication;
+    assert_eq!(status.pending_commits, 0);
+    assert!(status.last_success.is_some());
+    assert!(status.last_error.is_none());
+    drop(store);
+    assert_eq!(
+        repository
+            .store()
+            .status()
+            .unwrap()
+            .replication
+            .last_success,
+        status.last_success
+    );
+}
+
+#[test]
+fn synchronization_divergence_blocks_writes_without_rewriting_history() {
+    let (repository, remote) = sync_repository();
+    let store = repository.store();
+    store.push().unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let external = external_clone(&repository, remote.path(), temporary.path());
+    fs::write(
+        external.join("alice.md"),
+        page("Alice").replace("Alice profile.", "Remote edit."),
+    )
+    .unwrap();
+    command(&external, &["commit", "-am", "remote edit"]);
+    command(&external, &["push"]);
+    let request = ApplyEditsRequest {
+        edit_summary: "local edit".into(),
+        edits: vec![EditOperation::Replace {
+            path: "bob.md".into(),
+            anchor: format!("6:{}", short_hash("Bob profile.")),
+            content: "Local edit.".into(),
+        }],
+    };
+    assert_eq!(store.apply_edits(&request).unwrap().push, PushState::Queued);
+    let local = command(&repository.root, &["rev-parse", "HEAD"]);
+    assert_eq!(store.push().unwrap(), PushState::Diverged);
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), local);
+    assert!(
+        store
+            .apply_edits(&ApplyEditsRequest {
+                edit_summary: "blocked edit".into(),
+                edits: vec![EditOperation::CreatePage {
+                    path: "new.md".into(),
+                    content: page("New")
+                }]
+            })
+            .is_err()
+    );
+    drop(store);
+    assert!(repository.store().status().unwrap().blocked.is_some());
+}
+
+#[tokio::test]
+async fn background_sync_retries_an_outage_without_another_edit() {
+    let (repository, remote) = sync_repository();
+    let offline = remote.path().join("unavailable.git");
+    command(
+        &repository.root,
+        &["remote", "set-url", "origin", offline.to_str().unwrap()],
+    );
+    let store = repository.store();
+    let response = store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "offline edit".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "Offline edit.".into(),
+            }],
+        })
+        .unwrap();
+    assert_eq!(response.push, PushState::Queued);
+    let (_, server) = start_daemon(store.clone(), None).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while store.status().unwrap().replication.last_error.is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(store.status().unwrap().blocked.is_none());
+    command(
+        remote.path(),
+        &["init", "--bare", offline.to_str().unwrap()],
+    );
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while store.status().unwrap().replication.last_success.is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(store.status().unwrap().replication.pending_commits, 0);
+    assert!(store.status().unwrap().replication.last_error.is_none());
     server.abort();
 }
 

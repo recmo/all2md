@@ -32,8 +32,8 @@ pub use mcp::{
 pub use provider::{InputType, RerankResult, RetrievalProvider, ZeroEntropyProvider};
 pub use search::{SearchResponse, SearchResult, VectorCoverage};
 pub use store::{
-    ApplyEditsRequest, ApplyEditsResponse, ApplyStatus, PageResponse, StatusResponse, Store,
-    ValidationError,
+    ApplyEditsRequest, ApplyEditsResponse, ApplyStatus, PageResponse, ReplicationStatus,
+    StatusResponse, Store, ValidationError,
 };
 
 /// Loads and validates the configuration from the repository's committed `HEAD`.

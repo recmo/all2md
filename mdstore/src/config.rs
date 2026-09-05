@@ -620,18 +620,18 @@ impl Default for ProviderConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Controls ordered pushes of accepted commits.
+/// Controls background synchronization of accepted commits.
 pub struct GitConfig {
     #[serde(default = "default_true")]
-    /// Pushes accepted commits when true.
+    /// Enables background fetch/validate/push synchronization when true.
     pub push: bool,
     #[serde(default)]
     /// Optional remote used to establish or update the upstream.
     pub remote: Option<String>,
     #[serde(default = "default_push_timeout_seconds")]
-    /// Maximum synchronous push duration in seconds.
+    /// Timeout per Git network operation in seconds.
     pub push_timeout_seconds: u64,
 }
 

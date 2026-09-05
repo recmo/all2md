@@ -244,6 +244,39 @@ prefix. Omitting `list` retains the existing heading-count checks, with optional
 `level` enforcement. These rules use the same whole-corpus, atomic validation
 path as schema and style checks.
 
+## Local durability and background Git synchronization
+
+An accepted edit is committed locally before it returns. It never waits for a
+network request, including when retrying an already-applied batch. The response's
+`push` state describes current replication, not edit success. Embedding rebuilds
+and Git synchronization are independent background activities.
+
+With `git.push: true`, the running daemon synchronizes at startup, after edits,
+and every 30 seconds while healthy. Failures retry with exponential backoff from
+1 second to a 5-minute ceiling, even if no further edits arrive. The existing
+`git.push_timeout_seconds` bounds each network operation. Network failures are
+recorded in status and do not block local writes. `git.push: false` disables the
+worker. `mdstore push` explicitly attempts one synchronization immediately.
+
+The worker fetches the configured branch into a private ref. A fast-forward
+candidate's complete tree, configuration, templates, and sidecar ignore rules
+must validate before the live branch, checkout, or published state changes.
+Invalid incoming trees leave the accepted state untouched. Divergent histories
+block further writes until explicitly reconciled; the daemon never merges or
+rewrites history. A subsequent sync clears the divergence block once the
+histories are compatible again.
+
+Network operations run outside the edit lock. Pushes target a captured commit,
+so a newer edit remains pending if it arrives during a push. Short local
+activation/publication steps still use the repository lock. The daemon owns the
+live checkout: make external changes in another checkout and publish through Git.
+
+`status` and `/health` expose `replication.pending_commits`,
+`replication.last_success` (Unix seconds), and `replication.last_error`, separately
+from vector coverage. Progress reflects the last observed remote state, not a
+live remote query. Last success/error survive daemon restarts; pending commits
+are reconstructed from Git history. Replication metadata is private Git state.
+
 ## CLI
 
 Run `serve` first. Every other command is an HTTP client of that daemon, using

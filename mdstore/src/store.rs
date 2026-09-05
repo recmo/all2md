@@ -5,6 +5,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -36,6 +37,9 @@ pub struct Store {
     git_dir: PathBuf,
     head: RwLock<String>,
     blocked: RwLock<Option<String>>,
+    sync_lock: parking_lot::Mutex<()>,
+    sync_notify: tokio::sync::Notify,
+    replication: RwLock<ReplicationStatus>,
 }
 
 impl fmt::Debug for Store {
@@ -182,6 +186,8 @@ pub struct PageResponse {
 #[derive(Debug, Clone, Serialize)]
 /// Operational daemon and derived-index status.
 pub struct StatusResponse {
+    /// Local-to-remote replication progress, independent of embedding state.
+    pub replication: ReplicationStatus,
     /// Number of indexed Markdown pages.
     pub pages: usize,
     /// Number of searchable chunks.
@@ -194,6 +200,17 @@ pub struct StatusResponse {
     pub unpushed: bool,
     /// Persisted reason that writes are blocked, when present.
     pub blocked: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Last observed Git replication state. Pending counts are refreshed on status reads.
+pub struct ReplicationStatus {
+    /// Local commits not present at the last observed remote revision.
+    pub pending_commits: usize,
+    /// Unix timestamp of the last completed successful synchronization.
+    pub last_success: Option<u64>,
+    /// Most recent synchronization error, cleared on success.
+    pub last_error: Option<String>,
 }
 
 impl Store {
@@ -295,6 +312,12 @@ impl Store {
         ensure_sidecars_ignored(&root, pages.keys().map(String::as_str))?;
         let index = build_index(&root, &config, &pages, &parsed, &edges, provider.as_ref());
         let blocked = read_blocked(&git_dir)?;
+        let replication_path = git_dir.join("mdstore/replication.json");
+        let replication = if replication_path.exists() {
+            serde_json::from_slice(&fs::read(replication_path)?)?
+        } else {
+            ReplicationStatus::default()
+        };
         Ok(Arc::new(Self {
             root,
             state: RwLock::new(StoreState {
@@ -312,6 +335,9 @@ impl Store {
             git_dir,
             head: RwLock::new(head),
             blocked: RwLock::new(blocked),
+            sync_lock: parking_lot::Mutex::new(()),
+            sync_notify: tokio::sync::Notify::new(),
+            replication: RwLock::new(replication),
         }))
     }
 
@@ -583,7 +609,6 @@ impl Store {
             &edges,
             provider.as_ref(),
         );
-        let push_config = config.clone();
         *self.state.write() = StoreState {
             config,
             config_files: extra,
@@ -594,10 +619,7 @@ impl Store {
             provider,
             generation: current.generation + 1,
         };
-        let push = git::push(&self.root, &push_config);
-        if matches!(push, PushState::Diverged) {
-            self.set_blocked(Some("remote history diverged".into()))?;
-        }
+        let push = self.current_push_state()?;
         let response = ApplyEditsResponse {
             status: if committed {
                 ApplyStatus::Accepted
@@ -612,6 +634,7 @@ impl Store {
         };
         self.write_receipt(&digest, &response, &preimages, &postimages)?;
         self.remove_pending(&digest)?;
+        self.sync_notify.notify_one();
         Ok(response)
     }
 
@@ -751,9 +774,12 @@ impl Store {
                     .count(),
             )
         };
-        let unpushed = git::has_unpushed(&self.root)?;
+        let mut replication = self.replication.read().clone();
+        replication.pending_commits = git::pending_commits(&self.root)?;
+        let unpushed = replication.pending_commits > 0;
         let blocked = self.blocked.read().clone();
         Ok(StatusResponse {
+            replication,
             pages,
             chunks,
             vectors_ready,
@@ -763,19 +789,99 @@ impl Store {
         })
     }
 
-    /// Refreshes external state and attempts one ordered push.
+    /// Attempts one synchronization; network operations never hold the edit lock.
     pub fn push(&self) -> Result<PushState> {
-        let _lock = self.lock_repository()?;
-        git::recover_worktree(&self.root)?;
-        self.refresh_external_commit()?;
-        let config = self.state.read().config.clone();
-        let state = git::push(&self.root, &config);
-        if matches!(state, PushState::Pushed) {
-            self.set_blocked(None)?;
-        } else if matches!(state, PushState::Diverged) {
-            self.set_blocked(Some("remote history diverged".into()))?;
+        let _sync = self.sync_lock.lock();
+        let result = self.synchronize_once();
+        let mut status = self.replication.write();
+        status.pending_commits = git::pending_commits(&self.root)?;
+        match &result {
+            Ok(PushState::Pushed) => {
+                status.last_success = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
+                status.last_error = None;
+            }
+            Ok(PushState::Diverged) => status.last_error = Some("remote history diverged".into()),
+            Err(error) => status.last_error = Some(error.to_string()),
+            _ => {}
         }
-        Ok(state)
+        write_atomic(
+            &self.git_dir.join("mdstore/replication.json"),
+            &serde_json::to_vec(&*status)?,
+        )?;
+        result
+    }
+
+    fn synchronize_once(&self) -> Result<PushState> {
+        let config = {
+            let _lock = self.lock_repository()?;
+            git::recover_worktree(&self.root)?;
+            self.refresh_external_commit()?;
+            self.state.read().config.clone()
+        };
+        if !config.git.push {
+            return Ok(PushState::Disabled);
+        }
+        let target = git::sync_target(&self.root, &config)?;
+        let incoming = git::fetch_candidate(&self.root, &target, config.git.push_timeout_seconds)?;
+        let local = {
+            let _lock = self.lock_repository()?;
+            if self.state.read().config.git != config.git {
+                bail!("Git settings changed during synchronization; retry");
+            }
+            let mut local = git::head(&self.root)?;
+            if local != *self.head.read() {
+                bail!("live branch changed during synchronization; retry");
+            }
+            if let Some(incoming) = incoming {
+                git::acknowledge_remote(&self.root, &incoming)?;
+                if incoming != local && git::is_ancestor(&self.root, &local, &incoming)? {
+                    let state = self.load_candidate(&incoming)?;
+                    git::activate_candidate(&self.root, &local, &incoming)?;
+                    *self.state.write() = state;
+                    *self.head.write() = incoming.clone();
+                    local = incoming;
+                } else if !git::is_ancestor(&self.root, &incoming, &local)? {
+                    self.set_blocked(Some("remote history diverged".into()))?;
+                    return Ok(PushState::Diverged);
+                }
+            }
+            if self.blocked.read().as_deref() == Some("remote history diverged") {
+                self.set_blocked(None)?;
+            }
+            local
+        };
+        git::push_snapshot(&self.root, &target, &local, config.git.push_timeout_seconds)?;
+        Ok(PushState::Pushed)
+    }
+
+    pub(crate) async fn synchronize(self: Arc<Self>) {
+        let mut retry = 1_u64;
+        loop {
+            let generation = self.state.read().generation;
+            let store = Arc::clone(&self);
+            let enabled = self.state.read().config.git.push;
+            let result = if enabled {
+                blocking(move || store.push()).await
+            } else {
+                Ok(PushState::Disabled)
+            };
+            if self.state.read().generation != generation {
+                let store = Arc::clone(&self);
+                tokio::spawn(async move {
+                    let _ = store.reindex_missing().await;
+                });
+            }
+            if matches!(result, Ok(PushState::Pushed | PushState::Disabled)) {
+                retry = 1;
+                tokio::select! {
+                    _ = self.sync_notify.notified() => {},
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {},
+                }
+            } else {
+                tokio::time::sleep(Duration::from_secs(retry)).await;
+                retry = (retry * 2).min(300);
+            }
+        }
     }
 
     fn refresh_external_commit(&self) -> Result<()> {
@@ -783,13 +889,30 @@ impl Store {
         if current == *self.head.read() {
             return Ok(());
         }
+        let state = self.load_candidate(&current).inspect_err(|error| {
+            let _ = self.set_external_blocked(format!("external commit is invalid: {error}"));
+        })?;
+        *self.state.write() = state;
+        *self.head.write() = current;
+        if self
+            .blocked
+            .read()
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("external commit"))
+        {
+            self.set_blocked(None)?;
+        }
+        Ok(())
+    }
+
+    fn load_candidate(&self, current: &str) -> Result<StoreState> {
         let config = Config::from_yaml(&git::read_text(
             &self.root,
-            &current,
+            current,
             ".mdstore/config.yaml",
         )?)?;
-        let pages = load_pages(&self.root, &current, &config)?;
-        let extra = load_config_files(&self.root, &current)?;
+        let pages = load_pages(&self.root, current, &config)?;
+        let extra = load_config_files(&self.root, current)?;
         let (parsed, edges) = match validate_corpus(&config, &pages, &extra) {
             Ok(value) => value,
             Err(findings) => {
@@ -797,11 +920,18 @@ impl Store {
                     "external commit is invalid:\n{}",
                     serde_json::to_string_pretty(&findings).unwrap_or_default()
                 );
-                self.set_external_blocked(reason.clone())?;
                 bail!(reason);
             }
         };
-        ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
+        let sidecars: Vec<_> = pages
+            .keys()
+            .map(|path| {
+                sidecar::sidecar_path(Path::new(path))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        git::ensure_ignored_at(&self.root, current, sidecars.iter().map(String::as_str))?;
         let current_state = self.state.read().clone();
         if config.server != current_state.config.server {
             bail!("external commit changes server configuration; restart required");
@@ -809,7 +939,6 @@ impl Store {
         let provider = if config.provider != current_state.config.provider {
             let Some(factory) = self.provider_factory else {
                 let reason = "external commit changes provider configuration; restart required";
-                self.set_external_blocked(reason.into())?;
                 bail!(reason);
             };
             factory(config.provider.clone())
@@ -824,7 +953,7 @@ impl Store {
             &edges,
             provider.as_ref(),
         );
-        *self.state.write() = StoreState {
+        Ok(StoreState {
             config,
             config_files: extra,
             pages,
@@ -833,17 +962,7 @@ impl Store {
             index: Arc::new(index),
             provider,
             generation: current_state.generation + 1,
-        };
-        *self.head.write() = current;
-        if self
-            .blocked
-            .read()
-            .as_deref()
-            .is_some_and(|reason| reason.starts_with("external commit"))
-        {
-            self.set_blocked(None)?;
-        }
-        Ok(())
+        })
     }
 
     fn lock_repository(&self) -> Result<fs::File> {
@@ -952,11 +1071,7 @@ impl Store {
                 )
             }
         }
-        let config = self.state.read().config.clone();
-        let push = git::push(&self.root, &config);
-        if matches!(push, PushState::Diverged) {
-            self.set_blocked(Some("remote history diverged".into()))?;
-        }
+        let push = self.current_push_state()?;
         let response = ApplyEditsResponse {
             status: ApplyStatus::AlreadyApplied,
             push,
@@ -1016,7 +1131,7 @@ impl Store {
         let push_enabled = self.state.read().config.git.push;
         if !push_enabled {
             Ok(PushState::Disabled)
-        } else if git::has_unpushed(&self.root)? {
+        } else if git::pending_commits(&self.root)? > 0 {
             Ok(PushState::Queued)
         } else {
             Ok(PushState::Pushed)
