@@ -20,6 +20,7 @@ from pages2md.native import parse_native_observation, reconcile_observations
 from pages2md.embedded import assess_embedded
 from pages2md.adapters import _link_target, _raw_text_blocks, detect_kind, open_document
 from pages2md.formatting import FormatResult
+from pages2md.latex import clean_latex
 from pages2md.mathlint import MathLintResult
 from pages2md.pipeline import (
     _align_multi_results,
@@ -138,11 +139,9 @@ def test_cli_has_one_input_force_and_embedded_text_opt_out():
     arguments = parser().parse_args(
         ["paper.pdf", "--force", "--ignore-embedded-text"]
     )
-    assert arguments.input == Path("paper.pdf")
+    assert arguments.input == [Path("paper.pdf")]
     assert arguments.force is True
     assert arguments.ignore_embedded_text is True
-    with pytest.raises(SystemExit):
-        parser().parse_args(["convert", "paper.pdf"])
     with pytest.raises(SystemExit):
         parser().parse_args(["paper.pdf", "--output", "result"])
 
@@ -162,11 +161,47 @@ def test_cli_passes_embedded_text_opt_out_to_conversion(monkeypatch, capsys):
     cli_main(["paper.pdf", "--ignore-embedded-text"])
 
     assert captured == {
-        "source": Path("paper.pdf"),
+            "source": Path("paper.pdf"),
         "force": False,
         "ignore_embedded_text": True,
     }
     assert capsys.readouterr().out == "output.md\n"
+
+
+def test_cli_processes_multiple_inputs_in_order(monkeypatch, capsys):
+    calls = []
+
+    def fake_convert(source, *, force, ignore_embedded_text):
+        calls.append((source, force, ignore_embedded_text))
+        return Path(f"{source}.md")
+
+    monkeypatch.setattr("pages2md.cli.convert", fake_convert)
+    cli_main(["first.pdf", "second.pdf", "--force"])
+
+    assert calls == [
+        (Path("first.pdf"), True, False),
+        (Path("second.pdf"), True, False),
+    ]
+    assert capsys.readouterr().out == "first.pdf.md\nsecond.pdf.md\n"
+
+
+def test_cli_continues_after_an_input_fails(monkeypatch, capsys):
+    calls = []
+
+    def fake_convert(source, *, force, ignore_embedded_text):
+        calls.append(source)
+        if source == Path("first.pdf"):
+            raise ValueError("bad input")
+        return Path(f"{source}.md")
+
+    monkeypatch.setattr("pages2md.cli.convert", fake_convert)
+
+    with pytest.raises(SystemExit) as error:
+        cli_main(["first.pdf", "second.pdf"])
+
+    assert error.value.code == 1
+    assert calls == [Path("first.pdf"), Path("second.pdf")]
+    assert capsys.readouterr().err == "pages2md: bad input\n"
 
 
 def test_intermediate_root_discovers_legacy_direct_bundle(tmp_path: Path):
@@ -1097,6 +1132,21 @@ def test_document_normalization_cleans_prose_without_rewriting_math():
     assert r"na \equiv nh \mod J" in page.blocks[2].markdown
     assert r"\mathbb{Z}" in page.blocks[2].markdown
     assert r"\\)" not in page.blocks[0].markdown
+
+
+def test_latex_cleanup_cleans_math_in_tables():
+    page = PageResult(
+        number=28,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("table", "| \\( \\alpha_ {1} \\) | \\( \\mathbb {R} _ {q} \\) |\n| --- | --- |")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    page.blocks[0].markdown = clean_latex(page.blocks[0].markdown)
+
+    assert page.blocks[0].markdown == "| \\(α_1\\) | \\(ℝ_q\\) |\n| --- | --- |"
 
 
 def test_document_normalization_does_not_infer_caption_from_wording():

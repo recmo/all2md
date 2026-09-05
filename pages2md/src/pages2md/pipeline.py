@@ -29,6 +29,7 @@ from .reconciliation import reconcile_text
 from .document import normalize_document, merge_continued_tables, apply_links_to_blocks
 from .footnotes import normalize_footnotes
 from .formatting import format_and_lint
+from .latex import clean_latex
 from .mathlint import validator_identity
 from .lists import normalize_page_blocks
 from .markdown import (
@@ -363,6 +364,9 @@ def _convert_workspace(
     normalize_document(page_results)
     merge_continued_tables(page_results)
     for result in page_results:
+        for block in result.blocks:
+            if block.kind not in FIGURE_KINDS:
+                block.markdown = clean_latex(block.markdown, assume_math=block.kind in FORMULA_KINDS)
         _strip_review_metadata(result.blocks)
         normalize_table_blocks(result.blocks)
     available_pages = {page.number for page in page_results}

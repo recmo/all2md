@@ -90,6 +90,7 @@ The OCR dependency is pinned to MLX-VLM revision
 ```sh
 pages2md paper.pdf
 pages2md scans/
+pages2md paper.pdf scans/
 pages2md --force paper.pdf
 pages2md --ignore-embedded-text poor-text-layer.pdf
 ```
@@ -99,6 +100,11 @@ images. OCR, layout, chapter detection, and quality settings are fixed. Output i
 beside the input after replacing a file extension with `.md`: `paper.pdf`
 becomes `paper.md`, while the image directory `scans/` becomes `scans.md`.
 Existing output requires `--force`.
+If an input fails, the remaining inputs are still attempted and the command exits
+with a nonzero status.
+
+Within canonical Markdown, harmless OCR whitespace in LaTeX math is normalized
+without removing grouping braces or changing operator and comma spacing.
 
 Use `--ignore-embedded-text` for scans with a missing, stale, or low-quality
 text layer. This disables embedded text blocks, character/font repairs, text

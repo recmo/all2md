@@ -11,10 +11,10 @@ from .pipeline import convert
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(
         prog="pages2md",
-        description="Convert one document or image directory to Markdown",
+        description="Convert one or more documents or image directories to Markdown",
     )
     command.add_argument("--version", action="version", version=f"pages2md {commit_version()}")
-    command.add_argument("input", type=Path)
+    command.add_argument("input", nargs="+", type=Path)
     command.add_argument("--force", action="store_true", help="replace an existing output")
     command.add_argument(
         "--ignore-embedded-text",
@@ -26,17 +26,21 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     arguments = parser().parse_args(argv)
-    try:
-        print(
-            convert(
-                arguments.input,
-                force=arguments.force,
-                ignore_embedded_text=arguments.ignore_embedded_text,
+    failed = False
+    for source in arguments.input:
+        try:
+            print(
+                convert(
+                    source,
+                    force=arguments.force,
+                    ignore_embedded_text=arguments.ignore_embedded_text,
+                )
             )
-        )
-    except (FileExistsError, FileNotFoundError, RuntimeError, ValueError) as error:
-        print(f"pages2md: {error}", file=sys.stderr)
-        raise SystemExit(1) from error
+        except (FileExistsError, FileNotFoundError, RuntimeError, ValueError) as error:
+            failed = True
+            print(f"pages2md: {error}", file=sys.stderr)
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
