@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from pages2md.formatting import format_and_lint, format_markdown
-from pages2md.markdown import html_tables_to_markdown, local_links, markdown_anchors, merge_html_tables, normalize_heading_case, normalize_table_blocks, strict_page_markdown, title_case_heading, write_markdown
+from pages2md.markdown import html_tables_to_markdown, local_links, markdown_anchors, merge_html_tables, normalize_heading_case, normalize_heading_levels, normalize_table_blocks, strict_page_markdown, title_case_heading, write_markdown
 from pages2md.model import Block, Chapter, Comparison, EmbeddedEvidence, PageResult
 
 
@@ -329,6 +329,15 @@ def test_all_caps_headings_are_title_cased_conservatively():
         "Appendix: To IPO, or Not to IPO?"
     )
     assert title_case_heading("OpenAI and eBay") == "OpenAI and eBay"
+    assert title_case_heading("3.2 A BOUND ON INTERPOLATION") == "3.2 A Bound on Interpolation"
+
+
+def test_numbered_headings_recover_absolute_document_depth():
+    assert normalize_heading_levels(
+        "### Abstract\n\n### 3 Main\n\n### 3.2 A Bound\n\n## 3.2.1 Details\n\n## Algorithm 1"
+    ) == (
+        "## Abstract\n\n## 3 Main\n\n### 3.2 A Bound\n\n#### 3.2.1 Details\n\n#### Algorithm 1"
+    )
 
 
 def test_heading_links_keep_their_destinations():

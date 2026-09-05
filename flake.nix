@@ -104,26 +104,24 @@
         name = "speech-review";
         project = reviewProject;
       };
-      testPython = pkgs.python3.withPackages (
-        ps: with ps; [
-          beautifulsoup4
-          mdformat
-          mdformat-gfm
-          mlx
-          pillow
-          pymupdf
-          pytest
-          tqdm
-        ]
-      );
+      pagesTestEnvironment = mkPythonEnvironment {
+        name = "pages2md";
+        project = pagesProject;
+        extras = [
+          "ocr"
+          "dev"
+        ];
+      };
       pages2md = pkgs.writeShellApplication {
         name = "pages2md";
         runtimeInputs = [
           pkgs.djvulibre
           pkgs.poppler-utils
+          pkgs.nodejs
         ];
         text = ''
           export PAGES2MD_VERSION=${pagesVersion}
+          export PAGES2MD_KATEX_MODULE=${pkgs.katex}/lib/node_modules/katex
           exec ${pagesEnvironment}/bin/pages2md "$@"
         '';
       };
@@ -218,11 +216,54 @@
             echo "Run: uv sync --project doc2md --extra dev"
           '';
         };
+      mkMdstore =
+        mdSystem:
+        let
+          systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+        in
+        systemPkgs.rustPlatform.buildRustPackage {
+          pname = "mdstore";
+          version = "0.1.0";
+          src = ./mdstore;
+          cargoLock.lockFile = ./mdstore/Cargo.lock;
+          nativeCheckInputs = [ systemPkgs.git ];
+          nativeBuildInputs = [ systemPkgs.makeWrapper ];
+          postFixup = ''
+            wrapProgram "$out/bin/mdstore" --prefix PATH : ${nixpkgs.lib.makeBinPath [ systemPkgs.git ]}
+          '';
+          meta = {
+            description = "Git-backed Markdown search and editing daemon";
+            mainProgram = "mdstore";
+            license = nixpkgs.lib.licenses.mit;
+          };
+        };
+      mkMdstoreApp = mdSystem: {
+        type = "app";
+        program = "${mkMdstore mdSystem}/bin/mdstore";
+      };
+      mkMdstoreShell =
+        mdSystem:
+        let
+          systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+        in
+        systemPkgs.mkShell {
+          packages = [
+            systemPkgs.cargo
+            systemPkgs.clippy
+            systemPkgs.git
+            systemPkgs.rustc
+            systemPkgs.rustfmt
+          ];
+          shellHook = ''
+            echo "Run: cargo test --manifest-path mdstore/Cargo.toml"
+          '';
+        };
     in
     {
       packages =
         forDocSystems (docSystem: {
           doc2md = mkDoc2md docSystem;
+          mdstore = mkMdstore docSystem;
         })
         // {
           ${system} = {
@@ -234,12 +275,14 @@
               speech2md
               ;
             doc2md = mkDoc2md system;
+            mdstore = mkMdstore system;
           };
         };
 
       apps =
         forDocSystems (docSystem: {
           doc2md = mkDocApp docSystem;
+          mdstore = mkMdstoreApp docSystem;
         })
         // {
           ${system} = {
@@ -256,6 +299,7 @@
               program = "${speech-review}/bin/speech-review";
             };
             doc2md = mkDocApp system;
+            mdstore = mkMdstoreApp system;
           };
         };
 
@@ -263,6 +307,7 @@
         forDocSystems (docSystem: {
           doc2md = mkDoc2md docSystem;
           doc2md-independence = mkDocIndependenceCheck docSystem;
+          mdstore = mkMdstore docSystem;
         })
         // {
           ${system} = {
@@ -280,13 +325,17 @@
             pages2md-tests =
               pkgs.runCommand "pages2md-tests"
                 {
-                  nativeBuildInputs = [ testPython ];
+                  nativeBuildInputs = [
+                    pagesTestEnvironment
+                    pkgs.nodejs
+                  ];
                   PAGES2MD_VERSION = pagesVersion;
+                  PAGES2MD_KATEX_MODULE = "${pkgs.katex}/lib/node_modules/katex";
                 }
                 ''
                   export PYTHONPATH=${pagesProject}/src
                   export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-                  pytest -q ${pagesProject}/tests
+                  pytest -q -o cache_dir="$TMPDIR/pytest-cache" ${pagesProject}/tests
                   touch "$out"
                 '';
             speech2md-source =
@@ -379,21 +428,25 @@
                 '';
             doc2md = mkDoc2md system;
             doc2md-independence = mkDocIndependenceCheck system;
+            mdstore = mkMdstore system;
           };
         };
 
       devShells =
         forDocSystems (docSystem: {
           doc2md = mkDocShell docSystem;
+          mdstore = mkMdstoreShell docSystem;
         })
         // {
           ${system} = rec {
             pages2md = pkgs.mkShell {
+              PAGES2MD_KATEX_MODULE = "${pkgs.katex}/lib/node_modules/katex";
               packages = [
                 pkgs.djvulibre
                 pkgs.poppler-utils
                 pkgs.python3
                 pkgs.uv
+                pkgs.nodejs
               ];
               shellHook = ''
                 echo "Run: uv sync --project pages2md --extra dev --extra ocr"
@@ -432,6 +485,7 @@
             };
 
             doc2md = mkDocShell system;
+            mdstore = mkMdstoreShell system;
             default = pages2md;
           };
         };

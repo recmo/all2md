@@ -10,8 +10,10 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from .compare import compare_text, normalize
+from .embedded import assess_embedded, bbox_coverage, bbox_iou, embedded_text_for_bbox
 from .lists import annotate_native_list_block
-from .model import Block, OcrObservation
+from .embedded import bbox_iou as _iou, bbox_coverage as _coverage
+from .model import Block, EmbeddedEvidence, OcrObservation
 from .quality import output_quality_warnings
 
 PAGE_TOKEN = re.compile(r"\s*<PAGE>\s*")
@@ -287,25 +289,53 @@ def reconcile_observations(
     recoveries: list[OcrObservation],
     *,
     embedded_text: str = "",
+    embedded: EmbeddedEvidence | None = None,
 ) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
     """Keep multi-page structure and apply only confidently aligned Gundam spans."""
     provenance: list[dict[str, Any]] = []
     warnings: list[str] = list(primary.warnings)
     canonical = [_copy_block(block) for block in primary.blocks]
     primary_bad = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
-    page_detail = [
+    trust_visual = _observation_text(primary)
+    if primary_bad and embedded is not None and embedded.text:
+        observations = [primary, *recoveries]
+        trust_visual = max(
+            (_observation_text(observation) for observation in observations),
+            key=lambda value: _embedded_support(value, embedded.text),
+        )
+    embedded_trust = assess_embedded(embedded, trust_visual)
+    if embedded is not None and not embedded_trust.usable:
+        embedded_text = ""
+    detail_candidates = [
         recovery
         for recovery in recoveries
         if isinstance(recovery.generation.get("target_block_indices"), list)
     ]
-    if page_detail and not primary_bad:
-        return _reconcile_page_detail(
-            primary,
-            page_detail[0],
+    page_detail = [
+        recovery
+        for recovery in detail_candidates
+        if not set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS
+    ]
+    if detail_candidates and not primary_bad:
+        for detail in page_detail:
+            canonical, detail_provenance, warnings = _reconcile_page_detail(
+                primary,
+                detail,
+                canonical,
+                warnings,
+                embedded_text=embedded_text,
+                embedded=embedded,
+            )
+            provenance.extend(detail_provenance)
+        canonical, recovered_provenance, recovered_warnings = _recover_uncovered_blocks(
             canonical,
-            warnings,
-            embedded_text=embedded_text,
+            recoveries,
+            primary=primary,
+            embedded=embedded if embedded_trust.geometric else None,
         )
+        provenance.extend(recovered_provenance)
+        warnings.extend(recovered_warnings)
+        return canonical, provenance, sorted(set(warnings))
     if len(recoveries) >= 2 and not primary_bad:
         return _reconcile_consensus(primary, recoveries, canonical, warnings)
     for recovery in recoveries:
@@ -327,6 +357,13 @@ def reconcile_observations(
             canonical = retained_headings
             for candidate in recovery.blocks:
                 adopted = _copy_block(candidate)
+                if adopted.bbox is None and embedded_trust.geometric and embedded is not None:
+                    match = _match_uncovered_embedded_block(adopted, canonical, embedded)
+                    if match is not None:
+                        adopted.bbox, evidence, _ = match
+                        adopted.markdown = _repair_supported_boundary(adopted.markdown, evidence)
+                        adopted.metadata.pop("native_ungrounded", None)
+                        adopted.metadata["embedded_grounded_recovery"] = True
                 adopted.provenance.append(
                     {"observation": primary.id, "action": "replaced_corrupt_page_local_content"}
                 )
@@ -387,9 +424,16 @@ def reconcile_observations(
                 )
         elif any(index not in used for index in range(len(recovery.blocks))) and primary_bad:
             warnings.append("visual_reconciliation_uncertain")
+    canonical, recovered_provenance, recovered_warnings = _recover_uncovered_blocks(
+        canonical,
+        recoveries,
+        primary=primary,
+        embedded=embedded if embedded_trust.geometric else None,
+    )
+    provenance.extend(recovered_provenance)
+    warnings.extend(recovered_warnings)
     for block in canonical:
-        if _low_confidence(block) and not block.metadata.get("review_required"):
-            _mark_unresolved(block, detail=None)
+        if _low_confidence(block):
             warnings.append("visual_low_ocr_confidence")
     return canonical, provenance, sorted(set(warnings))
 
@@ -401,6 +445,7 @@ def _reconcile_page_detail(
     warnings: list[str],
     *,
     embedded_text: str,
+    embedded: EmbeddedEvidence | None,
 ) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
     provenance: list[dict[str, Any]] = []
     warnings.extend(recovery.warnings)
@@ -409,14 +454,20 @@ def _reconcile_page_detail(
         for index in recovery.generation.get("target_block_indices", [])
         if isinstance(index, int) or str(index).isdigit()
     }
+    used: set[int] = set()
     for index, block in enumerate(canonical):
-        compatible = [candidate for candidate in recovery.blocks if _compatible(block, candidate)]
-        candidate = max(compatible, key=lambda item: _alignment_score(block, item), default=None)
+        compatible = [
+            (candidate_index, candidate)
+            for candidate_index, candidate in enumerate(recovery.blocks)
+            if candidate_index not in used and _compatible(block, candidate)
+        ]
+        match = max(compatible, key=lambda item: _alignment_score(block, item[1]), default=None)
+        candidate_index, candidate = match if match is not None else (None, None)
         if candidate is None or _alignment_score(block, candidate) < 0.55:
             if index in targeted:
-                _mark_unresolved(block, detail=None)
                 warnings.append("visual_target_alignment_failed")
             continue
+        used.add(candidate_index)
         block = canonical[index]
         if _evidence_normalize(candidate.markdown) == _evidence_normalize(block.markdown):
             block.metadata.pop("uncertain_spans", None)
@@ -425,8 +476,9 @@ def _reconcile_page_detail(
 
         base_local = _local_confidence(block)
         candidate_local = _local_confidence(candidate)
-        base_evidence = _embedded_support(block.markdown, embedded_text)
-        candidate_evidence = _embedded_support(candidate.markdown, embedded_text)
+        local_evidence = embedded_text_for_bbox(embedded, block.bbox) or embedded_text
+        base_evidence = _embedded_support(block.markdown, local_evidence)
+        candidate_evidence = _embedded_support(candidate.markdown, local_evidence)
         evidence_delta = candidate_evidence - base_evidence
         detail_preferred = bool(
             _structural_penalty(candidate.markdown) <= _structural_penalty(block.markdown)
@@ -448,7 +500,16 @@ def _reconcile_page_detail(
                 and base_local >= candidate_local + 0.1
             )
         )
-        if detail_preferred:
+        merged, span_changes = _merge_supported_spans(
+            block.markdown,
+            candidate.markdown,
+            local_evidence,
+        )
+        partial_span_win = bool(
+            span_changes
+            and _evidence_normalize(merged) != _evidence_normalize(candidate.markdown)
+        )
+        if detail_preferred and not partial_span_win:
             replacement = _copy_block(candidate)
             replacement.source_pages = list(block.source_pages)
             replacement.bbox = block.bbox
@@ -474,18 +535,207 @@ def _reconcile_page_detail(
                 "detail_local_confidence": round(candidate_local, 6),
                 "embedded_support_delta": round(evidence_delta, 6),
             })
-        elif base_preferred:
-            block.metadata.pop("uncertain_spans", None)
-            block.metadata["targeted_detail_rejected"] = recovery.id
-        elif index in targeted:
-            # Keep Base on a tie because it preserves the multi-page reading order.
-            _mark_unresolved(block, detail=candidate)
-            warnings.append("visual_targeted_ocr_unresolved")
+        else:
+            if span_changes:
+                block.markdown = merged
+                block.metadata.setdefault("targeted_span_repairs", []).extend(span_changes)
+                block.provenance.append({
+                    "observation": recovery.id,
+                    "action": "selected_targeted_spans",
+                    "span_count": len(span_changes),
+                })
+                provenance.append({
+                    "block": index,
+                    "primary_observation": primary.id,
+                    "recovery_observation": recovery.id,
+                    "action": "selected_targeted_spans",
+                    "span_count": len(span_changes),
+                })
+                if index in targeted and _evidence_normalize(merged) != _evidence_normalize(candidate.markdown):
+                    warnings.append("visual_targeted_ocr_unresolved")
+            elif base_preferred:
+                block.metadata.pop("uncertain_spans", None)
+                block.metadata["targeted_detail_rejected"] = recovery.id
+            elif index in targeted:
+                # Keep Base on a tie because it preserves the multi-page reading order.
+                warnings.append("visual_targeted_ocr_unresolved")
     for index, block in enumerate(canonical):
         if _low_confidence(block) and index not in targeted:
-            _mark_unresolved(block, detail=None)
             warnings.append("visual_low_ocr_confidence")
     return canonical, provenance, sorted(set(warnings))
+
+
+def _merge_supported_spans(base: str, detail: str, embedded: str) -> tuple[str, list[dict[str, str]]]:
+    """Take only detail spans that improve bbox-local native-text agreement."""
+    if not embedded or base == detail:
+        return base, []
+    operations = [item for item in SequenceMatcher(None, base, detail, autojunk=False).get_opcodes() if item[0] != "equal"]
+    regions: list[list[int]] = []
+    for _, left_start, left_end, right_start, right_end in operations:
+        if regions and left_start - regions[-1][1] <= 4 and right_start - regions[-1][3] <= 4:
+            regions[-1][1] = left_end
+            regions[-1][3] = right_end
+        else:
+            regions.append([left_start, left_end, right_start, right_end])
+    accepted: list[tuple[int, int, str, str, float]] = []
+    base_score = _embedded_support(base, embedded)
+    for left_start, left_end, right_start, right_end in regions:
+        replacement = detail[right_start:right_end]
+        variant = base[:left_start] + replacement + base[left_end:]
+        delta = _embedded_support(variant, embedded) - base_score
+        if delta <= 0.0005 or _structural_penalty(variant) > _structural_penalty(base):
+            continue
+        accepted.append((left_start, left_end, replacement, base[left_start:left_end], delta))
+    if not accepted:
+        return base, []
+    merged = base
+    changes: list[dict[str, str]] = []
+    for start, end, replacement, original, delta in reversed(accepted):
+        merged = merged[:start] + replacement + merged[end:]
+        changes.append({
+            "visual": original,
+            "detail": replacement,
+            "embedded_support_delta": f"{delta:.6f}",
+        })
+    return merged, list(reversed(changes))
+
+
+def _recover_uncovered_blocks(
+    canonical: list[Block],
+    recoveries: list[OcrObservation],
+    *,
+    primary: OcrObservation,
+    embedded: EmbeddedEvidence | None,
+) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
+    """Adopt OCR candidate blocks that occupy reliable, otherwise uncovered text regions."""
+    if embedded is None:
+        return canonical, [], []
+    provenance: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for recovery in recoveries:
+        if set(recovery.warnings) & {
+            "visual_implausible_coordinates",
+            "visual_malformed_grounding",
+            "visual_page_transition_mismatch",
+        }:
+            continue
+        for candidate in recovery.blocks:
+            if candidate.kind in {"page_number", "header", "footer"}:
+                continue
+            normalized = _evidence_normalize(candidate.markdown)
+            if (
+                len(normalized) < 3
+                or len(normalized) > 5000
+                or "visual_text_repetition"
+                in compare_text(candidate.markdown, "").warnings
+                or _structural_penalty(candidate.markdown) > 0.2
+            ):
+                continue
+            duplicate = any(
+                block.kind == candidate.kind
+                and SequenceMatcher(
+                    None,
+                    _evidence_normalize(block.markdown),
+                    normalized,
+                    autojunk=False,
+                ).ratio() >= 0.82
+                for block in canonical
+            )
+            if duplicate:
+                continue
+            candidate_bbox = candidate.bbox
+            evidence = embedded_text_for_bbox(embedded, candidate_bbox, minimum_coverage=0.25)
+            support = _embedded_support(candidate.markdown, evidence)
+            if candidate_bbox is None or support < 0.45:
+                match = _match_uncovered_embedded_block(candidate, canonical, embedded)
+                if match is None:
+                    continue
+                candidate_bbox, evidence, support = match
+            overlap = max(
+                (
+                    max(bbox_iou(candidate_bbox, block.bbox), bbox_coverage(candidate_bbox, block.bbox))
+                    for block in canonical
+                    if block.bbox is not None
+                ),
+                default=0.0,
+            )
+            if overlap >= 0.35:
+                continue
+            if support < 0.45:
+                continue
+            adopted = _copy_block(candidate)
+            adopted.bbox = candidate_bbox
+            adopted.markdown = _repair_supported_boundary(adopted.markdown, evidence)
+            adopted.metadata.pop("native_ungrounded", None)
+            adopted.metadata["embedded_grounded_recovery"] = True
+            adopted.provenance.append({
+                "observation": recovery.id,
+                "action": "recovered_uncovered_region",
+                "embedded_support": round(support, 6),
+            })
+            insertion = next(
+                (
+                    index
+                    for index, block in enumerate(canonical)
+                    if block.bbox is not None and block.bbox[1] > candidate_bbox[1]
+                ),
+                len(canonical),
+            )
+            canonical.insert(insertion, adopted)
+            provenance.append({
+                "block": insertion,
+                "primary_observation": primary.id,
+                "recovery_observation": recovery.id,
+                "action": "recovered_uncovered_region",
+                "embedded_support": round(support, 6),
+            })
+            warnings.append("visual_uncovered_region_recovered")
+    return canonical, provenance, warnings
+
+
+def _match_uncovered_embedded_block(
+    candidate: Block,
+    canonical: list[Block],
+    embedded: EmbeddedEvidence,
+) -> tuple[tuple[float, float, float, float], str, float] | None:
+    matches = []
+    for native_block in embedded.blocks:
+        bbox = native_block.get("bbox", [])
+        text = str(native_block.get("text", "")).strip()
+        if len(bbox) != 4 or len(text) < 8:
+            continue
+        native_bbox = tuple(float(value) for value in bbox)
+        if any(
+            block.bbox is not None
+            and bbox_coverage(native_bbox, block.bbox) >= 0.45
+            for block in canonical
+        ):
+            continue
+        support = _embedded_support(candidate.markdown, text)
+        if support >= 0.45:
+            matches.append((support, native_bbox, text))
+    if not matches:
+        return None
+    support, bbox, text = max(matches, key=lambda item: item[0])
+    return bbox, text, support
+
+
+def _repair_supported_boundary(markdown: str, embedded: str) -> str:
+    """Repair a short corrupt prefix/suffix around an exact two-word anchor."""
+    native_words = list(re.finditer(r"[^\W_]+", embedded, re.UNICODE))
+    for left, right in zip(native_words, native_words[1:]):
+        if left.start() > 24:
+            break
+        pattern = re.compile(
+            rf"{re.escape(left.group(0))}\s+{re.escape(right.group(0))}",
+            re.IGNORECASE,
+        )
+        visual = pattern.search(markdown)
+        if visual is None or visual.start() > 32:
+            continue
+        native_anchor = embedded[left.start() : right.end()]
+        return embedded[: left.start()] + native_anchor + markdown[visual.end() :]
+    return markdown
 
 
 def _local_confidence(block: Block) -> float:
@@ -493,35 +743,6 @@ def _local_confidence(block: Block) -> float:
     if spans:
         return min(float(span.get("confidence", 0.0)) for span in spans)
     return float(block.confidence if block.confidence is not None else 1.0)
-
-
-def _mark_unresolved(block: Block, detail: Block | None) -> None:
-    base_excerpt, detail_excerpt = _changed_excerpts(
-        block.markdown,
-        detail.markdown if detail is not None else "",
-    )
-    block.metadata.update({
-        "review_required": True,
-        "review_reason": "targeted_ocr_unresolved",
-        "review_confidence": _local_confidence(block),
-        "review_base": base_excerpt,
-        "review_detail": detail_excerpt or None,
-    })
-
-
-def _changed_excerpts(base: str, detail: str, *, context: int = 24) -> tuple[str, str]:
-    if not detail:
-        spans = []
-        return base[: context * 2].strip(), ""
-    matcher = SequenceMatcher(None, base, detail, autojunk=False)
-    opcode = next((item for item in matcher.get_opcodes() if item[0] != "equal"), None)
-    if opcode is None:
-        return base[: context * 2].strip(), detail[: context * 2].strip()
-    _, left_start, left_end, right_start, right_end = opcode
-    return (
-        base[max(0, left_start - context) : min(len(base), left_end + context)].strip(),
-        detail[max(0, right_start - context) : min(len(detail), right_end + context)].strip(),
-    )
 
 
 def _low_confidence(block: Block) -> bool:
@@ -554,6 +775,7 @@ def _evidence_normalize(value: str) -> str:
     value = value.replace(r"\colon", ":")
     value = re.sub(r"\\([A-Za-z]+)", r"\1", value)
     value = re.sub(r"_\{([^{}]+)\}", r"_\1", value)
+    value = value.replace("^", "").replace("{", "").replace("}", "")
     value = re.sub(r"\s+([,.;:!?])", r"\1", value)
     return normalize(value).casefold()
 
@@ -618,14 +840,6 @@ def _reconcile_consensus(
             )
         if minimum_similarity < 0.985:
             warnings.append("visual_ocr_disagreement")
-            block.metadata.update(
-                {
-                    "review_required": True,
-                    "review_reason": "ocr_candidates_disagree",
-                    "review_consensus": round(max(scores), 6),
-                    "review_candidates": [identifier for identifier, _ in variants],
-                }
-            )
     return canonical, provenance, sorted(set(warnings))
 
 
@@ -687,22 +901,6 @@ def _alignment_score(left: Block, right: Block) -> float:
     text = SequenceMatcher(None, normalize(left.markdown), normalize(right.markdown), autojunk=False).ratio()
     geometry = _iou(left.bbox, right.bbox) if left.bbox and right.bbox else 0.5
     return 0.75 * text + 0.25 * geometry
-
-
-def _iou(a, b) -> float:
-    left, top = max(a[0], b[0]), max(a[1], b[1])
-    right, bottom = min(a[2], b[2]), min(a[3], b[3])
-    intersection = max(0.0, right - left) * max(0.0, bottom - top)
-    union = max(1.0, (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - intersection)
-    return intersection / union
-
-
-def _coverage(subject, container) -> float:
-    left, top = max(subject[0], container[0]), max(subject[1], container[1])
-    right, bottom = min(subject[2], container[2]), min(subject[3], container[3])
-    intersection = max(0.0, right - left) * max(0.0, bottom - top)
-    area = max(1.0, (subject[2] - subject[0]) * (subject[3] - subject[1]))
-    return intersection / area
 
 
 def _copy_block(block: Block) -> Block:

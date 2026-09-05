@@ -16,6 +16,11 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--version", action="version", version=f"pages2md {commit_version()}")
     command.add_argument("input", nargs="+", type=Path)
     command.add_argument("--force", action="store_true", help="replace an existing output")
+    command.add_argument(
+        "--ignore-embedded-text",
+        action="store_true",
+        help="ignore embedded PDF/DjVu text and use visual OCR only",
+    )
     return command
 
 
@@ -24,7 +29,13 @@ def main(argv: list[str] | None = None) -> None:
     failed = False
     for source in arguments.input:
         try:
-            print(convert(source, force=arguments.force))
+            print(
+                convert(
+                    source,
+                    force=arguments.force,
+                    ignore_embedded_text=arguments.ignore_embedded_text,
+                )
+            )
         except (FileExistsError, FileNotFoundError, RuntimeError, ValueError) as error:
             failed = True
             print(f"pages2md: {error}", file=sys.stderr)

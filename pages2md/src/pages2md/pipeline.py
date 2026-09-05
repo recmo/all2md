@@ -8,7 +8,9 @@ import shutil
 import sys
 import tempfile
 import time
+from copy import deepcopy
 from dataclasses import asdict
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -20,25 +22,53 @@ from .assets import AssetStore
 from .chapters import detect_chapters
 from .compare import compare_text
 from .constants import AUTO_SPLIT_BYTES, DEFAULT_DPI, SCHEMA_VERSION, commit_version
+from .embedded import assess_embedded, bbox_coverage, iter_embedded_characters
+from .alignment import align_glyphs
+from .embedded import bbox_iou as _iou
+from .reconciliation import reconcile_text
+from .document import normalize_document, merge_continued_tables, apply_links_to_blocks
+from .footnotes import normalize_footnotes
 from .formatting import format_and_lint
 from .latex import clean_latex
-from .lists import normalize_lists
+from .mathlint import validator_identity
+from .lists import normalize_page_blocks
 from .markdown import (
-    merge_html_tables,
     normalize_table_blocks,
     strict_page_markdown,
     write_markdown,
 )
-from .model import Block, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult
+from .model import FIGURE_KINDS, FORMULA_KINDS, Block, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult
 from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, confidence_summary, split_multi_page_output
 from .quality import adjacent_overlap, output_quality_warnings, runaway_repetition_span
-from .util import atomic_json, sha256_file, slugify
+from .util import atomic_json, sha256_file
 from .util import atomic_text
 from .verify import verify_bundle
 
-FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
-FORMULA_KINDS = {"formula", "equation", "display_formula"}
+# Bump only when stored raw observations are incompatible with recognition.
+OCR_CHECKPOINT_VERSION = 1
+
+EMBEDDED_PROOF_MARKS = {"□": r"\(\square\)", "∎": r"\(\blacksquare\)"}
+REVIEW_METADATA_KEYS = {
+    "review_required",
+    "review_reason",
+    "review_confidence",
+    "review_consensus",
+    "review_candidates",
+    "review_base",
+    "review_detail",
+}
+
+
+def _compare_with_embedded(visual: str, embedded: EmbeddedEvidence) -> Comparison:
+    comparison = compare_text(visual, embedded.text)
+    if embedded.extractor == "ignored":
+        comparison.warnings = [
+            warning
+            for warning in comparison.warnings
+            if warning != "embedded_text_absent"
+        ]
+    return comparison
 
 
 def convert(
@@ -46,12 +76,13 @@ def convert(
     *,
     force: bool = False,
     backend: OcrBackend | None = None,
+    ignore_embedded_text: bool = False,
 ) -> Path:
     """Convert a document, checkpointing pages beside the source before publishing."""
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    target = source.with_name(f"{source.name}.md")
+    target = source.with_name(f"{_source_stem(source)}.md")
     if target.exists() and not force:
         raise FileExistsError(f"output exists (use --force): {target}")
     source_hash = _source_hash(source)
@@ -63,6 +94,7 @@ def convert(
         _intermediate_root(source),
         backend=backend,
         force=force,
+        ignore_embedded_text=ignore_embedded_text,
     )
     verification = verify_bundle(workspace)
     for warning in verification.warnings:
@@ -73,7 +105,12 @@ def convert(
 def _intermediate_root(source: Path) -> Path:
     """Return the persistent, private workspace directory beside ``source``."""
     source = source.resolve()
-    return source.with_name(f"{source.name}.pages2md")
+    return source.with_name(f"{_source_stem(source)}.pages2md")
+
+
+def _source_stem(source: Path) -> str:
+    """Drop one document extension while preserving dotted directory names."""
+    return source.stem if source.is_file() else source.name
 
 
 def _convert_workspace(
@@ -83,47 +120,66 @@ def _convert_workspace(
     backend: OcrBackend | None = None,
     force: bool = False,
     resume: bool = True,
+    ignore_embedded_text: bool = False,
 ) -> Path:
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    bundle = output.resolve() / slugify(source.name, "document")
-    if force and bundle.exists():
-        shutil.rmtree(bundle)
+    bundle = output.resolve()
     backend = backend or MlxUnlimitedOcr()
     ocr_fingerprint = {
+        "contract_version": OCR_CHECKPOINT_VERSION,
         "source_sha256": _source_hash(source),
         "backend": dict(backend.identity),
         "dpi": DEFAULT_DPI,
         "multi_page": True,
         "quality": "thorough",
-        "code": _code_fingerprint(
-            "adapters.py", "assets.py", "compare.py", "model.py", "native.py", "ocr.py", "pipeline.py", "quality.py"
-        ),
     }
     assembly_fingerprint = {
         "split_mode": "auto",
+        "math_validator": validator_identity(),
+        "embedded_text": "ignored" if ignore_embedded_text else "enabled",
         "code": _code_fingerprint(
-            "chapters.py", "formatting.py", "lists.py", "markdown.py", "model.py", "pipeline.py", "quality.py", "verify.py"
+            "adapters.py", "assets.py", "chapters.py", "compare.py", "formatting.py",
+            "embedded.py", "alignment.py", "lists.py", "markdown.py", "model.py", "native.py", "pipeline.py",
+            "quality.py", "verify.py", "syntax.py", "reconciliation.py", "document.py", "edits.py", "mathlint.py", "katex_lint.cjs", "urls.py", "semantics.py", "footnotes.py",
         ),
     }
     previous = _read_json(bundle / "metadata.json")
     progress_state = _read_json(bundle / "progress.json")
     resume_state = progress_state or previous
-    can_resume = bool(
+    can_reuse_ocr = bool(
         resume
         and resume_state
         and resume_state.get("source") == str(source)
         and resume_state.get("ocr_fingerprint") == ocr_fingerprint
     )
-    if bundle.exists() and not can_resume:
-        shutil.rmtree(bundle)
+    can_resume_pages = bool(
+        can_reuse_ocr
+        and resume_state.get("assembly_fingerprint") == assembly_fingerprint
+    )
+    if bundle.exists() and not can_reuse_ocr:
+        if force:
+            shutil.rmtree(bundle)
+        else:
+            raise RuntimeError(
+                "incompatible intermediate bundle retained; use --force to replace it: "
+                f"{bundle}"
+            )
+    if (
+        can_resume_pages
+        and resume_state.get("status") == "complete"
+        and _page_checkpoints_complete(bundle, previous)
+    ):
+        verification = verify_bundle(bundle)
+        if verification.ok:
+            return bundle
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "pages").mkdir(exist_ok=True)
     (bundle / "raw").mkdir(exist_ok=True)
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
-    assets = AssetStore(bundle / "assets", load_existing=can_resume)
+    assets = AssetStore(bundle / "assets", load_existing=can_reuse_ocr)
     fingerprint = {"ocr": ocr_fingerprint, "assembly": assembly_fingerprint}
     started = time.time()
     _write_progress(
@@ -133,10 +189,17 @@ def _convert_workspace(
         completed_pages=set(),
         status="opening",
     )
-    document = open_document(source, work, assets, dpi=DEFAULT_DPI)
+    document = open_document(
+        source,
+        work,
+        assets,
+        dpi=DEFAULT_DPI,
+        ignore_embedded_text=ignore_embedded_text,
+    )
 
     resumed: dict[int, PageResult] = {}
-    if can_resume:
+    reassembled: dict[int, PageResult] = {}
+    if can_resume_pages:
         for source_page in document.pages:
             page_path = bundle / "pages" / f"page-{source_page.number:04d}.json"
             value = _read_json(page_path)
@@ -146,7 +209,25 @@ def _convert_workspace(
                 resumed[source_page.number] = _page_from_dict(value)
             except (KeyError, TypeError, ValueError):
                 continue
-    completed_pages = set(resumed)
+    elif can_reuse_ocr:
+        for source_page in document.pages:
+            page_path = bundle / "pages" / f"page-{source_page.number:04d}.json"
+            value = _read_json(page_path)
+            if not isinstance(value, dict) or value.get("number") != source_page.number:
+                continue
+            try:
+                result = _reassemble_cached_page(
+                    source_page,
+                    value,
+                    bundle,
+                    assets,
+                    document.outline,
+                )
+            except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+                continue
+            if result is not None:
+                reassembled[source_page.number] = result
+    completed_pages = set(resumed) | set(reassembled)
     _write_progress(
         bundle,
         source=source,
@@ -170,6 +251,13 @@ def _convert_workspace(
         for page in document.pages:
             if page.number in resumed:
                 page_results.append(resumed[page.number])
+                progress.update()
+                continue
+            if page.number in reassembled:
+                result = reassembled[page.number]
+                assets.write_manifest()
+                atomic_json(bundle / "pages" / f"page-{page.number:04d}.json", result.to_dict())
+                page_results.append(result)
                 progress.update()
                 continue
             blank, ink_fraction = _is_visually_blank(page.image_path)
@@ -229,6 +317,7 @@ def _convert_workspace(
                         primary,
                         candidates,
                         embedded_text=source_page.embedded.text,
+                        embedded=source_page.embedded,
                     )
                     validation_warnings.extend(candidate_warnings)
                     result = _page_result(
@@ -271,13 +360,22 @@ def _convert_workspace(
         raise RuntimeError(f"{len(failed)} page(s) failed; intermediate bundle: {bundle}")
 
     page_results.sort(key=lambda item: item.number)
-    _normalize_document_blocks(page_results)
-    _merge_continued_tables(page_results)
+    normalize_footnotes(page_results)
+    normalize_document(page_results)
+    merge_continued_tables(page_results)
     for result in page_results:
+        for block in result.blocks:
+            if block.kind not in FIGURE_KINDS:
+                block.markdown = clean_latex(block.markdown, assume_math=block.kind in FORMULA_KINDS)
+        _strip_review_metadata(result.blocks)
         normalize_table_blocks(result.blocks)
     available_pages = {page.number for page in page_results}
     for result in page_results:
-        _apply_links_to_blocks(result.blocks, result.embedded.links)
+        apply_links_to_blocks(
+            result.blocks,
+            result.embedded.links,
+            page_number=result.number,
+        )
         result.visual_markdown = strict_page_markdown(result, document.outline)
         retained_warnings = [
             warning
@@ -286,7 +384,7 @@ def _convert_workspace(
         ]
         if result.generation.get("multi_page_recovery"):
             retained_warnings.append("multi_page_recovered_corrupt_segment")
-        result.comparison = compare_text(result.visual_markdown, result.embedded.text)
+        result.comparison = _compare_with_embedded(result.visual_markdown, result.embedded)
         result.warnings = sorted(
             set(
                 [
@@ -300,8 +398,6 @@ def _convert_workspace(
         if unresolved:
             result.warnings.append("unresolved_internal_link")
             result.comparison.warnings.append("unresolved_internal_link")
-        result.visual.setdefault("canonical", {})["blocks"] = [asdict(block) for block in result.blocks]
-        result.visual["canonical"]["markdown"] = result.visual_markdown
         atomic_json(bundle / "pages" / f"page-{result.number:04d}.json", result.to_dict())
     overlap_pages: set[int] = set()
     for previous_page, current_page in zip(page_results, page_results[1:]):
@@ -339,12 +435,15 @@ def _convert_workspace(
         warnings.append("markdown_formatter_skipped_unsafe_change")
     if format_result.lint_errors:
         warnings.append("markdown_lint_failed")
+    if format_result.math_validation.diagnostics:
+        warnings.append("latex_validation_findings")
     output_fingerprints = {path: sha256_file(bundle / path) for path in files}
     assets.write_manifest()
     document_json = {
         "schema_version": SCHEMA_VERSION,
         "source": str(source),
         "kind": document.kind,
+        "ignore_embedded_text": ignore_embedded_text,
         "metadata": document.metadata,
         "outline": document.outline,
         "chapters": [asdict(chapter) for chapter in chapters],
@@ -358,6 +457,7 @@ def _convert_workspace(
         "assembly_fingerprint": assembly_fingerprint,
         "source": str(source),
         "source_kind": document.kind,
+        "ignore_embedded_text": ignore_embedded_text,
         "page_count": len(page_results),
         "requested_page_count": len(document.pages),
         "model": dict(backend.identity),
@@ -367,19 +467,15 @@ def _convert_workspace(
         "markdown_files": files,
         "warnings": sorted(set(warnings)),
         "formatting": {
-            "formatter": "mdformat==1.0.0 + mdformat-gfm==1.0.0",
+            "formatter": "mdformat==1.0.0 + mdformat-gfm==1.0.0 + mdformat-footnote==0.1.3",
             "linter": "pymarkdownlnt==0.9.38",
             "idempotent": format_result.idempotent,
             "lint_errors": format_result.lint_errors,
             "preservation_skips": format_result.preservation_skips,
         },
+        "math_validation": asdict(format_result.math_validation),
         "output_fingerprints": output_fingerprints,
         "failed_pages": failed,
-        "review_required_blocks": sum(
-            bool(block.metadata.get("review_required"))
-            for page in page_results
-            for block in page.blocks
-        ),
         "duration_seconds": round(time.time() - started, 3),
         "platform": platform.platform(),
     }
@@ -512,15 +608,33 @@ def _page_result(
     assets,
     outline,
 ) -> PageResult:
+    embedded_trust = assess_embedded(
+        source_page.embedded,
+        _blocks_markdown(blocks, ""),
+    )
+    trusted_embedded = source_page.embedded if embedded_trust.geometric else None
+    if source_page.embedded.extractor not in {None, "ignored"}:
+        validation_warnings.append(f"visual_embedded_text_{embedded_trust.state}")
     validation_warnings.extend(_repair_runaway_repetition(blocks))
     validation_warnings.extend(
         _canonicalize_figure_blocks(
             blocks,
             source_page.image_path,
+            trusted_embedded,
         )
     )
+    validation_warnings.extend(
+        _restore_embedded_proof_marks(
+            blocks,
+            trusted_embedded or EmbeddedEvidence(),
+            source_page.number,
+        )
+    )
+    blocks = normalize_page_blocks(blocks)
+    validation_warnings.extend(reconcile_text(blocks, source_page.embedded, embedded_trust))
+    _strip_review_metadata(blocks)
     visual_markdown = _blocks_markdown(blocks, "")
-    comparison = compare_text(visual_markdown, source_page.embedded.text)
+    comparison = _compare_with_embedded(visual_markdown, source_page.embedded)
     _materialize_figures(
         blocks,
         source_page.image_path,
@@ -555,7 +669,6 @@ def _page_result(
                 observation_dict(item, raw_path=f"{raw_root}/{item.id}.txt") for item in recoveries
             ],
             "canonical": {
-                "blocks": [asdict(block) for block in blocks],
                 "authoritative_observation": (
                     "multi_base_with_targeted_detail" if consensus_observations else group_observation.id
                 ),
@@ -565,6 +678,165 @@ def _page_result(
         recovery=recovery,
     )
     return result
+
+
+def _strip_review_metadata(blocks: list[Block]) -> None:
+    """Keep OCR uncertainty internal instead of publishing review markers."""
+    for block in blocks:
+        for key in REVIEW_METADATA_KEYS:
+            block.metadata.pop(key, None)
+
+
+def _has_embedded_coverage_gap(
+    blocks: list[Block],
+    embedded: EmbeddedEvidence,
+) -> bool:
+    """Detect meaningful native text lines not covered by any visual OCR block."""
+    uncovered_characters = 0
+    visual_text = _coverage_text(" ".join(block.markdown for block in blocks))
+    for native_block in embedded.blocks:
+        for line in native_block.get("lines", []):
+            text = re.sub(r"\s+", " ", str(line.get("text", ""))).strip()
+            bbox = line.get("bbox", [])
+            if len(text) < 8 or len(bbox) != 4:
+                continue
+            if bbox[1] < 35 or bbox[3] > 925:
+                continue
+            native_text = _coverage_text(text)
+            if native_text and native_text in visual_text:
+                continue
+            covered = any(
+                block.bbox is not None
+                and (
+                    bbox_coverage(bbox, _expand_bbox(block.bbox, 8.0)) >= 0.55
+                    or bbox_coverage(block.bbox, _expand_bbox(tuple(bbox), 8.0)) >= 0.55
+                )
+                for block in blocks
+            )
+            if not covered:
+                uncovered_characters += len(text)
+                if uncovered_characters >= 18:
+                    return True
+    return False
+
+
+def _coverage_text(value: str) -> str:
+    return " ".join(re.findall(r"[\w]+", value.casefold(), re.UNICODE))
+
+
+def _expand_bbox(bbox, padding: float):
+    return (
+        max(0.0, float(bbox[0]) - padding),
+        max(0.0, float(bbox[1]) - padding),
+        min(1000.0, float(bbox[2]) + padding),
+        min(1000.0, float(bbox[3]) + padding),
+    )
+
+
+def _reassemble_cached_page(
+    source_page,
+    value: dict[str, Any],
+    bundle: Path,
+    assets: AssetStore,
+    outline: list[dict[str, Any]],
+) -> PageResult | None:
+    """Re-run deterministic assembly from saved model observations."""
+    generation = value.get("generation", {})
+    if generation.get("mode") == "blank":
+        return _blank_page_result(
+            source_page,
+            float(generation.get("ink_fraction", 0.0)),
+        )
+    raw = value.get("raw_ocr")
+    visual = value.get("visual", {})
+    multi_value = visual.get("multi_page") if isinstance(visual, dict) else None
+    if not isinstance(raw, str) or not isinstance(multi_value, dict):
+        return None
+    group_observation = _cached_observation(multi_value, bundle)
+    source_pages = generation.get("source_pages", [source_page.number])
+    if not isinstance(source_pages, list) or not all(
+        isinstance(number, int) for number in source_pages
+    ):
+        source_pages = [source_page.number]
+    primary = parse_native_observation(
+        raw,
+        mode=str(generation.get("mode", "multi_base")),
+        source_pages=source_pages,
+        generation=generation,
+    )
+    _restore_cached_block_details(primary, group_observation)
+    primary.id = group_observation.id
+    candidate_values = visual.get("candidates", [])
+    if not isinstance(candidate_values, list):
+        return None
+    candidates = [
+        _cached_observation(candidate, bundle)
+        for candidate in candidate_values
+        if isinstance(candidate, dict)
+    ]
+    blocks, recovery, validation_warnings = reconcile_observations(
+        primary,
+        candidates,
+        embedded_text=source_page.embedded.text,
+        embedded=source_page.embedded,
+    )
+    return _page_result(
+        source_page,
+        primary,
+        group_observation,
+        candidates,
+        blocks,
+        recovery,
+        validation_warnings,
+        assets,
+        outline,
+    )
+
+
+def _cached_observation(value: dict[str, Any], bundle: Path) -> OcrObservation:
+    raw_path = value.get("raw_path")
+    if not isinstance(raw_path, str):
+        raise ValueError("cached observation has no raw path")
+    path = (bundle / raw_path).resolve()
+    if not path.is_relative_to(bundle.resolve()) or not path.is_file():
+        raise ValueError("cached observation raw path is invalid")
+    blocks_value = value.get("blocks", [])
+    if not isinstance(blocks_value, list):
+        raise ValueError("cached observation blocks are invalid")
+    return OcrObservation(
+        id=str(value["id"]),
+        mode=str(value.get("mode", "multi_base")),
+        raw=path.read_text(encoding="utf-8"),
+        source_pages=[int(number) for number in value.get("source_pages", [])],
+        generation=deepcopy(value.get("generation", {})),
+        blocks=[_block_from_dict(block) for block in blocks_value],
+        warnings=list(value.get("warnings", [])),
+    )
+
+
+def _restore_cached_block_details(
+    primary: OcrObservation,
+    group: OcrObservation,
+) -> None:
+    """Restore token confidence omitted from page-local raw checkpoints."""
+    unused = set(range(len(group.blocks)))
+    for block in primary.blocks:
+        match = next(
+            (
+                index
+                for index in unused
+                if group.blocks[index].kind == block.kind
+                and group.blocks[index].markdown == block.markdown
+                and group.blocks[index].bbox == block.bbox
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        cached = group.blocks[match]
+        block.confidence = cached.confidence
+        block.metadata = deepcopy(cached.metadata)
+        unused.remove(match)
 
 
 def _is_visually_blank(image_path: Path, *, maximum_ink_fraction: float = 0.0005) -> tuple[bool, float]:
@@ -579,7 +851,7 @@ def _is_visually_blank(image_path: Path, *, maximum_ink_fraction: float = 0.0005
 
 
 def _blank_page_result(source_page, ink_fraction: float) -> PageResult:
-    comparison = compare_text("", source_page.embedded.text)
+    comparison = _compare_with_embedded("", source_page.embedded)
     warning = "visual_blank_page"
     return PageResult(
         number=source_page.number,
@@ -684,7 +956,8 @@ def _collect_page_candidates(
         "visual_page_order_suspicious",
     }
     markdown = _blocks_markdown(primary.blocks, "")
-    comparison = compare_text(markdown, source_page.embedded.text)
+    comparison = _compare_with_embedded(markdown, source_page.embedded)
+    embedded_trust = assess_embedded(source_page.embedded, markdown)
     embedded_disagreement = (
         comparison.character_similarity is not None
         and comparison.character_similarity < 0.75
@@ -697,7 +970,13 @@ def _collect_page_candidates(
         if _block_needs_detail(block) and block.bbox is not None
     ]
     low_confidence = bool(target_blocks)
-    structural_problem = bool(set(primary.warnings) & critical or group_problem)
+    coverage_problem = bool(
+        embedded_trust.geometric
+        and _has_embedded_coverage_gap(primary.blocks, source_page.embedded)
+    )
+    structural_problem = bool(
+        set(primary.warnings) & critical or group_problem or coverage_problem
+    )
     needs_recovery = bool(
         structural_problem
         or embedded_disagreement
@@ -751,6 +1030,12 @@ def _collect_page_candidates(
             "visual_text_repetition",
             "visual_truncated",
         }
+    ) or bool(
+        coverage_problem
+        and _has_embedded_coverage_gap(
+            [*primary.blocks, *(candidates[0].blocks if candidates else [])],
+            source_page.embedded,
+        )
     )
     if structural_problem and detail_failed and callable(recognize_pages):
         try:
@@ -966,193 +1251,6 @@ def _align_multi_results(group, recognized):
     return output
 
 
-def _merge_continued_tables(pages: list[PageResult]) -> None:
-    active: Block | None = None
-    active_page: int | None = None
-    for page in pages:
-        retained: list[Block] = []
-        for block in page.blocks:
-            if block.kind == "table":
-                if active is not None:
-                    boundary_geometry = bool(
-                        active.bbox
-                        and block.bbox
-                        and active.bbox[3] >= 800
-                        and block.bbox[1] <= 250
-                    )
-                    merged = merge_html_tables(
-                        active.markdown,
-                        block.markdown,
-                        adjacent=active_page is not None and page.number == active_page + 1,
-                        boundary_geometry=boundary_geometry,
-                    )
-                    if merged is not None:
-                        active.markdown = merged
-                        active.source_pages = sorted(set([*active.source_pages, *block.source_pages, page.number]))
-                        active.provenance.extend(block.provenance)
-                        active.metadata["multi_page_table"] = True
-                        active_page = page.number
-                        continue
-                active = block
-                active_page = page.number
-                retained.append(block)
-            else:
-                retained.append(block)
-                if block.kind not in FIGURE_KINDS | {"footer"} and block.markdown.strip():
-                    active = None
-                    active_page = None
-        page.blocks = retained
-
-
-def _normalize_document_blocks(pages: list[PageResult]) -> None:
-    """Apply deterministic structural cleanup to normalized blocks, never raw OCR."""
-    from collections import Counter
-    from .compare import normalize
-
-    repeated = Counter()
-    repeated_top = Counter()
-    for page in pages:
-        for index, block in enumerate(page.blocks):
-            if not block.markdown.strip() or not block.bbox:
-                if index < 2:
-                    key = normalize(block.markdown)
-                    if key and len(key) <= 120:
-                        repeated_top[key] += 1
-                continue
-            if block.kind in {"header", "footer"} or block.bbox[1] <= 80 or block.bbox[3] >= 940:
-                key = normalize(block.markdown)
-                if key:
-                    repeated[key] += 1
-    boilerplate = {key for key, count in repeated.items() if count >= 2}
-    ungrounded_boilerplate = {key for key, count in repeated_top.items() if count >= 2}
-    for page in pages:
-        for block in page.blocks:
-            if not block.source_pages:
-                block.source_pages = [page.number]
-        retained = []
-        for index, block in enumerate(page.blocks):
-            normalized = normalize(block.markdown)
-            running_matter = bool(
-                block.kind in {"page_number", "header", "footer"}
-                or (
-                    block.bbox
-                    and normalized in boilerplate
-                    and (block.bbox[1] <= 80 or block.bbox[3] >= 940)
-                )
-                or (
-                    index < 2
-                    and not block.bbox
-                    and (normalized in ungrounded_boilerplate or bool(re.fullmatch(r"[ivxlcdm]+|\d+", normalized, re.I)))
-                )
-            )
-            if not running_matter:
-                retained.append(block)
-        page.blocks = retained
-
-    normalize_lists(pages)
-    _trim_adjacent_duplicate_blocks(pages)
-
-    for previous, current in zip(pages, pages[1:]):
-        if current.number != previous.number + 1 or not previous.blocks or not current.blocks:
-            continue
-        left, right = previous.blocks[-1], current.blocks[0]
-        if (
-            left.kind == right.kind == "paragraph"
-            and left.markdown.rstrip()
-            and right.markdown.lstrip()
-            and left.markdown.rstrip()[-1] not in ".!?;:"
-            and right.markdown.lstrip()[0].islower()
-        ):
-            left.markdown = f"{left.markdown.rstrip()} {right.markdown.lstrip()}"
-            left.source_pages = sorted(set([*left.source_pages, *right.source_pages, previous.number, current.number]))
-            left.provenance.extend(right.provenance)
-            left.metadata["cross_page_paragraph"] = True
-            current.blocks.pop(0)
-
-    for page in pages:
-        for block in page.blocks:
-            if block.kind not in FIGURE_KINDS:
-                block.markdown = clean_latex(block.markdown, assume_math=block.kind in FORMULA_KINDS)
-            if block.kind == "paragraph":
-                block.markdown = _clean_prose(block.markdown)
-
-        retained: list[Block] = []
-        index = 0
-        while index < len(page.blocks):
-            block = page.blocks[index]
-            if block.kind in FIGURE_KINDS and index + 1 < len(page.blocks):
-                caption = page.blocks[index + 1]
-                caption_text = caption.markdown.strip()
-                close = bool(
-                    block.bbox
-                    and caption.bbox
-                    and 0 <= caption.bbox[1] - block.bbox[3] <= 120
-                )
-                if caption.kind == "caption" and close:
-                    block.markdown = f"{block.markdown.rstrip()}\n\n*{caption_text}*"
-                    block.metadata["caption"] = caption_text
-                    block.provenance.extend(caption.provenance)
-                    retained.append(block)
-                    index += 2
-                    continue
-            retained.append(block)
-            index += 1
-        page.blocks = retained
-
-
-def _trim_adjacent_duplicate_blocks(pages: list[PageResult]) -> None:
-    """Keep duplicated OCR content on the physical page supported by evidence."""
-    from difflib import SequenceMatcher
-    from .compare import normalize
-
-    for previous, current in zip(pages, pages[1:]):
-        if current.number != previous.number + 1 or not previous.blocks or not current.blocks:
-            continue
-        left, right = previous.blocks[-1], current.blocks[0]
-        left_text, right_text = left.markdown.strip(), right.markdown.strip()
-        left_norm, right_norm = normalize(left_text), normalize(right_text)
-        if min(len(left_norm), len(right_norm)) < 120:
-            continue
-        exact = left_text.rfind(right_text)
-        if exact >= 0 and exact >= len(left_text) * 0.25:
-            left.markdown = left_text[:exact].rstrip()
-            left.metadata["trimmed_adjacent_page_overlap"] = current.number
-            previous.warnings.append("visual_adjacent_page_overlap_repaired")
-            continue
-        longest = SequenceMatcher(None, left_text, right_text, autojunk=False).find_longest_match()
-        if (
-            longest.size >= 0.75 * min(len(left_text), len(right_text))
-            and longest.a + longest.size >= len(left_text) - 80
-            and longest.b <= 80
-        ):
-            left.markdown = left_text[: longest.a].rstrip()
-            left.metadata["trimmed_adjacent_page_overlap"] = current.number
-            previous.warnings.append("visual_adjacent_page_overlap_repaired")
-            continue
-        similarity = SequenceMatcher(None, left_norm, right_norm, autojunk=False).ratio()
-        if similarity < 0.92:
-            continue
-        left_support = SequenceMatcher(
-            None, left_norm, normalize(previous.embedded.text), autojunk=False
-        ).ratio()
-        right_support = SequenceMatcher(
-            None, right_norm, normalize(current.embedded.text), autojunk=False
-        ).ratio()
-        if right_support > left_support + 0.05:
-            previous.blocks.pop()
-            previous.warnings.append("visual_adjacent_page_overlap_repaired")
-        elif left_support > right_support + 0.05:
-            current.blocks.pop(0)
-            current.warnings.append("visual_adjacent_page_overlap_repaired")
-
-
-def _clean_prose(value: str) -> str:
-    lines = [re.sub(r"[ \t]{2,}", " ", line).rstrip() for line in value.splitlines()]
-    value = "\n".join(lines).strip()
-    value = re.sub(r"\\\)\s+([,.;:!?])", lambda match: r"\)" + match.group(1), value)
-    return value
-
-
 def _materialize_figures(
     blocks: list[Block],
     page_image: Path,
@@ -1231,8 +1329,6 @@ def _repair_runaway_repetition(blocks: list[Block]) -> list[str]:
             indices[0],
         )
         blocks[anchor].metadata.update({
-            "review_required": True,
-            "review_reason": "runaway_repetition_truncated",
             "original_characters": original_characters,
             "retained_characters": sum(
                 len(blocks[index].markdown) for index in indices
@@ -1265,35 +1361,53 @@ def _joined_block_text(
 def _canonicalize_figure_blocks(
     blocks: list[Block],
     page_image: Path,
+    embedded: EmbeddedEvidence | None = None,
 ) -> list[str]:
-    """Clamp figure boxes and remove only provably blank or duplicate crops."""
+    """Clamp figure boxes and reject blank, duplicate, or glyph-explained crops."""
     candidates: list[tuple[int, Block]] = []
     warnings: list[str] = []
     rejected: set[int] = set()
+    proof_glyphs = list(_embedded_characters(embedded, EMBEDDED_PROOF_MARKS))
     with Image.open(page_image) as source:
         grayscale = source.convert("L")
         for index, block in enumerate(blocks):
             if block.kind not in FIGURE_KINDS or not block.bbox:
+                continue
+            matching_glyph = next(
+                (
+                    glyph
+                    for glyph in proof_glyphs
+                    if _small_box_contains(block.bbox, glyph["bbox"])
+                ),
+                None,
+            )
+            if matching_glyph is not None:
+                block.kind = "paragraph"
+                block.markdown = EMBEDDED_PROOF_MARKS[matching_glyph["text"]]
+                block.bbox = tuple(matching_glyph["bbox"])
+                block.metadata.update({
+                    "embedded_glyph": matching_glyph["text"],
+                    "reclassified_from": "figure",
+                    "reclassification_reason": "pdf_text_glyph_geometry",
+                })
+                block.provenance.append({
+                    "source": "embedded_pdf_glyph",
+                    "font": matching_glyph.get("font", ""),
+                    "bbox": matching_glyph["bbox"],
+                })
+                warnings.append("visual_text_glyph_figure_reclassified")
                 continue
             block.bbox = _padded_bbox(block.bbox)
             blank, touches_edge = _figure_crop_status(grayscale, block.bbox)
             if blank:
                 warnings.append("visual_blank_figure_crop_rejected")
                 if block.markdown.strip():
-                    block.metadata.update({
-                        "review_required": True,
-                        "review_reason": "blank_figure_crop_caption_preserved",
-                    })
                     block.kind = "paragraph"
                     block.bbox = None
                 else:
                     rejected.add(index)
                 continue
             if touches_edge:
-                block.metadata.update({
-                    "review_required": True,
-                    "review_reason": "figure_crop_touches_edge",
-                })
                 warnings.append("visual_figure_crop_may_be_clipped")
             candidates.append((index, block))
 
@@ -1321,6 +1435,134 @@ def _canonicalize_figure_blocks(
     if rejected:
         blocks[:] = [block for index, block in enumerate(blocks) if index not in rejected]
     return sorted(set(warnings))
+
+
+def _embedded_characters(
+    embedded: EmbeddedEvidence | None,
+    selected: set[str] | dict[str, str] | None = None,
+):
+    for glyph in iter_embedded_characters(embedded):
+        if selected is None or glyph["text"] in selected:
+            yield glyph
+
+
+def _small_box_contains(container, glyph) -> bool:
+    width = max(0.0, container[2] - container[0])
+    height = max(0.0, container[3] - container[1])
+    if width > 90 or height > 90:
+        return False
+    center_x = (glyph[0] + glyph[2]) / 2
+    center_y = (glyph[1] + glyph[3]) / 2
+    return (
+        container[0] - 8 <= center_x <= container[2] + 8
+        and container[1] - 8 <= center_y <= container[3] + 8
+    )
+
+
+def _embedded_proof_anchor(blocks: list[Block], embedded: EmbeddedEvidence, glyph) -> Block | None:
+    """Locate the ending text in PDF coordinates despite drift in OCR boxes."""
+    box = glyph["bbox"]
+    em = float((glyph.get("em") or [0, box[3] - box[1]])[1])
+    baseline = (glyph.get("origin") or [0, box[3]])[1]
+    region = (0, max(0, baseline - 1.5 * em), box[0], min(1000, baseline + .7 * em))
+    candidates = []
+    for block in blocks:
+        if not block.bbox or block.kind in FIGURE_KINDS:
+            continue
+        if block.bbox[3] < baseline - 3 * em or block.bbox[1] > baseline + 3 * em:
+            continue
+        aligned = align_glyphs(block.markdown, embedded, region)
+        equal = [(a, b) for a, b in aligned.matches.items() if aligned.text[a] == aligned.native[b]]
+        if len(equal) < 6 or len(equal) / max(1, len(aligned.text)) < .7:
+            continue
+        last = aligned.glyphs[max(b for _, b in equal)]
+        last_baseline = (last.get("origin") or [0, last["bbox"][3]])[1]
+        if abs(last_baseline - baseline) > .7 * em:
+            continue
+        candidates.append((len(equal) / max(1, len(aligned.text)), block))
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    if candidates and (len(candidates) == 1 or candidates[0][0] - candidates[1][0] > .1):
+        return candidates[0][1]
+    return None
+
+
+def _restore_embedded_proof_marks(
+    blocks: list[Block],
+    embedded: EmbeddedEvidence,
+    page: int,
+) -> list[str]:
+    """Normalize or insert PDF proof glyphs that OCR omitted from its block stream."""
+    restored = False
+    for glyph in _embedded_characters(embedded, EMBEDDED_PROOF_MARKS):
+        rendered = EMBEDDED_PROOF_MARKS[glyph["text"]]
+        anchor = _embedded_proof_anchor(blocks, embedded, glyph)
+        overlapping = [
+            (index, block)
+            for index, block in enumerate(blocks)
+            if block.bbox and bbox_coverage(glyph["bbox"], block.bbox) >= 0.45
+        ]
+        existing = next(
+            (
+                block
+                for _, block in overlapping
+                if any(mark in block.markdown for mark in ("□", "☐", r"\square", r"\blacksquare"))
+            ),
+            None,
+        )
+        if existing is not None:
+            updated = existing.markdown.replace("☐", rendered).replace("□", rendered)
+            if updated != existing.markdown:
+                existing.markdown = updated
+                existing.metadata["normalized_embedded_proof_mark"] = glyph["text"]
+                restored = True
+            if anchor is not None and existing is not anchor and existing.markdown.strip() == rendered:
+                old = blocks.index(existing)
+                blocks.remove(existing)
+                insertion = blocks.index(anchor) + 1
+                blocks.insert(insertion, existing)
+                restored |= old != insertion
+            continue
+        if any(
+            block.metadata.get("embedded_glyph") == glyph["text"]
+            and block.bbox
+            and bbox_coverage(glyph["bbox"], block.bbox) >= 0.45
+            for block in blocks
+        ):
+            continue
+        proof = Block(
+            kind="paragraph",
+            markdown=rendered,
+            bbox=glyph["bbox"],
+            confidence=1.0,
+            source_pages=[page],
+            provenance=[{
+                "source": "embedded_pdf_glyph",
+                "font": glyph.get("font", ""),
+                "bbox": glyph["bbox"],
+            }],
+            metadata={
+                "embedded_glyph": glyph["text"],
+                "recovery_reason": "ocr_omitted_pdf_text_glyph",
+            },
+        )
+        if anchor is not None:
+            insertion = blocks.index(anchor) + 1
+        elif overlapping:
+            insertion = max(index for index, _ in overlapping) + 1
+        else:
+            insertion = next(
+                (
+                    index
+                    for index, block in enumerate(blocks)
+                    if block.bbox and block.bbox[1] > glyph["bbox"][3]
+                ),
+                len(blocks),
+            )
+        blocks.insert(insertion, proof)
+        restored = True
+    return ["visual_embedded_proof_mark_recovered"] if restored else []
+
+
 
 
 def _padded_bbox(
@@ -1391,89 +1633,6 @@ def _matching_original(bbox, placements, assets: AssetStore):
     return best if best_overlap >= 0.25 else None
 
 
-def _iou(a, b) -> float:
-    left, top = max(a[0], b[0]), max(a[1], b[1])
-    right, bottom = min(a[2], b[2]), min(a[3], b[3])
-    intersection = max(0.0, right - left) * max(0.0, bottom - top)
-    union = max(1.0, (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - intersection)
-    return intersection / union
-
-
-def _apply_links(markdown: str, links) -> str:
-    for link in links:
-        label = " ".join(link.text.split())
-        if not label or not link.target or f"]({link.target})" in markdown:
-            continue
-        markdown, _ = _replace_plain_text_once(markdown, label, link.target)
-    return markdown
-
-
-def _apply_links_to_blocks(blocks: list[Block], links) -> None:
-    for link in links:
-        label = " ".join(link.text.split())
-        if not label or not link.target:
-            continue
-        if any(f"]({link.target})" in block.markdown for block in blocks):
-            continue
-        candidates = [
-            block
-            for block in blocks
-            if block.kind not in {"table", "figure"}
-            and _link_label_pattern(label).search(block.markdown)
-        ]
-        if link.bbox:
-            candidates.sort(
-                key=lambda block: _bbox_coverage(link.bbox, block.bbox) if block.bbox else 0.0,
-                reverse=True,
-            )
-        for block in candidates:
-            updated, count = _replace_plain_text_once(block.markdown, label, link.target)
-            if count:
-                block.markdown = updated
-                block.metadata.setdefault("links", []).append(
-                    {"target": link.target, "source": "embedded_link_geometry"}
-                )
-                break
-
-
-_PROTECTED_MARKDOWN = re.compile(
-    r"```.*?```|~~~.*?~~~|`[^`\n]*`|!\[[^\]]*\]\([^)]*\)|"
-    r"\[[^\]]*\]\([^)]*\)|<[^>]*>|\\\(.*?\\\)|\\\[.*?\\\]|\$\$.*?\$\$",
-    re.DOTALL,
-)
-
-
-def _replace_plain_text_once(markdown: str, label: str, target: str) -> tuple[str, int]:
-    """Link one visible occurrence without entering existing Markdown constructs."""
-    pattern = _link_label_pattern(label)
-    cursor = 0
-    for protected in _PROTECTED_MARKDOWN.finditer(markdown):
-        match = pattern.search(markdown, cursor, protected.start())
-        if match:
-            replacement = f"[{match.group(0)}]({target})"
-            return markdown[: match.start()] + replacement + markdown[match.end() :], 1
-        cursor = protected.end()
-    match = pattern.search(markdown, cursor)
-    if not match:
-        return markdown, 0
-    replacement = f"[{match.group(0)}]({target})"
-    return markdown[: match.start()] + replacement + markdown[match.end() :], 1
-
-
-def _link_label_pattern(label: str) -> re.Pattern[str]:
-    prefix = r"(?<!\w)" if label[:1].isalnum() else ""
-    suffix = r"(?!\w)" if label[-1:].isalnum() else ""
-    return re.compile(prefix + re.escape(label) + suffix, re.IGNORECASE)
-
-
-def _bbox_coverage(subject, container) -> float:
-    left, top = max(subject[0], container[0]), max(subject[1], container[1])
-    right, bottom = min(subject[2], container[2]), min(subject[3], container[3])
-    intersection = max(0.0, right - left) * max(0.0, bottom - top)
-    area = max(1.0, (subject[2] - subject[0]) * (subject[3] - subject[1]))
-    return intersection / area
-
-
 def _sanitize_page_links(markdown: str, available_pages: set[int]) -> tuple[str, list[int]]:
     import re
 
@@ -1515,7 +1674,57 @@ def _comparison_quality(comparison) -> float:
 
 
 def _title(document, source: Path) -> str:
-    return document.metadata.get("title") or source.stem.replace("-", " ").replace("_", " ").strip().title()
+    embedded_title = _embedded_document_title(document)
+    if embedded_title:
+        return embedded_title
+    metadata_title = str(document.metadata.get("title") or "").strip()
+    if metadata_title and metadata_title.casefold() not in {"untitled", "none"}:
+        return metadata_title
+    return source.stem.replace("-", " ").replace("_", " ").strip().title()
+
+
+def _embedded_document_title(document) -> str:
+    """Use conspicuously large first-page PDF text as title evidence."""
+    from statistics import median
+
+    if not document.pages:
+        return ""
+    candidates: list[tuple[float, float, float, str]] = []
+    sizes: list[float] = []
+    for block in document.pages[0].embedded.blocks:
+        block_sizes: list[float] = []
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                size = span.get("size")
+                if isinstance(size, (int, float)) and size > 0:
+                    block_sizes.append(float(size))
+                    sizes.append(float(size))
+        bbox = block.get("bbox", [])
+        text = " ".join(str(block.get("text", "")).replace("\u00ad", "").split())
+        if block_sizes and len(bbox) == 4 and bbox[1] <= 350 and len(text) >= 12:
+            candidates.append((max(block_sizes), float(bbox[1]), float(bbox[3]), text))
+    if not candidates or not sizes:
+        return ""
+    normal_size = median(sizes)
+    candidates.sort(key=lambda item: (item[1], item[2]))
+    joined: list[tuple[float, float, float, str]] = []
+    for size, top, bottom, text in candidates:
+        if (
+            joined
+            and abs(size - joined[-1][0]) <= max(0.5, size * 0.05)
+            and 0 <= top - joined[-1][2] <= max(35.0, size * 2.2)
+        ):
+            previous_size, previous_top, _, previous_text = joined[-1]
+            joined[-1] = (
+                max(previous_size, size),
+                previous_top,
+                bottom,
+                f"{previous_text} {text}",
+            )
+        else:
+            joined.append((size, top, bottom, text))
+    size, _, _, text = max(joined, key=lambda item: (item[0], -item[1]))
+    return text if size >= normal_size * 1.25 else ""
 
 
 def _source_hash(source: Path) -> str:
@@ -1545,6 +1754,18 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _page_checkpoints_complete(bundle: Path, metadata: Any) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    count = metadata.get("requested_page_count", metadata.get("page_count"))
+    return bool(
+        isinstance(count, int)
+        and count >= 0
+        and all(
+            (bundle / "pages" / f"page-{number:04d}.json").is_file()
+            for number in range(1, count + 1)
+        )
+    )
 def _write_progress(
     bundle: Path,
     *,
@@ -1585,20 +1806,7 @@ def _page_from_dict(value: dict[str, Any]) -> PageResult:
         ],
         extractor=embedded_value.get("extractor"),
     )
-    blocks = []
-    for block in value.get("blocks", []):
-        blocks.append(
-            Block(
-                kind=block.get("kind", "paragraph"),
-                markdown=block.get("markdown", ""),
-                bbox=tuple(block["bbox"]) if block.get("bbox") is not None else None,
-                confidence=block.get("confidence"),
-                asset_id=block.get("asset_id"),
-                source_pages=block.get("source_pages", []),
-                provenance=block.get("provenance", []),
-                metadata=block.get("metadata", {}),
-            )
-        )
+    blocks = [_block_from_dict(block) for block in value.get("blocks", [])]
     return PageResult(
         number=value["number"],
         image=value.get("image", ""),
@@ -1615,6 +1823,17 @@ def _page_from_dict(value: dict[str, Any]) -> PageResult:
     )
 
 
+def _block_from_dict(value: dict[str, Any]) -> Block:
+    return Block(
+        kind=value.get("kind", "paragraph"),
+        markdown=value.get("markdown", ""),
+        bbox=tuple(value["bbox"]) if value.get("bbox") is not None else None,
+        confidence=value.get("confidence"),
+        asset_id=value.get("asset_id"),
+        source_pages=list(value.get("source_pages", [])),
+        provenance=deepcopy(value.get("provenance", [])),
+        metadata=deepcopy(value.get("metadata", {})),
+    )
 def _write_log(bundle: Path, metadata: dict[str, Any]) -> None:
     lines = [
         f"source={metadata.get('source')}",

@@ -16,6 +16,8 @@ Local-first tools that turn source material into auditable Markdown.
   playback, speaker identity hints, attendees, and localized corrections.
 - [`doc2md`](doc2md/README.md) extracts Google Docs and Notion pages into
   durable Markdown with source metadata, assets, and synchronization safety.
+- [`mdstore`](mdstore/README.md) serves a Git-tracked Markdown corpus through
+  schema-valid hashline edits and hybrid exact/vector/graph search.
 
 Each project owns its runtime and dependencies. The repository shares only
 top-level build orchestration.
@@ -31,10 +33,12 @@ nix run github:recmo/all2md#pages2md -- --help
 nix run github:recmo/all2md#speech2md -- --help
 nix run github:recmo/all2md#doc2md -- --help
 nix run github:recmo/all2md#speech-review -- ~/Meetings
+nix run github:recmo/all2md#mdstore -- --help
 nix build github:recmo/all2md#meeting-capture
 nix develop .#pages2md
 nix develop .#speech2md
 nix develop .#doc2md
+nix develop .#mdstore
 nix flake check
 ```
 

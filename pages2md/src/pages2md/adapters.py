@@ -28,6 +28,142 @@ def _link_target(link: dict[str, object]) -> str:
     return f"#page-{page_number + 1}" if page_number >= 0 else ""
 
 
+def _normalized_bbox(bbox, page_rect) -> list[float]:
+    if not bbox or len(bbox) != 4:
+        return []
+    return [
+        float(bbox[0]) * 1000 / page_rect.width,
+        float(bbox[1]) * 1000 / page_rect.height,
+        float(bbox[2]) * 1000 / page_rect.width,
+        float(bbox[3]) * 1000 / page_rect.height,
+    ]
+
+
+def _raw_text_blocks(page) -> list[dict[str, object]]:
+    """Retain PDF character geometry and font metadata as optional evidence."""
+    output: list[dict[str, object]] = []
+    font_ids: dict[str, set[int]] = {}
+    for font in page.get_fonts():
+        name = re.sub(r"^[A-Z]{6}\+", "", font[3])
+        font_ids.setdefault(name, set()).add(font[0])
+    raw = page.get_text("rawdict", sort=True)
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        lines: list[dict[str, object]] = []
+        block_text: list[str] = []
+        for line in block.get("lines", []):
+            spans: list[dict[str, object]] = []
+            line_text: list[str] = []
+            for span in line.get("spans", []):
+                characters = []
+                for character in span.get("chars", []):
+                    value = character.get("c", "")
+                    if not value:
+                        continue
+                    character_bbox = _normalized_bbox(character.get("bbox"), page.rect)
+                    characters.append({
+                        "text": value,
+                        "bbox": character_bbox,
+                        "origin": [
+                            float(character["origin"][0]) * 1000 / page.rect.width,
+                            float(character["origin"][1]) * 1000 / page.rect.height,
+                        ] if character.get("origin") else None,
+                        "space": "normalized_1000",
+                    })
+                    line_text.append(value)
+                span_text = "".join(item["text"] for item in characters)
+                if not span_text:
+                    continue
+                spans.append({
+                    "text": span_text,
+                    "bbox": _normalized_bbox(span.get("bbox"), page.rect),
+                    "space": "normalized_1000",
+                    "font": span.get("font", ""),
+                    "font_xrefs": sorted(font_ids.get(span.get("font", ""), set())),
+                    "size": span.get("size"),
+                    "em": [
+                        float(span.get("size", 0)) * 1000 / page.rect.width,
+                        float(span.get("size", 0)) * 1000 / page.rect.height,
+                    ],
+                    "flags": span.get("flags"),
+                    "chars": characters,
+                })
+            text = "".join(line_text)
+            if text:
+                block_text.append(text)
+                lines.append({
+                    "text": text,
+                    "direction": list(line.get("dir", (1, 0))),
+                    "bbox": _normalized_bbox(line.get("bbox"), page.rect),
+                    "space": "normalized_1000",
+                    "spans": spans,
+                })
+        text = "\n".join(block_text).strip()
+        if text:
+            output.append({
+                "text": text,
+                "bbox": _normalized_bbox(block.get("bbox"), page.rect),
+                "space": "normalized_1000",
+                "lines": lines,
+            })
+    return output
+
+
+def _characters_in_box(
+    blocks: list[dict[str, object]],
+    bbox: tuple[float, float, float, float],
+) -> str:
+    """Read only glyphs whose centers lie inside an annotation rectangle."""
+    selected: list[str] = []
+    left, top, right, bottom = bbox
+    tolerance = 1.5
+    for block in blocks:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                for character in span.get("chars", []):
+                    box = character.get("bbox", [])
+                    if len(box) != 4:
+                        continue
+                    x = (box[0] + box[2]) / 2
+                    y = (box[1] + box[3]) / 2
+                    if left - tolerance <= x <= right + tolerance and top - tolerance <= y <= bottom + tolerance:
+                        selected.append(character.get("text", ""))
+    return "".join(selected).strip()
+
+
+def _coalesce_links(links: list[Link]) -> list[Link]:
+    """Join adjacent annotation rectangles that encode one wrapped URI label."""
+    output: list[Link] = []
+    for link in links:
+        if not link.text:
+            continue
+        previous = output[-1] if output else None
+        if (
+            previous
+            and previous.target == link.target
+            and previous.external == link.external
+            and previous.bbox
+            and link.bbox
+            and -max(
+                previous.bbox[3] - previous.bbox[1],
+                link.bbox[3] - link.bbox[1],
+            ) - 3
+            <= link.bbox[1] - previous.bbox[3]
+            <= 35
+        ):
+            previous.text = f"{previous.text}{link.text}"
+            previous.bbox = (
+                min(previous.bbox[0], link.bbox[0]),
+                min(previous.bbox[1], link.bbox[1]),
+                max(previous.bbox[2], link.bbox[2]),
+                max(previous.bbox[3], link.bbox[3]),
+            )
+            continue
+        output.append(link)
+    return output
+
+
 def detect_kind(path: Path) -> str:
     if path.is_dir():
         return "images"
@@ -60,18 +196,37 @@ def open_document(
     assets: AssetStore,
     *,
     dpi: int,
+    ignore_embedded_text: bool = False,
 ) -> SourceDocument:
     kind = detect_kind(source)
     if kind == "pdf":
-        return _open_pdf(source, work, assets, dpi=dpi)
+        return _open_pdf(
+            source,
+            work,
+            assets,
+            dpi=dpi,
+            ignore_embedded_text=ignore_embedded_text,
+        )
     if kind == "djvu":
-        return _open_djvu(source, work, dpi=dpi)
+        return _open_djvu(
+            source,
+            work,
+            dpi=dpi,
+            ignore_embedded_text=ignore_embedded_text,
+        )
     if kind == "cbz":
         return _open_cbz(source, work)
     return _open_images(source, work)
 
 
-def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int) -> SourceDocument:
+def _open_pdf(
+    source: Path,
+    work: Path,
+    assets: AssetStore,
+    *,
+    dpi: int,
+    ignore_embedded_text: bool,
+) -> SourceDocument:
     pages_dir = work / "rendered"
     pages_dir.mkdir(parents=True, exist_ok=True)
     result = SourceDocument(path=source, kind="pdf")
@@ -89,40 +244,18 @@ def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int) -> Sour
             page = document[page_number - 1]
             image_path = pages_dir / f"page-{page_number:04d}.png"
             page.get_pixmap(matrix=matrix, alpha=False).save(image_path)
-            text_dict = page.get_text("dict", sort=True)
-            embedded_blocks = []
-            for block in text_dict.get("blocks", []):
-                if block.get("type") != 0:
-                    continue
-                lines = []
-                for line in block.get("lines", []):
-                    lines.append("".join(span.get("text", "") for span in line.get("spans", [])))
-                text = "\n".join(lines).strip()
-                if text:
-                    bbox = block.get("bbox", ())
-                    embedded_blocks.append({
-                        "text": text,
-                        "bbox": [
-                            bbox[0] * 1000 / page.rect.width,
-                            bbox[1] * 1000 / page.rect.height,
-                            bbox[2] * 1000 / page.rect.width,
-                            bbox[3] * 1000 / page.rect.height,
-                        ] if len(bbox) == 4 else [],
-                        "space": "normalized_1000",
-                    })
+            embedded_blocks = [] if ignore_embedded_text else _raw_text_blocks(page)
             links = []
-            for link in page.get_links():
-                target = _link_target(link)
-                if target:
-                    rect = link.get("from")
-                    label = page.get_textbox(rect).strip() if rect else ""
-                    bbox = (
-                        rect.x0 * 1000 / page.rect.width,
-                        rect.y0 * 1000 / page.rect.height,
-                        rect.x1 * 1000 / page.rect.width,
-                        rect.y1 * 1000 / page.rect.height,
-                    ) if rect else None
-                    links.append(Link(text=label, target=target, bbox=bbox, external=bool(link.get("uri"))))
+            if not ignore_embedded_text:
+                for link in page.get_links():
+                    target = _link_target(link)
+                    if target:
+                        rect = link.get("from")
+                        normalized = _normalized_bbox(rect, page.rect) if rect else []
+                        bbox = tuple(normalized) if normalized else None
+                        label = _characters_in_box(embedded_blocks, bbox) if bbox else ""
+                        links.append(Link(text=label, target=target, bbox=bbox, external=bool(link.get("uri"))))
+                links = _coalesce_links(links)
             source_assets: list[dict[str, object]] = []
             for image in page.get_images(full=True):
                 xref = image[0]
@@ -167,7 +300,7 @@ def _open_pdf(source: Path, work: Path, assets: AssetStore, *, dpi: int) -> Sour
                 text="\n\n".join(block["text"] for block in embedded_blocks),
                 blocks=embedded_blocks,
                 links=links,
-                extractor="pymupdf",
+                extractor="ignored" if ignore_embedded_text else "pymupdf",
             )
             result.pages.append(SourcePage(page_number, image_path, embedded, source_assets))
     return result
@@ -182,7 +315,13 @@ def _is_page_backing_image(rect, page_rect) -> bool:
     return width_ratio >= 0.90 and height_ratio >= 0.90
 
 
-def _open_djvu(source: Path, work: Path, *, dpi: int) -> SourceDocument:
+def _open_djvu(
+    source: Path,
+    work: Path,
+    *,
+    dpi: int,
+    ignore_embedded_text: bool,
+) -> SourceDocument:
     for command in ("ddjvu", "djvused"):
         if not shutil.which(command):
             raise RuntimeError(f"{command} is required for DjVu input")
@@ -214,24 +353,28 @@ def _open_djvu(source: Path, work: Path, *, dpi: int) -> SourceDocument:
             ["ddjvu", "-format=png", f"-page={page_number}", f"-dpi={dpi}", str(source), str(image_path)],
             check=True,
         )
-        text = subprocess.run(
-            ["djvused", str(source), "-e", f"select {page_number}; print-pure-txt"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        structured = subprocess.run(
-            ["djvused", str(source), "-e", f"select {page_number}; print-txt"],
-            check=False,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        annotations = subprocess.run(
-            ["djvused", str(source), "-e", f"select {page_number}; print-ant"],
-            check=False,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        text = ""
+        structured = ""
+        annotations = ""
+        if not ignore_embedded_text:
+            text = subprocess.run(
+                ["djvused", str(source), "-e", f"select {page_number}; print-pure-txt"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            structured = subprocess.run(
+                ["djvused", str(source), "-e", f"select {page_number}; print-txt"],
+                check=False,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            annotations = subprocess.run(
+                ["djvused", str(source), "-e", f"select {page_number}; print-ant"],
+                check=False,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
         result.pages.append(
             SourcePage(
                 page_number,
@@ -244,8 +387,12 @@ def _open_djvu(source: Path, work: Path, *, dpi: int) -> SourceDocument:
                             "structured_text": structured,
                             "annotations": annotations,
                         }
-                    ],
-                    extractor="djvused:print-pure-txt+print-txt+print-ant",
+                    ] if not ignore_embedded_text else [],
+                    extractor=(
+                        "djvused:print-pure-txt+print-txt+print-ant"
+                        if not ignore_embedded_text
+                        else "ignored"
+                    ),
                 ),
             )
         )
