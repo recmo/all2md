@@ -72,7 +72,7 @@ fn default_listen() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Complete repository-defined mdstore configuration.
+/// Effective operational settings and document policy used by validation.
 pub struct Config {
     /// Markdown corpus selection rules.
     pub documents: DocumentConfig,
@@ -136,9 +136,26 @@ pub struct MarkdownConfig {
 }
 
 impl Config {
-    /// Parses and validates repository YAML configuration.
+    /// Parses the operational root config, rejecting document policy fields.
+    pub fn from_root_yaml(text: &str) -> Result<Self> {
+        let value: serde_yaml::Value = serde_yaml::from_str(text)?;
+        for key in [
+            "schemas",
+            "sections",
+            "markdown",
+            "links",
+            "relations",
+            "metadata",
+        ] {
+            if value.get(key).is_some() {
+                bail!("{key} is document policy and belongs in template.yaml");
+            }
+        }
+        Self::from_yaml(text)
+    }
+    /// Parses effective settings, including policy. Repository roots use `from_root_yaml`.
     pub fn from_yaml(text: &str) -> Result<Self> {
-        let value: Self = serde_yaml::from_str(text).context("parse .mdstore/config.yaml")?;
+        let value: Self = serde_yaml::from_str(text).context("parse config.yaml")?;
         value.validate()?;
         Ok(value)
     }
@@ -303,12 +320,7 @@ pub(crate) fn validate_repo_path(path: &str) -> Result<()> {
 }
 
 pub(crate) fn is_config_resource_path(path: &str) -> bool {
-    path.starts_with(".mdstore/")
-        && Path::new(path).extension().is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("yaml")
-                || extension.eq_ignore_ascii_case("yml")
-                || extension.eq_ignore_ascii_case("json")
-        })
+    path == "config.yaml"
 }
 
 /// Rejects repository paths whose existing ancestors contain symlinks.

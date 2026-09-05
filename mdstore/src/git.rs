@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::config::{
     Config, ensure_repository_path_safe, is_config_resource_path, validate_repo_path,
@@ -67,7 +68,7 @@ pub(crate) fn tracked_markdown(
         .collect())
 }
 
-/// Lists tracked YAML and JSON resources below `.mdstore`.
+/// Lists root operational configuration and directory templates.
 pub(crate) fn tracked_config_files(root: &Path, revision: &str) -> Result<Vec<String>> {
     let output = checked(root, ["ls-tree", "-r", "--name-only", "-z", revision])?;
     Ok(output
@@ -630,6 +631,7 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Optio
 pub(crate) struct SyncTarget {
     remote: String,
     branch: String,
+    pub(crate) identity: String,
 }
 
 pub(crate) fn sync_target(root: &Path, config: &Config) -> Result<SyncTarget> {
@@ -658,9 +660,31 @@ pub(crate) fn sync_target(root: &Path, config: &Config) -> Result<SyncTarget> {
     if !destination.starts_with("refs/heads/") {
         bail!("sync destination must be a branch");
     }
+    let url = |push: bool| -> Result<String> {
+        let mut args = vec!["remote", "get-url", "--all"];
+        if push {
+            args.push("--push");
+        }
+        args.extend(["--", remote.as_str()]);
+        let output = run(root, args)?;
+        Ok(if output.status.success() {
+            String::from_utf8(output.stdout)?
+        } else {
+            remote.clone()
+        })
+    };
+    let identity = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(
+            url(false)?,
+            url(true)?,
+            &destination
+        ))?)
+    );
     Ok(SyncTarget {
         remote,
         branch: destination,
+        identity,
     })
 }
 
@@ -726,8 +750,15 @@ pub(crate) fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Resu
     }
 }
 
-pub(crate) fn acknowledge_remote(root: &Path, revision: &str) -> Result<()> {
-    checked(root, ["update-ref", "refs/mdstore/replicated", revision])?;
+pub(crate) fn acknowledge_remote(root: &Path, target: &SyncTarget, revision: &str) -> Result<()> {
+    checked(
+        root,
+        [
+            "update-ref",
+            &format!("refs/mdstore/replication/{}", target.identity),
+            revision,
+        ],
+    )?;
     Ok(())
 }
 
@@ -751,7 +782,7 @@ pub(crate) fn push_snapshot(
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    acknowledge_remote(root, revision)
+    acknowledge_remote(root, target, revision)
 }
 
 pub(crate) fn activate_candidate(root: &Path, expected: &str, candidate: &str) -> Result<()> {
@@ -763,16 +794,15 @@ pub(crate) fn activate_candidate(root: &Path, expected: &str, candidate: &str) -
 }
 
 pub(crate) fn pending_commits(root: &Path) -> Result<usize> {
-    let reference = if run(root, ["rev-parse", "--verify", "refs/mdstore/replicated"])?
-        .status
-        .success()
+    let config = Config::from_yaml(&read_text(root, &head(root)?, "config.yaml")?)?;
+    let target = sync_target(root, &config).ok();
+    let name = target.map(|target| format!("refs/mdstore/replication/{}", target.identity));
+    let reference = if let Some(name) = name
+        && run(root, ["rev-parse", "--verify", &name])?
+            .status
+            .success()
     {
-        Some("refs/mdstore/replicated")
-    } else if run(root, ["rev-parse", "--verify", "@{upstream}"])?
-        .status
-        .success()
-    {
-        Some("@{upstream}")
+        Some(name)
     } else {
         None
     };
@@ -1085,7 +1115,12 @@ mod tests {
         checked(&root, ["config", "commit.gpgsign", "false"]).unwrap();
         checked(&root, ["remote", "add", "origin", "../remote.git"]).unwrap();
         fs::write(root.join("note.md"), "one\n").unwrap();
-        checked(&root, ["add", "note.md"]).unwrap();
+        fs::write(
+            root.join("config.yaml"),
+            "documents: {include: ['**/*.md']}\ngit: {remote: origin}\n",
+        )
+        .unwrap();
+        checked(&root, ["add", "note.md", "config.yaml"]).unwrap();
         checked(&root, ["commit", "-m", "initial"]).unwrap();
         assert_eq!(pending_commits(&root).unwrap(), 1);
 

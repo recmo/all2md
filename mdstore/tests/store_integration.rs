@@ -216,9 +216,8 @@ impl Repository {
         command(&root, &["config", "user.name", "mdstore tests"]);
         command(&root, &["config", "user.email", "mdstore@example.invalid"]);
         command(&root, &["config", "commit.gpgsign", "false"]);
-        fs::create_dir_all(root.join(".mdstore")).unwrap();
-        fs::write(root.join(".mdstore/config.yaml"), config_yaml()).unwrap();
-        fs::write(root.join(".mdstore/schema.json"), schema()).unwrap();
+        fs::write(root.join("config.yaml"), config_yaml()).unwrap();
+        fs::write(root.join("template.yaml"), template_yaml()).unwrap();
         fs::write(root.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
         fs::write(root.join("alice.md"), page("Alice")).unwrap();
         fs::write(root.join("bob.md"), page("Bob")).unwrap();
@@ -268,20 +267,6 @@ fn command(root: &Path, arguments: &[&str]) -> String {
 fn config_yaml() -> &'static str {
     r#"documents:
   include: ["**/*.md"]
-schemas:
-  - include: "**/*.md"
-    schema: ".mdstore/schema.json"
-metadata:
-  display_name: /name
-links:
-  markdown: true
-  wiki:
-    - '\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]'
-relations:
-  - name: mentions
-    reciprocal: mentions
-    selector:
-      kind: markdown_links
 chunking:
   target_tokens: 40
   overlap_percent: 10
@@ -296,6 +281,13 @@ git:
 server:
   listen: 127.0.0.1:3131
 "#
+}
+
+fn template_yaml() -> String {
+    format!(
+        "frontmatter: {}\nstructure: {{additional_sections: true}}\nmetadata:\n  display_name: /name\nlinks:\n  markdown: true\n  wiki:\n    - '\\[\\[(?P<target>[^\\]|#]+)(?:#[^\\]|]+)?(?:\\|[^\\]]+)?\\]\\]'\nrelations:\n  - name: mentions\n    reciprocal: mentions\n    selector:\n      kind: markdown_links\n",
+        serde_json::from_str::<serde_json::Value>(schema()).unwrap()
+    )
 }
 
 fn schema() -> &'static str {
@@ -533,12 +525,12 @@ fn partially_reverted_batch_requires_fresh_atomic_edits() {
 #[test]
 fn no_op_edit_reports_queued_pushes_without_network() {
     let repository = Repository::new();
-    let config_path = repository.root.join(".mdstore/config.yaml");
+    let config_path = repository.root.join("config.yaml");
     let config = fs::read_to_string(&config_path)
         .unwrap()
         .replace("  push: false", "  push: true");
     fs::write(&config_path, config).unwrap();
-    command(&repository.root, &["add", ".mdstore/config.yaml"]);
+    command(&repository.root, &["add", "config.yaml"]);
     command(&repository.root, &["commit", "-q", "-m", "enable pushing"]);
     let remote = repository.root.join("remote.git");
     command(
@@ -697,10 +689,15 @@ fn invalid_templates_block_startup_even_without_matching_pages() {
 #[test]
 fn template_recovery_and_invalid_external_activation() {
     let repository = Repository::new();
-    fs::write(repository.root.join("template.yaml"), "unknown: untracked").unwrap();
+    fs::create_dir(repository.root.join("stray")).unwrap();
+    fs::write(
+        repository.root.join("stray/template.yaml"),
+        "unknown: untracked",
+    )
+    .unwrap();
     let store = repository.store();
-    assert!(!repository.root.join("template.yaml").exists());
-    assert!(store.get_page("alice.md", None).unwrap().template.is_none());
+    assert!(!repository.root.join("stray/template.yaml").exists());
+    assert!(store.get_page("alice.md", None).unwrap().template.is_some());
     fs::write(
         repository.root.join("template.yaml"),
         "sections: [{heading: Missing, rules: {required: true}}]",
@@ -712,38 +709,33 @@ fn template_recovery_and_invalid_external_activation() {
         &["commit", "-qm", "incompatible template"],
     );
     assert!(store.push().is_err());
-    assert!(store.get_page("alice.md", None).unwrap().template.is_none());
+    assert!(store.get_page("alice.md", None).unwrap().template.is_some());
 }
 
 #[test]
 fn structured_sections_validate_activation_and_atomic_batches() {
     let repository = Repository::new();
-    let store = repository.store();
-    let configure = ApplyEditsRequest {
-        edit_summary: "require dated Notes entries".into(),
-        edits: vec![EditOperation::InsertBefore {
-            path: ".mdstore/config.yaml".into(),
-            anchor: format!("1:{}", short_hash("documents:")),
-            content: "sections:\n- heading: Notes\n  required: true\n  list:\n    minimum_items: 1\n    date_order: descending".into(),
-        }],
-    };
-    let head = command(&repository.root, &["rev-parse", "HEAD"]);
-    assert!(store.apply_edits(&configure).is_err());
-    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
-    store
-        .apply_edits(&ApplyEditsRequest {
-            edit_summary: "author dated entries".into(),
-            edits: ["Alice", "Bob"]
-                .iter()
-                .map(|name| EditOperation::Replace {
-                    path: format!("{}.md", name.to_lowercase()),
-                    anchor: format!("6:{}", short_hash(&format!("{name} profile."))),
-                    content: "- 2024-01-01 Created".into(),
-                })
-                .collect(),
-        })
+    let template = format!(
+        "{}sections:\n- heading: Notes\n  rules:\n    required: true\n    list: {{minimum_items: 1, date_order: descending}}\n",
+        template_yaml()
+    );
+    fs::write(repository.root.join("template.yaml"), template).unwrap();
+    command(&repository.root, &["add", "template.yaml"]);
+    command(
+        &repository.root,
+        &["commit", "-qm", "require dated entries"],
+    );
+    assert!(Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).is_err());
+    for name in ["Alice", "Bob"] {
+        fs::write(
+            repository.root.join(format!("{}.md", name.to_lowercase())),
+            page(name).replace(&format!("{name} profile."), "- 2024-01-01 Created"),
+        )
         .unwrap();
-    store.apply_edits(&configure).unwrap();
+    }
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "author valid entries"]);
+    let store = repository.store();
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
     assert!(
         store
@@ -764,59 +756,45 @@ fn structured_sections_validate_activation_and_atomic_batches() {
             .is_err()
     );
     assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
-    assert!(
-        fs::read_to_string(repository.root.join("alice.md"))
-            .unwrap()
-            .contains("2024-01-01")
-    );
 }
 
 #[test]
 fn markdown_style_activation_and_edits_are_atomic() {
     let repository = Repository::new();
+    fs::write(
+        repository.root.join("template.yaml"),
+        format!("{}markdown: {{max_line_length: 5}}\n", template_yaml()),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "template.yaml"]);
+    command(&repository.root, &["commit", "-qm", "invalid style policy"]);
+    assert!(Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).is_err());
+    fs::write(
+        repository.root.join("template.yaml"),
+        format!(
+            "{}markdown: {{no_trailing_whitespace: true, closed_fences: true}}\n",
+            template_yaml()
+        ),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "template.yaml"]);
+    command(&repository.root, &["commit", "-qm", "valid style policy"]);
     let store = repository.store();
-    let head = command(&repository.root, &["rev-parse", "HEAD"]);
-    let configure = |settings: &str| ApplyEditsRequest {
-        edit_summary: "configure Markdown validation".into(),
-        edits: vec![EditOperation::InsertBefore {
-            path: ".mdstore/config.yaml".into(),
-            anchor: format!("1:{}", short_hash("documents:")),
-            content: format!("markdown:\n{settings}"),
-        }],
-    };
-    let error = store
-        .apply_edits(&configure("  max_line_length: 5"))
-        .unwrap_err();
-    let findings = &error
-        .downcast_ref::<mdstore::ValidationError>()
-        .unwrap()
-        .findings;
-    assert!(findings.iter().any(|finding| finding.path == "alice.md"));
-    assert!(findings.iter().any(|finding| finding.path == "bob.md"));
-    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
-    assert!(store.config().markdown.max_line_length.is_none());
-
-    store
-        .apply_edits(&configure(
-            "  no_trailing_whitespace: true\n  closed_fences: true",
-        ))
-        .unwrap();
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
     let error = store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "invalid multi-page update".into(),
-            edits: vec![
-                EditOperation::Replace {
-                    path: "alice.md".into(),
-                    anchor: format!("6:{}", short_hash("Alice profile.")),
-                    content: "Valid change.".into(),
-                },
-                EditOperation::Replace {
-                    path: "bob.md".into(),
-                    anchor: format!("6:{}", short_hash("Bob profile.")),
-                    content: "Invalid change. ".into(),
-                },
-            ],
+            edit_summary: "invalid multi-page style".into(),
+            edits: [
+                ("alice.md", "Alice profile.", "Valid."),
+                ("bob.md", "Bob profile.", "Invalid. "),
+            ]
+            .iter()
+            .map(|(path, old, content)| EditOperation::Replace {
+                path: (*path).into(),
+                anchor: format!("6:{}", short_hash(old)),
+                content: (*content).into(),
+            })
+            .collect(),
         })
         .unwrap_err();
     let findings = &error
@@ -827,21 +805,13 @@ fn markdown_style_activation_and_edits_are_atomic() {
     assert_eq!(findings[0].path, "bob.md");
     assert_eq!(findings[0].line, Some(6));
     assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
-    assert_eq!(
-        fs::read_to_string(repository.root.join("alice.md")).unwrap(),
-        page("Alice")
-    );
-    assert_eq!(
-        fs::read_to_string(repository.root.join("bob.md")).unwrap(),
-        page("Bob")
-    );
 }
 
 #[test]
 fn create_page_never_overwrites_an_untracked_config_resource() {
     let repository = Repository::new();
     let store = repository.store();
-    let path = repository.root.join(".mdstore/local.json");
+    let path = repository.root.join("local.json");
     fs::write(&path, "local untracked bytes\n").unwrap();
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
 
@@ -849,13 +819,13 @@ fn create_page_never_overwrites_an_untracked_config_resource() {
         .apply_edits(&ApplyEditsRequest {
             edit_summary: "create config resource".into(),
             edits: vec![EditOperation::CreatePage {
-                path: ".mdstore/local.json".into(),
+                path: "local.json".into(),
                 content: "{}\n".into(),
             }],
         })
         .unwrap_err();
 
-    assert!(error.to_string().contains("untracked repository path"));
+    assert!(error.to_string().contains("read-only"));
     assert_eq!(fs::read_to_string(path).unwrap(), "local untracked bytes\n");
     assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
 }
@@ -864,26 +834,22 @@ fn create_page_never_overwrites_an_untracked_config_resource() {
 fn configuration_activation_reselects_the_tracked_corpus() {
     let repository = Repository::new();
     let store = repository.store();
-    let config = fs::read_to_string(repository.root.join(".mdstore/config.yaml")).unwrap();
-    let anchor = format!("2:{}", short_hash("  include: [\"**/*.md\"]"));
-    let request = ApplyEditsRequest {
-        edit_summary: "exclude Bob from the corpus".into(),
-        edits: vec![EditOperation::InsertAfter {
-            path: ".mdstore/config.yaml".into(),
-            anchor,
-            content: "  exclude: [\"bob.md\"]".into(),
-        }],
-    };
-    assert!(config.contains("include:"));
-    let response = store.apply_edits(&request).unwrap();
+    let config = config_yaml().replace("documents:", "documents:\n  exclude: ['bob.md']");
+    fs::write(repository.root.join("config.yaml"), config).unwrap();
+    command(&repository.root, &["add", "config.yaml"]);
+    command(
+        &repository.root,
+        &["commit", "-qm", "administrative corpus selection"],
+    );
+    store.push().unwrap();
     assert_eq!(store.status().unwrap().pages, 1);
     assert!(store.get_page("bob.md", None).is_err());
-    assert!(response.fresh_hashlines[".mdstore/config.yaml"].contains("exclude:"));
 }
 
 #[test]
 fn configured_markdown_under_mdstore_is_editable_content() {
     let repository = Repository::new();
+    fs::create_dir(repository.root.join(".mdstore")).unwrap();
     fs::write(repository.root.join(".mdstore/note.md"), page("Internal")).unwrap();
     command(&repository.root, &["add", ".mdstore/note.md"]);
     command(
@@ -921,17 +887,14 @@ fn configured_markdown_under_mdstore_is_editable_content() {
 fn rejects_edits_to_tracked_markdown_outside_the_configured_corpus() {
     let repository = Repository::new();
     fs::write(repository.root.join("excluded.md"), "private\n").unwrap();
-    let config = fs::read_to_string(repository.root.join(".mdstore/config.yaml"))
+    let config = fs::read_to_string(repository.root.join("config.yaml"))
         .unwrap()
         .replace(
             "  include: [\"**/*.md\"]",
             "  include: [\"**/*.md\"]\n  exclude: [\"excluded.md\"]",
         );
-    fs::write(repository.root.join(".mdstore/config.yaml"), config).unwrap();
-    command(
-        &repository.root,
-        &["add", ".mdstore/config.yaml", "excluded.md"],
-    );
+    fs::write(repository.root.join("config.yaml"), config).unwrap();
+    command(&repository.root, &["add", "config.yaml", "excluded.md"]);
     command(
         &repository.root,
         &["commit", "-q", "-m", "add excluded markdown"],
@@ -980,7 +943,7 @@ fn startup_verifies_repository_ownership_before_recovery() {
 
     let error = Store::open(root).err().unwrap().to_string();
 
-    assert!(error.contains(".mdstore/config.yaml must be tracked"));
+    assert!(error.contains("config.yaml must be tracked"));
     assert_eq!(
         fs::read_to_string(root.join("unrelated.txt")).unwrap(),
         "dirty\n"
@@ -1135,15 +1098,28 @@ async fn reindex_removes_sidecars_without_a_current_page() {
 
 #[test]
 fn schemas_are_repository_configuration_not_rust_fields() {
-    let first = Config::from_yaml(config_yaml()).unwrap();
-    let alternate = Config::from_yaml(
-        &config_yaml()
-            .replace("display_name: /name", "project_code: /code")
-            .replace("schema.json", "project-schema.json"),
+    let repository = Repository::new();
+    fs::create_dir(repository.root.join("projects")).unwrap();
+    fs::write(repository.root.join("projects/template.yaml"), "structure: {additional_sections: true}\nfrontmatter: {type: object, required: [code]}\nmetadata: {project_code: /code}\n").unwrap();
+    fs::write(
+        repository.root.join("projects/a.md"),
+        "---\ncode: A\n---\n# Project\n",
     )
     .unwrap();
-    assert!(first.metadata.contains_key("display_name"));
-    assert!(alternate.metadata.contains_key("project_code"));
+    command(&repository.root, &["add", "."]);
+    command(
+        &repository.root,
+        &["commit", "-qm", "different folder schema"],
+    );
+    let store = repository.store();
+    assert_eq!(
+        store.get_page("alice.md", None).unwrap().metadata["display_name"],
+        "Alice"
+    );
+    assert_eq!(
+        store.get_page("projects/a.md", None).unwrap().metadata["project_code"],
+        "A"
+    );
 }
 
 #[test]
@@ -1154,73 +1130,48 @@ fn mcp_allowlist_is_exact() {
 #[test]
 fn configuration_resources_are_hashline_readable() {
     let repository = Repository::new();
-    fs::write(
-        repository.root.join(".mdstore/UPPER.JSON"),
-        "{\"value\":\"old\"}\n",
-    )
-    .unwrap();
-    command(&repository.root, &["add", ".mdstore/UPPER.JSON"]);
-    command(
-        &repository.root,
-        &["commit", "-q", "-m", "add uppercase config resource"],
-    );
     let store = repository.store();
-    let response = store
-        .get_page(".mdstore/config.yaml", Some((1, 2)))
-        .unwrap();
-    assert!(response.content.contains("1:"));
-    assert!(response.content.contains("documents:"));
-    assert_eq!(response.metadata, serde_json::json!({}));
-
-    store
-        .apply_edits(&ApplyEditsRequest {
-            edit_summary: "edit uppercase config resource".into(),
-            edits: vec![EditOperation::Replace {
-                path: ".mdstore/UPPER.JSON".into(),
-                anchor: format!("1:{}", short_hash("{\"value\":\"old\"}")),
-                content: "{\"value\":\"new\"}".into(),
-            }],
-        })
-        .unwrap();
-    assert!(
-        store
-            .get_page(".mdstore/UPPER.JSON", None)
-            .unwrap()
-            .content
-            .contains("{\"value\":\"new\"}")
-    );
+    for path in ["config.yaml", "template.yaml"] {
+        let response = store.get_page(path, Some((1, 2))).unwrap();
+        assert!(response.content.starts_with("1:"));
+        assert_eq!(response.metadata, serde_json::json!({}));
+        let text = fs::read_to_string(repository.root.join(path)).unwrap();
+        let first = text.lines().next().unwrap();
+        assert!(
+            store
+                .apply_edits(&ApplyEditsRequest {
+                    edit_summary: "weaken configuration".into(),
+                    edits: vec![EditOperation::Replace {
+                        path: path.into(),
+                        anchor: format!("1:{}", short_hash(first)),
+                        content: "{}".into()
+                    }],
+                })
+                .unwrap_err()
+                .to_string()
+                .contains("read-only")
+        );
+    }
+    assert!(!repository.root.join(".mdstore").exists());
 }
 
 #[test]
 fn dirty_and_staged_configuration_do_not_leak_into_the_published_state() {
     let repository = Repository::new();
     let store = repository.store();
-    let original = store
-        .get_page(".mdstore/schema.json", None)
-        .unwrap()
-        .content;
+    let original = store.get_page("template.yaml", None).unwrap().content;
 
-    fs::write(
-        repository.root.join(".mdstore/schema.json"),
-        "not valid JSON\n",
-    )
-    .unwrap();
+    fs::write(repository.root.join("template.yaml"), "not valid JSON\n").unwrap();
     assert!(store.validate().is_ok());
     assert_eq!(
-        store
-            .get_page(".mdstore/schema.json", None)
-            .unwrap()
-            .content,
+        store.get_page("template.yaml", None).unwrap().content,
         original
     );
 
-    command(&repository.root, &["add", ".mdstore/schema.json"]);
+    command(&repository.root, &["add", "template.yaml"]);
     assert!(store.validate().is_ok());
     assert_eq!(
-        store
-            .get_page(".mdstore/schema.json", None)
-            .unwrap()
-            .content,
+        store.get_page("template.yaml", None).unwrap().content,
         original
     );
 }
@@ -1229,7 +1180,7 @@ fn dirty_and_staged_configuration_do_not_leak_into_the_published_state() {
 fn injected_provider_open_uses_committed_configuration() {
     let repository = Repository::new();
     fs::write(
-        repository.root.join(".mdstore/config.yaml"),
+        repository.root.join("config.yaml"),
         config_yaml().replace("dimensions: 2", "dimensions: 99"),
     )
     .unwrap();
@@ -1529,7 +1480,7 @@ fn valid_external_commit_is_loaded_before_the_next_write() {
 fn live_server_configuration_changes_require_restart() {
     let repository = Repository::new();
     let store = repository.store();
-    let config = fs::read_to_string(repository.root.join(".mdstore/config.yaml")).unwrap();
+    let config = fs::read_to_string(repository.root.join("config.yaml")).unwrap();
     let line = config
         .lines()
         .position(|line| line == "  listen: 127.0.0.1:3131")
@@ -1539,15 +1490,15 @@ fn live_server_configuration_changes_require_restart() {
         .apply_edits(&ApplyEditsRequest {
             edit_summary: "change live server address".into(),
             edits: vec![EditOperation::Replace {
-                path: ".mdstore/config.yaml".into(),
+                path: "config.yaml".into(),
                 anchor: format!("{line}:{}", short_hash("  listen: 127.0.0.1:3131")),
                 content: "  listen: 127.0.0.1:4141".into(),
             }],
         })
         .unwrap_err();
-    assert!(error.to_string().contains("daemon restart"));
+    assert!(error.to_string().contains("read-only"));
     assert_eq!(
-        fs::read_to_string(repository.root.join(".mdstore/config.yaml")).unwrap(),
+        fs::read_to_string(repository.root.join("config.yaml")).unwrap(),
         config
     );
 }
@@ -1556,13 +1507,13 @@ fn live_server_configuration_changes_require_restart() {
 fn external_server_configuration_change_requires_restart() {
     let repository = Repository::new();
     let store = repository.store();
-    let config = fs::read_to_string(repository.root.join(".mdstore/config.yaml")).unwrap();
+    let config = fs::read_to_string(repository.root.join("config.yaml")).unwrap();
     fs::write(
-        repository.root.join(".mdstore/config.yaml"),
+        repository.root.join("config.yaml"),
         config.replace("127.0.0.1:3131", "127.0.0.1:4141"),
     )
     .unwrap();
-    command(&repository.root, &["add", ".mdstore/config.yaml"]);
+    command(&repository.root, &["add", "config.yaml"]);
     command(
         &repository.root,
         &["commit", "-q", "-m", "change server address"],
@@ -1616,9 +1567,9 @@ fn manual_push_uses_the_repository_write_lock() {
 fn manual_push_refreshes_external_configuration_before_selecting_push_settings() {
     let repository = Repository::new();
     let store = repository.store();
-    let schema = format!("\n{}", schema());
-    fs::write(repository.root.join(".mdstore/schema.json"), &schema).unwrap();
-    command(&repository.root, &["add", ".mdstore/schema.json"]);
+    let schema = format!("\n{}", template_yaml());
+    fs::write(repository.root.join("template.yaml"), &schema).unwrap();
+    command(&repository.root, &["add", "template.yaml"]);
     command(
         &repository.root,
         &["commit", "-q", "-m", "external schema formatting"],
@@ -1627,7 +1578,7 @@ fn manual_push_refreshes_external_configuration_before_selecting_push_settings()
     assert!(matches!(store.push().unwrap(), PushState::Disabled));
     assert!(
         store
-            .get_page(".mdstore/schema.json", None)
+            .get_page("template.yaml", None)
             .unwrap()
             .content
             .lines()
@@ -1757,19 +1708,19 @@ fn fresh_hashlines_cover_middle_edits() {
 fn deleting_a_referenced_schema_fails_against_the_overlay() {
     let repository = Repository::new();
     let store = repository.store();
-    let schema = fs::read_to_string(repository.root.join(".mdstore/schema.json")).unwrap();
+    let schema = fs::read_to_string(repository.root.join("template.yaml")).unwrap();
     let count = schema.lines().count();
     let first = schema.lines().next().unwrap();
     let last = schema.lines().last().unwrap();
     let request = ApplyEditsRequest {
         edit_summary: "remove active schema".into(),
         edits: vec![EditOperation::RemovePage {
-            path: ".mdstore/schema.json".into(),
+            path: "template.yaml".into(),
             anchor: format!("1:{}..{count}:{}", short_hash(first), short_hash(last)),
         }],
     };
     assert!(store.apply_edits(&request).is_err());
-    assert!(repository.root.join(".mdstore/schema.json").is_file());
+    assert!(repository.root.join("template.yaml").is_file());
 }
 
 #[test]
@@ -1910,10 +1861,11 @@ async fn post_edit_reindex_reuses_still_valid_sidecars() {
     let embedded = calls.load(Ordering::SeqCst);
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "add unrelated configuration".into(),
-            edits: vec![EditOperation::CreatePage {
-                path: ".mdstore/unused.json".into(),
-                content: "{}\n".into(),
+            edit_summary: "repeat unchanged document edit".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "Alice profile.".into(),
             }],
         })
         .unwrap();
@@ -1963,13 +1915,13 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
         &repository.root,
         &["remote", "add", "origin", remote.path().to_str().unwrap()],
     );
-    let config_path = repository.root.join(".mdstore/config.yaml");
+    let config_path = repository.root.join("config.yaml");
     let config = fs::read_to_string(&config_path).unwrap().replace(
         "  push: false",
         "  push: true\n  remote: origin\n  push_timeout_seconds: 5",
     );
     fs::write(&config_path, config).unwrap();
-    command(&repository.root, &["add", ".mdstore/config.yaml"]);
+    command(&repository.root, &["add", "config.yaml"]);
     command(
         &repository.root,
         &["commit", "-q", "-m", "enable delayed push"],
@@ -2068,13 +2020,13 @@ fn sync_repository() -> (Repository, tempfile::TempDir) {
         &repository.root,
         &["remote", "add", "origin", remote.path().to_str().unwrap()],
     );
-    let config_path = repository.root.join(".mdstore/config.yaml");
+    let config_path = repository.root.join("config.yaml");
     let config = fs::read_to_string(&config_path).unwrap().replace(
         "  push: false",
         "  push: true\n  remote: origin\n  push_timeout_seconds: 2",
     );
     fs::write(config_path, config).unwrap();
-    command(&repository.root, &["add", ".mdstore/config.yaml"]);
+    command(&repository.root, &["add", "config.yaml"]);
     command(&repository.root, &["commit", "-qm", "enable sync"]);
     (repository, remote)
 }
@@ -2220,6 +2172,165 @@ fn synchronization_divergence_blocks_writes_without_rewriting_history() {
     );
     drop(store);
     assert!(repository.store().status().unwrap().blocked.is_some());
+}
+
+#[test]
+fn destination_changes_invalidate_replication_progress() {
+    let (repository, remote) = sync_repository();
+    let store = repository.store();
+    store.push().unwrap();
+    assert_eq!(store.status().unwrap().replication.pending_commits, 0);
+    let unavailable = remote.path().join("missing.git");
+    command(
+        &repository.root,
+        &["remote", "set-url", "origin", unavailable.to_str().unwrap()],
+    );
+    assert!(store.status().unwrap().replication.pending_commits > 0);
+    assert!(store.status().unwrap().replication.last_success.is_none());
+    assert!(store.push().is_err());
+    assert!(store.status().unwrap().unpushed);
+    command(
+        &repository.root,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            remote.path().to_str().unwrap(),
+        ],
+    );
+    store.push().unwrap();
+    let branch = command(&repository.root, &["branch", "--show-current"]);
+    command(
+        &repository.root,
+        &[
+            "config",
+            &format!("branch.{}.remote", branch.trim()),
+            "origin",
+        ],
+    );
+    command(
+        &repository.root,
+        &[
+            "config",
+            &format!("branch.{}.merge", branch.trim()),
+            "refs/heads/replacement",
+        ],
+    );
+    assert!(store.status().unwrap().replication.pending_commits > 0);
+    assert!(store.status().unwrap().replication.last_success.is_none());
+    store.push().unwrap();
+    assert_eq!(store.status().unwrap().replication.pending_commits, 0);
+}
+
+#[test]
+fn staged_listener_change_activates_on_restart() {
+    let (repository, remote) = sync_repository();
+    let store = repository.store();
+    store.push().unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let external = external_clone(&repository, remote.path(), temporary.path());
+    fs::write(
+        external.join("config.yaml"),
+        config_yaml()
+            .replace("127.0.0.1:3131", "127.0.0.1:3132")
+            .replace("push: false", "push: true\n  remote: origin"),
+    )
+    .unwrap();
+    command(&external, &["commit", "-am", "change listener"]);
+    command(&external, &["push"]);
+    let before = command(&repository.root, &["rev-parse", "HEAD"]);
+    assert!(
+        store
+            .push()
+            .unwrap_err()
+            .to_string()
+            .contains("restart required")
+    );
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), before);
+    drop(store);
+    let restarted = repository.store();
+    assert_eq!(restarted.config().server.listen, "127.0.0.1:3132");
+    assert_eq!(
+        command(&repository.root, &["rev-parse", "HEAD"]),
+        command(&external, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(restarted.push().unwrap(), PushState::Pushed);
+}
+
+#[test]
+fn staged_restart_never_overwrites_a_later_local_edit() {
+    let (repository, remote) = sync_repository();
+    let store = repository.store();
+    store.push().unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let external = external_clone(&repository, remote.path(), temporary.path());
+    let config = fs::read_to_string(external.join("config.yaml"))
+        .unwrap()
+        .replace("127.0.0.1:3131", "127.0.0.1:3132");
+    fs::write(external.join("config.yaml"), config).unwrap();
+    command(&external, &["commit", "-am", "stage listener"]);
+    command(&external, &["push"]);
+    assert!(store.push().is_err());
+    store
+        .apply_edits(&ApplyEditsRequest {
+            edit_summary: "later local edit".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{}", short_hash("Alice profile.")),
+                content: "Preserve this edit.".into(),
+            }],
+        })
+        .unwrap();
+    let local = command(&repository.root, &["rev-parse", "HEAD"]);
+    drop(store);
+    let restarted = repository.store();
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), local);
+    assert_eq!(restarted.config().server.listen, "127.0.0.1:3131");
+    assert!(
+        restarted
+            .get_page("alice.md", None)
+            .unwrap()
+            .content
+            .contains("Preserve this edit.")
+    );
+    assert_eq!(restarted.push().unwrap(), PushState::Diverged);
+}
+
+#[test]
+fn operational_config_rejects_document_rules() {
+    for rule in [
+        "schemas: []",
+        "sections: []",
+        "markdown: {}",
+        "relations: []",
+        "links: {}",
+        "metadata: {}",
+    ] {
+        assert!(Config::from_root_yaml(&format!("{}\n{rule}\n", config_yaml())).is_err());
+    }
+    let repository = Repository::new();
+    let store = repository.store();
+    for path in [
+        "config.yaml",
+        "template.yaml",
+        "people/template.yaml",
+        ".mdstore/config.yaml",
+        "schema.json",
+    ] {
+        assert!(
+            store
+                .apply_edits(&ApplyEditsRequest {
+                    edit_summary: "change policy".into(),
+                    edits: vec![EditOperation::CreatePage {
+                        path: path.into(),
+                        content: "{}".into()
+                    }]
+                })
+                .unwrap_err()
+                .to_string()
+                .contains("read-only")
+        );
+    }
 }
 
 #[tokio::test]

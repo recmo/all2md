@@ -10,6 +10,8 @@ use crate::config::{Config, RelationLinkSyntax, RelationSelector};
 #[derive(Debug, Clone, Serialize)]
 /// Parsed structural and authored-link information for one page.
 pub(crate) struct ParsedPage {
+    /// Metadata projected using the page's directory template.
+    pub metadata: serde_json::Value,
     /// YAML frontmatter converted to JSON.
     pub frontmatter: serde_json::Value,
     /// First body line after frontmatter, one-based.
@@ -215,6 +217,7 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
     structural_boundaries.sort_unstable();
     structural_boundaries.dedup();
     Ok(ParsedPage {
+        metadata: serde_json::json!({}),
         frontmatter,
         body_start_line,
         headings,
@@ -342,9 +345,17 @@ pub(crate) fn validate_corpus(
     let schemas = compile_schemas(config, extra_files, &mut findings);
     crate::template::validate_corpus(pages, extra_files, &mut findings);
     let mut parsed = HashMap::new();
+    let templates = crate::template::compile_policies(config, extra_files);
+    let mut policies = HashMap::new();
     for (path, text) in pages {
+        let Ok(policy) = crate::template::page_policy(config, path, extra_files, &templates) else {
+            continue;
+        };
+        policies.insert(path.clone(), policy);
+        let config = &policies[path];
         match parse_page(text, &config.links) {
-            Ok(page) => {
+            Ok(mut page) => {
+                page.metadata = project_metadata(config, &page.frontmatter);
                 validate_schema(&schemas, path, &page.frontmatter, &mut findings);
                 validate_sections(config, path, &page, &mut findings);
                 crate::structure::validate(config, path, text, &page, &mut findings);
@@ -383,88 +394,91 @@ pub(crate) fn validate_corpus(
         }
     }
     let mut edges = Vec::new();
-    for rule in &config.relations {
-        match &rule.selector {
-            RelationSelector::MarkdownLinks {
-                include,
-                section,
-                syntax,
-            } => {
-                for (source, links) in &resolved_links {
-                    let included = include.as_ref().is_none_or(|pattern| {
-                        globset::Glob::new(pattern)
-                            .is_ok_and(|glob| glob.compile_matcher().is_match(source))
-                    });
-                    if !included {
-                        continue;
-                    }
-                    for link in links {
-                        if section
-                            .as_ref()
-                            .is_some_and(|section| !link.sections.contains(section))
-                            || syntax.is_some_and(|syntax| !syntax.matches(link.syntax))
-                        {
-                            continue;
-                        }
-                        edges.push(Edge {
-                            source: source.clone(),
-                            relation: rule.name.clone(),
-                            target: link.target.clone(),
+    for (source, config) in &policies {
+        for rule in &config.relations {
+            match &rule.selector {
+                RelationSelector::MarkdownLinks {
+                    include,
+                    section,
+                    syntax,
+                } => {
+                    if let Some(links) = resolved_links.get(source) {
+                        let included = include.as_ref().is_none_or(|pattern| {
+                            globset::Glob::new(pattern)
+                                .is_ok_and(|glob| glob.compile_matcher().is_match(source))
                         });
-                    }
-                }
-            }
-            RelationSelector::Frontmatter {
-                array_pointer,
-                target_pointer,
-                type_pointer,
-                type_value,
-            } => {
-                for (source, page) in &parsed {
-                    let Some(items) = page
-                        .frontmatter
-                        .pointer(array_pointer)
-                        .and_then(|v| v.as_array())
-                    else {
-                        continue;
-                    };
-                    for item in items {
-                        if let (Some(pointer), Some(expected)) = (type_pointer, type_value)
-                            && item.pointer(pointer) != Some(expected)
-                        {
+                        if !included {
                             continue;
                         }
-                        let Some(target) = item.pointer(target_pointer).and_then(|v| v.as_str())
-                        else {
-                            findings.push(Finding {
-                                path: source.clone(),
-                                message: format!(
-                                    "relation {} target at {target_pointer} must be a string",
-                                    rule.name
-                                ),
-                                line: None,
-                            });
-                            continue;
-                        };
-                        match resolver.resolve(source, target, LinkSyntax::Wiki) {
-                            Ok(Some(target)) => edges.push(Edge {
+                        for link in links {
+                            if section
+                                .as_ref()
+                                .is_some_and(|section| !link.sections.contains(section))
+                                || syntax.is_some_and(|syntax| !syntax.matches(link.syntax))
+                            {
+                                continue;
+                            }
+                            edges.push(Edge {
                                 source: source.clone(),
                                 relation: rule.name.clone(),
-                                target,
-                            }),
-                            Ok(None) => unreachable!(),
-                            Err(message) => findings.push(Finding {
-                                path: source.clone(),
-                                message,
-                                line: None,
-                            }),
+                                target: link.target.clone(),
+                            });
+                        }
+                    }
+                }
+                RelationSelector::Frontmatter {
+                    array_pointer,
+                    target_pointer,
+                    type_pointer,
+                    type_value,
+                } => {
+                    if let Some(page) = parsed.get(source) {
+                        let Some(items) = page
+                            .frontmatter
+                            .pointer(array_pointer)
+                            .and_then(|v| v.as_array())
+                        else {
+                            continue;
+                        };
+                        for item in items {
+                            if let (Some(pointer), Some(expected)) = (type_pointer, type_value)
+                                && item.pointer(pointer) != Some(expected)
+                            {
+                                continue;
+                            }
+                            let Some(target) =
+                                item.pointer(target_pointer).and_then(|v| v.as_str())
+                            else {
+                                findings.push(Finding {
+                                    path: source.clone(),
+                                    message: format!(
+                                        "relation {} target at {target_pointer} must be a string",
+                                        rule.name
+                                    ),
+                                    line: None,
+                                });
+                                continue;
+                            };
+                            match resolver.resolve(source, target, LinkSyntax::Wiki) {
+                                Ok(Some(target)) => edges.push(Edge {
+                                    source: source.clone(),
+                                    relation: rule.name.clone(),
+                                    target,
+                                }),
+                                Ok(None) => unreachable!(),
+                                Err(message) => findings.push(Finding {
+                                    path: source.clone(),
+                                    message,
+                                    line: None,
+                                }),
+                            }
                         }
                     }
                 }
             }
         }
     }
-    validate_reciprocals(config, &edges, &mut findings);
+    validate_reciprocals(&policies, &edges, &mut findings);
     if findings.is_empty() {
         Ok((parsed, edges))
     } else {
@@ -578,9 +592,14 @@ fn validate_sections(config: &Config, path: &str, page: &ParsedPage, findings: &
     }
 }
 
-fn validate_reciprocals(config: &Config, edges: &[Edge], findings: &mut Vec<Finding>) {
+fn validate_reciprocals(
+    policies: &HashMap<String, Config>,
+    edges: &[Edge],
+    findings: &mut Vec<Finding>,
+) {
     let set: std::collections::HashSet<_> = edges.iter().cloned().collect();
     for edge in edges {
+        let config = &policies[&edge.source];
         let reciprocal = config
             .relations
             .iter()

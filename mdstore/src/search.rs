@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::{
     chunk::Chunk,
     config::Config,
-    markdown::{Edge, ParsedPage, project_metadata},
+    markdown::{Edge, ParsedPage},
     provider::{InputType, RetrievalProvider, validate_rerank_results, validate_vectors},
 };
 
@@ -90,7 +90,7 @@ impl SearchIndex {
     #[must_use]
     /// Builds a deterministic index from validated pages and sidecar vectors.
     pub(crate) fn build(
-        config: &Config,
+        _config: &Config,
         pages: &HashMap<String, String>,
         parsed: &HashMap<String, ParsedPage>,
         edges: &[Edge],
@@ -111,7 +111,7 @@ impl SearchIndex {
                     .then_with(|| left.0.end_line.cmp(&right.0.end_line))
                     .then_with(|| left.0.text.cmp(&right.0.text))
             });
-            let metadata = project_metadata(config, &page.frontmatter);
+            let metadata = page.metadata.clone();
             for (chunk, vector) in values {
                 let heading = chunk.heading.join(" ");
                 let text = &chunk.text;

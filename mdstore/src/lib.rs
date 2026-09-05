@@ -39,5 +39,5 @@ pub use store::{
 /// Loads and validates the configuration from the repository's committed `HEAD`.
 pub fn load_repository_config(root: &Path) -> Result<Config> {
     let head = git::head(root)?;
-    Config::from_yaml(&git::read_text(root, &head, ".mdstore/config.yaml")?)
+    Config::from_root_yaml(&git::read_text(root, &head, "config.yaml")?)
 }

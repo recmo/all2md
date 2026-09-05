@@ -13,6 +13,11 @@ use crate::{SectionListRule, markdown::Finding};
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Template {
+    frontmatter: Option<serde_json::Value>,
+    markdown: crate::MarkdownConfig,
+    links: crate::LinkConfig,
+    relations: Vec<crate::RelationRule>,
+    metadata: std::collections::BTreeMap<String, String>,
     instructions: String,
     examples: Vec<String>,
     structure: Structure,
@@ -108,7 +113,50 @@ fn parse(text: &str) -> Result<Template> {
     let template: Template = serde_yaml::from_str(text)?;
     validate_definition(&template.structure, &template.sections, 0)?;
     validate_rules(&template.preamble)?;
+    let base = crate::Config::from_yaml("documents: {include: ['**/*.md']}")?;
+    policy(&template, &base).validate()?;
+    if let Some(schema) = &template.frontmatter {
+        let _ = jsonschema::validator_for(schema)?;
+    }
     Ok(template)
+}
+
+fn policy(template: &Template, base: &crate::Config) -> crate::Config {
+    let mut config = base.clone();
+    config.schemas.clear();
+    config.sections.clear();
+    config.markdown = template.markdown.clone();
+    config.links = template.links.clone();
+    config.relations = template.relations.clone();
+    config.metadata = template.metadata.clone();
+    config
+}
+
+pub(crate) fn page_policy(
+    base: &crate::Config,
+    path: &str,
+    files: &HashMap<String, String>,
+    policies: &HashMap<String, crate::Config>,
+) -> Result<crate::Config> {
+    applicable(path, files).map_or_else(
+        || Ok(base.clone()),
+        |(path, _)| policies.get(&path).cloned().context("invalid template"),
+    )
+}
+
+pub(crate) fn compile_policies(
+    base: &crate::Config,
+    files: &HashMap<String, String>,
+) -> HashMap<String, crate::Config> {
+    files
+        .iter()
+        .filter(|(path, _)| is_template(path))
+        .filter_map(|(path, text)| {
+            parse(text)
+                .ok()
+                .map(|template| (path.clone(), policy(&template, base)))
+        })
+        .collect()
 }
 
 fn validate_rules(rules: &Rules) -> Result<()> {
@@ -194,6 +242,17 @@ pub(crate) fn validate_corpus(
             }),
         }
     }
+    let schemas: HashMap<_, _> = templates
+        .iter()
+        .filter_map(|(path, template)| {
+            template.frontmatter.as_ref().map(|schema| {
+                (
+                    path.clone(),
+                    jsonschema::validator_for(schema).expect("validated schema"),
+                )
+            })
+        })
+        .collect();
     for (path, text) in pages {
         let Some((template_path, _)) = applicable(path, files) else {
             continue;
@@ -204,6 +263,18 @@ pub(crate) fn validate_corpus(
         let Ok(page) = crate::markdown::parse_page(text, &crate::LinkConfig::default()) else {
             continue;
         };
+        if let Some(validator) = schemas.get(&template_path) {
+            for error in validator.iter_errors(&page.frontmatter) {
+                findings.push(Finding {
+                    path: path.clone(),
+                    line: Some(1),
+                    message: format!(
+                        "{template_path}: frontmatter{}: {error}",
+                        error.instance_path
+                    ),
+                });
+            }
+        }
         let mut offsets = vec![0];
         offsets.extend(text.match_indices('\n').map(|(offset, _)| offset + 1));
         let body_start = offsets

@@ -22,7 +22,7 @@ use crate::{
     },
     git::{self, PushState},
     hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
-    markdown::{Edge, Finding, ParsedPage, project_metadata, validate_corpus},
+    markdown::{Edge, Finding, ParsedPage, validate_corpus},
     provider::{InputType, RetrievalProvider, ZeroEntropyProvider},
     search::{SearchIndex, SearchResponse},
     sidecar::{self, Sidecar},
@@ -205,6 +205,9 @@ pub struct StatusResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// Last observed Git replication state. Pending counts are refreshed on status reads.
 pub struct ReplicationStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Fingerprint of the destination whose progress is reported.
+    pub destination: Option<String>,
     /// Local commits not present at the last observed remote revision.
     pub pending_commits: usize,
     /// Unix timestamp of the last completed successful synchronization.
@@ -274,14 +277,16 @@ impl Store {
                         zeroentropy_provider;
                     (zeroentropy_provider(config.provider.clone()), Some(factory))
                 };
-                Self::open_inner(
+                let store = Self::open_inner(
                     root.to_path_buf(),
                     head.clone(),
                     config,
                     provider,
                     git_dir.to_path_buf(),
                     provider_factory,
-                )
+                )?;
+                store.activate_staged_restart()?;
+                Ok(store)
             });
             if git::head(root)? == head {
                 return result;
@@ -291,9 +296,9 @@ impl Store {
     }
 
     fn load_config(root: &Path, head: &str) -> Result<Config> {
-        let config_text = git::read_text(root, head, ".mdstore/config.yaml")
-            .map_err(|_| anyhow!(".mdstore/config.yaml must be tracked by Git"))?;
-        Config::from_yaml(&config_text)
+        let config_text = git::read_text(root, head, "config.yaml")
+            .map_err(|_| anyhow!("config.yaml must be tracked by Git"))?;
+        Config::from_root_yaml(&config_text)
     }
 
     fn open_inner(
@@ -370,7 +375,7 @@ impl Store {
                 template: crate::template::discovery(path, &state.config_files)?,
                 path: path.into(),
                 content: render(text, window),
-                metadata: project_metadata(&state.config, &page.frontmatter),
+                metadata: page.metadata.clone(),
                 relations: state
                     .edges
                     .iter()
@@ -446,46 +451,25 @@ impl Store {
         }
 
         let mut paths = BTreeSet::new();
-        let mut has_config = false;
-        let mut has_content = false;
         for edit in &request.edits {
             let path = edit.path();
             validate_repo_path(path)?;
-            if crate::template::is_template(path) {
-                bail!("template.yaml is read-only through apply_edits");
-            }
-            if path.ends_with(".mdstore") {
-                bail!("embedding sidecars cannot be edited");
-            }
-            if is_config_resource_path(path) {
-                has_config = true;
-            } else if path.ends_with(".md") {
-                has_content = true;
-            } else if path.starts_with(".mdstore/") {
-                bail!("configuration edits are limited to YAML and JSON files");
-            } else {
-                bail!("edits may target configured Markdown or .mdstore YAML/JSON only");
+            if !path.ends_with(".md") {
+                bail!(
+                    "apply_edits may edit Markdown only; configuration and templates are read-only"
+                );
             }
             paths.insert(path.to_owned());
-        }
-        if has_config && has_content {
-            bail!("configuration and Markdown edits must be separate batches");
         }
 
         let current = self.state.read().clone();
         let base_head = self.head.read().clone();
-        if has_content {
-            ensure_paths_match_config(&current.config, paths.iter())?;
-        }
+        ensure_paths_match_config(&current.config, paths.iter())?;
 
         let mut originals = HashMap::new();
         for path in &paths {
             ensure_repository_path_safe(&self.root, path)?;
-            let original = if path.ends_with(".md") {
-                current.pages.get(path)
-            } else {
-                current.config_files.get(path)
-            };
+            let original = current.pages.get(path);
             if let Some(original) = original {
                 originals.insert(path.clone(), original.clone());
             }
@@ -498,51 +482,23 @@ impl Store {
         let applied = apply_operations_with_ranges(&originals, &request.edits)?;
         let changes = &applied.changes;
         let mut pages = current.pages.clone();
-        let mut extra = current.config_files.clone();
+        let extra = current.config_files.clone();
         for (path, content) in changes {
-            if path.ends_with(".md") {
-                match content {
-                    Some(text) => {
-                        pages.insert(path.clone(), text.clone());
-                    }
-                    None => {
-                        pages.remove(path);
-                    }
+            match content {
+                Some(text) => {
+                    pages.insert(path.clone(), text.clone());
                 }
-            } else {
-                match content {
-                    Some(text) => {
-                        extra.insert(path.clone(), text.clone());
-                    }
-                    None => {
-                        extra.remove(path);
-                    }
+                None => {
+                    pages.remove(path);
                 }
             }
         }
-        let config = if let Some(text) = extra.get(".mdstore/config.yaml") {
-            Config::from_yaml(text)?
-        } else {
-            bail!(".mdstore/config.yaml cannot be removed");
-        };
-        if config.server != current.config.server {
-            bail!("server configuration changes require a daemon restart");
-        }
-        if has_config {
-            pages = load_pages(&self.root, &base_head, &config)?;
-        }
+        let config = current.config.clone();
         ensure_pages_match_config(&config, &pages)?;
         let (parsed, edges) = validate_corpus(&config, &pages, &extra)
             .map_err(|findings| ValidationError { findings })?;
         ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
-        let provider = if config.provider != current.config.provider {
-            let factory = self
-                .provider_factory
-                .context("provider configuration changes require a daemon restart")?;
-            factory(config.provider.clone())
-        } else {
-            current.provider.clone()
-        };
+        let provider = current.provider.clone();
 
         let ordered: Vec<(String, Option<String>)> = paths
             .iter()
@@ -774,7 +730,7 @@ impl Store {
                     .count(),
             )
         };
-        let mut replication = self.replication.read().clone();
+        let mut replication = self.current_replication();
         replication.pending_commits = git::pending_commits(&self.root)?;
         let unpushed = replication.pending_commits > 0;
         let blocked = self.blocked.read().clone();
@@ -792,8 +748,10 @@ impl Store {
     /// Attempts one synchronization; network operations never hold the edit lock.
     pub fn push(&self) -> Result<PushState> {
         let _sync = self.sync_lock.lock();
+        let mut progress = self.current_replication();
         let result = self.synchronize_once();
         let mut status = self.replication.write();
+        std::mem::swap(&mut *status, &mut progress);
         status.pending_commits = git::pending_commits(&self.root)?;
         match &result {
             Ok(PushState::Pushed) => {
@@ -833,9 +791,18 @@ impl Store {
                 bail!("live branch changed during synchronization; retry");
             }
             if let Some(incoming) = incoming {
-                git::acknowledge_remote(&self.root, &incoming)?;
+                git::acknowledge_remote(&self.root, &target, &incoming)?;
                 if incoming != local && git::is_ancestor(&self.root, &local, &incoming)? {
-                    let state = self.load_candidate(&incoming)?;
+                    let state = self.load_candidate(&incoming, true)?;
+                    if state.config.server != self.state.read().config.server {
+                        write_atomic(
+                            &self.git_dir.join("mdstore/restart.json"),
+                            &serde_json::to_vec(&(&local, &incoming))?,
+                        )?;
+                        bail!(
+                            "validated server configuration staged; restart required to activate"
+                        );
+                    }
                     git::activate_candidate(&self.root, &local, &incoming)?;
                     *self.state.write() = state;
                     *self.head.write() = incoming.clone();
@@ -889,7 +856,7 @@ impl Store {
         if current == *self.head.read() {
             return Ok(());
         }
-        let state = self.load_candidate(&current).inspect_err(|error| {
+        let state = self.load_candidate(&current, false).inspect_err(|error| {
             let _ = self.set_external_blocked(format!("external commit is invalid: {error}"));
         })?;
         *self.state.write() = state;
@@ -905,12 +872,8 @@ impl Store {
         Ok(())
     }
 
-    fn load_candidate(&self, current: &str) -> Result<StoreState> {
-        let config = Config::from_yaml(&git::read_text(
-            &self.root,
-            current,
-            ".mdstore/config.yaml",
-        )?)?;
+    fn load_candidate(&self, current: &str, allow_restart: bool) -> Result<StoreState> {
+        let config = Config::from_root_yaml(&git::read_text(&self.root, current, "config.yaml")?)?;
         let pages = load_pages(&self.root, current, &config)?;
         let extra = load_config_files(&self.root, current)?;
         let (parsed, edges) = match validate_corpus(&config, &pages, &extra) {
@@ -933,7 +896,7 @@ impl Store {
             .collect();
         git::ensure_ignored_at(&self.root, current, sidecars.iter().map(String::as_str))?;
         let current_state = self.state.read().clone();
-        if config.server != current_state.config.server {
+        if !allow_restart && config.server != current_state.config.server {
             bail!("external commit changes server configuration; restart required");
         }
         let provider = if config.provider != current_state.config.provider {
@@ -963,6 +926,24 @@ impl Store {
             provider,
             generation: current_state.generation + 1,
         })
+    }
+
+    fn activate_staged_restart(&self) -> Result<()> {
+        let _lock = self.lock_repository()?;
+        let path = self.git_dir.join("mdstore/restart.json");
+        if !path.exists() {
+            return Ok(());
+        }
+        let (base, candidate): (String, String) = serde_json::from_slice(&fs::read(&path)?)?;
+        if git::head(&self.root)? == base {
+            if !git::is_ancestor(&self.root, &base, &candidate)? {
+                bail!("staged restart is not a fast-forward");
+            }
+            let _ = self.load_candidate(&candidate, true)?;
+            git::activate_candidate(&self.root, &base, &candidate)?;
+        }
+        fs::remove_file(path)?;
+        Ok(())
     }
 
     fn lock_repository(&self) -> Result<fs::File> {
@@ -1135,6 +1116,21 @@ impl Store {
             Ok(PushState::Queued)
         } else {
             Ok(PushState::Pushed)
+        }
+    }
+
+    fn current_replication(&self) -> ReplicationStatus {
+        let destination = git::sync_target(&self.root, &self.state.read().config)
+            .ok()
+            .map(|target| target.identity);
+        let status = self.replication.read();
+        if status.destination == destination {
+            status.clone()
+        } else {
+            ReplicationStatus {
+                destination,
+                ..ReplicationStatus::default()
+            }
         }
     }
 
@@ -1495,9 +1491,9 @@ mod tests {
 
         fn embedding_provider_identity(&self) -> String {
             if !self.advanced.swap(true, Ordering::SeqCst) {
-                fs::write(self.root.join(".mdstore/config.yaml"), config("new.md")).unwrap();
+                fs::write(self.root.join("config.yaml"), config("new.md")).unwrap();
                 fs::write(self.root.join("new.md"), "new snapshot\n").unwrap();
-                run_git(&self.root, &["add", ".mdstore/config.yaml", "new.md"]);
+                run_git(&self.root, &["add", "config.yaml", "new.md"]);
                 run_git(&self.root, &["commit", "-q", "-m", "new snapshot"]);
             }
             "advancing-provider".into()
@@ -1549,12 +1545,9 @@ mod tests {
         run_git(root, &["config", "commit.gpgsign", "false"]);
         fs::create_dir(root.join(".mdstore")).unwrap();
         fs::write(root.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
-        fs::write(root.join(".mdstore/config.yaml"), config("old.md")).unwrap();
+        fs::write(root.join("config.yaml"), config("old.md")).unwrap();
         fs::write(root.join("old.md"), "old snapshot\n").unwrap();
-        run_git(
-            root,
-            &["add", ".gitignore", ".mdstore/config.yaml", "old.md"],
-        );
+        run_git(root, &["add", ".gitignore", "config.yaml", "old.md"]);
         run_git(root, &["commit", "-q", "-m", "old snapshot"]);
 
         let provider: Arc<dyn RetrievalProvider> = Arc::new(AdvancingProvider {
@@ -1577,12 +1570,9 @@ mod tests {
         run_git(root, &["config", "commit.gpgsign", "false"]);
         fs::create_dir(root.join(".mdstore")).unwrap();
         fs::write(root.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
-        fs::write(root.join(".mdstore/config.yaml"), config("old.md")).unwrap();
+        fs::write(root.join("config.yaml"), config("old.md")).unwrap();
         fs::write(root.join("old.md"), "---\nunterminated\n").unwrap();
-        run_git(
-            root,
-            &["add", ".gitignore", ".mdstore/config.yaml", "old.md"],
-        );
+        run_git(root, &["add", ".gitignore", "config.yaml", "old.md"]);
         run_git(root, &["commit", "-q", "-m", "invalid old snapshot"]);
 
         let (root, git_dir) = Store::prepare_repository(root).unwrap();
@@ -1594,9 +1584,9 @@ mod tests {
         let store =
             Store::open_stable_with(&root, &git_dir, Some(&provider), |root, _captured_head| {
                 if !advanced {
-                    fs::write(root.join(".mdstore/config.yaml"), config("new.md")).unwrap();
+                    fs::write(root.join("config.yaml"), config("new.md")).unwrap();
                     fs::write(root.join("new.md"), "new snapshot\n").unwrap();
-                    run_git(root, &["add", ".mdstore/config.yaml", "new.md"]);
+                    run_git(root, &["add", "config.yaml", "new.md"]);
                     run_git(root, &["commit", "-q", "-m", "valid new snapshot"]);
                     advanced = true;
                 }

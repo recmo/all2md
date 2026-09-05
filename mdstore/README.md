@@ -5,102 +5,51 @@ validates repository-defined schemas, exposes hashline-safe atomic edits, keeps
 adjacent binary embedding sidecars, and serves exact, vector, graph-assisted,
 and reranked search over MCP.
 
-Markdown and `.mdstore/` configuration are canonical. `*.mdstore` embedding
-files are disposable and must be ignored by Git. Because the configuration
-directory has the same suffix, repositories should use both rules:
+Markdown, root `config.yaml`, and directory `template.yaml` files are canonical.
+Adjacent `*.mdstore` embedding files are disposable and ignored by Git. No
+repository `.mdstore/` directory is needed; daemon state lives in Git's private
+directory.
 
 ```gitignore
 *.mdstore
-!.mdstore/
 ```
 
 ## Repository configuration
 
-Every served repository must track `.mdstore/config.yaml`. Document fields,
-section names, relation types, and reciprocity are configuration rather than
-Rust conventions. A minimal example is:
+Every served repository tracks a root `config.yaml` with operational settings
+only. Document rules belong exclusively in directory templates. Both kinds of
+configuration are readable but cannot be changed through `apply_edits`.
 
 ```yaml
 documents:
   include: ["**/*.md"]
   exclude: ["archive/**"]
-
-schemas:
-  - include: "people/**/*.md"
-    schema: ".mdstore/schemas/person.json"
-
-markdown:
-  closed_fences: true
-  fence_language: true
-  nonempty_headings: true
-  heading_increment: true
-  nonempty_links: true
-  no_trailing_whitespace: true
-  no_tabs: true
-  max_line_length: 120
-  final_newline: true
-metadata:
-  display_name: /name
-  tags: /tags
-
-links:
-  markdown: true
-  wiki:
-    - '\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]'
-
-relations:
-  - name: mentions
-    reciprocal: mentioned_by
-    selector:
-      kind: markdown_links
-      include: "people/**/*.md"
-      section: Mentions
-      syntax: markdown
-  - name: mentioned_by
-    reciprocal: mentions
-    selector:
-      kind: frontmatter
-      array_pointer: /backlinks
-      target_pointer: /target
-
 chunking:
   target_tokens: 400
   overlap_percent: 15
   max_chars: 2000
-  exclude_sections: []
-  context_pointers: [/name]
-
 search:
   limit: 10
   candidates: 30
   rrf_k: 60
   graph_weight: 0.15
-
 provider:
   base_url: https://api.zeroentropy.dev/v1
   api_key_env: ZEROENTROPY_API_KEY
   embedding_model: zembed-1
   rerank_model: zerank-2
   dimensions: 1280
-  batch_size: 64
-  request_timeout_seconds: 30
-
 git:
   push: true
+  remote: origin
   push_timeout_seconds: 30
-
 server:
   listen: 127.0.0.1:3131
-  bearer_token_env: MDSTORE_BEARER_TOKEN
 ```
-
-The example `mentioned_by` representation is deliberately configured; mdstore
-does not create it. A batch adding `mentions` must also contain the matching
-`mentioned_by` edit or whole-tree validation rejects the batch.
 
 ### Markdown validation
 
-The `markdown` checks above are independently configurable and disabled when
+The `markdown` checks in a directory template are independently configurable and disabled when
 omitted. They impose no required frontmatter, section names, or initial heading
 level. `heading_increment` rejects jumps such as H2 to H4; decreasing levels is
 allowed. `fence_language` requires a nonempty info string, not a fixed language
@@ -113,8 +62,7 @@ and LF endings are accepted. `final_newline` covers the entire nonempty file.
 
 Failures include the rule name, page path, and one-based source line. Checks run
 at startup, on `validate`, and against the complete proposed tree before an edit
-is committed. Enabling checks through a configuration-only edit first validates
-every selected page. Invalid batches change nothing; there is no auto-formatting.
+is committed. Incoming template changes are validated against every selected page before activation. Invalid batches change nothing; there is no auto-formatting.
 These are explicit checks on CommonMark parsing, not a guarantee that every
 typo is rejected: unmatched emphasis and undefined reference syntax can still
 be ordinary text, and link fragments are not checked against headings.
@@ -125,13 +73,31 @@ Place `template.yaml` in the directory whose documents it governs. It applies
 recursively; the nearest ancestor template replaces its parent completely,
 without merging. Templates are ordinary versioned YAML files, not sidecars.
 All template definitions are checked, including those in empty directories.
-Existing repository-wide schema, style, and section constraints still apply.
+There are no additional global document-validation rules in `config.yaml`.
 
 Example `people/template.yaml`:
 
 ```yaml
 instructions: Describe established facts, not speculation.
 examples: []
+frontmatter:
+  type: object
+  required: [name]
+  properties:
+    name: {type: string}
+metadata:
+  display_name: /name
+markdown:
+  closed_fences: true
+  nonempty_headings: true
+  no_trailing_whitespace: true
+  final_newline: true
+links:
+  markdown: true
+relations:
+  - name: related
+    reciprocal: related
+    selector: {kind: markdown_links}
 structure:
   level: 2
   order: enforced
@@ -192,57 +158,15 @@ than becoming an alternate source of authored state; sidecars remain disposable
 and Gitignored. Invalid edits reject the complete batch and include the template
 path, source line, and relevant section guidance in findings.
 
-### Folder-specific section structure
-
-Section rules are additive: every matching `include` glob applies. Omit `include`
-to apply a rule corpus-wide. Nothing requires a section named Timeline unless
-the repository configures it, for example:
-
-```yaml
-sections:
-  - include: 'people/**'
-    heading: Timeline
-    required: true
-    maximum: 1
-    level: 2
-    list:
-      ordered: false
-      minimum_items: 1
-      date_order: descending
-  - include: 'projects/**'
-    heading: Milestones
-    required: true
-    list:
-      ordered: true
-      minimum_items: 1
-      item_pattern: '^M[0-9]+: '
-```
-
-The first rule accepts:
-
-```markdown
-## Timeline
-
-- 2026-09-05 Released the first version.
-- 2026-09-01 Started implementation.
-```
-
-`list` requires an uncontained heading and a body consisting only of lists,
-ending at the next uncontained heading of equal or lower depth. Prose and
-subsections are rejected; continuation paragraphs and nested supporting lists
-inside an item are allowed. Item constraints apply only to top-level items.
-`ordered: true` requires numbered lists; `false` requires bullets; omission
-allows either. `minimum_items` defaults to zero.
-
-`date_order` accepts `ascending` or `descending`, permits equal dates, and
-requires each item to begin with a literal, valid Gregorian `YYYY-MM-DD` date
-(years 0001–9999), followed by whitespace or the end of the item. Bold/code
-wrapping, timestamps, and non-zero-padded dates do not satisfy this rule.
-Ordering continues across all lists in the section. `item_pattern` optionally
-matches raw Markdown after the list marker; anchor it with `^` to require a
-prefix. Omitting `list` retains the existing heading-count checks, with optional
-`level` enforcement. These rules use the same whole-corpus, atomic validation
-path as schema and style checks.
+Template `frontmatter` is an inline JSON Schema; `metadata` maps output names to
+frontmatter JSON pointers. `markdown` selects deterministic style checks.
+`links` configures Markdown/wiki syntax, and `relations` selects authored links
+or frontmatter relations with optional reciprocal requirements. These settings
+use the nearest template, just like structure: a nested template replaces all
+parent policy. Reciprocal facts must still be authored atomically by callers;
+the daemon never generates them. `rules.list` supports `ordered`,
+`minimum_items`, `item_pattern`, and `date_order: ascending|descending`.
+Dates must be valid literal YYYY-MM-DD prefixes, with equal dates allowed.
 
 ## Local durability and background Git synchronization
 
@@ -261,7 +185,11 @@ worker. `mdstore push` explicitly attempts one synchronization immediately.
 The worker fetches the configured branch into a private ref. A fast-forward
 candidate's complete tree, configuration, templates, and sidecar ignore rules
 must validate before the live branch, checkout, or published state changes.
-Invalid incoming trees leave the accepted state untouched. Divergent histories
+Invalid incoming trees leave the accepted state untouched. Valid listener/auth
+changes are staged in private Git state and reported as requiring restart.
+Restart revalidates and activates the staged fast-forward before binding the
+new listener. If local history advanced meanwhile, the stale stage is discarded
+without overwriting local work; synchronization must reconcile the new state. Divergent histories
 block further writes until explicitly reconciled; the daemon never merges or
 rewrites history. A subsequent sync clears the divergence block once the
 histories are compatible again.
@@ -274,8 +202,10 @@ live checkout: make external changes in another checkout and publish through Git
 `status` and `/health` expose `replication.pending_commits`,
 `replication.last_success` (Unix seconds), and `replication.last_error`, separately
 from vector coverage. Progress reflects the last observed remote state, not a
-live remote query. Last success/error survive daemon restarts; pending commits
-are reconstructed from Git history. Replication metadata is private Git state.
+live remote query. Last success/error survive daemon restarts and are scoped to a fingerprint of
+the resolved fetch URL, push URL, and destination branch. Changing the destination
+invalidates the previous progress report; pending commits are reconstructed from
+destination-specific Git acknowledgements, never inferred from an old upstream. Replication metadata is private Git state.
 
 ## CLI
 
@@ -289,7 +219,7 @@ mdstore --root /path/to/brain validate
 mdstore --root /path/to/brain serve
 mdstore --root /path/to/brain search "query" --variant "caller expansion"
 mdstore --root /path/to/brain get people/alice.md
-mdstore --root /path/to/brain get .mdstore/config.yaml
+mdstore --root /path/to/brain get config.yaml
 mdstore --root /path/to/brain apply --file edits.json
 mdstore --root /path/to/brain reindex
 mdstore --root /path/to/brain status

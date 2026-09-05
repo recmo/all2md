@@ -450,14 +450,13 @@ mod tests {
         git(root, &["config", "user.name", "mdstore test"]);
         git(root, &["config", "user.email", "mdstore@example.invalid"]);
         git(root, &["config", "commit.gpgsign", "false"]);
-        fs::create_dir(root.join(".mdstore")).unwrap();
         let committed = "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push: false\nserver:\n  listen: 127.0.0.1:3131\n";
-        fs::write(root.join(".mdstore/config.yaml"), committed).unwrap();
-        git(root, &["add", ".mdstore/config.yaml"]);
+        fs::write(root.join("config.yaml"), committed).unwrap();
+        git(root, &["add", "config.yaml"]);
         git(root, &["commit", "-m", "configuration"]);
 
         fs::write(
-            root.join(".mdstore/config.yaml"),
+            root.join("config.yaml"),
             committed.replace(
                 "  listen: 127.0.0.1:3131",
                 "  listen: 203.0.113.1:4444\n  bearer_token_env: PATH",
