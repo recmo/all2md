@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 dist/
 result/
+*.mdstore
+!.mdstore/
+mdstore/target/

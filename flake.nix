@@ -216,11 +216,54 @@
             echo "Run: uv sync --project doc2md --extra dev"
           '';
         };
+      mkMdstore =
+        mdSystem:
+        let
+          systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+        in
+        systemPkgs.rustPlatform.buildRustPackage {
+          pname = "mdstore";
+          version = "0.1.0";
+          src = ./mdstore;
+          cargoLock.lockFile = ./mdstore/Cargo.lock;
+          nativeCheckInputs = [ systemPkgs.git ];
+          nativeBuildInputs = [ systemPkgs.makeWrapper ];
+          postFixup = ''
+            wrapProgram "$out/bin/mdstore" --prefix PATH : ${nixpkgs.lib.makeBinPath [ systemPkgs.git ]}
+          '';
+          meta = {
+            description = "Git-backed Markdown search and editing daemon";
+            mainProgram = "mdstore";
+            license = nixpkgs.lib.licenses.mit;
+          };
+        };
+      mkMdstoreApp = mdSystem: {
+        type = "app";
+        program = "${mkMdstore mdSystem}/bin/mdstore";
+      };
+      mkMdstoreShell =
+        mdSystem:
+        let
+          systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+        in
+        systemPkgs.mkShell {
+          packages = [
+            systemPkgs.cargo
+            systemPkgs.clippy
+            systemPkgs.git
+            systemPkgs.rustc
+            systemPkgs.rustfmt
+          ];
+          shellHook = ''
+            echo "Run: cargo test --manifest-path mdstore/Cargo.toml"
+          '';
+        };
     in
     {
       packages =
         forDocSystems (docSystem: {
           doc2md = mkDoc2md docSystem;
+          mdstore = mkMdstore docSystem;
         })
         // {
           ${system} = {
@@ -232,12 +275,14 @@
               speech2md
               ;
             doc2md = mkDoc2md system;
+            mdstore = mkMdstore system;
           };
         };
 
       apps =
         forDocSystems (docSystem: {
           doc2md = mkDocApp docSystem;
+          mdstore = mkMdstoreApp docSystem;
         })
         // {
           ${system} = {
@@ -254,6 +299,7 @@
               program = "${speech-review}/bin/speech-review";
             };
             doc2md = mkDocApp system;
+            mdstore = mkMdstoreApp system;
           };
         };
 
@@ -261,6 +307,7 @@
         forDocSystems (docSystem: {
           doc2md = mkDoc2md docSystem;
           doc2md-independence = mkDocIndependenceCheck docSystem;
+          mdstore = mkMdstore docSystem;
         })
         // {
           ${system} = {
@@ -381,12 +428,14 @@
                 '';
             doc2md = mkDoc2md system;
             doc2md-independence = mkDocIndependenceCheck system;
+            mdstore = mkMdstore system;
           };
         };
 
       devShells =
         forDocSystems (docSystem: {
           doc2md = mkDocShell docSystem;
+          mdstore = mkMdstoreShell docSystem;
         })
         // {
           ${system} = rec {
@@ -436,6 +485,7 @@
             };
 
             doc2md = mkDocShell system;
+            mdstore = mkMdstoreShell system;
             default = pages2md;
           };
         };
