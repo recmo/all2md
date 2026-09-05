@@ -868,6 +868,21 @@ def test_document_normalization_cleans_prose_without_rewriting_math():
     assert r"\\)" not in page.blocks[0].markdown
 
 
+def test_document_normalization_cleans_math_in_tables():
+    page = PageResult(
+        number=28,
+        image="page.png",
+        visual_markdown="",
+        blocks=[Block("table", "| \\( \\alpha_ {1} \\) | \\( \\mathbb {R} _ {q} \\) |\n| --- | --- |")],
+        embedded=EmbeddedEvidence(),
+        comparison=Comparison(),
+    )
+
+    _normalize_document_blocks([page])
+
+    assert page.blocks[0].markdown == "| \\(α_1\\) | \\(ℝ_q\\) |\n| --- | --- |"
+
+
 def test_document_normalization_does_not_infer_caption_from_wording():
     page = PageResult(
         number=28,

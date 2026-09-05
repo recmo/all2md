@@ -1071,7 +1071,7 @@ def _normalize_document_blocks(pages: list[PageResult]) -> None:
 
     for page in pages:
         for block in page.blocks:
-            if block.kind not in FIGURE_KINDS | {"table"}:
+            if block.kind not in FIGURE_KINDS:
                 block.markdown = clean_latex(block.markdown, assume_math=block.kind in FORMULA_KINDS)
             if block.kind == "paragraph":
                 block.markdown = _clean_prose(block.markdown)
