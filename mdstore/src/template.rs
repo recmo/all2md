@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    ops::Range,
     path::Path,
 };
 
@@ -210,24 +211,27 @@ pub(crate) fn validate_corpus(
             .copied()
             .unwrap_or(text.len());
         let body = &text[body_start..];
+        let events: Vec<_> = Parser::new_ext(body, Options::all())
+            .into_offset_iter()
+            .map(|(event, range)| (event, body_start + range.start..body_start + range.end))
+            .collect();
         let mut headings = Vec::new();
         let mut depth = 0_usize;
-        for (event, range) in Parser::new_ext(body, Options::all()).into_offset_iter() {
+        for (event, range) in &events {
             match event {
                 Event::Start(tag) => {
                     if let Tag::Heading { level, .. } = tag
                         && depth == 0
                     {
-                        let line =
-                            offsets.partition_point(|offset| *offset <= body_start + range.start);
+                        let line = offsets.partition_point(|offset| *offset <= range.start);
                         if let Some(heading) =
                             page.headings.iter().find(|heading| heading.line == line)
                         {
                             headings.push((
-                                level as u8,
+                                *level as u8,
                                 heading.text.clone(),
-                                body_start + range.start,
-                                body_start + range.end,
+                                range.start,
+                                range.end,
                             ));
                         }
                     }
@@ -250,6 +254,7 @@ pub(crate) fn validate_corpus(
             .unwrap_or(headings.len());
         check_sections(
             text,
+            &events,
             &headings[first_section..],
             body_start,
             text.len(),
@@ -268,6 +273,7 @@ type Heading = (u8, String, usize, usize);
 #[allow(clippy::too_many_arguments)]
 fn check_sections(
     text: &str,
+    events: &[(Event<'_>, Range<usize>)],
     headings: &[Heading],
     start: usize,
     end: usize,
@@ -286,6 +292,7 @@ fn check_sections(
         } else {
             own_end
         }],
+        events,
         start,
         own_rules,
         offsets,
@@ -335,6 +342,7 @@ fn check_sections(
             };
             check_sections(
                 text,
+                events,
                 &headings[index + 1..next],
                 *content_start,
                 section_end,
@@ -365,6 +373,7 @@ fn check_sections(
 
 fn check_content(
     text: &str,
+    events: &[(Event<'_>, Range<usize>)],
     offset: usize,
     rules: &Rules,
     offsets: &[usize],
@@ -374,7 +383,10 @@ fn check_content(
     let mut paragraphs = 0;
     let mut items = 0;
     let mut depth = 0_usize;
-    for (event, _) in Parser::new_ext(text, Options::all()).into_offset_iter() {
+    for (event, _) in events
+        .iter()
+        .filter(|(_, range)| range.start >= offset && range.end <= offset + text.len())
+    {
         match event {
             Event::Start(tag) => {
                 if matches!(tag, Tag::Paragraph) {
@@ -413,7 +425,7 @@ fn check_content(
                     rendered.push(' ');
                 }
             }
-            Event::Text(value) | Event::Code(value) => rendered.push_str(&value),
+            Event::Text(value) | Event::Code(value) => rendered.push_str(value),
             Event::SoftBreak | Event::HardBreak => rendered.push(' '),
             _ if depth == 0 && rules.content.is_some() => {
                 report(offset, "content block type is not allowed".into())
@@ -543,5 +555,29 @@ mod tests {
         let template = "structure: {level: 2}\nsections:\n- heading: Summary\n  rules: {required: true, words: {maximum: 1}, characters: {maximum: 6}}\n";
         assert!(check("## Summary\nfoo**bar**\n", template).is_empty());
         assert!(!check("## Summary\nfoo**bars**\n", template).is_empty());
+    }
+
+    #[test]
+    fn section_lengths_preserve_document_wide_reference_definitions() {
+        let template = "structure: {level: 2, additional_sections: true}\nsections:\n- heading: Summary\n  rules: {required: true, content: paragraphs, paragraphs: {minimum: 1, maximum: 1}, words: {maximum: 1}, characters: {maximum: 5}}\n";
+        for text in [
+            "## Summary\n[Alice][person]\n## Sources\n[person]: https://example.com\n",
+            "[person]: https://example.com\n\n## Summary\n[Alice][person]\n",
+            "## Summary\n[Alice][]\n## Sources\n[Alice]: https://example.com\n",
+            "## Summary\n[Alice]\n## Sources\n[Alice]: https://example.com\n",
+        ] {
+            assert!(
+                check(text, template).is_empty(),
+                "{text:?}: {:?}",
+                check(text, template)
+            );
+        }
+        assert!(
+            !check(
+                "## Summary\n[Alicia][person]\n## Sources\n[person]: https://example.com\n",
+                template
+            )
+            .is_empty()
+        );
     }
 }

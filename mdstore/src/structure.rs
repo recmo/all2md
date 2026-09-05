@@ -111,7 +111,10 @@ pub(crate) fn validate_list(
     let mut depth = 0_usize;
     let mut items = 0;
     let mut previous = None;
-    for (event, range) in Parser::new_ext(text, Options::all()).into_offset_iter() {
+    let mut parser = Parser::new_ext(text, Options::all())
+        .into_offset_iter()
+        .peekable();
+    while let Some((event, range)) = parser.next() {
         let line = offsets.partition_point(|start| *start <= offset + range.start);
         match event {
             Event::Start(tag) => {
@@ -147,7 +150,11 @@ pub(crate) fn validate_list(
                         report(line, "item does not match item_pattern".into());
                     }
                     if let Some(order) = rule.date_order {
-                        if let Some(date) = date_prefix(content) {
+                        let plain_start = matches!(
+                            parser.peek(),
+                            Some((Event::Text(_) | Event::Start(Tag::Paragraph), _))
+                        );
+                        if let Some(date) = date_prefix(content).filter(|_| plain_start) {
                             if previous.is_some_and(|previous| match order {
                                 DateOrder::Ascending => date < previous,
                                 DateOrder::Descending => date > previous,
@@ -280,6 +287,32 @@ mod tests {
             "中文中文中文",
         ] {
             assert!(date_prefix(date).is_none(), "{date}");
+        }
+    }
+
+    #[test]
+    fn dated_items_must_start_with_plain_paragraph_text() {
+        for item in [
+            "-     2024-01-01 Code block",
+            "- `2024-01-01` Inline code",
+            "- **2024-01-01** Bold",
+            "- > 2024-01-01 Quote",
+            "- ```\n  2024-01-01\n  ```",
+        ] {
+            assert!(
+                !check(&format!("## Timeline\n{item}\n")).is_empty(),
+                "{item}"
+            );
+        }
+        for items in [
+            "- 2024-01-01 Plain",
+            "- 2024-01-02 First\n\n- 2024-01-01 Second",
+            "- 2024-01-01 Plain\n\n      Supporting code",
+        ] {
+            assert!(
+                check(&format!("## Timeline\n{items}\n")).is_empty(),
+                "{items}"
+            );
         }
     }
 
