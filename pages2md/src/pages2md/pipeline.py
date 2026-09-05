@@ -46,6 +46,9 @@ from .verify import verify_bundle
 
 FIGURE_KINDS = {"figure", "image", "diagram", "chart", "graphic", "illustration", "photo", "map"}
 FORMULA_KINDS = {"formula", "equation", "display_formula"}
+# Bump only when stored raw observations are incompatible with recognition.
+OCR_CHECKPOINT_VERSION = 1
+
 EMBEDDED_PROOF_MARKS = {"□": r"\(\square\)", "∎": r"\(\blacksquare\)"}
 REVIEW_METADATA_KEYS = {
     "review_required",
@@ -80,7 +83,7 @@ def convert(
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    target = source.with_name(f"{source.name}.md")
+    target = source.with_name(f"{_source_stem(source)}.md")
     if target.exists() and not force:
         raise FileExistsError(f"output exists (use --force): {target}")
     source_hash = _source_hash(source)
@@ -103,11 +106,12 @@ def convert(
 def _intermediate_root(source: Path) -> Path:
     """Return the persistent, private workspace directory beside ``source``."""
     source = source.resolve()
-    legacy = source.with_suffix(".pages2md")
-    legacy_metadata = _read_json(legacy / "metadata.json")
-    if isinstance(legacy_metadata, dict) and legacy_metadata.get("source") == str(source):
-        return legacy
-    return source.with_name(f"{source.name}.pages2md")
+    return source.with_name(f"{_source_stem(source)}.pages2md")
+
+
+def _source_stem(source: Path) -> str:
+    """Drop one document extension while preserving dotted directory names."""
+    return source.stem if source.is_file() else source.name
 
 
 def _convert_workspace(
@@ -122,16 +126,10 @@ def _convert_workspace(
     source = source.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    output = output.resolve()
-    output_metadata = _read_json(output / "metadata.json")
-    bundle = (
-        output
-        if isinstance(output_metadata, dict) and output_metadata.get("source") == str(source)
-        else output / slugify(source.name, "document")
-    )
+    bundle = output.resolve()
     backend = backend or MlxUnlimitedOcr()
     ocr_fingerprint = {
-        "contract_version": 1,
+        "contract_version": OCR_CHECKPOINT_VERSION,
         "source_sha256": _source_hash(source),
         "backend": dict(backend.identity),
         "dpi": DEFAULT_DPI,
@@ -162,7 +160,13 @@ def _convert_workspace(
         and resume_state.get("assembly_fingerprint") == assembly_fingerprint
     )
     if bundle.exists() and not can_reuse_ocr:
-        shutil.rmtree(bundle)
+        if force:
+            shutil.rmtree(bundle)
+        else:
+            raise RuntimeError(
+                "incompatible intermediate bundle retained; use --force to replace it: "
+                f"{bundle}"
+            )
     if (
         can_resume_pages
         and resume_state.get("status") == "complete"
@@ -1796,16 +1800,57 @@ def _repair_embedded_digit_runs(
         evidence = _embedded_text_for_bbox(embedded, block.bbox)
         if not evidence:
             continue
-        evidence_compact = re.sub(r"\s+", "", evidence)
+        if block.kind in {"code", "code_block"}:
+            continue
+        # Whitespace in native text is evidence of token boundaries, not OCR
+        # damage. Never manufacture a corroborating number by removing it.
+        native_numbers = set(re.findall(r"(?<![\w.])\d+(?:\.\d+)?(?!\w|\.\d)", evidence))
+        # Linear PDF text can concatenate a base and its exponent ('218').
+        # Recover separate digit runs only across touching glyphs sharing a
+        # baseline and scale; spaces and script transitions end a run.
+        run = ""
+        previous = None
+        for glyph in _embedded_characters(embedded):
+            if _bbox_coverage(glyph["bbox"], block.bbox) < 0.45:
+                continue
+            value, origin, em = glyph["text"], glyph.get("origin"), glyph.get("em")
+            usable = value.isascii() and value.isdigit() and origin and em
+            adjacent = bool(usable and previous
+                and abs(origin[1] - previous["origin"][1]) <= .08 * em[1]
+                and abs(em[1] - previous["em"][1]) <= .08 * em[1]
+                and -.05 * em[0] <= glyph["bbox"][0] - previous["bbox"][2] <= .12 * em[0])
+            if not adjacent:
+                if run:
+                    native_numbers.add(run)
+                run = ""
+            if usable:
+                run += value
+                previous = glyph
+            else:
+                previous = None
+        if run:
+            native_numbers.add(run)
+        protected = [m.span() for m in _PROTECTED_MARKDOWN.finditer(block.markdown)
+                     if not m.group().startswith((r"\(", r"\[", "$"))]
+
+        def is_protected(match):
+            # Exact native agreement on separated digits must beat a matching
+            # compact number elsewhere in the same OCR block.
+            separated = r"\s+".join(re.escape(part) for part in match.group().split())
+            return (any(a < match.end() and match.start() < b for a, b in protected)
+                    or re.search(r"(?<!\w)" + separated + r"(?!\w)", evidence) is not None)
+
         changes: list[dict[str, str]] = []
         native_decimals = sorted(set(
-            re.findall(r"(?<!\w)\d+\.\d{3,}(?!\w)", evidence_compact)
+            number for number in native_numbers if re.fullmatch(r"\d+\.\d{3,}", number)
         ))
 
         def join_decimal(match: re.Match[str]) -> str:
+            if is_protected(match):
+                return match.group(0)
             candidate = match.group(1) + "." + re.sub(r"\s+", "", match.group(2))
             replacement = candidate
-            if candidate not in evidence_compact:
+            if candidate not in native_numbers:
                 compatible = [
                     native
                     for native in native_decimals
@@ -1820,19 +1865,32 @@ def _repair_embedded_digit_runs(
             return replacement
 
         def join_integer(match: re.Match[str]) -> str:
+            if is_protected(match):
+                return match.group(0)
             candidate = re.sub(r"\s+", "", match.group(1))
             if len(candidate) < 3:
                 left = match.string[max(0, match.start() - 3) : match.start()]
                 right = match.string[match.end() : match.end() + 3]
                 if "}" not in right or not any(marker in left for marker in ("{", "/", "^", "_")):
                     return match.group(0)
-            if candidate not in evidence_compact:
+            if candidate not in native_numbers:
                 return match.group(0)
             changes.append({"visual": match.group(0), "embedded": candidate})
             return candidate
 
-        updated = decimal.sub(join_decimal, block.markdown)
-        updated = integer.sub(join_integer, updated)
+        # Both passes use original offsets so earlier edits cannot shift a
+        # protected code/link span underneath a later match.
+        edits = []
+        for pattern, repair in ((decimal, join_decimal), (integer, join_integer)):
+            for match in pattern.finditer(block.markdown):
+                if any(a < match.end() and match.start() < b for a, b, _ in edits):
+                    continue
+                replacement = repair(match)
+                if replacement != match.group():
+                    edits.append((*match.span(), replacement))
+        updated = block.markdown
+        for start, end, replacement in sorted(edits, reverse=True):
+            updated = updated[:start] + replacement + updated[end:]
         if updated != block.markdown:
             block.markdown = updated
             block.metadata.setdefault("embedded_text_repairs", []).extend(changes)
@@ -2466,35 +2524,26 @@ def _repair_embedded_math_structure(
                 replacement = f"{base} ^ {{{match.group('exponent').rstrip()} {match.group('tail')}}}"
                 replacements.append((match.start(), match.end(), match.group(0), replacement))
 
-        # Repair a sum binder when the body consistently uses another variable and
-        # the embedded layer explicitly contains that alternate lower limit.
-        sum_binder = re.compile(
-            r"\\sum_\s*(?:\{\s*)?(?P<variable>[A-Za-z])\s*=\s*"
-            r"(?P<lower>[A-Za-z0-9+\-]+)(?:\s*\})?\s*\^\s*(?:\{[^{}]+\}|[A-Za-z0-9]+)"
-        )
-        evidence_projection, _ = _semantic_math_projection(evidence)
+        # A binder is an occurrence, not a variable inferred from nearby
+        # summands (which may belong to a different sum altogether).
+        sum_binder = re.compile(r"\\sum_\s*\{?\s*(?P<variable>[A-Za-z])\s*=")
+        projected, source_spans = _semantic_math_projection(block.markdown)
+        native, _ = _semantic_math_projection(evidence)
+        local_substitutions = {}
+        opcodes = SequenceMatcher(None, projected, native, autojunk=False).get_opcodes()
+        for i, (op, a, b, c, d) in enumerate(opcodes):
+            if op != "replace" or b - a != 1 or d - c != 1 or i == 0 or i + 1 == len(opcodes):
+                continue
+            before, after = opcodes[i - 1], opcodes[i + 1]
+            if (before[0] == after[0] == "equal"
+                and before[2] - before[1] >= 1 and after[2] - after[1] >= 2
+                and before[2] - before[1] + after[2] - after[1] >= 6):
+                local_substitutions[source_spans[a]] = native[c]
         for match in sum_binder.finditer(block.markdown):
-            body = block.markdown[match.end():match.end() + 180]
-            candidates = [
-                item.group(1) or item.group(2)
-                for item in re.finditer(
-                    r"(?:\^|_)\s*(?:\{\s*([A-Za-z])(?:\s*\+\s*\d+)?\s*\}|([A-Za-z]))",
-                    body,
-                )
-            ]
-            counts = {candidate: candidates.count(candidate) for candidate in set(candidates)}
-            alternatives = [
-                candidate for candidate, count in counts.items()
-                if candidate != match.group("variable") and count >= 2
-            ]
-            if len(alternatives) != 1:
-                continue
-            alternative = alternatives[0]
-            lower, _ = _semantic_math_projection(match.group("lower"))
-            if f"{alternative}={lower}" not in evidence_projection:
-                continue
             start, end = match.span("variable")
-            replacements.append((start, end, match.group("variable"), alternative))
+            replacement = local_substitutions.get((start, end))
+            if replacement and replacement.isascii() and replacement.isalpha():
+                replacements.append((start, end, match.group("variable"), replacement))
 
         # Recover a stacked relation label from small glyphs directly above '='.
         stackrel = re.compile(
@@ -3060,8 +3109,6 @@ def _page_checkpoints_complete(bundle: Path, metadata: Any) -> bool:
             for number in range(1, count + 1)
         )
     )
-
-
 def _write_progress(
     bundle: Path,
     *,
@@ -3130,8 +3177,6 @@ def _block_from_dict(value: dict[str, Any]) -> Block:
         provenance=deepcopy(value.get("provenance", [])),
         metadata=deepcopy(value.get("metadata", {})),
     )
-
-
 def _write_log(bundle: Path, metadata: dict[str, Any]) -> None:
     lines = [
         f"source={metadata.get('source')}",

@@ -580,5 +580,5 @@ def test_list_output_is_stable_without_publishing_intermediates(tmp_path):
     assert backend.calls == 1
     assert repeated.read_bytes() == first
     assert "•" not in first.decode()
-    assert bundle == tmp_path / "fixture.pdf.md"
+    assert bundle == tmp_path / "fixture.md"
     assert verify_bundle(repeated).ok

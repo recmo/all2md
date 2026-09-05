@@ -182,13 +182,16 @@ def place_footnotes(text: str, pages: list[PageResult], *, chapter: bool = False
         if chapter:
             content = content.replace("](assets/", "](../assets/")
         first_line = lines[token.map[0]]
-        marker = re.match(r"([ \t]*)(?:[-+*]|\d+[.)])\s+", first_line)
-        indent = " " * max(4, marker.end()) if marker else re.match(r"[ \t]*", first_line)[0]
+        # Retain quote containers and replace list markers with their content
+        # indentation, including combinations such as '> -' and '- >'.
+        prefix = re.match(r"[ \t]*(?:(?:>[ \t]?|(?:[-+*]|\d+[.)])[ \t]+)[ \t]*)*", first_line)[0]
+        indent = re.sub(r"(?:[-+*]|\d+[.)])[ \t]+", lambda m: " " * len(m.group()), prefix)
         if indent:
-            content = "\n".join(indent + line if line else "" for line in content.splitlines())
+            content = "\n".join(indent + line if line else indent.rstrip() for line in content.splitlines())
         end = offsets[token.map[1]]
-        insertions.setdefault(end, []).append(content)
-    for end, notes in sorted(insertions.items(), reverse=True):
-        separator = "\n" if end and text[end - 1] == "\n" else "\n\n"
-        text = text[:end] + separator + "\n\n".join(notes) + "\n\n" + text[end:].lstrip("\n")
+        blank = indent.rstrip() if ">" in indent else ""
+        insertions[end] = (content, blank)
+    for end, (content, blank) in sorted(insertions.items(), reverse=True):
+        separator = "" if end and text[end - 1] == "\n" else "\n"
+        text = text[:end] + separator + blank + "\n" + content + "\n" + blank + "\n" + text[end:].lstrip("\n")
     return text

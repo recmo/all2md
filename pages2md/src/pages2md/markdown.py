@@ -211,13 +211,18 @@ def title_case_heading(value: str) -> str:
 
     links: list[str] = []
 
+    def protect_reference(match: re.Match) -> str:
+        links.append(match.group(0))
+        return f"§{len(links) - 1}§"
+
     def protect_link(match: re.Match) -> str:
         links.append(f"[{normalize_text(match.group(1))}]({match.group(2)})")
         return f"§{len(links) - 1}§"
 
-    protected = MARKDOWN_LINK.sub(protect_link, value)
+    protected = re.sub(r"\[\^[^\]]+\]", protect_reference, value)
+    protected = MARKDOWN_LINK.sub(protect_link, protected)
     normalized = normalize_text(protected)
-    for index, link in enumerate(links):
+    for index, link in reversed(list(enumerate(links))):
         normalized = normalized.replace(f"§{index}§", link)
     return normalized
 

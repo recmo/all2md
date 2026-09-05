@@ -96,8 +96,8 @@ pages2md --ignore-embedded-text poor-text-layer.pdf
 
 The input is one supported paginated image source or a directory containing
 images. OCR, layout, chapter detection, and quality settings are fixed. Output is written
-beside the input by appending `.md` to its complete basename: `paper.pdf`
-becomes `paper.pdf.md`, while the image directory `scans/` becomes `scans.md`.
+beside the input after replacing a file extension with `.md`: `paper.pdf`
+becomes `paper.md`, while the image directory `scans/` becomes `scans.md`.
 Existing output requires `--force`.
 
 Use `--ignore-embedded-text` for scans with a missing, stale, or low-quality
@@ -137,19 +137,21 @@ reference, including in split chapters. OCR-labelled notes can
 still be linked without embedded text. Unmatched or ambiguous notes remain in
 place; cross-page note-body continuations are not inferred automatically.
 
+Per-page checkpoints and raw observations are retained directly in
+`paper.pages2md/` beside the source.
 ## Output
 
 ```text
 # paper.pdf, one Markdown file and no figures
-paper.pdf.md
+paper.md
 
 # paper.pdf, one Markdown file with figures
-paper.pdf.md/
-  paper.pdf.md
+paper.md/
+  paper.md
   figures/
 
 # paper.pdf, multiple chapters
-paper.pdf.md/
+paper.md/
   index.md
   001-introduction.md
   002-background.md
