@@ -162,6 +162,9 @@ def _convert_workspace(
     can_resume_pages = bool(
         can_reuse_ocr
         and not recover_regions_fresh
+        # "opening" records the new assembly hash before any page is rebuilt.
+        # Existing page files may still belong to the previous assembly.
+        and resume_state.get("status") != "opening"
         and resume_state.get("assembly_fingerprint") == assembly_fingerprint
     )
     if bundle.exists() and not can_reuse_ocr:
@@ -212,7 +215,12 @@ def _convert_workspace(
             if not isinstance(value, dict) or value.get("number") != source_page.number:
                 continue
             try:
-                resumed[source_page.number] = _page_from_dict(value)
+                if value.get("visual", {}).get("assembly_fingerprint") == assembly_fingerprint:
+                    resumed[source_page.number] = _page_from_dict(value)
+                else:
+                    result = _reassemble_cached_page(source_page, value, bundle, assets, document.outline)
+                    if result is not None:
+                        reassembled[source_page.number] = result
             except (KeyError, TypeError, ValueError):
                 continue
     elif can_reuse_ocr:
@@ -262,6 +270,7 @@ def _convert_workspace(
                 continue
             if page.number in reassembled:
                 result = reassembled[page.number]
+                result.visual["assembly_fingerprint"] = assembly_fingerprint
                 assets.write_manifest()
                 atomic_json(bundle / "pages" / f"page-{page.number:04d}.json", result.to_dict())
                 page_results.append(result)
@@ -341,6 +350,7 @@ def _convert_workspace(
                         bundle=bundle,
                     )
                     assets.write_manifest()
+                    result.visual["assembly_fingerprint"] = assembly_fingerprint
                     atomic_json(page_path, result.to_dict())
                     page_results.append(result)
                     completed_pages.add(source_page.number)
@@ -373,6 +383,7 @@ def _convert_workspace(
     normalize_document(page_results)
     merge_continued_tables(page_results)
     for result in page_results:
+        result.visual["assembly_fingerprint"] = assembly_fingerprint
         for block in result.blocks:
             if block.kind not in FIGURE_KINDS:
                 block.markdown = clean_latex(block.markdown, assume_math=block.kind in FORMULA_KINDS)

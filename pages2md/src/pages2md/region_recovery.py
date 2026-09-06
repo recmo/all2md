@@ -14,7 +14,7 @@ from PIL import Image
 
 from .embedded import bbox_coverage
 from .native import parse_native_observation
-from .quality import output_quality_warnings
+from .quality import output_quality_warnings, MAX_PAGE_CHARACTERS
 from .regions import audit_regions, preserves_coverage, public_audit, source_inventory, valid_box
 from .util import atomic_json, atomic_text
 
@@ -32,7 +32,9 @@ def select_candidates(blocks, candidates, inventory, embedded):
     if not audit["findings"]:
         return blocks, audit, attempts
     for candidate in candidates:
-        quality = output_quality_warnings(candidate.raw)
+        quality = (["visual_implausible_output_length"]
+                   if len(candidate.raw) > MAX_PAGE_CHARACTERS * max(1, len(candidate.source_pages))
+                   else output_quality_warnings(candidate.raw))
         if any(w in quality for w in
                ("visual_math_repetition", "visual_implausible_output_length")):
             attempts.append({"observation": candidate.id, "accepted": False,

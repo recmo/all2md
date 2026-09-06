@@ -155,3 +155,52 @@ def test_cli_explicit_fresh_recovery(monkeypatch):
     monkeypatch.setattr(cli, "convert", lambda source, **options: calls.append(options))
     cli.main(["--recover-regions", "paper.pdf"])
     assert calls[0]["recover_regions_fresh"] is True
+
+
+def test_runaway_cached_candidate_is_rejected_before_legacy_alignment(monkeypatch):
+    from pages2md import native
+    primary = OcrObservation("primary", "base", "Known content", [1],
+                             blocks=[Block("paragraph", "Known content", BOX)])
+    bad = OcrObservation("bad", "detail", "x" * 120000, [1],
+                         blocks=[Block("paragraph", "x" * 120000, BOX)])
+    def forbidden(*args):
+        raise AssertionError("runaway candidate reached quadratic alignment")
+    monkeypatch.setattr(native, "_alignment_score", forbidden)
+    blocks, _, warnings = native.reconcile_observations(primary, [bad])
+    assert blocks[0].markdown == "Known content"
+    assert "visual_runaway_candidate_rejected" in warnings
+    assert len(bad.raw) == 120000
+
+
+def test_interrupted_assembly_cannot_resume_stale_page_blocks(tmp_path, monkeypatch):
+    import json
+    import fitz
+    from pages2md import pipeline
+    from test_core import FixtureOcr
+    source = tmp_path / "paper.pdf"
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((72, 72), "The visual text.")
+        pdf.save(source)
+    backend = FixtureOcr()
+    root = pipeline._convert_workspace(source, tmp_path / "paper.pages2md", backend=backend)
+    reassembled = []
+    original = pipeline._reassemble_cached_page
+    def record(page, *args, **kwargs):
+        reassembled.append(page.number)
+        return original(page, *args, **kwargs)
+    monkeypatch.setattr(pipeline, "_reassemble_cached_page", record)
+    def forbidden(*args):
+        raise AssertionError("checkpoint replay repeated OCR")
+    monkeypatch.setattr(backend, "recognize", forbidden)
+    for status in ("opening", "running"):
+        checkpoint = root / "pages/page-0001.json"
+        value = json.loads(checkpoint.read_text())
+        value["visual"]["assembly_fingerprint"] = {"code": "old"}
+        value["blocks"][0]["markdown"] = "STALE BLOCK"
+        checkpoint.write_text(json.dumps(value))
+        progress = json.loads((root / "progress.json").read_text())
+        progress["status"] = status
+        (root / "progress.json").write_text(json.dumps(progress))
+        pipeline._convert_workspace(source, root, backend=backend)
+        assert "STALE BLOCK" not in (root / "book.md").read_text()
+    assert reassembled == [1, 1]
