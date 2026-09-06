@@ -22,11 +22,48 @@ def output_quality_warnings(markdown: str, *, page_count: int = 1) -> list[str]:
         warnings.append("visual_implausible_output_length")
     if severe_text_repetition(markdown):
         warnings.append("visual_text_repetition")
+    if mathematical_runaway(markdown):
+        warnings.append("visual_math_repetition")
     if table_quality_errors(markdown):
         warnings.append("visual_malformed_table")
     if math_syntax_errors(markdown):
         warnings.append("visual_malformed_math")
     return sorted(set(warnings))
+
+
+def mathematical_runaway(markdown: str) -> bool:
+    """Detect long repeated math templates, including changing indices.
+
+    This is a recovery signal only. Legitimate indexed sequences must never be
+    shortened by the prose repetition repair.
+    """
+    spans, _ = math_spans(markdown)
+    previous = None
+    count = 0
+    end = 0
+    for span in spans:
+        tex = markdown[span.content_start:span.content_end]
+        signature = re.sub(r"\d+", "#", re.sub(r"\s+", "", tex))
+        if signature == previous and not markdown[end:span.start].strip(" \t\r\n,;"):
+            count += 1
+        else:
+            count = 1
+        if count >= 32:
+            return True
+        previous, end = signature, span.end
+        if len(tex) > 1000:
+            atoms = re.findall(r"\\[A-Za-z]+(?:\s*[_^]\s*\{?\d+\}?)*|[^\s]", tex)
+            normalized = [re.sub(r"\d+", "#", a) for a in atoms]
+            for size in range(1, 17):
+                streak = 0
+                for i in range(size, len(normalized), size):
+                    if normalized[i:i + size] == normalized[i - size:i]:
+                        streak += 1
+                        if streak * size >= 128:
+                            return True
+                    else:
+                        streak = 0
+    return False
 
 
 def severe_text_repetition(markdown: str) -> bool:

@@ -871,6 +871,7 @@ def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObs
 
 
 _SEVERE_OBSERVATION_WARNINGS = {
+    "visual_math_repetition",
     "visual_empty_output",
     "visual_implausible_output_length",
     "visual_malformed_grounding",

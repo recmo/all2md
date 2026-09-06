@@ -148,7 +148,7 @@ def test_outline_and_visual_titles_become_markdown_hierarchy():
         result,
         [{"level": 2, "title": "Chapter 1: Start", "page": 10}],
     )
-    assert markdown.startswith("## Chapter 1: Start\n\nBody")
+    assert markdown.startswith("## Chapter I: Start\n\nBody")
     assert "### A Section" in markdown
     assert "<table" not in markdown
     assert "| A | B |" in markdown
