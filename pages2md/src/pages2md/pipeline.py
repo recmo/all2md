@@ -44,7 +44,9 @@ from .quality import adjacent_overlap, output_quality_warnings, runaway_repetiti
 from .util import atomic_json, sha256_file
 from .util import atomic_text
 from .verify import verify_bundle
-from .region_recovery import recover_regions, write_review
+from .region_recovery import recover_regions
+from .region_review import write_review
+from .crop_store import CropStore
 
 # Bump only when stored raw observations are incompatible with recognition.
 OCR_CHECKPOINT_VERSION = 1
@@ -148,6 +150,7 @@ def _convert_workspace(
             "embedded.py", "alignment.py", "lists.py", "markdown.py", "model.py", "native.py", "pipeline.py",
             "quality.py", "verify.py", "syntax.py", "reconciliation.py", "document.py", "edits.py", "mathlint.py", "katex_lint.cjs", "urls.py", "semantics.py", "footnotes.py",
             "latex.py", "texstructure.py", "regions.py", "region_recovery.py",
+            "crop_store.py", "region_review.py",
         ),
     }
     previous = _read_json(bundle / "metadata.json")
@@ -189,6 +192,7 @@ def _convert_workspace(
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
     assets = AssetStore(bundle / "assets", load_existing=can_reuse_ocr)
+    crop_store = CropStore(bundle)
     fingerprint = {"ocr": ocr_fingerprint, "assembly": assembly_fingerprint}
     started = time.time()
     _write_progress(
@@ -218,7 +222,8 @@ def _convert_workspace(
                 if value.get("visual", {}).get("assembly_fingerprint") == assembly_fingerprint:
                     resumed[source_page.number] = _page_from_dict(value)
                 else:
-                    result = _reassemble_cached_page(source_page, value, bundle, assets, document.outline)
+                    result = _reassemble_cached_page(source_page, value, bundle, assets, document.outline,
+                                                     crop_store=crop_store)
                     if result is not None:
                         reassembled[source_page.number] = result
             except (KeyError, TypeError, ValueError):
@@ -237,6 +242,7 @@ def _convert_workspace(
                     assets,
                     document.outline,
                     backend=backend if recover_regions_fresh else None,
+                    crop_store=crop_store,
                 )
             except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
                 continue
@@ -348,6 +354,7 @@ def _convert_workspace(
                         document.outline,
                         backend=backend,
                         bundle=bundle,
+                        crop_store=crop_store,
                     )
                     assets.write_manifest()
                     result.visual["assembly_fingerprint"] = assembly_fingerprint
@@ -634,6 +641,7 @@ def _page_result(
     *,
     backend=None,
     bundle=None,
+    crop_store=None,
 ) -> PageResult:
     embedded_trust = assess_embedded(
         source_page.embedded,
@@ -661,6 +669,7 @@ def _page_result(
     validation_warnings.extend(reconcile_text(blocks, source_page.embedded, embedded_trust))
     blocks, region_result = recover_regions(
         source_page, blocks, [primary, *recoveries], backend=backend, bundle=bundle,
+        crop_store=crop_store,
     )
     blocks = normalize_page_blocks(blocks)
     _strip_review_metadata(blocks)
@@ -773,6 +782,7 @@ def _reassemble_cached_page(
     outline: list[dict[str, Any]],
     *,
     backend=None,
+    crop_store=None,
 ) -> PageResult | None:
     """Re-run deterministic assembly from saved model observations."""
     generation = value.get("generation", {})
@@ -826,6 +836,7 @@ def _reassemble_cached_page(
         outline,
         bundle=bundle,
         backend=backend,
+        crop_store=crop_store,
     )
 
 

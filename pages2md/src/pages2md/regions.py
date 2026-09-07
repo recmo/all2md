@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -50,7 +49,7 @@ def valid_box(b) -> bool:
 
 
 def source_inventory(page: int, embedded: EmbeddedEvidence,
-                     image: Path | None = None) -> list[Region]:
+                     image: Path | Image.Image | None = None) -> list[Region]:
     """Use locally legible glyphs regardless of the OCR's quality score."""
     by_line = {}
     for glyph in iter_embedded_characters(embedded):
@@ -70,7 +69,7 @@ def source_inventory(page: int, embedded: EmbeddedEvidence,
             bbox[1] > 890 or bbox[3] < 65) else None
         regions.append(Region(_id(page, "native", bbox, text), bbox, text, "native",
                               tuple(g["order"] for g in glyphs), excluded))
-    if image is not None and image.is_file():
+    if image is not None and (isinstance(image, Image.Image) or image.is_file()):
         for bbox in _ink_regions(image):
             # Do not let one native line account for an entire raster paragraph.
             intersections = [r for r in regions if bbox_coverage(r.bbox, bbox) > .5]
@@ -90,10 +89,13 @@ def _runs(flags):
             start = None
 
 
-def _ink_regions(path: Path):
-    with Image.open(path) as source:
+def _ink_regions(source: Path | Image.Image):
+    if isinstance(source, Image.Image):
         gray = source.convert("L")
-        gray.thumbnail((1000, 1400))
+    else:
+        with Image.open(source) as image:
+            gray = image.convert("L")
+    gray.thumbnail((1000, 1400))
     # Remove slow background variation, then join nearby glyph strokes. This
     # inventory is deliberately conservative: classification happens later.
     background = gray.filter(ImageFilter.MaxFilter(9))
@@ -119,120 +121,161 @@ def _ink_regions(path: Path):
                        1000 * (group[-1] + 1) / width, 1000 * y1 / height)
 
 
-def alignment_cache(embedded: EmbeddedEvidence):
-    """Bounded, page-owned cache; evidence never crosses page/run boundaries."""
-    @lru_cache(maxsize=256)
-    def align(markdown, bbox):
-        return align_glyphs(markdown, embedded, bbox)
-    return align
+@dataclass(frozen=True)
+class Finding:
+    kind: str
+    severity: str
+    bbox: Box | None
+    block: int | None = None
+    region: str | None = None
+    support: float | None = None
+    source: str | None = None
+    scripts: list[dict] | None = None
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+
+@dataclass(frozen=True)
+class BlockAnalysis:
+    regions: tuple[str, ...]
+    matched_glyphs: frozenset[tuple[int, ...]]
+    findings: tuple[Finding, ...]
+
+
+@dataclass
+class AuditResult:
+    regions: list[dict]
+    findings: list[Finding]
+    matched_glyphs: frozenset[tuple[int, ...]]
+
+    @property
+    def status(self) -> str:
+        return "needs_review" if self.findings else "checked"
+
+
+def analyze_block(regions: list[Region], block: Block, embedded: EmbeddedEvidence,
+                  *, align=None) -> BlockAnalysis:
+    """Analyze one block independently of its position in the canonical list."""
+    matched = set()
+    findings = []
+    local = [r for r in regions if block.bbox and (
+        bbox_coverage(r.bbox, block.bbox) >= .3 or bbox_coverage(block.bbox, r.bbox) >= .5)]
+    quality = output_quality_warnings(block.markdown)
+    math, _ = math_spans(block.markdown)
+    if any(not balanced_sizing_delimiters(block.markdown[s.content_start:s.content_end])
+           for s in math):
+        findings.append(Finding(kind="unbalanced_sizing_delimiters",
+                                bbox=block.bbox, severity="error"))
+    fatal = [w for w in quality if w in {
+        "visual_implausible_output_length", "visual_text_repetition",
+        "visual_math_repetition", "visual_malformed_math"}]
+    for warning in fatal:
+        findings.append(Finding(kind=warning.removeprefix("visual_"),
+                                bbox=block.bbox, severity="error"))
+    if block.kind in FIGURE_KINDS or not block.bbox or len(block.markdown) > 12000:
+        return BlockAnalysis(tuple(r.id for r in local), frozenset(matched), tuple(findings))
+    if not any(r.kind == "native" for r in local):
+        return BlockAnalysis(tuple(r.id for r in local), frozenset(matched), tuple(findings))
+    aligned = (align(block.markdown, tuple(block.bbox)) if align is not None
+               else align_glyphs(block.markdown, embedded, block.bbox))
+    equal = {a: b for a, b in aligned.matches.items()
+             if aligned.text[a] == aligned.native[b]}
+    for b in equal.values():
+        glyph = aligned.glyphs[b]
+        # Only the original glyph identity matters for ordinary characters.
+        matched.add(tuple(glyph["order"]))
+    if len(aligned.text) >= 24:
+        fraction = len(equal) / len(aligned.text)
+        if fraction < .55:
+            findings.append(Finding(kind="unsupported_content",
+                                    bbox=block.bbox, support=round(fraction, 3),
+                                    severity="review"))
+    # Check script ownership only at unambiguous, exactly matched occurrences.
+    edges = script_memberships(block.markdown)
+    spans = math
+    reverse = {b: a for a, b in equal.items()}
+    disagreements = []
+    for native_child, (native_parent, kind) in aligned.parents.items():
+        if kind not in {"_", "^"} or native_child not in reverse or native_parent not in reverse:
+            continue
+        child = aligned.spans[reverse[native_child]][0]
+        parent = aligned.spans[reverse[native_parent]][0]
+        if not any(s.content_start <= child < s.content_end for s in spans):
+            continue
+        # A braced base or macro argument requires richer TeX expansion;
+        # abstain rather than pretending its last glyph is the whole base.
+        if not (block.markdown[parent:parent + 1].isalnum()
+                or re.match(r"\\(?:sum|prod)\b", block.markdown[parent:])):
+            continue
+        if edges.get(child) != (parent, kind):
+            disagreements.append({"offset": child, "parent": parent, "script": kind})
+    if disagreements:
+        findings.append(Finding(kind="math_structure_disagreement",
+                                bbox=block.bbox, severity="review",
+                                scripts=disagreements[:20]))
+
+    return BlockAnalysis(tuple(r.id for r in local), frozenset(matched), tuple(findings))
+
+
+class PageAuditor:
+    """Page-owned block analyses; aggregate proposals without re-analyzing unchanged blocks."""
+
+    def __init__(self, regions: list[Region], embedded: EmbeddedEvidence, *, align=None):
+        self.regions = regions
+        self.native_counts = {r.id: len(semantic_math_projection(r.text)[0]) for r in regions}
+
+        @lru_cache(maxsize=256)
+        def analyze(kind, markdown, bbox):
+            return analyze_block(regions, Block(kind, markdown, bbox), embedded, align=align)
+        self._analyze = analyze
+
+    def analyze(self, block: Block) -> BlockAnalysis:
+        return self._analyze(block.kind, block.markdown,
+                             tuple(block.bbox) if block.bbox else None)
+
+    def audit(self, analyses: list[BlockAnalysis]) -> AuditResult:
+        matched = frozenset(g for analysis in analyses for g in analysis.matched_glyphs)
+        findings = [replace(f, block=i) for i, analysis in enumerate(analyses)
+                    for f in analysis.findings]
+        associations = {r.id: [] for r in self.regions}
+        for index, analysis in enumerate(analyses):
+            for region in analysis.regions:
+                associations[region].append(index)
+        inventory = []
+        for region in self.regions:
+            entry = asdict(region)
+            entry.pop("glyph_ids")
+            entry["blocks"] = associations[region.id]
+            if region.excluded:
+                entry["status"] = "excluded"
+            elif region.kind == "native":
+                support = sum(g in matched for g in region.glyph_ids) / max(1, len(region.glyph_ids))
+                entry["support"] = round(support, 3)
+                entry["status"] = "transcribed" if support >= .8 else "unresolved"
+                if support < .8 and self.native_counts[region.id] >= 3:
+                    findings.append(Finding("source_content_unresolved", "review", region.bbox,
+                                            region=region.id, support=round(support, 3),
+                                            source=region.text[:200]))
+            else:
+                entry["status"] = "visually_associated" if associations[region.id] else "unresolved"
+                if not associations[region.id]:
+                    findings.append(Finding("uncovered_ink", "review", region.bbox, region=region.id))
+            inventory.append(entry)
+        return AuditResult(inventory, findings, matched)
 
 
 def audit_regions(regions: list[Region], blocks: list[Block],
-                  embedded: EmbeddedEvidence, *, align=None) -> dict:
-    matched = set()
-    findings = []
-    associations = {r.id: [] for r in regions}
-    native_counts = {r.id: len(semantic_math_projection(r.text)[0]) for r in regions}
-    # Retain source glyph identities so recovery cannot trade away good content.
-    matched_counts = Counter()
-    block_glyphs = []
-    for index, block in enumerate(blocks):
-        block_glyphs.append(set())
-        local = [r for r in regions if block.bbox and (
-            bbox_coverage(r.bbox, block.bbox) >= .3 or bbox_coverage(block.bbox, r.bbox) >= .5)]
-        for region in local:
-            associations[region.id].append(index)
-        quality = output_quality_warnings(block.markdown)
-        math, _ = math_spans(block.markdown)
-        if any(not balanced_sizing_delimiters(block.markdown[s.content_start:s.content_end])
-               for s in math):
-            findings.append({"kind": "unbalanced_sizing_delimiters", "block": index,
-                             "bbox": block.bbox, "severity": "error"})
-        fatal = [w for w in quality if w in {
-            "visual_implausible_output_length", "visual_text_repetition",
-            "visual_math_repetition", "visual_malformed_math"}]
-        for warning in fatal:
-            findings.append({"kind": warning.removeprefix("visual_"), "block": index,
-                             "bbox": block.bbox, "severity": "error"})
-        if block.kind in FIGURE_KINDS or not block.bbox or len(block.markdown) > 12000:
-            continue
-        if not any(r.kind == "native" for r in local):
-            continue
-        aligned = (align(block.markdown, tuple(block.bbox)) if align is not None
-                   else align_glyphs(block.markdown, embedded, block.bbox))
-        equal = {a: b for a, b in aligned.matches.items()
-                 if aligned.text[a] == aligned.native[b]}
-        for b in equal.values():
-            glyph = aligned.glyphs[b]
-            # Only the original glyph identity matters for ordinary characters.
-            matched.add(tuple(glyph["order"]))
-            block_glyphs[index].add(tuple(glyph["order"]))
-        if len(aligned.text) >= 24:
-            fraction = len(equal) / len(aligned.text)
-            if fraction < .55:
-                findings.append({"kind": "unsupported_content", "block": index,
-                                 "bbox": block.bbox, "support": round(fraction, 3),
-                                 "severity": "review"})
-        # Check script ownership only at unambiguous, exactly matched occurrences.
-        edges = script_memberships(block.markdown)
-        spans, _ = math_spans(block.markdown)
-        reverse = {b: a for a, b in equal.items()}
-        disagreements = []
-        for native_child, (native_parent, kind) in aligned.parents.items():
-            if kind not in {"_", "^"} or native_child not in reverse or native_parent not in reverse:
-                continue
-            child = aligned.spans[reverse[native_child]][0]
-            parent = aligned.spans[reverse[native_parent]][0]
-            if not any(s.content_start <= child < s.content_end for s in spans):
-                continue
-            # A braced base or macro argument requires richer TeX expansion;
-            # abstain rather than pretending its last glyph is the whole base.
-            if not (block.markdown[parent:parent + 1].isalnum()
-                    or re.match(r"\\(?:sum|prod)\b", block.markdown[parent:])):
-                continue
-            if edges.get(child) != (parent, kind):
-                disagreements.append({"offset": child, "parent": parent, "script": kind})
-        if disagreements:
-            findings.append({"kind": "math_structure_disagreement", "block": index,
-                             "bbox": block.bbox, "severity": "review",
-                             "scripts": disagreements[:20]})
-    for region in regions:
-        for glyph in region.glyph_ids:
-            if glyph in matched:
-                matched_counts[region.id] += 1
-    inventory = []
-    for region in regions:
-        entry = asdict(region)
-        entry.pop("glyph_ids")
-        entry["blocks"] = associations[region.id]
-        if region.excluded:
-            entry["status"] = "excluded"
-        elif region.kind == "native":
-            support = matched_counts[region.id] / max(1, len(region.glyph_ids))
-            entry["support"] = round(support, 3)
-            entry["status"] = "transcribed" if support >= .8 else "unresolved"
-            # Ignore isolated extension glyphs, but retain them in the inventory.
-            if support < .8 and native_counts[region.id] >= 3:
-                findings.append({"kind": "source_content_unresolved", "region": region.id,
-                                 "bbox": region.bbox, "support": round(support, 3),
-                                 "severity": "review", "source": region.text[:200]})
-        else:
-            entry["status"] = "visually_associated" if associations[region.id] else "unresolved"
-            if not associations[region.id]:
-                findings.append({"kind": "uncovered_ink", "region": region.id,
-                                 "bbox": region.bbox, "severity": "review"})
-        inventory.append(entry)
-    return {"regions": inventory, "findings": findings,
-            "status": "needs_review" if findings else "checked",
-            "matched_glyphs": sorted(matched),
-            "block_glyphs": [sorted(ids) for ids in block_glyphs]}
+                  embedded: EmbeddedEvidence, *, align=None) -> AuditResult:
+    auditor = PageAuditor(regions, embedded, align=align)
+    return auditor.audit([auditor.analyze(block) for block in blocks])
 
 
-def preserves_coverage(before: dict, after: dict) -> bool:
-    return set(map(tuple, before["matched_glyphs"])).issubset(
-        set(map(tuple, after["matched_glyphs"])))
+def preserves_coverage(before: AuditResult, after: AuditResult) -> bool:
+    return before.matched_glyphs <= after.matched_glyphs
 
 
-def public_audit(audit: dict) -> dict:
-    return {key: value for key, value in audit.items()
-            if key not in {"matched_glyphs", "block_glyphs"}}
+def public_audit(audit: AuditResult) -> dict:
+    """The serialization boundary excludes internal glyph ownership."""
+    return {"regions": audit.regions, "findings": [f.to_dict() for f in audit.findings],
+            "status": audit.status}

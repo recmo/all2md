@@ -6,23 +6,19 @@ Raster associations alone do not authorize mathematical replacements.
 from __future__ import annotations
 
 import hashlib
-import json
 from copy import deepcopy
-from pathlib import Path
-
-from PIL import Image
+from dataclasses import replace
 
 from .embedded import bbox_coverage
-from .native import parse_native_observation
-from .quality import output_quality_warnings, MAX_PAGE_CHARACTERS
-from .regions import (alignment_cache, audit_regions, preserves_coverage, public_audit,
-                      source_inventory, valid_box)
-from .util import atomic_json, atomic_text
+from .crop_store import CropStore
+from .model import RecoveryAttempt
+from .quality import candidate_rejection
+from .regions import PageAuditor, preserves_coverage, public_audit, source_inventory, valid_box
 
 
 def _score(audit):
-    return (sum(f["severity"] == "error" for f in audit["findings"]),
-            len(audit["findings"]), -len(audit["matched_glyphs"]))
+    return (sum(f.severity == "error" for f in audit.findings),
+            len(audit.findings), -len(audit.matched_glyphs))
 
 
 def _insertion_index(blocks, box):
@@ -39,23 +35,18 @@ def _insertion_index(blocks, box):
     return gaps[0] if len(gaps) == 1 else None
 
 
-def select_candidates(blocks, candidates, inventory, embedded, *, align=None):
+def select_candidates(blocks, candidates, inventory, embedded, *, align=None, auditor=None):
     """Try local replacements and insertions; never replace an entire page."""
     blocks = deepcopy(blocks)
-    if align is None:
-        align = alignment_cache(embedded)
-    audit = audit_regions(inventory, blocks, embedded, align=align)
+    auditor = auditor or PageAuditor(inventory, embedded, align=align)
+    analyses = [auditor.analyze(block) for block in blocks]
+    audit = auditor.audit(analyses)
     attempts = []
-    if not audit["findings"]:
+    if not audit.findings:
         return blocks, audit, attempts
     for candidate in candidates:
-        quality = (["visual_implausible_output_length"]
-                   if len(candidate.raw) > MAX_PAGE_CHARACTERS * max(1, len(candidate.source_pages))
-                   else output_quality_warnings(candidate.raw))
-        if any(w in quality for w in
-               ("visual_math_repetition", "visual_implausible_output_length")):
-            attempts.append({"observation": candidate.id, "accepted": False,
-                             "reason": "runaway_candidate"})
+        if candidate_rejection(candidate):
+            attempts.append(RecoveryAttempt("runaway_candidate", observation=candidate.id))
             continue
         for block in candidate.blocks:
             if not valid_box(block.bbox) or not block.markdown.strip():
@@ -65,191 +56,101 @@ def select_candidates(blocks, candidates, inventory, embedded, *, align=None):
             # Merging blocks loses the location of errors and may swallow a
             # column or a previously correct formula. Require a local edit.
             if len(overlapping) > 1:
-                attempts.append({"observation": candidate.id, "accepted": False,
-                                 "reason": "ambiguous_multi_block_replacement"})
+                attempts.append(RecoveryAttempt("ambiguous_multi_block_replacement",
+                                                observation=candidate.id, bbox=block.bbox))
                 continue
             if any(old.bbox and i not in overlapping
                    and bbox_coverage(block.bbox, old.bbox) > 0
                    for i, old in enumerate(blocks)):
-                attempts.append({"observation": candidate.id, "accepted": False,
-                                 "reason": "ambiguous_source_overlap"})
+                attempts.append(RecoveryAttempt("ambiguous_source_overlap",
+                                                observation=candidate.id, bbox=block.bbox))
                 continue
-            local = audit_regions(inventory, [block], embedded, align=align)
-            glyphs = set(map(tuple, local["matched_glyphs"]))
-            if any(glyphs.intersection(map(tuple, ids)) for i, ids in
-                   enumerate(audit["block_glyphs"]) if i not in overlapping):
-                attempts.append({"observation": candidate.id, "accepted": False,
-                                 "reason": "source_already_owned"})
+            local = auditor.analyze(block)
+            glyphs = local.matched_glyphs
+            if any(glyphs & analysis.matched_glyphs for i, analysis in
+                   enumerate(analyses) if i not in overlapping):
+                attempts.append(RecoveryAttempt("source_already_owned",
+                                                observation=candidate.id, bbox=block.bbox))
                 continue
             index = overlapping[0] if overlapping else _insertion_index(blocks, block.bbox)
             if index is None:
-                attempts.append({"observation": candidate.id, "accepted": False,
-                                 "reason": "ambiguous_reading_order"})
+                attempts.append(RecoveryAttempt("ambiguous_reading_order",
+                                                observation=candidate.id, bbox=block.bbox))
                 continue
-            proposal = deepcopy(blocks)
+            proposal = list(blocks)
+            proposed_analyses = list(analyses)
             replacement = deepcopy(block)
             replacement.provenance.append({"kind": "region_recovery", "observation": candidate.id})
-            proposal[index:index + bool(overlapping)] = [replacement]
-            after = audit_regions(inventory, proposal, embedded, align=align)
+            if overlapping:
+                proposal[index] = replacement
+                proposed_analyses[index] = local
+            else:
+                proposal.insert(index, replacement)
+                proposed_analyses.insert(index, local)
+            after = auditor.audit(proposed_analyses)
             # A lower warning count alone is insufficient: require real source
             # support, no new findings, and no loss of matched glyph identities.
             # Unchanged blocks retain their findings; changed content must be
             # locally clean, not merely trade errors of the same global kind.
-            clean_replacement = not any("block" in f for f in local["findings"])
-            before_regions = {(f["kind"], f["region"]) for f in audit["findings"]
-                              if "region" in f}
+            clean_replacement = not local.findings
+            before_regions = {(f.kind, f.region) for f in audit.findings if f.region is not None}
+            after_regions = {(f.kind, f.region) for f in after.findings if f.region is not None}
             accepted = (preserves_coverage(audit, after)
-                        and len(after["matched_glyphs"]) > len(audit["matched_glyphs"])
+                        and len(after.matched_glyphs) > len(audit.matched_glyphs)
                         and _score(after) < _score(audit)
                         and clean_replacement
-                        and not {(f["kind"], f["region"]) for f in after["findings"]
-                                 if "region" in f} - before_regions)
-            attempts.append({"observation": candidate.id, "bbox": block.bbox,
-                             "accepted": accepted, "reason": "coverage_improved" if accepted
-                             else "no_safe_coverage_improvement"})
+                        and not after_regions - before_regions)
+            attempts.append(RecoveryAttempt(
+                "coverage_improved" if accepted else "no_safe_coverage_improvement",
+                accepted=accepted, observation=candidate.id, bbox=block.bbox))
             if accepted:
-                blocks, audit = proposal, after
+                blocks, analyses, audit = proposal, proposed_analyses, after
     return blocks, audit, attempts
 
 
-def recover_regions(source_page, blocks, candidates, *, backend=None, bundle=None, budget=4):
+def _crop_targets(audit):
+    targets = []
+    for finding in audit.findings:
+        if finding.kind == "uncovered_ink":
+            continue
+        box = finding.bbox
+        if valid_box(box) and not any(bbox_coverage(box, b) > .7 for b in targets):
+            targets.append(tuple(box))
+    for box in targets:
+        for scale in (1, 2):
+            yield (max(0, box[0] - 12 * scale), max(0, box[1] - 8 * scale),
+                   min(1000, box[2] + 12 * scale), min(1000, box[3] + 8 * scale)), scale
+
+
+def recover_regions(source_page, blocks, candidates, *, backend=None, bundle=None,
+                    budget=4, crop_store=None):
     inventory = source_inventory(source_page.number, source_page.embedded, source_page.image_path)
-    align = alignment_cache(source_page.embedded)
-    blocks, audit, attempts = select_candidates(blocks, candidates, inventory, source_page.embedded,
-                                                align=align)
-    recognize = getattr(backend, "recognize_detail", None)
-    if bundle is not None:
-        cache = Path(bundle) / "region-observations"
-        cache.mkdir(exist_ok=True)
-        identity = dict(backend.identity) if backend is not None else None
+    auditor = PageAuditor(inventory, source_page.embedded)
+    blocks, audit, attempts = select_candidates(
+        blocks, candidates, inventory, source_page.embedded, auditor=auditor)
+    store = crop_store or (CropStore(bundle) if bundle is not None else None)
+    if store is not None:
         source_hash = hashlib.sha256(source_page.image_path.read_bytes()).hexdigest()
-        # Every run tries saved crops first, including explicitly requested
-        # fresh recovery. Neither success nor failure discards raw evidence.
-        for path in sorted(cache.glob("*.json")):
-            try:
-                value = json.loads(path.read_text())
-                if value.get("source_hash") != source_hash:
-                    continue
-                if "raw" in value:
-                    blocks, audit, tried = select_candidates(
-                        blocks, [_crop_observation(value)], inventory, source_page.embedded,
-                        align=align)
-                    attempts.extend({**item, "cache": str(path.relative_to(bundle))} for item in tried)
-                else:
-                    attempts.append({"cache": str(path.relative_to(bundle)), "accepted": False,
-                                     "error": value.get("error", "invalid_cache")})
-            except (ValueError, TypeError, KeyError):
-                attempts.append({"cache": str(path.relative_to(bundle)), "accepted": False,
-                                 "error": "invalid_cache"})
-        targets = []
-        for finding in audit["findings"]:
-            if finding["kind"] == "uncovered_ink":
-                continue
-            box = finding.get("bbox")
-            if valid_box(box) and not any(bbox_coverage(box, b) > .7 for b in targets):
-                targets.append(tuple(box))
-        calls = 0
-        for box in targets:
-            for scale in (1, 2):
+
+        def evaluate(observation, cache_path, failure):
+            nonlocal blocks, audit
+            if failure is not None:
+                attempts.append(failure)
+                return
+            blocks, audit, tried = select_candidates(
+                blocks, [observation], inventory, source_page.embedded, auditor=auditor)
+            attempts.extend(replace(item, cache=cache_path) for item in tried)
+
+        for entry in store.replay(source_hash):
+            evaluate(*entry)
+        if callable(getattr(backend, "recognize_detail", None)):
+            calls = 0
+            for box, scale in _crop_targets(audit):
                 if calls >= budget:
                     break
-                padded = (max(0, box[0] - 12 * scale), max(0, box[1] - 8 * scale),
-                          min(1000, box[2] + 12 * scale), min(1000, box[3] + 8 * scale))
-                # Cache survives assembly-code changes. Replay does not need the
-                # backend identity: persisted observations are tried separately.
-                key = hashlib.sha256(json.dumps(
-                    [1, source_hash, identity, padded, scale], sort_keys=True).encode()).hexdigest()
-                path = cache / f"{key}.json"
-                if path.exists():
-                    # All saved responses were considered above; don't replay
-                    # one twice or overwrite corrupt/failed evidence.
-                    continue
-                elif callable(recognize):
+                entry = store.request(source_page, source_hash, box, scale, backend)
+                if entry is not None:
                     calls += 1
-                    crop_path = cache / f"{key}.png"
-                    with Image.open(source_page.image_path) as image:
-                        w, h = image.size
-                        crop = image.crop((int(padded[0]*w/1000), int(padded[1]*h/1000),
-                                           int(padded[2]*w/1000), int(padded[3]*h/1000)))
-                        if scale != 1:
-                            crop = crop.resize((crop.width * scale, crop.height * scale))
-                        crop.save(crop_path)
-                    try:
-                        raw, generation = recognize(crop_path)
-                        value = {"raw": raw, "generation": dict(generation), "bbox": padded,
-                                 "page": source_page.number, "source_hash": source_hash}
-                    except Exception as error:
-                        value = {"error": type(error).__name__, "page": source_page.number,
-                                 "source_hash": source_hash}
-                    atomic_json(path, value)
-                else:
-                    continue
-                if "raw" in value:
-                    observation = _crop_observation(value)
-                    blocks, audit, tried = select_candidates(
-                        blocks, [observation], inventory, source_page.embedded, align=align)
-                    attempts.extend({**item, "cache": str(path.relative_to(bundle))} for item in tried)
-                else:
-                    attempts.append({"cache": path.name, "accepted": False, "error": value["error"]})
-    return blocks, {"stage": "region_recovery", "audit": public_audit(audit), "attempts": attempts}
-
-
-def _crop_observation(value):
-    if not valid_box(value["bbox"]) or not isinstance(value["raw"], str):
-        raise ValueError("invalid crop observation")
-    observation = parse_native_observation(value["raw"], mode="region_detail",
-                                          source_pages=[value["page"]],
-                                          generation=value["generation"])
-    x0, y0, x1, y1 = value["bbox"]
-    observation.id += "-" + hashlib.sha256(json.dumps(value["bbox"]).encode()).hexdigest()[:8]
-    for block in observation.blocks:
-        if valid_box(block.bbox):
-            a, b, c, d = block.bbox
-            block.bbox = (x0+a*(x1-x0)/1000, y0+b*(y1-y0)/1000,
-                          x0+c*(x1-x0)/1000, y0+d*(y1-y0)/1000)
-        else:
-            block.bbox = None
-    return observation
-
-
-def write_review(bundle, pages, source_pages):
-    """Separate final findings from historical failed/rejected OCR attempts."""
-    report = {"schema_version": 1, "status": "checked", "pages": []}
-    directory = Path(bundle) / "review"
-    directory.mkdir(exist_ok=True)
-    lines = ["# Transcription review", "",
-             "Findings indicate uncertainty, not certified mathematical errors.",
-             "Raster-only associations do not establish transcription accuracy.", ""]
-    sources = {p.number: p for p in source_pages}
-    for page in pages:
-        source = sources[page.number]
-        inventory = source_inventory(page.number, page.embedded, source.image_path)
-        # Content may have moved to an adjacent page during document assembly.
-        blocks = list(page.blocks)
-        for other in pages:
-            if other.number != page.number:
-                blocks.extend(b for b in other.blocks if page.number in b.source_pages)
-        audit = public_audit(audit_regions(inventory, blocks, page.embedded))
-        attempts = page.visual.get("region_review", {}).get("attempts", [])
-        entry = {"page": page.number, **audit, "attempt_history": attempts}
-        report["pages"].append(entry)
-        if audit["findings"]:
-            report["status"] = "needs_review"
-            lines.extend([f"## Page {page.number}", ""])
-            for i, finding in enumerate(audit["findings"]):
-                crop_name = None
-                if valid_box(finding.get("bbox")):
-                    with Image.open(source.image_path) as image:
-                        w, h = image.size
-                        a, b, c, d = finding["bbox"]
-                        crop = image.crop((max(0, int(a*w/1000)-8), max(0, int(b*h/1000)-8),
-                                           min(w, int(c*w/1000)+8), min(h, int(d*h/1000)+8)))
-                        crop_name = f"page-{page.number:04d}-{i:03d}.png"
-                        crop.save(directory / crop_name)
-                    finding["source_crop"] = f"review/{crop_name}"
-                lines.append(f"- {finding['kind']}" + (f" — [source crop]({crop_name})" if crop_name else ""))
-            lines.append("")
-    atomic_text(directory / "index.md", "\n".join(lines) + "\n")
-    atomic_json(Path(bundle) / "review.json", report)
-    return {"status": report["status"], "report": "review.json",
-            "finding_count": sum(len(p["findings"]) for p in report["pages"])}
+                    evaluate(*entry)
+    return blocks, {"stage": "region_recovery", "audit": public_audit(audit),
+                    "attempts": [a.to_dict() for a in attempts]}

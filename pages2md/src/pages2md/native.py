@@ -14,7 +14,7 @@ from .embedded import assess_embedded, bbox_coverage, bbox_iou, embedded_text_fo
 from .lists import annotate_native_list_block
 from .embedded import bbox_iou as _iou, bbox_coverage as _coverage
 from .model import Block, EmbeddedEvidence, OcrObservation
-from .quality import output_quality_warnings, MAX_PAGE_CHARACTERS, mathematical_runaway
+from .quality import output_quality_warnings, candidate_rejection
 
 PAGE_TOKEN = re.compile(r"\s*<PAGE>\s*")
 DET_TOKEN = re.compile(r"<\|det\|>(.*?)<\|/det\|>", re.DOTALL)
@@ -298,9 +298,7 @@ def reconcile_observations(
     # output BEFORE quadratic alignment, while retaining its raw checkpoint.
     usable_recoveries = []
     for recovery in recoveries:
-        text = _observation_text(recovery)
-        if (len(text) > MAX_PAGE_CHARACTERS * max(1, len(recovery.source_pages))
-                or mathematical_runaway(text)):
+        if candidate_rejection(recovery):
             warnings.append("visual_runaway_candidate_rejected")
         else:
             usable_recoveries.append(recovery)

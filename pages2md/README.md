@@ -80,8 +80,9 @@ quality or structure findings. Replacements are spliced into the existing
 reading order, never globally sorted; multi-block replacements and overlaps
 with other blocks are rejected. Source glyphs already owned by another block
 cannot support an insertion. New blocks require a uniquely bracketed gap in
-the same column. A bounded page-local alignment cache reuses unchanged blocks
-across candidate scoring and crop replay. Ambiguous content is retained, never
+the same column. A bounded page-local block-analysis cache reuses quality,
+structure, alignment and association results across candidate scoring and crop
+replay; page audits only aggregate those results. Ambiguous content is retained, never
 truncated or reconstructed from native text. Raster-only findings currently
 require review; they cannot authorize automatic replacements.
 
@@ -93,6 +94,13 @@ Raw crop observations (including failures) are cached in region-observations/.
 Ordinary code-only reassembly makes no OCR calls. Use --recover-regions to
 permit bounded fresh crop requests on cached pages; already attempted requests
 remain cached. Existing page observations are not invalidated.
+
+Recovery policy, crop persistence, and report rendering are separate modules.
+The document-scoped crop store indexes the existing flat cache once; decoding
+errors are reported separately from evaluator failures. Internal findings,
+block analyses and recovery attempts are typed records, serialized only at the
+report boundary. Reporting indexes moved blocks once and decodes each page
+image once for its inventory and all review crops.
 
 LaTeX cleanup compacts application/multiplication spacing and simple paired
 bars, preserves balanced text arguments, and gives array/alignment rows their

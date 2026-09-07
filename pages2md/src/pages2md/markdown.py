@@ -85,17 +85,7 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
                 f"{'#' * min(6, max(1, entry.get('level', 1)))} {title_case_heading(title)}"
             ))
     inline_boundary = _visual_boundary_index(blocks, boundary["title"]) if boundary else None
-    if boundary and inline_boundary is not None:
-        block = blocks[inline_boundary]
-        blocks[inline_boundary] = replace(
-            block,
-            kind="heading",
-            markdown=(
-                f"{'#' * min(6, max(1, boundary.get('level', 1)))} "
-                f"{title_case_heading(re.sub(r'^#{1,6}\s+', '', block.markdown.strip()))}"
-            ),
-        )
-    elif boundary:
+    if boundary and inline_boundary is None:
         blocks = _drop_visual_boundary_title(blocks, boundary["title"])
 
     body_pages = [

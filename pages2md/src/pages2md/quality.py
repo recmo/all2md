@@ -8,10 +8,21 @@ from bs4 import BeautifulSoup
 
 from .compare import normalize
 from .syntax import math_spans
+from .model import OcrObservation
 
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 MAX_PAGE_CHARACTERS = 20_000
+
+
+def candidate_rejection(observation: OcrObservation) -> str | None:
+    """Shared pre-alignment guard over rendered content, not grounding markup."""
+    text = "\n\n".join(block.markdown for block in observation.blocks).strip() or observation.raw
+    if len(text) > MAX_PAGE_CHARACTERS * max(1, len(observation.source_pages)):
+        return "visual_implausible_output_length"
+    if mathematical_runaway(text):
+        return "visual_math_repetition"
+    return None
 
 
 def output_quality_warnings(markdown: str, *, page_count: int = 1) -> list[str]:

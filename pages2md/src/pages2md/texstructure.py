@@ -44,6 +44,45 @@ def next_nonspace(ts: list[Token], index: int) -> int:
     return index
 
 
+@dataclass
+class TexGroup:
+    start: int
+    end: int
+    script: str | None
+    children: list[TexGroup]
+
+
+def tex_groups(value: str) -> list[TexGroup]:
+    """Group/script tree over the same tokens and brace matching as inspection.
+
+    Preserve the repair API's -1 end for incomplete groups; never synthesize a brace.
+    """
+    ts = tokens(value)
+
+    def parse(start, stop):
+        groups = []
+        pending = None
+        i = start
+        while i < stop:
+            token = ts[i]
+            if token.value in {"_", "^"}:
+                pending = token.value
+            elif token.value == "{":
+                close = group_end(ts, i)
+                end = close if close is not None else stop
+                groups.append(TexGroup(token.end, ts[close].start if close is not None else -1,
+                                       pending, parse(i + 1, end)))
+                pending = None
+                i = end + 1
+                continue
+            elif not token.value.isspace():
+                pending = None
+            i += 1
+        return groups
+
+    return parse(0, len(ts))
+
+
 def text_ranges(value: str) -> list[tuple[int, int]]:
     ts = tokens(value)
     ranges = []

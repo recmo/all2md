@@ -12,9 +12,6 @@ _MATH_SPAN = re.compile(
     r"(?<!\\)\$(?!\$)(?:[^$\\\n]|\\.)*?(?<!\\)\$(?!\$)",
     re.DOTALL,
 )
-_TEXT_GROUP = re.compile(
-    r"\\(?:text|textbf|textit|textrm|textsf|texttt|operatorname)\{[^{}]*\}"
-)
 _MATH_FONT_GROUP = re.compile(
     r"\\(?P<command>mathbb|mathbf|mathsf|mathrm|mathcal|mathit|mathtt)"
     r"\{(?P<content>[A-Za-z0-9 \t\n]+)\}"

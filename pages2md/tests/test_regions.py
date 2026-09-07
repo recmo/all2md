@@ -1,11 +1,16 @@
 from types import SimpleNamespace
+import hashlib
+import json
+
+import pytest
 
 from PIL import Image
 
 from pages2md.latex import clean_latex
 from pages2md.model import Block, OcrObservation, EmbeddedEvidence
 from pages2md.quality import mathematical_runaway, runaway_repetition_span
-from pages2md.region_recovery import recover_regions, select_candidates, _crop_observation
+from pages2md.region_recovery import recover_regions, select_candidates
+from pages2md.crop_store import crop_observation
 from pages2md.regions import source_inventory, audit_regions, preserves_coverage
 from test_alignment import evidence, BOX
 
@@ -34,7 +39,7 @@ def test_recovery_preserves_column_order_and_bboxless_blocks():
     initial.insert(1, Block("paragraph", "Unpositioned note", None))
     result, _, attempts = select_candidates(initial, [candidate(
         Block("paragraph", texts[0], boxes[0]))], inventory, native)
-    assert attempts[0]["accepted"]
+    assert attempts[0].accepted
     assert [b.markdown for b in result] == [texts[0], "Unpositioned note", *texts[1:]]
     assert result[1:] == initial[1:]
 
@@ -46,7 +51,7 @@ def test_misgrounded_equation_cannot_be_appended_as_duplicate():
     result, _, attempts = select_candidates(initial, [candidate(
         Block("formula", "H equation complete", (407, 300, 999, 361)))], inventory, native)
     assert result == initial
-    assert attempts[0]["reason"] == "ambiguous_source_overlap"
+    assert attempts[0].reason == "ambiguous_source_overlap"
 
 
 def test_candidate_cannot_move_delimiter_error_into_clean_formula():
@@ -57,7 +62,7 @@ def test_candidate_cannot_move_delimiter_error_into_clean_formula():
     result, _, attempts = select_candidates(initial, [candidate(Block("formula",
         r"\(alpha restored\) \(beta restored\) \(\left. gamma\)", BOX))], inventory, native)
     assert result == initial
-    assert attempts[0]["reason"] == "ambiguous_multi_block_replacement"
+    assert attempts[0].reason == "ambiguous_multi_block_replacement"
 
 
 def test_same_block_cannot_trade_delimiter_errors_for_coverage():
@@ -66,7 +71,7 @@ def test_same_block_cannot_trade_delimiter_errors_for_coverage():
     result, _, attempts = select_candidates(initial, [candidate(Block("formula",
         r"\(alpha restored\) \(beta restored\) \(\left. gamma\)", BOX))], inventory, native)
     assert result == initial
-    assert not attempts[0]["accepted"]
+    assert not attempts[0].accepted
 
 
 def test_insertion_uses_bracketing_column_and_abstains_without_anchors():
@@ -77,15 +82,15 @@ def test_insertion_uses_bracketing_column_and_abstains_without_anchors():
     all_blocks = [Block("paragraph", text, box) for text, box in zip(texts, boxes)]
     result, _, attempts = select_candidates([all_blocks[i] for i in (0, 2, 3)],
         [candidate(all_blocks[1])], inventory, native)
-    assert attempts[0]["accepted"]
+    assert attempts[0].accepted
     assert [b.markdown for b in result] == texts
     result, _, attempts = select_candidates([all_blocks[0]], [candidate(all_blocks[1])],
                                             inventory, native)
     assert len(result) == 1
-    assert attempts[0]["reason"] == "ambiguous_reading_order"
+    assert attempts[0].reason == "ambiguous_reading_order"
 
 
-def test_alignment_cache_is_bounded_page_scoped_and_result_preserving(monkeypatch):
+def test_analysis_cache_is_page_scoped_and_result_preserving(monkeypatch):
     from pages2md import regions
     native, inventory = recovery_fixture(["The missing equation xyz=123"], [BOX])
     initial = [Block("paragraph", "The missing equation", BOX)]
@@ -101,19 +106,145 @@ def test_alignment_cache_is_bounded_page_scoped_and_result_preserving(monkeypatc
     uncached = select_candidates(initial, candidates, inventory, native,
                                   align=lambda text, box: original(text, native, box))
     assert cached == uncached
-    cache = regions.alignment_cache(native)
-    assert cache.cache_info().maxsize == 256
-    other, _ = recovery_fixture(["Entirely different page"], [BOX])
-    assert (cache("The missing equation", BOX).native !=
-            regions.alignment_cache(other)("The missing equation", BOX).native)
+    auditor = regions.PageAuditor(inventory, native)
+    other, other_inventory = recovery_fixture(["Entirely different page"], [BOX])
+    assert (auditor.analyze(initial[0]).matched_glyphs !=
+            regions.PageAuditor(other_inventory, other).analyze(initial[0]).matched_glyphs)
+
+
+def test_block_analysis_is_reused_and_reports_exclude_internal_state(monkeypatch):
+    from pages2md import regions
+    native, inventory = recovery_fixture(["The missing equation xyz=123"], [BOX])
+    original = regions.analyze_block
+    calls = []
+    def recorded(*args, **kwargs):
+        calls.append(args[1].markdown)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(regions, "analyze_block", recorded)
+    auditor = regions.PageAuditor(inventory, native)
+    initial = [Block("paragraph", "The missing equation", BOX)]
+    candidates = [candidate(Block("paragraph", "The missing equation xyz=123", BOX))]
+    result = select_candidates(initial, candidates, inventory, native, auditor=auditor)
+    assert result[2][0].accepted
+    assert len(calls) == 2
+    assert select_candidates(initial, candidates, inventory, native, auditor=auditor) == result
+    assert len(calls) == 2
+    report = regions.public_audit(result[1])
+    assert set(report) == {"regions", "findings", "status"}
+    json.dumps(report)
+    changed = Block("formula", initial[0].markdown, BOX)
+    auditor.analyze(changed)
+    assert len(calls) == 3  # kind is part of the analysis key
+    assert auditor._analyze.cache_info().maxsize == 256
+
+
+def test_candidate_guard_is_shared_and_counts_rendered_pages():
+    from pages2md import native, region_recovery, quality
+    assert native.candidate_rejection is region_recovery.candidate_rejection
+    observation = OcrObservation("large", "detail", "grounding" * 10000, [1, 2],
+                                 blocks=[Block("paragraph", "x" * 21000, BOX)])
+    assert quality.candidate_rejection(observation) is None
+    observation.source_pages = [1]
+    assert quality.candidate_rejection(observation) == "visual_implausible_output_length"
+    observation.blocks = [Block("formula", ", ".join(rf"\(\alpha_{{{i}}}\)" for i in range(150)), BOX)]
+    assert quality.candidate_rejection(observation) == "visual_math_repetition"
+
+
+def test_crop_store_indexes_once_and_keeps_invalid_evidence(tmp_path, monkeypatch):
+    from pathlib import Path
+    from pages2md.crop_store import CropStore
+    directory = tmp_path / "region-observations"
+    directory.mkdir()
+    for page in (1, 2):
+        (directory / f"{page}.json").write_text(json.dumps({
+            "source_hash": str(page), "page": page, "error": "RuntimeError"}))
+    broken = directory / "broken.json"
+    broken.write_text("[]")
+    original = Path.read_text
+    reads = []
+    def record(path, *args, **kwargs):
+        reads.append(path)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", record)
+    store = CropStore(tmp_path)
+    assert len(reads) == 3
+    first = list(store.replay("1"))
+    second = list(store.replay("2"))
+    assert len(reads) == 3
+    assert len(first) == 2 and len(second) == 1
+    assert first[0][2].reason == "invalid_cache"
+    assert second[0][2].error == "RuntimeError"
+    assert original(broken) == "[]"
+
+
+def test_crop_evaluation_errors_are_not_reclassified_as_bad_cache(tmp_path, monkeypatch):
+    from pages2md import region_recovery
+    image = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image)
+    directory = tmp_path / "region-observations"
+    directory.mkdir()
+    (directory / "saved.json").write_text(json.dumps({
+        "source_hash": hashlib.sha256(image.read_bytes()).hexdigest(),
+        "page": 1, "bbox": BOX, "generation": {},
+        "raw": "<|det|>text [0,0,1000,1000]<|/det|>Recovered text"}))
+    native, _ = recovery_fixture(["Recovered text"], [BOX])
+    source = SimpleNamespace(number=1, embedded=native, image_path=image)
+    original = region_recovery.select_candidates
+    calls = 0
+    def evaluate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("evaluation bug")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(region_recovery, "select_candidates", evaluate)
+    with pytest.raises(ValueError, match="evaluation bug"):
+        recover_regions(source, [Block("paragraph", "Recovered", BOX)], [], bundle=tmp_path)
+
+
+def test_report_opens_each_image_once_and_accounts_for_moved_blocks(tmp_path, monkeypatch):
+    from pages2md.region_review import write_review
+    native, _ = recovery_fixture(["Missing first", "Missing second"],
+                                  [(20, 80, 450, 110), (20, 180, 450, 210)])
+    path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(path)
+    source = SimpleNamespace(number=1, image_path=path)
+    page = SimpleNamespace(number=1, embedded=native, blocks=[], visual={})
+    # Moved content retains the original page identity and box.
+    other = SimpleNamespace(number=2, embedded=EmbeddedEvidence(), visual={}, blocks=[
+        Block("paragraph", "Missing first", (20, 80, 450, 110), source_pages=[1, 1])])
+    other_source = SimpleNamespace(number=2, image_path=path)
+    original = Image.open
+    opened = []
+    def record(*args, **kwargs):
+        opened.append(args[0])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(Image, "open", record)
+    write_review(tmp_path, [page, other], [source, other_source])
+    assert len(opened) == 2
+    report = json.loads((tmp_path / "review.json").read_text())
+    first = report["pages"][0]
+    assert first["regions"][0]["status"] == "transcribed"
+    assert first["regions"][0]["blocks"] == [0]
+    assert any(f["kind"] == "source_content_unresolved" for f in first["findings"])
+
+
+def test_repair_and_inspection_share_tex_group_traversal():
+    from pages2md import alignment, texstructure
+    assert alignment.tex_groups is texstructure.tex_groups
+    tree = texstructure.tex_groups(r"x^{a_{b}\{c\}} y_{unfinished")
+    assert len(tree) == 2
+    assert tree[0].script == "^"
+    assert tree[0].children[0].script == "_"
+    assert tree[1].end == -1
 
 
 def test_source_inventory_does_not_accept_box_overlap_as_transcription():
     native = evidence([("Missing equation xyz=123", 20, 100, 10, "Times-Roman")])
     inventory = source_inventory(1, native)
     audit = audit_regions(inventory, [Block("paragraph", "Unrelated prose", BOX)], native)
-    assert audit["status"] == "needs_review"
-    assert any(f["kind"] == "source_content_unresolved" for f in audit["findings"])
+    assert audit.status == "needs_review"
+    assert any(f.kind == "source_content_unresolved" for f in audit.findings)
 
 
 def test_cached_candidate_recovers_content_without_discarding_matched_glyphs():
@@ -124,7 +255,7 @@ def test_cached_candidate_recovers_content_without_discarding_matched_glyphs():
                                blocks=[Block("paragraph", "The missing equation xyz=123", BOX)])
     blocks, audit, attempts = select_candidates(initial, [candidate], inventory, native)
     assert blocks[0].markdown.endswith("xyz=123")
-    assert attempts[0]["accepted"]
+    assert attempts[0].accepted
     assert preserves_coverage(audit_regions(inventory, initial, native), audit)
     assert initial[0].markdown == "The missing equation"
 
@@ -137,7 +268,7 @@ def test_candidate_cannot_trade_away_known_content():
                                blocks=[Block("paragraph", "klmnopqrst", BOX)])
     blocks, _, attempts = select_candidates(initial, [candidate], inventory, native)
     assert blocks == initial
-    assert not attempts[0]["accepted"]
+    assert not attempts[0].accepted
 
 
 def test_math_runaway_with_changing_indices_is_detected_not_truncated():
@@ -193,7 +324,7 @@ def test_raster_inventory_distinguishes_association_from_transcription(tmp_path)
     inventory = source_inventory(1, native, path)
     assert inventory
     audit = audit_regions(inventory, [Block("paragraph", "words", BOX)], native)
-    assert all(r["status"] == "visually_associated" for r in audit["regions"])
+    assert all(r["status"] == "visually_associated" for r in audit.regions)
 
 
 def test_proof_square_requires_shape_and_context():
@@ -232,7 +363,7 @@ def test_heading_math_and_multiple_late_boundaries_survive():
 def test_crop_coordinates_map_back_to_page():
     value = {"raw": "<|det|>text [100,200,900,800]<|/det|>Recovered text",
              "page": 7, "bbox": (100, 300, 500, 600), "generation": {}}
-    observation = _crop_observation(value)
+    observation = crop_observation(value)
     assert observation.blocks[0].bbox == (140, 360, 460, 540)
     assert observation.source_pages == [7]
 
@@ -241,7 +372,7 @@ def test_unmatched_sizing_delimiter_triggers_recovery():
     native = evidence([("abc", 20, 100, 10, "Times-Roman")])
     audit = audit_regions(source_inventory(1, native),
                           [Block("formula", r"\[\left\{abc\]", BOX)], native)
-    assert any(f["kind"] == "unbalanced_sizing_delimiters" for f in audit["findings"])
+    assert any(f.kind == "unbalanced_sizing_delimiters" for f in audit.findings)
     from pages2md.texstructure import balanced_sizing_delimiters
     assert balanced_sizing_delimiters(r"\left\{a + \left(b\right)\right.")
     assert balanced_sizing_delimiters(r"\text{\left} + x")

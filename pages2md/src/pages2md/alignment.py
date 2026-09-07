@@ -14,6 +14,7 @@ from statistics import median
 
 from .embedded import embedded_characters_for_bbox, iter_embedded_characters
 from .model import EmbeddedEvidence
+from .texstructure import TexGroup, tex_groups
 
 
 @dataclass
@@ -334,48 +335,6 @@ def math_font_role(glyph: dict) -> str | None:
     if font.startswith(("newtxmi", "cmmi", "stixmathitalic")):
         return "ordinary"
     return None
-
-
-@dataclass
-class TexGroup:
-    start: int
-    end: int
-    script: str | None
-    children: list[TexGroup]
-
-
-def tex_groups(value: str) -> list[TexGroup]:
-    """Parse balanced TeX groups and braced script arguments, preserving ranges.
-
-    Commands remain opaque; malformed groups are never repaired by guessing a
-    closing delimiter. This small structural parser does not evaluate TeX.
-    """
-    roots: list[TexGroup] = []
-    stack: list[TexGroup] = []
-    pending = None
-    index = 0
-    while index < len(value):
-        char = value[index]
-        if char == "\\":
-            command = re.match(r"\\(?:[A-Za-z]+|.)", value[index:])
-            index += len(command[0]) if command else 1
-            pending = None
-            continue
-        if char in "_^":
-            pending = char
-        elif char == "{":
-            group = TexGroup(index + 1, -1, pending, [])
-            (stack[-1].children if stack else roots).append(group)
-            stack.append(group)
-            pending = None
-        elif char == "}":
-            if stack:
-                stack.pop().end = index
-            pending = None
-        elif not char.isspace():
-            pending = None
-        index += 1
-    return roots
 
 
 def script_edits(markdown: str, alignment: GlyphAlignment) -> list[tuple[int, int, str]]:
