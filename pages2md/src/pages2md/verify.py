@@ -125,6 +125,10 @@ def verify_bundle(root: Path) -> Verification:
     for page in pages:
         for warning in output_quality_warnings(page.get("visual_markdown", "")):
             warnings.append(f"page {page.get('number')} needs content review: {warning}")
+    if metadata.get("transcription_review", {}).get("status") == "needs_review":
+        warnings.append("unresolved source regions: see review/index.md")
+    if metadata.get("transcription_review") and not (root / "review.json").is_file():
+        errors.append("missing transcription review report")
     for previous, current in zip(pages, pages[1:]):
         if (
             current.get("number") == previous.get("number", 0) + 1

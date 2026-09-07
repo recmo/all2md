@@ -14,7 +14,7 @@ from .embedded import assess_embedded, bbox_coverage, bbox_iou, embedded_text_fo
 from .lists import annotate_native_list_block
 from .embedded import bbox_iou as _iou, bbox_coverage as _coverage
 from .model import Block, EmbeddedEvidence, OcrObservation
-from .quality import output_quality_warnings
+from .quality import output_quality_warnings, candidate_rejection
 
 PAGE_TOKEN = re.compile(r"\s*<PAGE>\s*")
 DET_TOKEN = re.compile(r"<\|det\|>(.*?)<\|/det\|>", re.DOTALL)
@@ -294,6 +294,15 @@ def reconcile_observations(
     """Keep multi-page structure and apply only confidently aligned Gundam spans."""
     provenance: list[dict[str, Any]] = []
     warnings: list[str] = list(primary.warnings)
+    # Cached observations can predate quality checks. Reject runaway auxiliary
+    # output BEFORE quadratic alignment, while retaining its raw checkpoint.
+    usable_recoveries = []
+    for recovery in recoveries:
+        if candidate_rejection(recovery):
+            warnings.append("visual_runaway_candidate_rejected")
+        else:
+            usable_recoveries.append(recovery)
+    recoveries = usable_recoveries
     canonical = [_copy_block(block) for block in primary.blocks]
     primary_bad = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
     trust_visual = _observation_text(primary)
@@ -871,6 +880,7 @@ def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObs
 
 
 _SEVERE_OBSERVATION_WARNINGS = {
+    "visual_math_repetition",
     "visual_empty_output",
     "visual_implausible_output_length",
     "visual_malformed_grounding",

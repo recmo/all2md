@@ -16,6 +16,8 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--version", action="version", version=f"pages2md {commit_version()}")
     command.add_argument("input", nargs="+", type=Path)
     command.add_argument("--force", action="store_true", help="replace an existing output")
+    command.add_argument("--recover-regions", action="store_true",
+                         help="allow bounded fresh crop OCR while replaying cached pages")
     command.add_argument(
         "--ignore-embedded-text",
         action="store_true",
@@ -34,6 +36,7 @@ def main(argv: list[str] | None = None) -> None:
                     source,
                     force=arguments.force,
                     ignore_embedded_text=arguments.ignore_embedded_text,
+                    **({"recover_regions_fresh": True} if arguments.recover_regions else {}),
                 )
             )
         except (FileExistsError, FileNotFoundError, RuntimeError, ValueError) as error:

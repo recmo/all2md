@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from .texstructure import format_environments, text_ranges
+
 
 _CODE_SPAN = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
 _MATH_SPAN = re.compile(
@@ -9,9 +11,6 @@ _MATH_SPAN = re.compile(
     r"\\begin\{(?P<environment>[A-Za-z*]+)\}.*?\\end\{(?P=environment)\}|"
     r"(?<!\\)\$(?!\$)(?:[^$\\\n]|\\.)*?(?<!\\)\$(?!\$)",
     re.DOTALL,
-)
-_TEXT_GROUP = re.compile(
-    r"\\(?:text|textbf|textit|textrm|textsf|texttt|operatorname)\{[^{}]*\}"
 )
 _MATH_FONT_GROUP = re.compile(
     r"\\(?P<command>mathbb|mathbf|mathsf|mathrm|mathcal|mathit|mathtt)"
@@ -79,6 +78,21 @@ def _clean_math_spans(value: str) -> str:
 
 
 def _clean_math(value: str) -> str:
+    # Protect balanced text arguments before any whitespace edits.
+    protected: list[str] = []
+    end = -1
+    ranges = []
+    for a, b in text_ranges(value):
+        if a >= end:
+            ranges.append((a, b))
+            end = b
+    for a, b in reversed(ranges):
+        protected.append(re.sub(r"^(\\[A-Za-z]+)[ \t]+(?=\{)", r"\1", value[a:b]))
+        value = value[:a] + f"\x00pages2md-text-{len(protected) - 1}\x00" + value[b:]
+    # Application and multiplication deliberately use the same source spacing.
+    value = re.sub(r"(?<=[\w)\]}])[ \t]+(?=\()", "", value)
+    # Only compact simple paired bars, not relational/set-builder bars.
+    value = re.sub(r"(?<![\\|])\|[ \t]*([^\s|{}=<>∈∣]+)[ \t]*\|(?!\|)", r"|\1|", value)
     value = re.sub(r"\\([A-Za-z]+)[ \t]+(?=\{)", r"\\\1", value)
     value = re.sub(r"(?<=[_^])[ \t]+(?=\{)", "", value)
     value = re.sub(r"(\\(?:left|right))[ \t]+", r"\1", value)
@@ -86,13 +100,6 @@ def _clean_math(value: str) -> str:
     value = re.sub(r"([A-Za-z0-9}\)])[ \t]+(?=\\(?:left|right)\b)", r"\1", value)
     value = re.sub(r"([A-Za-z0-9}])[ \t]+(?=\[)", r"\1", value)
 
-    protected: list[str] = []
-
-    def protect_text(match: re.Match[str]) -> str:
-        protected.append(match.group(0))
-        return f"\x00pages2md-text-{len(protected) - 1}\x00"
-
-    value = _TEXT_GROUP.sub(protect_text, value)
     value = re.sub(r"[ \t]{2,}", " ", value)
     value = re.sub(r"[ \t]+([,.;!?])", r"\1", value)
     value = re.sub(r"([\(\[])[ \t]+", r"\1", value)
@@ -106,6 +113,7 @@ def _clean_math(value: str) -> str:
     value = _SINGLE_SCRIPT.sub(r"\1\2", value)
     value = re.sub(r"^(\\\[|\\\(|\$\$|\$)[ \t\n]+", r"\1", value)
     value = re.sub(r"[ \t\n]+(\\\]|\\\)|\$\$|\$)$", r"\1", value)
+    value = format_environments(value)
     for index, text in enumerate(protected):
         value = value.replace(f"\x00pages2md-text-{index}\x00", text)
     return value

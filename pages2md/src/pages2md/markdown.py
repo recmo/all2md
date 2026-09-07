@@ -12,6 +12,7 @@ from .model import Block, Chapter, PageResult
 from .util import atomic_text, slugify
 from .urls import autolink_urls
 from .footnotes import place_footnotes
+from .syntax import math_spans
 
 LOCAL_LINK = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)")
 IMAGE_LINK = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
@@ -67,19 +68,24 @@ def strict_page_markdown(page: PageResult, outline: list[dict]) -> str:
     entries = [item for item in outline if item.get("page") == page.number]
     boundary = max(entries, key=lambda item: item.get("level", 1), default=None)
     blocks = list(page.blocks)
+    blocks = [
+        replace(block, markdown=" ".join(block.markdown.splitlines()))
+        if block.kind in TITLE_KINDS else block for block in blocks
+    ]
     normalize_table_blocks(blocks)
+    # Outline strings often omit mathematics. Use them for hierarchy, while
+    # preserving the visual heading whenever it contains a formula.
+    for entry in entries:
+        index = _visual_boundary_index(blocks, entry["title"])
+        if index is not None:
+            block = blocks[index]
+            title = re.sub(r"^#{1,6}\s+", "", block.markdown.strip())
+            title = re.sub(r"^(\d+(?:\.\d+)*)\.(?=\s)", r"\1", title)
+            blocks[index] = replace(block, kind="heading", markdown=(
+                f"{'#' * min(6, max(1, entry.get('level', 1)))} {title_case_heading(title)}"
+            ))
     inline_boundary = _visual_boundary_index(blocks, boundary["title"]) if boundary else None
-    if boundary and inline_boundary is not None:
-        block = blocks[inline_boundary]
-        blocks[inline_boundary] = replace(
-            block,
-            kind="heading",
-            markdown=(
-                f"{'#' * min(6, max(1, boundary.get('level', 1)))} "
-                f"{title_case_heading(boundary['title'].strip())}"
-            ),
-        )
-    elif boundary:
+    if boundary and inline_boundary is None:
         blocks = _drop_visual_boundary_title(blocks, boundary["title"])
 
     body_pages = [
@@ -615,9 +621,7 @@ def _drop_visual_boundary_title(blocks, title: str):
 
 
 def _visual_boundary_index(blocks, title: str) -> int | None:
-    for index, block in enumerate(blocks[:8]):
-        if block.bbox and block.bbox[1] > 500:
-            break
+    for index, block in enumerate(blocks):
         if block.kind in TITLE_KINDS and _same_heading(block.markdown, title):
             return index
     return None
@@ -627,6 +631,9 @@ def _same_heading(left: str, right: str) -> bool:
     from difflib import SequenceMatcher
 
     def canonical(value: str) -> str:
+        spans, _ = math_spans(value)
+        for span in reversed(spans):
+            value = value[:span.start] + value[span.end:]
         value = re.sub(r"^#{1,6}\s+", "", value.strip())
         value = re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
         return value
