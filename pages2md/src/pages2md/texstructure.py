@@ -26,16 +26,20 @@ def tokens(value: str) -> list[Token]:
     return [Token(m.group(), *m.span()) for m in TOKEN.finditer(value)]
 
 
+def _group_pairs(ts: list[Token], start: int = 0):
+    """Match braces iteratively; escaped braces are opaque command tokens."""
+    stack = []
+    for i in range(start, len(ts)):
+        if ts[i].value == "{":
+            stack.append(i)
+        elif ts[i].value == "}" and stack:
+            yield stack.pop(), i
+
+
 def group_end(ts: list[Token], index: int) -> int | None:
     if index >= len(ts) or ts[index].value != "{":
         return None
-    depth = 0
-    for i in range(index, len(ts)):
-        depth += ts[i].value == "{"
-        depth -= ts[i].value == "}"
-        if depth == 0:
-            return i
-    return None
+    return next((end for start, end in _group_pairs(ts, index) if start == index), None)
 
 
 def next_nonspace(ts: list[Token], index: int) -> int:
@@ -59,28 +63,27 @@ def tex_groups(value: str) -> list[TexGroup]:
     """
     ts = tokens(value)
 
-    def parse(start, stop):
-        groups = []
-        pending = None
-        i = start
-        while i < stop:
-            token = ts[i]
-            if token.value in {"_", "^"}:
-                pending = token.value
-            elif token.value == "{":
-                close = group_end(ts, i)
-                end = close if close is not None else stop
-                groups.append(TexGroup(token.end, ts[close].start if close is not None else -1,
-                                       pending, parse(i + 1, end)))
-                pending = None
-                i = end + 1
-                continue
-            elif not token.value.isspace():
-                pending = None
-            i += 1
-        return groups
-
-    return parse(0, len(ts))
+    closes = dict(_group_pairs(ts))
+    groups = []
+    stack = []
+    pending = None
+    for i, token in enumerate(ts):
+        if token.value in {"_", "^"}:
+            pending = token.value
+        elif token.value == "{":
+            close = closes.get(i)
+            group = TexGroup(token.end, ts[close].start if close is not None else -1,
+                             pending, [])
+            (stack[-1].children if stack else groups).append(group)
+            stack.append(group)
+            pending = None
+        elif token.value == "}":
+            if stack:
+                stack.pop()
+            pending = None
+        elif not token.value.isspace():
+            pending = None
+    return groups
 
 
 def text_ranges(value: str) -> list[tuple[int, int]]:
@@ -100,8 +103,10 @@ def script_memberships(value: str) -> dict[int, tuple[int, str]]:
     """Map visible token offsets to the base and script kind that own them."""
     ts = tokens(value)
     edges = {}
-
-    def parse(start, end, inherited=None):
+    closes = dict(_group_pairs(ts))
+    scopes = [(0, len(ts), None)]
+    while scopes:
+        start, end, inherited = scopes.pop()
         base = None
         i = start
         while i < end:
@@ -111,10 +116,10 @@ def script_memberships(value: str) -> dict[int, tuple[int, str]]:
                 continue
             if token.value in {"_", "^"}:
                 j = next_nonspace(ts, i + 1)
-                close = group_end(ts, j)
+                close = closes.get(j)
                 parent = (base, token.value) if base is not None else inherited
                 if close is not None and close < end:
-                    parse(j + 1, close, parent)
+                    scopes.append((j + 1, close, parent))
                     i = close + 1
                 elif j < end:
                     if parent:
@@ -124,10 +129,10 @@ def script_memberships(value: str) -> dict[int, tuple[int, str]]:
                     i += 1
                 continue
             if token.value == "{":
-                close = group_end(ts, i)
+                close = closes.get(i)
                 if close is None:
-                    return
-                parse(i + 1, close, inherited)
+                    break
+                scopes.append((i + 1, close, inherited))
                 base = token.start
                 i = close + 1
                 continue
@@ -136,7 +141,6 @@ def script_memberships(value: str) -> dict[int, tuple[int, str]]:
                 if inherited:
                     edges[token.start] = inherited
             i += 1
-    parse(0, len(ts))
     return edges
 
 

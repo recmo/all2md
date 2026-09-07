@@ -169,7 +169,7 @@ def analyze_block(regions: list[Region], block: Block, embedded: EmbeddedEvidenc
                                 bbox=block.bbox, severity="error"))
     fatal = [w for w in quality if w in {
         "visual_implausible_output_length", "visual_text_repetition",
-        "visual_math_repetition", "visual_malformed_math"}]
+        "visual_math_repetition", "visual_malformed_math", "visual_malformed_table"}]
     for warning in fatal:
         findings.append(Finding(kind=warning.removeprefix("visual_"),
                                 bbox=block.bbox, severity="error"))

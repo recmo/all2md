@@ -150,6 +150,52 @@ def test_candidate_guard_is_shared_and_counts_rendered_pages():
     assert quality.candidate_rejection(observation) == "visual_math_repetition"
 
 
+def test_malformed_table_cannot_pass_local_recovery_checks():
+    from pages2md.quality import output_quality_warnings
+    native, inventory = recovery_fixture(["The missing equation xyz=123"], [BOX])
+    initial = [Block("paragraph", "The missing equation", BOX)]
+    malformed = Block("table", "<table>The missing equation xyz=123</table>", BOX)
+    assert "visual_malformed_table" in output_quality_warnings(malformed.markdown)
+    result, _, attempts = select_candidates(initial, [candidate(malformed)], inventory, native)
+    assert result == initial
+    assert not attempts[0].accepted
+    audit = audit_regions(inventory, [malformed], native)
+    assert any(f.kind == "malformed_table" and f.block == 0 for f in audit.findings)
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_deep_tex_nesting_is_safe_for_grouping_memberships_and_repair(closed):
+    from pages2md.texstructure import tex_groups, script_memberships
+    from pages2md.alignment import script_edits
+    depth = 1500
+    text = "x^" + "{" * depth + "a" + ("}" * depth if closed else "")
+    tree = tex_groups(text)
+    count = 0
+    while tree:
+        assert len(tree) == 1
+        group = tree[0]
+        assert (group.end >= 0) == closed
+        count += 1
+        tree = group.children
+    assert count == depth
+    edges = script_memberships(text)
+    if closed:
+        assert edges[text.index("a")] == (0, "^")
+    alignment = SimpleNamespace(layout_matches={}, spans=[], text="", native="", parents={})
+    assert script_edits(text, alignment) == []
+
+
+def test_iterative_script_scopes_preserve_nested_and_sibling_ownership():
+    from pages2md.texstructure import script_memberships
+    text = r"x^{a_{b}+c} + y_d + z^{q}"
+    edges = script_memberships(text)
+    assert edges[text.index("a")] == (text.index("x"), "^")
+    assert edges[text.index("b")] == (text.index("a"), "_")
+    assert edges[text.index("c")] == (text.index("x"), "^")
+    assert edges[text.index("d")] == (text.index("y"), "_")
+    assert edges[text.index("q")] == (text.index("z"), "^")
+
+
 def test_crop_store_indexes_once_and_keeps_invalid_evidence(tmp_path, monkeypatch):
     from pathlib import Path
     from pages2md.crop_store import CropStore
