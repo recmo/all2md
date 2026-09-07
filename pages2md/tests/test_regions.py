@@ -10,6 +10,104 @@ from pages2md.regions import source_inventory, audit_regions, preserves_coverage
 from test_alignment import evidence, BOX
 
 
+def recovery_fixture(texts, boxes):
+    native = evidence([(text, box[0] + 2, box[3] - 2, 10, "Times-Roman")
+                       for text, box in zip(texts, boxes)])
+    # Give each source row its own stable region identity.
+    spans = native.blocks[0]["lines"][0]["spans"]
+    native.blocks[0]["lines"] = [{"spans": [span]} for span in spans]
+    return native, source_inventory(1, native)
+
+
+def candidate(*blocks):
+    return OcrObservation("test", "detail", "", [1], blocks=list(blocks))
+
+
+def test_recovery_preserves_column_order_and_bboxless_blocks():
+    texts = ["First column first paragraph complete", "First column second paragraph",
+             "Second column first paragraph", "Second column second paragraph"]
+    boxes = [(20, 80, 450, 110), (20, 280, 450, 310),
+             (550, 80, 980, 110), (550, 280, 980, 310)]
+    native, inventory = recovery_fixture(texts, boxes)
+    initial = [Block("paragraph", text, box) for text, box in zip(texts, boxes)]
+    initial[0].markdown = "First column"
+    initial.insert(1, Block("paragraph", "Unpositioned note", None))
+    result, _, attempts = select_candidates(initial, [candidate(
+        Block("paragraph", texts[0], boxes[0]))], inventory, native)
+    assert attempts[0]["accepted"]
+    assert [b.markdown for b in result] == [texts[0], "Unpositioned note", *texts[1:]]
+    assert result[1:] == initial[1:]
+
+
+def test_misgrounded_equation_cannot_be_appended_as_duplicate():
+    boxes = [(327, 293, 675, 338)]
+    native, inventory = recovery_fixture(["H equation complete"], boxes)
+    initial = [Block("formula", "H equation", boxes[0])]
+    result, _, attempts = select_candidates(initial, [candidate(
+        Block("formula", "H equation complete", (407, 300, 999, 361)))], inventory, native)
+    assert result == initial
+    assert attempts[0]["reason"] == "ambiguous_source_overlap"
+
+
+def test_candidate_cannot_move_delimiter_error_into_clean_formula():
+    boxes = [(20, 80, 450, 110), (20, 180, 450, 210), (20, 280, 450, 310)]
+    native, inventory = recovery_fixture(["alpha restored", "beta restored", "gamma"], boxes)
+    initial = [Block("formula", text, box) for text, box in zip(
+        [r"\(\left. alpha\)", r"\(\left. beta\)", r"\(gamma\)"], boxes)]
+    result, _, attempts = select_candidates(initial, [candidate(Block("formula",
+        r"\(alpha restored\) \(beta restored\) \(\left. gamma\)", BOX))], inventory, native)
+    assert result == initial
+    assert attempts[0]["reason"] == "ambiguous_multi_block_replacement"
+
+
+def test_same_block_cannot_trade_delimiter_errors_for_coverage():
+    native, inventory = recovery_fixture(["alpha restored beta restored gamma"], [BOX])
+    initial = [Block("formula", r"\(\left. alpha\) \(\left. beta\) \(gamma\)", BOX)]
+    result, _, attempts = select_candidates(initial, [candidate(Block("formula",
+        r"\(alpha restored\) \(beta restored\) \(\left. gamma\)", BOX))], inventory, native)
+    assert result == initial
+    assert not attempts[0]["accepted"]
+
+
+def test_insertion_uses_bracketing_column_and_abstains_without_anchors():
+    boxes = [(20, 80, 450, 110), (20, 180, 450, 210), (20, 280, 450, 310),
+             (550, 80, 980, 110)]
+    texts = ["first paragraph", "missing paragraph", "last paragraph", "right column"]
+    native, inventory = recovery_fixture(texts, boxes)
+    all_blocks = [Block("paragraph", text, box) for text, box in zip(texts, boxes)]
+    result, _, attempts = select_candidates([all_blocks[i] for i in (0, 2, 3)],
+        [candidate(all_blocks[1])], inventory, native)
+    assert attempts[0]["accepted"]
+    assert [b.markdown for b in result] == texts
+    result, _, attempts = select_candidates([all_blocks[0]], [candidate(all_blocks[1])],
+                                            inventory, native)
+    assert len(result) == 1
+    assert attempts[0]["reason"] == "ambiguous_reading_order"
+
+
+def test_alignment_cache_is_bounded_page_scoped_and_result_preserving(monkeypatch):
+    from pages2md import regions
+    native, inventory = recovery_fixture(["The missing equation xyz=123"], [BOX])
+    initial = [Block("paragraph", "The missing equation", BOX)]
+    candidates = [candidate(Block("paragraph", "The missing equation xyz=123", BOX))]
+    original = regions.align_glyphs
+    calls = []
+    def recorded(*args):
+        calls.append(args[0])
+        return original(*args)
+    monkeypatch.setattr(regions, "align_glyphs", recorded)
+    cached = select_candidates(initial, candidates, inventory, native)
+    assert len(calls) == 2  # baseline and candidate, not proposal again
+    uncached = select_candidates(initial, candidates, inventory, native,
+                                  align=lambda text, box: original(text, native, box))
+    assert cached == uncached
+    cache = regions.alignment_cache(native)
+    assert cache.cache_info().maxsize == 256
+    other, _ = recovery_fixture(["Entirely different page"], [BOX])
+    assert (cache("The missing equation", BOX).native !=
+            regions.alignment_cache(other)("The missing equation", BOX).native)
+
+
 def test_source_inventory_does_not_accept_box_overlap_as_transcription():
     native = evidence([("Missing equation xyz=123", 20, 100, 10, "Times-Roman")])
     inventory = source_inventory(1, native)

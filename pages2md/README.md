@@ -75,7 +75,13 @@ findings and can include false positives, especially on complex mathematics.
 Recovery first tries saved OCR candidates, then at most four fresh crop calls
 per newly recognized page, using two context/scale variants. A replacement must
 increase matched source coverage without losing already-matched glyphs or
-introducing a new category of finding. Ambiguous content is retained, never
+introducing a finding in a new source region. Changed blocks must have no local
+quality or structure findings. Replacements are spliced into the existing
+reading order, never globally sorted; multi-block replacements and overlaps
+with other blocks are rejected. Source glyphs already owned by another block
+cannot support an insertion. New blocks require a uniquely bracketed gap in
+the same column. A bounded page-local alignment cache reuses unchanged blocks
+across candidate scoring and crop replay. Ambiguous content is retained, never
 truncated or reconstructed from native text. Raster-only findings currently
 require review; they cannot authorize automatic replacements.
 

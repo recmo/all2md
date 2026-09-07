@@ -10,6 +10,7 @@ import hashlib
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageFilter
@@ -118,15 +119,25 @@ def _ink_regions(path: Path):
                        1000 * (group[-1] + 1) / width, 1000 * y1 / height)
 
 
+def alignment_cache(embedded: EmbeddedEvidence):
+    """Bounded, page-owned cache; evidence never crosses page/run boundaries."""
+    @lru_cache(maxsize=256)
+    def align(markdown, bbox):
+        return align_glyphs(markdown, embedded, bbox)
+    return align
+
+
 def audit_regions(regions: list[Region], blocks: list[Block],
-                  embedded: EmbeddedEvidence) -> dict:
+                  embedded: EmbeddedEvidence, *, align=None) -> dict:
     matched = set()
     findings = []
     associations = {r.id: [] for r in regions}
     native_counts = {r.id: len(semantic_math_projection(r.text)[0]) for r in regions}
     # Retain source glyph identities so recovery cannot trade away good content.
     matched_counts = Counter()
+    block_glyphs = []
     for index, block in enumerate(blocks):
+        block_glyphs.append(set())
         local = [r for r in regions if block.bbox and (
             bbox_coverage(r.bbox, block.bbox) >= .3 or bbox_coverage(block.bbox, r.bbox) >= .5)]
         for region in local:
@@ -147,13 +158,15 @@ def audit_regions(regions: list[Region], blocks: list[Block],
             continue
         if not any(r.kind == "native" for r in local):
             continue
-        aligned = align_glyphs(block.markdown, embedded, block.bbox)
+        aligned = (align(block.markdown, tuple(block.bbox)) if align is not None
+                   else align_glyphs(block.markdown, embedded, block.bbox))
         equal = {a: b for a, b in aligned.matches.items()
                  if aligned.text[a] == aligned.native[b]}
         for b in equal.values():
             glyph = aligned.glyphs[b]
             # Only the original glyph identity matters for ordinary characters.
             matched.add(tuple(glyph["order"]))
+            block_glyphs[index].add(tuple(glyph["order"]))
         if len(aligned.text) >= 24:
             fraction = len(equal) / len(aligned.text)
             if fraction < .55:
@@ -211,7 +224,8 @@ def audit_regions(regions: list[Region], blocks: list[Block],
         inventory.append(entry)
     return {"regions": inventory, "findings": findings,
             "status": "needs_review" if findings else "checked",
-            "matched_glyphs": sorted(matched)}
+            "matched_glyphs": sorted(matched),
+            "block_glyphs": [sorted(ids) for ids in block_glyphs]}
 
 
 def preserves_coverage(before: dict, after: dict) -> bool:
@@ -220,4 +234,5 @@ def preserves_coverage(before: dict, after: dict) -> bool:
 
 
 def public_audit(audit: dict) -> dict:
-    return {key: value for key, value in audit.items() if key != "matched_glyphs"}
+    return {key: value for key, value in audit.items()
+            if key not in {"matched_glyphs", "block_glyphs"}}

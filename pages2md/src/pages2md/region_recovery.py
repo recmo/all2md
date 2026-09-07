@@ -15,7 +15,8 @@ from PIL import Image
 from .embedded import bbox_coverage
 from .native import parse_native_observation
 from .quality import output_quality_warnings, MAX_PAGE_CHARACTERS
-from .regions import audit_regions, preserves_coverage, public_audit, source_inventory, valid_box
+from .regions import (alignment_cache, audit_regions, preserves_coverage, public_audit,
+                      source_inventory, valid_box)
 from .util import atomic_json, atomic_text
 
 
@@ -24,10 +25,26 @@ def _score(audit):
             len(audit["findings"]), -len(audit["matched_glyphs"]))
 
 
-def select_candidates(blocks, candidates, inventory, embedded):
+def _insertion_index(blocks, box):
+    """Only insert in a uniquely bracketed gap in the existing column order."""
+    gaps = []
+    for index in range(1, len(blocks)):
+        before, after = blocks[index - 1].bbox, blocks[index].bbox
+        if not valid_box(before) or not valid_box(after):
+            continue
+        if (before[3] <= box[1] < box[3] <= after[1]
+                and max(before[0], after[0]) <= box[0]
+                and box[2] <= min(before[2], after[2])):
+            gaps.append(index)
+    return gaps[0] if len(gaps) == 1 else None
+
+
+def select_candidates(blocks, candidates, inventory, embedded, *, align=None):
     """Try local replacements and insertions; never replace an entire page."""
     blocks = deepcopy(blocks)
-    audit = audit_regions(inventory, blocks, embedded)
+    if align is None:
+        align = alignment_cache(embedded)
+    audit = audit_regions(inventory, blocks, embedded, align=align)
     attempts = []
     if not audit["findings"]:
         return blocks, audit, attempts
@@ -45,24 +62,48 @@ def select_candidates(blocks, candidates, inventory, embedded):
                 continue
             overlapping = [i for i, old in enumerate(blocks) if old.bbox and
                            bbox_coverage(old.bbox, block.bbox) >= .7]
-            if any(old.bbox and i not in overlapping
-                   and bbox_coverage(block.bbox, old.bbox) > .3
-                   for i, old in enumerate(blocks)):
-                # A partial crop cannot replace a containing paragraph safely.
+            # Merging blocks loses the location of errors and may swallow a
+            # column or a previously correct formula. Require a local edit.
+            if len(overlapping) > 1:
+                attempts.append({"observation": candidate.id, "accepted": False,
+                                 "reason": "ambiguous_multi_block_replacement"})
                 continue
-            proposal = [deepcopy(old) for i, old in enumerate(blocks) if i not in overlapping]
+            if any(old.bbox and i not in overlapping
+                   and bbox_coverage(block.bbox, old.bbox) > 0
+                   for i, old in enumerate(blocks)):
+                attempts.append({"observation": candidate.id, "accepted": False,
+                                 "reason": "ambiguous_source_overlap"})
+                continue
+            local = audit_regions(inventory, [block], embedded, align=align)
+            glyphs = set(map(tuple, local["matched_glyphs"]))
+            if any(glyphs.intersection(map(tuple, ids)) for i, ids in
+                   enumerate(audit["block_glyphs"]) if i not in overlapping):
+                attempts.append({"observation": candidate.id, "accepted": False,
+                                 "reason": "source_already_owned"})
+                continue
+            index = overlapping[0] if overlapping else _insertion_index(blocks, block.bbox)
+            if index is None:
+                attempts.append({"observation": candidate.id, "accepted": False,
+                                 "reason": "ambiguous_reading_order"})
+                continue
+            proposal = deepcopy(blocks)
             replacement = deepcopy(block)
             replacement.provenance.append({"kind": "region_recovery", "observation": candidate.id})
-            proposal.append(replacement)
-            proposal.sort(key=lambda b: (b.bbox[1], b.bbox[0]) if b.bbox else (1000, 1000))
-            after = audit_regions(inventory, proposal, embedded)
+            proposal[index:index + bool(overlapping)] = [replacement]
+            after = audit_regions(inventory, proposal, embedded, align=align)
             # A lower warning count alone is insufficient: require real source
             # support, no new findings, and no loss of matched glyph identities.
-            before_kinds = {f["kind"] for f in audit["findings"]}
+            # Unchanged blocks retain their findings; changed content must be
+            # locally clean, not merely trade errors of the same global kind.
+            clean_replacement = not any("block" in f for f in local["findings"])
+            before_regions = {(f["kind"], f["region"]) for f in audit["findings"]
+                              if "region" in f}
             accepted = (preserves_coverage(audit, after)
                         and len(after["matched_glyphs"]) > len(audit["matched_glyphs"])
                         and _score(after) < _score(audit)
-                        and not {f["kind"] for f in after["findings"]} - before_kinds)
+                        and clean_replacement
+                        and not {(f["kind"], f["region"]) for f in after["findings"]
+                                 if "region" in f} - before_regions)
             attempts.append({"observation": candidate.id, "bbox": block.bbox,
                              "accepted": accepted, "reason": "coverage_improved" if accepted
                              else "no_safe_coverage_improvement"})
@@ -73,7 +114,9 @@ def select_candidates(blocks, candidates, inventory, embedded):
 
 def recover_regions(source_page, blocks, candidates, *, backend=None, bundle=None, budget=4):
     inventory = source_inventory(source_page.number, source_page.embedded, source_page.image_path)
-    blocks, audit, attempts = select_candidates(blocks, candidates, inventory, source_page.embedded)
+    align = alignment_cache(source_page.embedded)
+    blocks, audit, attempts = select_candidates(blocks, candidates, inventory, source_page.embedded,
+                                                align=align)
     recognize = getattr(backend, "recognize_detail", None)
     if bundle is not None:
         cache = Path(bundle) / "region-observations"
@@ -89,7 +132,8 @@ def recover_regions(source_page, blocks, candidates, *, backend=None, bundle=Non
                     continue
                 if "raw" in value:
                     blocks, audit, tried = select_candidates(
-                        blocks, [_crop_observation(value)], inventory, source_page.embedded)
+                        blocks, [_crop_observation(value)], inventory, source_page.embedded,
+                        align=align)
                     attempts.extend({**item, "cache": str(path.relative_to(bundle))} for item in tried)
                 else:
                     attempts.append({"cache": str(path.relative_to(bundle)), "accepted": False,
@@ -143,7 +187,7 @@ def recover_regions(source_page, blocks, candidates, *, backend=None, bundle=Non
                 if "raw" in value:
                     observation = _crop_observation(value)
                     blocks, audit, tried = select_candidates(
-                        blocks, [observation], inventory, source_page.embedded)
+                        blocks, [observation], inventory, source_page.embedded, align=align)
                     attempts.extend({**item, "cache": str(path.relative_to(bundle))} for item in tried)
                 else:
                     attempts.append({"cache": path.name, "accepted": False, "error": value["error"]})
