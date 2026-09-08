@@ -17,6 +17,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published var lastManifest: URL?
     @Published var recoverableFiles: [URL] = []
+    @Published private(set) var recoveryInProgress = false
+    @Published private(set) var recoveryError: String?
+    @Published private(set) var finalizationsInProgress = 0
+    @Published private(set) var activeOutputClients: [AudioClient] = []
     let capture = CaptureCoordinator()
 
     private let monitor = AudioActivityMonitor()
@@ -38,7 +42,6 @@ final class AppModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        AccessibilityMetadataProvider.requestAccess()
         recoverableFiles = capture.recoverableFiles()
         guard screenRecordingPermissionGranted(prompt: true) else {
             requireScreenRecordingPermission()
@@ -51,6 +54,10 @@ final class AppModel: ObservableObject {
 
     func manualStart() {
         let client = AudioClient(audioObjectID: 0, processID: 0, bundleID: nil, applicationName: "Manual recording", inputDevices: [])
+        beginRecording(client, method: .manual)
+    }
+
+    func manualStart(client: AudioClient) {
         beginRecording(client, method: .manual)
     }
 
@@ -78,7 +85,11 @@ final class AppModel: ObservableObject {
         guard case .recording = state else { return }
         state = .finalizing
         Task {
-            do { lastManifest = try await capture.stop(); recoverableFiles = capture.recoverableFiles(); state = .idle }
+            do {
+                let request = try await capture.stop()
+                state = .idle
+                finalizeInBackground(request)
+            }
             catch {
                 recoverableFiles = capture.recoverableFiles()
                 state = .error(error.localizedDescription)
@@ -94,16 +105,46 @@ final class AppModel: ObservableObject {
     }
 
     func recoverInterruptedRecordings() {
-        state = .finalizing
+        guard Self.allowsMaintenance(in: state), !recoveryInProgress,
+              let interruptedFile = recoverableFiles.first else { return }
+        recoveryInProgress = true
+        recoveryError = nil
         Task {
             do {
-                lastManifest = try await capture.recoverInterruptedRecordings()
+                lastManifest = try await capture.recoverInterruptedRecording(interruptedFile)
                 recoverableFiles = capture.recoverableFiles()
-                state = .idle
             } catch {
                 recoverableFiles = capture.recoverableFiles()
-                state = .error(error.localizedDescription)
+                recoveryError = error.localizedDescription
             }
+            recoveryInProgress = false
+        }
+    }
+
+    var showsMaintenance: Bool { Self.allowsMaintenance(in: state) }
+
+    var allowsTermination: Bool {
+        switch state {
+        case .idle, .permissionRequired, .error: true
+        case .detecting, .countdown, .recording, .finalizing: false
+        }
+    }
+
+    static func allowsMaintenance(in state: State) -> Bool {
+        if case .idle = state { return true }
+        return false
+    }
+
+    private func finalizeInBackground(_ request: FinalizeCaptureRequest) {
+        finalizationsInProgress += 1
+        Task {
+            do {
+                if let manifest = try await capture.finalize(request) { lastManifest = manifest }
+            } catch {
+                recoveryError = error.localizedDescription
+            }
+            finalizationsInProgress -= 1
+            recoverableFiles = capture.recoverableFiles()
         }
     }
 
@@ -200,6 +241,9 @@ final class AppModel: ObservableObject {
     private func startMonitoring() {
         permissionTimer?.invalidate(); permissionTimer = nil
         monitor.onClientsChanged = { [weak self] clients in self?.handle(clients) }
+        monitor.onOutputClientsChanged = { [weak self] clients in
+            self?.activeOutputClients = clients
+        }
         state = .idle
         monitor.start()
     }

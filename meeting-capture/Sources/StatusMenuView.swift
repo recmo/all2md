@@ -15,6 +15,14 @@ struct StatusMenuView: View {
             case .idle:
                 Label("Watching microphone activity", systemImage: "mic")
                 Button("Start recording manually") { model.manualStart() }
+                if !model.activeOutputClients.isEmpty {
+                    Text("Active audio applications").font(.caption).foregroundStyle(.secondary)
+                    ForEach(model.activeOutputClients) { client in
+                        Button("Record \(client.applicationName)") {
+                            model.manualStart(client: client)
+                        }
+                    }
+                }
             case let .detecting(client, _):
                 Label("Checking \(client.applicationName)…", systemImage: "waveform")
                 Text(client.inputDeviceSummary).font(.caption).foregroundStyle(.secondary)
@@ -48,13 +56,26 @@ struct StatusMenuView: View {
                 Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Button("Dismiss") { model.dismissError() }
             }
-            if model.lastManifest != nil { Button("Reveal last recording") { model.revealLastRecording() } }
-            if !model.recoverableFiles.isEmpty {
-                Text("\(model.recoverableFiles.count) interrupted recording file(s) need recovery").font(.caption).foregroundStyle(.orange)
-                Button("Recover interrupted recording") { model.recoverInterruptedRecordings() }
+            if model.showsMaintenance {
+                if model.lastManifest != nil { Button("Reveal last recording") { model.revealLastRecording() } }
+                if model.finalizationsInProgress > 0 {
+                    ProgressView("Finalizing \(model.finalizationsInProgress) recording(s) in isolated workers…")
+                }
+                if !model.recoverableFiles.isEmpty {
+                    Text("\(model.recoverableFiles.count) interrupted recording file(s) need recovery").font(.caption).foregroundStyle(.orange)
+                    if model.recoveryInProgress {
+                        ProgressView("Recovering in an isolated worker…")
+                    } else {
+                        Button("Recover interrupted recording") { model.recoverInterruptedRecordings() }
+                    }
+                }
+                if let recoveryError = model.recoveryError {
+                    Text(recoveryError).font(.caption).foregroundStyle(.orange)
+                }
             }
             Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }
+                .disabled(!model.allowsTermination)
         }
         .padding(14)
         .frame(width: 320)

@@ -54,14 +54,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         configuration.channelCount = 2
 
         let writer = try AVAssetWriter(outputURL: url, fileType: .caf)
-        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 2,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: false,
-        ])
+        let input = try Self.makeWriterInput()
         input.expectsMediaDataInRealTime = true
         guard writer.canAdd(input) else { throw CaptureError.writerFailure("cannot add PCM input") }
         writer.add(input)
@@ -75,6 +68,43 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
         self.stream = stream
         try await stream.startCapture()
+    }
+
+    static func makeWriterInput() throws -> AVAssetWriterInput {
+        // ScreenCaptureKit already delivers PCM. Passing an explicit PCM output
+        // dictionary aborts in AVAssetWriterInput on macOS 26.6; passthrough
+        // preserves the sample-buffer format and keeps capture initialization safe.
+        // Passthrough requires a source hint before a CAF writer will accept it.
+        var streamDescription = AudioStreamBasicDescription(
+            mSampleRate: 48_000,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagsNativeFloatPacked,
+            mBytesPerPacket: 8,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 8,
+            mChannelsPerFrame: 2,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+        var formatDescription: CMAudioFormatDescription?
+        let status = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &streamDescription,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &formatDescription
+        )
+        guard status == noErr, let formatDescription else {
+            throw CaptureError.writerFailure("could not create PCM source format hint (\(status))")
+        }
+        return AVAssetWriterInput(
+            mediaType: .audio,
+            outputSettings: nil,
+            sourceFormatHint: formatDescription
+        )
     }
 
     static func matchingApplicationIndex(

@@ -1,9 +1,19 @@
 import Foundation
 import AVFoundation
+import Darwin
 import XCTest
 @testable import MeetingCapture
 
 final class MeetingStoreTests: XCTestCase {
+    func testSystemAudioWriterInputUsesSafePassthroughConstruction() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = try AVAssetWriter(outputURL: root, fileType: .caf)
+        let input = try SystemAudioRecorder.makeWriterInput()
+        XCTAssertEqual(input.mediaType, .audio)
+        XCTAssertTrue(writer.canAdd(input))
+    }
+
     func testAccessibilityTreeDiffRecordsAddedRemovedAndChangedAttributes() {
         let before = [
             AccessibilitySnapshotNode(path: "0", attributes: ["AXRole": "AXApplication"]),
@@ -165,6 +175,50 @@ final class MeetingStoreTests: XCTestCase {
         )
         XCTAssertEqual(retried.tracks.count, 2)
         XCTAssertTrue(FileManager.default.fileExists(atPath: final.path))
+    }
+
+    func testRecoveryRejectsHeaderOnlyAudio() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let empty = root.appending(path: ".fixture-microphone.part.caf")
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        _ = try AVAudioFile(forWriting: empty, settings: format.settings)
+
+        let segments = try AudioFinalizer.recoveredSegments(from: [empty], startedAt: Date())
+
+        XCTAssertTrue(segments.isEmpty)
+    }
+
+    @MainActor
+    func testMaintenanceCannotStartDuringCaptureCriticalStates() {
+        let client = AudioClient(
+            audioObjectID: 1,
+            processID: 42,
+            bundleID: "fixture.meeting",
+            applicationName: "Fixture",
+            inputDevices: []
+        )
+        XCTAssertTrue(AppModel.allowsMaintenance(in: .idle))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .detecting(client, since: Date())))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .countdown(client, remaining: 5)))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .recording(client)))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .finalizing))
+    }
+
+    func testWorkerSegfaultDoesNotCrashHost() async throws {
+        let worker = try BackgroundWorkerClient()
+        do {
+            try await worker.verifyCrashIsolation()
+            XCTFail("The crash-test worker unexpectedly succeeded")
+        } catch let error as BackgroundWorkerError {
+            guard case let .crashed(command, reason, status) = error else {
+                return XCTFail("Unexpected worker error: \(error)")
+            }
+            XCTAssertEqual(command, "crash-test")
+            XCTAssertEqual(reason, .uncaughtSignal)
+            XCTAssertEqual(status, SIGSEGV)
+        }
     }
 
     func testProcessResolverWalksFromBrowserHelperToOwningApplication() throws {

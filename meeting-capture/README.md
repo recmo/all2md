@@ -59,8 +59,16 @@ Accessibility remains optional and only enriches metadata.
   publishes the archive, records its SHA-256 in the v2 manifest, and only then
   deletes the temporary PCM files. A failed finalization leaves the PCM files
   available for recovery.
+- Finalization, verification, hashing, manifest publication, interrupted-file
+  recovery, and optional Accessibility probing run in dedicated worker
+  processes. A worker crash or hang cannot terminate the recorder or replace
+  its live state. Stopping a recording returns the app to monitoring before
+  deferred finalization finishes.
 - Interrupted CAF chunks are discovered at launch and can be recovered from
-  the menu.
+  the menu only while idle. Recovery remains a secondary maintenance status;
+  it cannot replace detection, countdown, or recording state. Header-only CAF
+  files are preserved with an `.unrecoverable.caf` suffix rather than retried
+  forever.
 - Generic Accessibility inspection currently contributes the focused window
   title when permission is available; it never gates recording.
 - Every attributed recording also starts a generic Accessibility probe for the

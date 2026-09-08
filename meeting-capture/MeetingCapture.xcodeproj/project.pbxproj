@@ -10,23 +10,41 @@
 		1374A3296BCB527EEE34A8CE /* AccessibilityMetadataProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E18E979B02A5E440D77924E /* AccessibilityMetadataProvider.swift */; };
 		1739D94D26118EB78B1B7598 /* StatusMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B4163AE64E3D7D074701FCC /* StatusMenuView.swift */; };
 		26E88B9365440C1A0EBB2401 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 57DBAADC234A81C14B254516 /* Assets.xcassets */; };
+		2D59519F48B87E454D3B0AC3 /* WorkerOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8726A34195979C1FB0BE6B8E /* WorkerOperations.swift */; };
 		43A142377BBAB3FFF1CF36C7 /* AudioActivityMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0749EA236967FF20E57AD97C /* AudioActivityMonitor.swift */; };
 		4881C700096CF7591E632C13 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A006FF91C37787A13A91D93 /* AppModel.swift */; };
 		57C53F2F4C8D282D446ABC56 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41B7AE97EC372C0BD54E18DE /* Models.swift */; };
+		607376059C58718079CC2226 /* BackgroundWorkerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09C5FA6A2A2354EDD730FF13 /* BackgroundWorkerProtocol.swift */; };
+		621DC59197140E2FDF32FB60 /* CaptureError.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEC9B13E6CBFE8197D1A3EB6 /* CaptureError.swift */; };
+		669B5E1BC90BDC1C302CB913 /* AccessibilityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AB53E4134566DDE24B64A51 /* AccessibilityProbe.swift */; };
 		6CD35CB1AC21DC4CC793A39B /* HUDLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE8B5C5A6EACD14D4A820C38 /* HUDLayoutTests.swift */; };
 		747A9206C742279295390E27 /* MeetingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2E0E7DD1BC627C8D91E34AF /* MeetingStore.swift */; };
 		7864B4E13F70DD2709A6661E /* MeetingCaptureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18DD35ED00ADD46EF006D7B6 /* MeetingCaptureApp.swift */; };
+		7DFD55521B20CC83BDFD4E77 /* BackgroundWorkerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09C5FA6A2A2354EDD730FF13 /* BackgroundWorkerProtocol.swift */; };
 		82D3DE9DB4907F04E9D9FCEB /* manifest-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = C24D5A489742BE085F4C29D9 /* manifest-v1.json */; };
 		8A690EA36CA84061000E9065 /* MeetingStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 520E01FDA0F33C14B50F579C /* MeetingStoreTests.swift */; };
 		8D2D9A51832F876CACD8ABB4 /* AudioFinalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD57CB2B550A57193DEDA1E0 /* AudioFinalizer.swift */; };
 		9B5125CE45C59978F8237FDE /* HUDController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2501C526AE496B370359ED3D /* HUDController.swift */; };
+		A47BC3AB6B3D9F9891F65C20 /* MeetingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2E0E7DD1BC627C8D91E34AF /* MeetingStore.swift */; };
+		AAD82767DC99767A048A0014 /* AudioFinalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD57CB2B550A57193DEDA1E0 /* AudioFinalizer.swift */; };
+		B445F638C352EA3CF3915633 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41B7AE97EC372C0BD54E18DE /* Models.swift */; };
 		B736CB6ED892BDC10F34741D /* SystemAudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2608D5C2FB518BB4AD82371 /* SystemAudioRecorder.swift */; };
+		BC64EA075084EC920F999962 /* CaptureError.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEC9B13E6CBFE8197D1A3EB6 /* CaptureError.swift */; };
 		C69865E1976D7DDD1827CDB1 /* CaptureCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 004F3D933EA6D6CF314F97D7 /* CaptureCoordinator.swift */; };
 		D9197EFC5DB36BB70A927D26 /* AccessibilityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AB53E4134566DDE24B64A51 /* AccessibilityProbe.swift */; };
 		DDE6096767048E8EE5BFFF8F /* MicrophoneRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C58BFDACDA8AEB550897A658 /* MicrophoneRecorder.swift */; };
+		F75B6EE9C18C19AAF538E84D /* BackgroundWorkerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E47FE754D884F4C611E2CE50 /* BackgroundWorkerClient.swift */; };
+		F8C61EDBB06F92FEF7669D97 /* MeetingCaptureWorker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94FC96EECAF8CF827F8D199E /* MeetingCaptureWorker.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		271A8E5F5D001BAF5650A83B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F1FE80554FDAE9E2B8EFFD4D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 38F2349BB08D8AF55D32FAE8;
+			remoteInfo = MeetingCaptureWorker;
+		};
 		33A2717C1E7150A90206AEA5 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = F1FE80554FDAE9E2B8EFFD4D /* Project object */;
@@ -34,11 +52,19 @@
 			remoteGlobalIDString = 94681A3FDD16295FE80F0BE7;
 			remoteInfo = MeetingCapture;
 		};
+		B051746BA7604F92070C9370 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F1FE80554FDAE9E2B8EFFD4D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 38F2349BB08D8AF55D32FAE8;
+			remoteInfo = MeetingCaptureWorker;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		004F3D933EA6D6CF314F97D7 /* CaptureCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureCoordinator.swift; sourceTree = "<group>"; };
 		0749EA236967FF20E57AD97C /* AudioActivityMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioActivityMonitor.swift; sourceTree = "<group>"; };
+		09C5FA6A2A2354EDD730FF13 /* BackgroundWorkerProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundWorkerProtocol.swift; sourceTree = "<group>"; };
 		18DD35ED00ADD46EF006D7B6 /* MeetingCaptureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingCaptureApp.swift; sourceTree = "<group>"; };
 		2501C526AE496B370359ED3D /* HUDController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDController.swift; sourceTree = "<group>"; };
 		2B4163AE64E3D7D074701FCC /* StatusMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMenuView.swift; sourceTree = "<group>"; };
@@ -47,14 +73,19 @@
 		57DBAADC234A81C14B254516 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5A006FF91C37787A13A91D93 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		5AB53E4134566DDE24B64A51 /* AccessibilityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityProbe.swift; sourceTree = "<group>"; };
+		83AF6C5365A6C9A4865EAEA6 /* MeetingCaptureWorker */ = {isa = PBXFileReference; includeInIndex = 0; path = MeetingCaptureWorker; sourceTree = BUILT_PRODUCTS_DIR; };
+		8726A34195979C1FB0BE6B8E /* WorkerOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkerOperations.swift; sourceTree = "<group>"; };
 		8E18E979B02A5E440D77924E /* AccessibilityMetadataProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityMetadataProvider.swift; sourceTree = "<group>"; };
+		94FC96EECAF8CF827F8D199E /* MeetingCaptureWorker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingCaptureWorker.swift; sourceTree = "<group>"; };
 		995FD8FEA245DBB08333993E /* MeetingCaptureTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeetingCaptureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2608D5C2FB518BB4AD82371 /* SystemAudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioRecorder.swift; sourceTree = "<group>"; };
 		BD57CB2B550A57193DEDA1E0 /* AudioFinalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioFinalizer.swift; sourceTree = "<group>"; };
 		C24D5A489742BE085F4C29D9 /* manifest-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "manifest-v1.json"; sourceTree = "<group>"; };
 		C58BFDACDA8AEB550897A658 /* MicrophoneRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneRecorder.swift; sourceTree = "<group>"; };
 		CE8B5C5A6EACD14D4A820C38 /* HUDLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDLayoutTests.swift; sourceTree = "<group>"; };
+		CEC9B13E6CBFE8197D1A3EB6 /* CaptureError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureError.swift; sourceTree = "<group>"; };
 		E2E0E7DD1BC627C8D91E34AF /* MeetingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingStore.swift; sourceTree = "<group>"; };
+		E47FE754D884F4C611E2CE50 /* BackgroundWorkerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundWorkerClient.swift; sourceTree = "<group>"; };
 		FAF9F6DA2537AD5632D6FF77 /* MeetingCapture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MeetingCapture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -77,6 +108,23 @@
 			path = Tests;
 			sourceTree = "<group>";
 		};
+		A9804196DA98ADA255906DF5 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				09C5FA6A2A2354EDD730FF13 /* BackgroundWorkerProtocol.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		D52B6A051A477F0FF8FB57F4 /* Worker */ = {
+			isa = PBXGroup;
+			children = (
+				94FC96EECAF8CF827F8D199E /* MeetingCaptureWorker.swift */,
+				8726A34195979C1FB0BE6B8E /* WorkerOperations.swift */,
+			);
+			path = Worker;
+			sourceTree = "<group>";
+		};
 		DCDDE480F4E5DFF73E71C77B /* Sources */ = {
 			isa = PBXGroup;
 			children = (
@@ -85,7 +133,9 @@
 				5A006FF91C37787A13A91D93 /* AppModel.swift */,
 				0749EA236967FF20E57AD97C /* AudioActivityMonitor.swift */,
 				BD57CB2B550A57193DEDA1E0 /* AudioFinalizer.swift */,
+				E47FE754D884F4C611E2CE50 /* BackgroundWorkerClient.swift */,
 				004F3D933EA6D6CF314F97D7 /* CaptureCoordinator.swift */,
+				CEC9B13E6CBFE8197D1A3EB6 /* CaptureError.swift */,
 				2501C526AE496B370359ED3D /* HUDController.swift */,
 				18DD35ED00ADD46EF006D7B6 /* MeetingCaptureApp.swift */,
 				E2E0E7DD1BC627C8D91E34AF /* MeetingStore.swift */,
@@ -101,8 +151,10 @@
 			isa = PBXGroup;
 			children = (
 				57DBAADC234A81C14B254516 /* Assets.xcassets */,
+				A9804196DA98ADA255906DF5 /* Shared */,
 				DCDDE480F4E5DFF73E71C77B /* Sources */,
 				9FC750F119896C2558B7FB16 /* Tests */,
+				D52B6A051A477F0FF8FB57F4 /* Worker */,
 				F60852B1E7101E2172ABBE82 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -112,6 +164,7 @@
 			children = (
 				FAF9F6DA2537AD5632D6FF77 /* MeetingCapture.app */,
 				995FD8FEA245DBB08333993E /* MeetingCaptureTests.xctest */,
+				83AF6C5365A6C9A4865EAEA6 /* MeetingCaptureWorker */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -119,16 +172,35 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		38F2349BB08D8AF55D32FAE8 /* MeetingCaptureWorker */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A9C63B3333A42B4348AC3779 /* Build configuration list for PBXNativeTarget "MeetingCaptureWorker" */;
+			buildPhases = (
+				76FE290747527EE9A9C053FB /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MeetingCaptureWorker;
+			packageProductDependencies = (
+			);
+			productName = MeetingCaptureWorker;
+			productReference = 83AF6C5365A6C9A4865EAEA6 /* MeetingCaptureWorker */;
+			productType = "com.apple.product-type.tool";
+		};
 		94681A3FDD16295FE80F0BE7 /* MeetingCapture */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 5D220AE94C8C8055BCBAD5E7 /* Build configuration list for PBXNativeTarget "MeetingCapture" */;
 			buildPhases = (
 				F79BED16100AB08D3420D6DF /* Sources */,
 				1ADC3015FC9678AD682E987B /* Resources */,
+				27111F7F46C49764930EB6DA /* Embed background worker */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				5A336D9E19FB8EB0ED8FEFF7 /* PBXTargetDependency */,
 			);
 			name = MeetingCapture;
 			packageProductDependencies = (
@@ -148,6 +220,7 @@
 			);
 			dependencies = (
 				73F4EFCAFD2B3AE2DBD0BA6F /* PBXTargetDependency */,
+				E315322AFFA7EDE1AC7BBCCA /* PBXTargetDependency */,
 			);
 			name = MeetingCaptureTests;
 			packageProductDependencies = (
@@ -165,6 +238,10 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					38F2349BB08D8AF55D32FAE8 = {
+						DevelopmentTeam = V458N7266F;
+						ProvisioningStyle = Automatic;
+					};
 					94681A3FDD16295FE80F0BE7 = {
 						DevelopmentTeam = V458N7266F;
 						ProvisioningStyle = Automatic;
@@ -191,6 +268,7 @@
 			targets = (
 				94681A3FDD16295FE80F0BE7 /* MeetingCapture */,
 				A99F52864255EDC0309DD127 /* MeetingCaptureTests */,
+				38F2349BB08D8AF55D32FAE8 /* MeetingCaptureWorker */,
 			);
 		};
 /* End PBXProject section */
@@ -214,7 +292,45 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		27111F7F46C49764930EB6DA /* Embed background worker */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/MeetingCaptureWorker",
+			);
+			name = "Embed background worker";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/MeetingCaptureWorker",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "helper_dir=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nmkdir -p \"$helper_dir\"\ncp \"$BUILT_PRODUCTS_DIR/MeetingCaptureWorker\" \"$helper_dir/MeetingCaptureWorker\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
+		76FE290747527EE9A9C053FB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				669B5E1BC90BDC1C302CB913 /* AccessibilityProbe.swift in Sources */,
+				AAD82767DC99767A048A0014 /* AudioFinalizer.swift in Sources */,
+				7DFD55521B20CC83BDFD4E77 /* BackgroundWorkerProtocol.swift in Sources */,
+				BC64EA075084EC920F999962 /* CaptureError.swift in Sources */,
+				F8C61EDBB06F92FEF7669D97 /* MeetingCaptureWorker.swift in Sources */,
+				A47BC3AB6B3D9F9891F65C20 /* MeetingStore.swift in Sources */,
+				B445F638C352EA3CF3915633 /* Models.swift in Sources */,
+				2D59519F48B87E454D3B0AC3 /* WorkerOperations.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		D531C7B89097CC246EAC99FF /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -233,7 +349,10 @@
 				4881C700096CF7591E632C13 /* AppModel.swift in Sources */,
 				43A142377BBAB3FFF1CF36C7 /* AudioActivityMonitor.swift in Sources */,
 				8D2D9A51832F876CACD8ABB4 /* AudioFinalizer.swift in Sources */,
+				F75B6EE9C18C19AAF538E84D /* BackgroundWorkerClient.swift in Sources */,
+				607376059C58718079CC2226 /* BackgroundWorkerProtocol.swift in Sources */,
 				C69865E1976D7DDD1827CDB1 /* CaptureCoordinator.swift in Sources */,
+				621DC59197140E2FDF32FB60 /* CaptureError.swift in Sources */,
 				9B5125CE45C59978F8237FDE /* HUDController.swift in Sources */,
 				7864B4E13F70DD2709A6661E /* MeetingCaptureApp.swift in Sources */,
 				747A9206C742279295390E27 /* MeetingStore.swift in Sources */,
@@ -247,10 +366,20 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		5A336D9E19FB8EB0ED8FEFF7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 38F2349BB08D8AF55D32FAE8 /* MeetingCaptureWorker */;
+			targetProxy = 271A8E5F5D001BAF5650A83B /* PBXContainerItemProxy */;
+		};
 		73F4EFCAFD2B3AE2DBD0BA6F /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 94681A3FDD16295FE80F0BE7 /* MeetingCapture */;
 			targetProxy = 33A2717C1E7150A90206AEA5 /* PBXContainerItemProxy */;
+		};
+		E315322AFFA7EDE1AC7BBCCA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 38F2349BB08D8AF55D32FAE8 /* MeetingCaptureWorker */;
+			targetProxy = B051746BA7604F92070C9370 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -349,6 +478,34 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = ventures.wicked.MeetingCapture;
 				PRODUCT_NAME = MeetingCapture;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		93BD0795F167F6A1E35F5221 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ventures.wicked.MeetingCapture.worker;
+				PRODUCT_NAME = MeetingCaptureWorker;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		99BA251448108D76B7249542 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ventures.wicked.MeetingCapture.worker;
+				PRODUCT_NAME = MeetingCaptureWorker;
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -475,6 +632,15 @@
 			buildConfigurations = (
 				C89866A6C642979AF684D9C5 /* Debug */,
 				8B71AE480F82EF1BE0DE23EF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A9C63B3333A42B4348AC3779 /* Build configuration list for PBXNativeTarget "MeetingCaptureWorker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				93BD0795F167F6A1E35F5221 /* Debug */,
+				99BA251448108D76B7249542 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
