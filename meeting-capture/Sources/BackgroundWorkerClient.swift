@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum BackgroundWorkerError: LocalizedError {
     case unavailable
@@ -40,6 +41,14 @@ struct BackgroundWorkerClient: Sendable {
         return result.manifest
     }
 
+    func checkAccess(_ request: WorkerAccessRequest) async throws -> WorkerAccessReport {
+        try await run(command: "check-access", request: request)
+    }
+
+    func checkMetadataAccess(_ request: WorkerAccessRequest) async throws -> WorkerAccessReport {
+        try await run(command: "check-metadata-access", request: request, timeout: 5)
+    }
+
     func recover(_ request: RecoverCaptureRequest) async throws -> URL? {
         let result: WorkerManifestResult = try await run(command: "recover", request: request)
         return result.manifest
@@ -79,7 +88,7 @@ struct BackgroundWorkerClient: Sendable {
         return handle
     }
 
-    private func run<Request: Encodable, Value: Codable>(command: String, request: Request) async throws -> Value {
+    private func run<Request: Encodable, Value: Codable>(command: String, request: Request, timeout: TimeInterval? = nil) async throws -> Value {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "MeetingCaptureWorker-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -89,7 +98,8 @@ struct BackgroundWorkerClient: Sendable {
         let invocation = WorkerInvocation(
             executableURL: executableURL,
             arguments: [command, requestURL.path, responseURL.path],
-            responseURL: responseURL
+            responseURL: responseURL,
+            timeout: timeout
         )
         defer { try? FileManager.default.removeItem(at: directory) }
         let data = try await Task.detached { try invocation.execute() }.value
@@ -105,6 +115,7 @@ private struct WorkerInvocation: Sendable {
     let executableURL: URL
     let arguments: [String]
     let responseURL: URL?
+    var timeout: TimeInterval? = nil
 
     func execute() throws -> Data? {
         let process = Process()
@@ -116,6 +127,16 @@ private struct WorkerInvocation: Sendable {
         process.standardError = errorPipe
         do { try process.run() }
         catch { throw BackgroundWorkerError.launch(error.localizedDescription) }
+        if let timeout {
+            let deadline = ProcessInfo.processInfo.systemUptime + timeout
+            while process.isRunning, ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.02) }
+            if process.isRunning {
+                // This is our own, still-unreaped child, so its PID cannot be reused.
+                kill(process.processIdentifier, SIGKILL)
+                process.waitUntilExit()
+                throw BackgroundWorkerError.operation("Optional metadata permission check timed out.")
+            }
+        }
         process.waitUntilExit()
         let standardError = errorPipe.fileHandleForReading.readDataToEndOfFile()
         guard process.terminationStatus == 0 else {

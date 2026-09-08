@@ -4,6 +4,7 @@ import Foundation
 
 struct StartupCaptureReport: Equatable, Sendable {
     let systemAudioObserved: Bool
+    var accessibility: String = "Accessibility: not checked."
 }
 
 @MainActor
@@ -21,7 +22,7 @@ enum StartupCaptureCheck {
             throw CaptureError.screenRecordingPermissionRequired
         }
         try validateStorage(MeetingStore().root)
-        _ = try BackgroundWorkerClient()
+        let worker = try BackgroundWorkerClient()
 
         // Exercise the same recording implementations and TCC identity as live
         // capture. These files never enter the meeting store or recovery queue.
@@ -48,7 +49,15 @@ enum StartupCaptureCheck {
                     throw CaptureError.writerFailure("The system-audio check received samples but could not save them. Retry the check.")
                 }
             }
-            return StartupCaptureReport(systemAudioObserved: observed)
+            let request = WorkerAccessRequest(
+                root: MeetingStore().root, microphone: microphoneURL,
+                applicationProcessID: ProcessInfo.processInfo.processIdentifier
+            )
+            _ = try await worker.checkAccess(request)
+            let accessibility: String
+            do { accessibility = try await worker.checkMetadataAccess(request).accessibility }
+            catch { accessibility = "Accessibility: optional check failed. \(error.localizedDescription)" }
+            return StartupCaptureReport(systemAudioObserved: observed, accessibility: accessibility)
         } catch {
             _ = microphone.stop()
             try? await system.stop()

@@ -5,6 +5,33 @@ import XCTest
 @testable import MeetingCapture
 
 final class MeetingStoreTests: XCTestCase {
+    func testWorkerAccessCheckProcessesAppAudioAndCleansArtifacts() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let microphone = root.appending(path: "test.caf")
+        try writeTone(to: microphone, sampleRate: 48_000, channels: 1, duration: 0.1)
+        let original = try Data(contentsOf: microphone)
+        let worker = try BackgroundWorkerClient()
+        let report = try await worker.checkAccess(WorkerAccessRequest(
+            root: root, microphone: microphone,
+            applicationProcessID: ProcessInfo.processInfo.processIdentifier
+        ))
+        XCTAssertTrue(report.accessibility.hasPrefix("Accessibility:"))
+        let metadata = try await worker.checkMetadataAccess(WorkerAccessRequest(
+            root: root, microphone: microphone, applicationProcessID: ProcessInfo.processInfo.processIdentifier
+        ))
+        XCTAssertTrue(metadata.accessibility.hasPrefix("Accessibility:"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["test.caf"])
+        XCTAssertEqual(try Data(contentsOf: microphone), original)
+        do {
+            _ = try await worker.checkAccess(WorkerAccessRequest(root: microphone, microphone: microphone,
+                                                               applicationProcessID: ProcessInfo.processInfo.processIdentifier))
+            XCTFail("Worker must reject an unusable meeting directory")
+        } catch {}
+        XCTAssertEqual(try Data(contentsOf: microphone), original)
+    }
+
     @MainActor
     func testStartupCheckGatesRecordingAndCanRetry() async throws {
         var attempts = 0

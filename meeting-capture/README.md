@@ -37,6 +37,21 @@ system, the menu explicitly reports that access was authorized but no system
 audio was observed; play audio and rerun the check to verify sample delivery.
 Test audio is deleted and never appears among meetings or recovery files.
 
+The startup check also asks the actual worker to read the disposable audio and
+create, verify, hash, rename, and delete a small archive under the meeting folder.
+This exercises worker folder access and its ffmpeg/ffprobe subprocesses. The same
+worker checks Accessibility trust without prompting and, when authorized, tries
+an Accessibility read and observer creation against the app. The menu reports
+the optional metadata check separately; a target meeting app can still expose
+different Accessibility capabilities.
+
+The permission inventory is Microphone, Screen & System Audio Recording,
+Documents access under Files & Folders, and optional Accessibility. The current
+implementation does not use Camera, Input Monitoring, Automation/Apple Events,
+Calendar, Contacts, or notification authorization, and does not require Full
+Disk Access. The audio-input signing entitlement is included in the app package;
+the real microphone probe exercises that capability as well as user consent.
+
 Failures keep recording disabled and expose Settings links and an explicit Retry
 action. macOS may require quitting and reopening the installed app after a grant.
 Permission rechecks cannot run during capture, countdown, or detection. Optional

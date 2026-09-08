@@ -1,7 +1,58 @@
 import Darwin
 import Foundation
+import AVFoundation
+import ApplicationServices
 
 enum WorkerOperations {
+    static func checkAccess(_ request: WorkerAccessRequest) throws -> WorkerAccessReport {
+        // Check the worker's access to app-created audio and the meeting folder.
+        // A successful parent-process write does not verify this execution path.
+        _ = try FileManager.default.contentsOfDirectory(at: request.root, includingPropertiesForKeys: nil)
+        let directory = request.root.appending(path: ".worker-check-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = try AVAudioFile(forReading: request.microphone)
+        guard input.length > 0, input.processingFormat.sampleRate > 0 else {
+            throw CaptureError.writerFailure("Worker could not read the startup recording")
+        }
+        let start = Date()
+        let end = start.addingTimeInterval(Double(input.length) / input.processingFormat.sampleRate)
+        let archive = try AudioFinalizer.createArchive(
+            microphoneSegments: [CapturedAudioSegment(url: request.microphone, startedAt: start, endedAt: end)],
+            participants: nil, participantsStartedAt: nil,
+            captureStartedAt: start, captureEndedAt: end,
+            temporaryDestination: directory.appending(path: "test.part.mka"),
+            finalDestination: directory.appending(path: "test.mka")
+        )
+        guard archive.tracks.count == 1 else { throw CaptureError.writerFailure("Worker archive check failed") }
+        try FileManager.default.removeItem(at: directory)
+        return WorkerAccessReport(accessibility: "Accessibility: not checked.")
+    }
+
+    static func checkMetadataAccess(_ request: WorkerAccessRequest) -> WorkerAccessReport {
+        WorkerAccessReport(accessibility: checkAccessibility(processID: request.applicationProcessID))
+    }
+
+    private static func checkAccessibility(processID: Int32) -> String {
+        guard AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": false] as CFDictionary) else {
+            return "Accessibility: not granted to the metadata worker (optional)."
+        }
+        let application = AXUIElementCreateApplication(processID)
+        AXUIElementSetMessagingTimeout(application, 1)
+        var role: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(application, kAXRoleAttribute as CFString, &role)
+        guard result == .success, role != nil else {
+            return "Accessibility: authorized, but reading the app could not be verified (\(result.rawValue))."
+        }
+        var observer: AXObserver?
+        let observed = AXObserverCreate(processID, { _, _, _, _ in }, &observer)
+        guard observed == .success, observer != nil else {
+            return "Accessibility: reads verified, but observing the app failed (\(observed.rawValue))."
+        }
+        return "Accessibility: metadata worker read and observer checks passed."
+    }
+
     static func finalize(_ request: FinalizeCaptureRequest) throws -> WorkerManifestResult {
         let claim = try RecordingClaim(request.paths)
         defer { withExtendedLifetime(claim) {} }

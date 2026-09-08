@@ -1,5 +1,15 @@
 import Foundation
 
+struct WorkerAccessRequest: Codable, Sendable {
+    let root: URL
+    let microphone: URL
+    let applicationProcessID: Int32
+}
+
+struct WorkerAccessReport: Codable, Equatable, Sendable {
+    let accessibility: String
+}
+
 struct FinalizeCaptureRequest: Codable, Sendable {
     let microphoneSegments: [CapturedAudioSegment]
     let participants: URL?

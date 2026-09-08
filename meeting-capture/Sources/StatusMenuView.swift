@@ -19,6 +19,10 @@ struct StatusMenuView: View {
                          ? "Startup recording check passed"
                          : "Microphone verified; system capture authorized. No system audio was observed during the check.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Text("App and worker storage / archive checks passed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(report.accessibility).font(.caption).foregroundStyle(.secondary)
+                    Button("Accessibility Settings (optional)") { model.openAccessibilitySettings() }
                 }
                 Button("Check recording access again") { model.checkPermissions() }
                 Button("Start recording manually") { model.manualStart() }
@@ -65,6 +69,7 @@ struct StatusMenuView: View {
                     .foregroundStyle(.secondary)
                 Button("Open Screen & System Audio Settings") { model.openScreenRecordingSettings() }
                 Button("Open Microphone Settings") { model.openMicrophoneSettings() }
+                Button("Open Files & Folders Settings") { model.openFilesSettings() }
                 Button("Retry recording check") { model.checkPermissions() }
             case let .error(message):
                 Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
