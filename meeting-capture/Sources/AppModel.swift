@@ -29,6 +29,7 @@ final class AppModel: ObservableObject {
     private var permissionTimer: Timer?
     private var ignoredUntil: [String: Date] = [:]
     private var started = false
+    private var recordingMethod: TriggerMethod = .audioProcess
 
     var statusIcon: String {
         switch state {
@@ -83,6 +84,7 @@ final class AppModel: ObservableObject {
 
     func stopRecording() {
         guard case .recording = state else { return }
+        stopTask?.cancel(); stopTask = nil
         state = .finalizing
         Task {
             do {
@@ -169,7 +171,7 @@ final class AppModel: ObservableObject {
                 stopTask?.cancel(); stopTask = nil
                 capture.updateMicrophoneDevices(current.inputDevices)
                 if current != candidate { state = .recording(current) }
-            } else if stopTask == nil {
+            } else if Self.shouldAutoStop(method: recordingMethod), stopTask == nil {
                 stopTask = Task { @MainActor [weak self] in
                     try? await Task.sleep(for: .seconds(15))
                     guard !Task.isCancelled else { return }
@@ -200,6 +202,8 @@ final class AppModel: ObservableObject {
 
     private func beginRecording(_ client: AudioClient, method: TriggerMethod = .audioProcess) {
         countdownTask?.cancel(); countdownTask = nil
+        stopTask?.cancel(); stopTask = nil
+        recordingMethod = method
         state = .finalizing
         let resolvedMethod: TriggerMethod = method == .manual ? .manual : (client.processID > 0 ? .audioProcess : .deviceRunning)
         let trigger = CaptureTrigger(method: resolvedMethod, processID: client.processID > 0 ? client.processID : nil, bundleID: client.bundleID, applicationName: client.applicationName)
@@ -215,6 +219,8 @@ final class AppModel: ObservableObject {
             }
         }
     }
+
+    static func shouldAutoStop(method: TriggerMethod) -> Bool { method != .manual }
 
     private func screenRecordingPermissionGranted(prompt: Bool = false) -> Bool {
         if CGPreflightScreenCaptureAccess() { return true }

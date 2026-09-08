@@ -3,6 +3,8 @@ import Foundation
 
 enum WorkerOperations {
     static func finalize(_ request: FinalizeCaptureRequest) throws -> WorkerManifestResult {
+        let claim = try RecordingClaim(request.paths)
+        defer { withExtendedLifetime(claim) {} }
         waitForAccessibilityWorker(request.accessibilityWorkerProcessID)
         let accessibility = finalizeAccessibilityArtifact(paths: request.paths)
         var metadata = request.metadata
@@ -53,11 +55,15 @@ enum WorkerOperations {
 
     static func recover(_ request: RecoverCaptureRequest) throws -> WorkerManifestResult {
         let store = MeetingStore()
-        let files = store.interruptedRecordings()
-        guard files.contains(request.interruptedFile) else {
+        let paths = store.paths(forInterruptedFile: request.interruptedFile)
+        let claim = try RecordingClaim(paths)
+        defer { withExtendedLifetime(claim) {} }
+        // This worker owns the claim, so enumerate its inputs directly.
+        let files = try FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasSuffix(".part.caf") }
+        guard files.contains(where: { $0.resolvingSymlinksInPath() == request.interruptedFile.resolvingSymlinksInPath() }) else {
             throw CaptureError.writerFailure("the selected interrupted recording is no longer available")
         }
-        let paths = store.paths(forInterruptedFile: request.interruptedFile)
         let relatedFiles = files.filter { store.paths(forInterruptedFile: $0).baseName == paths.baseName }
         let datedFiles = relatedFiles.compactMap { url -> (URL, Date, Date)? in
             guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
@@ -67,8 +73,8 @@ enum WorkerOperations {
         let ended = max(started, datedFiles.map { $0.2 }.max() ?? Date())
         let microphoneURLs = relatedFiles.filter { $0.lastPathComponent.contains("-microphone") }
         let microphoneSegments = try AudioFinalizer.recoveredSegments(from: microphoneURLs, startedAt: started)
-        let participantsURL = relatedFiles.first { $0.lastPathComponent.hasSuffix("-participants.part.caf") }
-            .flatMap { AudioFinalizer.containsAudio($0) ? $0 : nil }
+        let participantsURL = try relatedFiles.first { $0.lastPathComponent.hasSuffix("-participants.part.caf") }
+            .flatMap { try AudioFinalizer.containsAudio($0) ? $0 : nil }
         guard !microphoneSegments.isEmpty || participantsURL != nil else {
             quarantineEmptyRecoveryFiles(relatedFiles, archiveTemporary: paths.archiveTemporary)
             throw CaptureError.writerFailure("the interrupted recording contains no audio frames; its empty files were quarantined")

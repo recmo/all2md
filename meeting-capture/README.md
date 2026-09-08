@@ -69,6 +69,12 @@ Accessibility remains optional and only enriches metadata.
   it cannot replace detection, countdown, or recording state. Header-only CAF
   files are preserved with an `.unrecoverable.caf` suffix rather than retried
   forever.
+- Capture, finalization, and recovery claim each recording exclusively. Claimed
+  recordings are excluded from recovery discovery; worker claims are released by
+  the operating system even if a worker crashes. Unreadable audio fails processing
+  and is preserved for recovery rather than silently omitted and deleted.
+- Manually started recordings, including those selected from active audio
+  applications, continue until explicitly stopped even when the meeting is muted.
 - Generic Accessibility inspection currently contributes the focused window
   title when permission is available; it never gates recording.
 - Every attributed recording also starts a generic Accessibility probe for the

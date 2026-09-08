@@ -32,8 +32,8 @@ enum AudioFinalizer {
         temporaryDestination: URL,
         finalDestination: URL
     ) throws -> ArchiveResult {
-        let microphoneSegments = microphoneSegments.filter { containsAudio($0.url) }
-        let participants = participants.flatMap { containsAudio($0) ? $0 : nil }
+        let microphoneSegments = try microphoneSegments.filter { try containsAudio($0.url) }
+        let participants = try participants.flatMap { try containsAudio($0) ? $0 : nil }
         guard !microphoneSegments.isEmpty || participants != nil else {
             throw CaptureError.writerFailure("no captured audio is available for finalization")
         }
@@ -145,10 +145,12 @@ enum AudioFinalizer {
         }
     }
 
-    static func containsAudio(_ url: URL) -> Bool {
-        guard FileManager.default.fileExists(atPath: url.path),
-              let input = try? AVAudioFile(forReading: url) else { return false }
-        return input.length > 0
+    static func containsAudio(_ url: URL) throws -> Bool {
+        do {
+            return try AVAudioFile(forReading: url).length > 0
+        } catch {
+            throw CaptureError.writerFailure("Cannot read \(url.lastPathComponent); original audio preserved: \(error.localizedDescription)")
+        }
     }
 
     static func sha256(_ url: URL) throws -> String {

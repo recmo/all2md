@@ -14,6 +14,8 @@ final class CaptureCoordinator: ObservableObject {
     private var accessibilityWorkerID: UUID?
     private let backgroundWorker = try? BackgroundWorkerClient()
     private let store = MeetingStore()
+    private var recordingClaim: RecordingClaim?
+    private var claimedRecordings = Set<URL>()
     private var paths: RecordingPaths?
     private var trigger: CaptureTrigger?
     private var metadata: [MetadataEvent] = []
@@ -27,6 +29,8 @@ final class CaptureCoordinator: ObservableObject {
         let start = Date()
         let title = trigger.applicationName
         let paths = try store.paths(startedAt: start, title: title)
+        recordingClaim = try RecordingClaim(paths)
+        claimedRecordings.insert(paths.manifest)
         self.paths = paths
         self.trigger = trigger
         startedAt = start
@@ -67,6 +71,7 @@ final class CaptureCoordinator: ObservableObject {
             try? FileManager.default.removeItem(at: paths.accessibilityTemporary)
             try? FileManager.default.removeItem(at: paths.participantsTemporary)
             reset()
+            claimedRecordings.remove(paths.manifest)
             throw error
         }
     }
@@ -141,18 +146,26 @@ final class CaptureCoordinator: ObservableObject {
     }
 
     func finalize(_ request: FinalizeCaptureRequest) async throws -> URL? {
+        defer { claimedRecordings.remove(request.paths.manifest) }
         guard let backgroundWorker else { throw BackgroundWorkerError.unavailable }
         return try await backgroundWorker.finalize(request)
     }
 
-    func recoverableFiles() -> [URL] { store.interruptedRecordings() }
+    func recoverableFiles() -> [URL] { store.interruptedRecordings(excluding: claimedRecordings) }
 
     func recoverInterruptedRecording(_ file: URL) async throws -> URL? {
+        let identity = store.paths(forInterruptedFile: file).manifest
+        guard !claimedRecordings.contains(identity) else {
+            throw CaptureError.writerFailure("Recording is already being captured or processed")
+        }
+        claimedRecordings.insert(identity)
+        defer { claimedRecordings.remove(identity) }
         guard let backgroundWorker else { throw BackgroundWorkerError.unavailable }
         return try await backgroundWorker.recover(RecoverCaptureRequest(interruptedFile: file))
     }
 
     private func reset() {
+        recordingClaim = nil
         microphoneLevel = 0
         participantsLevel = 0
         startedAt = nil
