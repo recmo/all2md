@@ -14,6 +14,13 @@ struct StatusMenuView: View {
             switch model.state {
             case .idle:
                 Label("Watching microphone activity", systemImage: "mic")
+                if let report = model.startupReport {
+                    Text(report.systemAudioObserved
+                         ? "Startup recording check passed"
+                         : "Microphone verified; system capture authorized. No system audio was observed during the check.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Button("Check recording access again") { model.checkPermissions() }
                 Button("Start recording manually") { model.manualStart() }
                 if !model.activeOutputClients.isEmpty {
                     Text("Active audio applications").font(.caption).foregroundStyle(.secondary)
@@ -45,13 +52,20 @@ struct StatusMenuView: View {
                 Button("Stop") { model.stopRecording() }.keyboardShortcut(.defaultAction)
             case .finalizing:
                 ProgressView("Preparing recording…")
+            case .checkingPermissions:
+                ProgressView("Checking recording access…")
+                Text("A brief test captures microphone and system audio, then deletes it. Respond to any macOS permission prompts.")
+                    .font(.caption).foregroundStyle(.secondary)
             case .permissionRequired:
-                Label("Screen & System Audio Recording permission is required", systemImage: "exclamationmark.triangle.fill")
+                Label("Recording check failed", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                Text("Meeting Capture is paused until access is granted. If macOS requests it, quit and reopen the app after enabling access.")
+                Text(model.permissionMessage)
+                Text("Enable access for this installed app, then retry. If macOS requests a restart, quit and reopen Meeting Capture.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("Open Screen & System Audio Settings") { model.openScreenRecordingSettings() }
+                Button("Open Microphone Settings") { model.openMicrophoneSettings() }
+                Button("Retry recording check") { model.checkPermissions() }
             case let .error(message):
                 Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Button("Dismiss") { model.dismissError() }

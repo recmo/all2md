@@ -9,13 +9,22 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
     private var writer: AVAssetWriter?
     private var writerInput: AVAssetWriterInput?
     private var sessionStarted = false
+    private var deliveryError: Error?
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
     private(set) var firstSampleAt: Date?
     var onLevel: (@Sendable (Float) -> Void)?
 
     func start(processID: pid_t, bundleID: String?, to url: URL) async throws {
+        try await startCapture(processID: processID, bundleID: bundleID, to: url, prompt: false)
+    }
+
+    func startAuthorizationCheck(to url: URL) async throws {
+        try await startCapture(processID: nil, bundleID: nil, to: url, prompt: true)
+    }
+
+    private func startCapture(processID: pid_t?, bundleID: String?, to url: URL, prompt: Bool) async throws {
         firstSampleAt = nil
-        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
+        guard CGPreflightScreenCaptureAccess() || (prompt && CGRequestScreenCaptureAccess()) else {
             throw CaptureError.screenRecordingPermissionRequired
         }
 
@@ -36,13 +45,16 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
                 isUserApplication: true
             )
         }
-        guard let index = Self.matchingApplicationIndex(processID: processID, bundleID: bundleID, candidates: identities) else {
-            throw CaptureError.triggeringApplicationUnavailable
-        }
-        let application = content.applications[index]
         guard let display = content.displays.first else { throw CaptureError.noDisplay }
-
-        let filter = SCContentFilter(display: display, including: [application], exceptingWindows: [])
+        let filter: SCContentFilter
+        if let processID {
+            guard let index = Self.matchingApplicationIndex(processID: processID, bundleID: bundleID, candidates: identities) else {
+                throw CaptureError.triggeringApplicationUnavailable
+            }
+            filter = SCContentFilter(display: display, including: [content.applications[index]], exceptingWindows: [])
+        } else {
+            filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        }
         let configuration = SCStreamConfiguration()
         configuration.width = 2
         configuration.height = 2
@@ -118,18 +130,31 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
     }
 
     func stop() async throws {
-        if let stream { try await stream.stopCapture() }
+        var stopError: Error?
+        if let stream {
+            do { try await stream.stopCapture() } catch { stopError = error }
+        }
         stream = nil
-        writerInput?.markAsFinished()
-        if let writer {
+        // Detach on the delivery queue, including when stopCapture fails, so no
+        // callback can append to a writer while it is being finished.
+        let (completedWriter, hadSession, failure) = queue.sync {
+            let result = (writer, sessionStarted, deliveryError)
+            if sessionStarted { writerInput?.markAsFinished() }
+            else { writer?.cancelWriting() }
+            writer = nil
+            writerInput = nil
+            sessionStarted = false
+            deliveryError = nil
+            return result
+        }
+        if let failure { stopError = failure }
+        if let writer = completedWriter, hadSession {
             await writer.finishWriting()
             if writer.status == .failed {
-                throw CaptureError.writerFailure(writer.error?.localizedDescription ?? "finalization failed")
+                stopError = CaptureError.writerFailure(writer.error?.localizedDescription ?? "finalization failed")
             }
         }
-        writer = nil
-        writerInput = nil
-        sessionStarted = false
+        if let stopError { throw stopError }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -139,9 +164,13 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
             sessionStarted = true
             firstSampleAt = Date()
         }
-        if writerInput.isReadyForMoreMediaData { writerInput.append(sampleBuffer) }
+        if writerInput.isReadyForMoreMediaData, !writerInput.append(sampleBuffer) {
+            deliveryError = CaptureError.writerFailure(writer.error?.localizedDescription ?? "Could not write system audio")
+        }
         onLevel?(CMSampleBufferGetNumSamples(sampleBuffer) > 0 ? 0.35 : 0)
     }
 
-    func stream(_ stream: SCStream, didStopWithError error: any Error) {}
+    func stream(_ stream: SCStream, didStopWithError error: any Error) {
+        queue.async { self.deliveryError = error }
+    }
 }

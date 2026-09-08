@@ -1,4 +1,5 @@
 import CoreAudio
+import AVFoundation
 import Foundation
 
 @MainActor
@@ -26,6 +27,9 @@ final class CaptureCoordinator: ObservableObject {
     private var microphoneSegmentIndex = 0
 
     func start(trigger: CaptureTrigger, microphoneDevice: AudioInputDevice?) async throws {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            throw CaptureError.microphonePermissionRequired
+        }
         let start = Date()
         let title = trigger.applicationName
         let paths = try store.paths(startedAt: start, title: title)

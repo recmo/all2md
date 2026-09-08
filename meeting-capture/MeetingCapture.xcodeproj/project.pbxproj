@@ -11,6 +11,7 @@
 		1739D94D26118EB78B1B7598 /* StatusMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B4163AE64E3D7D074701FCC /* StatusMenuView.swift */; };
 		26E88B9365440C1A0EBB2401 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 57DBAADC234A81C14B254516 /* Assets.xcassets */; };
 		2D59519F48B87E454D3B0AC3 /* WorkerOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8726A34195979C1FB0BE6B8E /* WorkerOperations.swift */; };
+		3C69C6ACA985850A96934FC8 /* StartupCaptureCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = 725D7BEF2601FD369048CB41 /* StartupCaptureCheck.swift */; };
 		43A142377BBAB3FFF1CF36C7 /* AudioActivityMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0749EA236967FF20E57AD97C /* AudioActivityMonitor.swift */; };
 		4881C700096CF7591E632C13 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A006FF91C37787A13A91D93 /* AppModel.swift */; };
 		57C53F2F4C8D282D446ABC56 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41B7AE97EC372C0BD54E18DE /* Models.swift */; };
@@ -73,6 +74,7 @@
 		57DBAADC234A81C14B254516 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5A006FF91C37787A13A91D93 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		5AB53E4134566DDE24B64A51 /* AccessibilityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityProbe.swift; sourceTree = "<group>"; };
+		725D7BEF2601FD369048CB41 /* StartupCaptureCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupCaptureCheck.swift; sourceTree = "<group>"; };
 		83AF6C5365A6C9A4865EAEA6 /* MeetingCaptureWorker */ = {isa = PBXFileReference; includeInIndex = 0; path = MeetingCaptureWorker; sourceTree = BUILT_PRODUCTS_DIR; };
 		8726A34195979C1FB0BE6B8E /* WorkerOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkerOperations.swift; sourceTree = "<group>"; };
 		8E18E979B02A5E440D77924E /* AccessibilityMetadataProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityMetadataProvider.swift; sourceTree = "<group>"; };
@@ -141,6 +143,7 @@
 				E2E0E7DD1BC627C8D91E34AF /* MeetingStore.swift */,
 				C58BFDACDA8AEB550897A658 /* MicrophoneRecorder.swift */,
 				41B7AE97EC372C0BD54E18DE /* Models.swift */,
+				725D7BEF2601FD369048CB41 /* StartupCaptureCheck.swift */,
 				2B4163AE64E3D7D074701FCC /* StatusMenuView.swift */,
 				B2608D5C2FB518BB4AD82371 /* SystemAudioRecorder.swift */,
 			);
@@ -358,6 +361,7 @@
 				747A9206C742279295390E27 /* MeetingStore.swift in Sources */,
 				DDE6096767048E8EE5BFFF8F /* MicrophoneRecorder.swift in Sources */,
 				57C53F2F4C8D282D446ABC56 /* Models.swift in Sources */,
+				3C69C6ACA985850A96934FC8 /* StartupCaptureCheck.swift in Sources */,
 				1739D94D26118EB78B1B7598 /* StatusMenuView.swift in Sources */,
 				B736CB6ED892BDC10F34741D /* SystemAudioRecorder.swift in Sources */,
 			);

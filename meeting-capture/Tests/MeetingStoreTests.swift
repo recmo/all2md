@@ -6,6 +6,75 @@ import XCTest
 
 final class MeetingStoreTests: XCTestCase {
     @MainActor
+    func testStartupCheckGatesRecordingAndCanRetry() async throws {
+        var attempts = 0
+        let model = AppModel(checkCapture: {
+            attempts += 1
+            throw CaptureError.microphonePermissionRequired
+        })
+        XCTAssertEqual(model.state, .checkingPermissions)
+        model.manualStart()
+        XCTAssertEqual(model.state, .checkingPermissions)
+        model.start()
+        for _ in 0..<100 where model.state == .checkingPermissions { await Task.yield() }
+        XCTAssertEqual(model.state, .permissionRequired)
+        XCTAssertNil(model.startupReport)
+        XCTAssertTrue(model.permissionMessage.contains("Microphone"))
+        model.manualStart()
+        XCTAssertEqual(model.state, .permissionRequired)
+        model.checkPermissions()
+        for _ in 0..<100 where model.state == .checkingPermissions { await Task.yield() }
+        XCTAssertEqual(attempts, 2)
+        XCTAssertEqual(model.state, .permissionRequired)
+    }
+
+    @MainActor
+    func testStartupSuccessRequiresCompletedCheck() async throws {
+        var finish: CheckedContinuation<StartupCaptureReport, Error>?
+        let model = AppModel(checkCapture: {
+            try await withCheckedThrowingContinuation { finish = $0 }
+        })
+        model.start()
+        for _ in 0..<100 where finish == nil { await Task.yield() }
+        XCTAssertEqual(model.state, .checkingPermissions)
+        XCTAssertNil(model.startupReport)
+        model.checkPermissions() // Must not start a duplicate probe.
+        finish?.resume(returning: StartupCaptureReport(systemAudioObserved: false))
+        for _ in 0..<100 where model.state == .checkingPermissions { await Task.yield() }
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertEqual(model.startupReport, StartupCaptureReport(systemAudioObserved: false))
+    }
+
+    @MainActor
+    func testPermissionChecksCannotInterruptCapture() {
+        let client = AudioClient(audioObjectID: 0, processID: 1, bundleID: nil, applicationName: "Fixture", inputDevices: [])
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .recording(client)))
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .detecting(client, since: Date())))
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .countdown(client, remaining: 2)))
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .finalizing))
+        XCTAssertTrue(AppModel.allowsPermissionCheck(in: .permissionRequired))
+        XCTAssertTrue(AppModel.allowsPermissionCheck(in: .idle))
+    }
+
+    @MainActor
+    func testStartupRejectsEmptyMicrophoneRecording() {
+        XCTAssertThrowsError(try StartupCaptureCheck.validateMicrophoneFrames(0))
+        XCTAssertNoThrow(try StartupCaptureCheck.validateMicrophoneFrames(4096))
+    }
+
+    @MainActor
+    func testStartupStorageCheckCleansUpAndReportsUnwritableDestination() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try StartupCaptureCheck.validateStorage(root)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        let file = root.appending(path: "not-a-directory")
+        try Data("keep".utf8).write(to: file)
+        XCTAssertThrowsError(try StartupCaptureCheck.validateStorage(file))
+        XCTAssertEqual(try Data(contentsOf: file), Data("keep".utf8))
+    }
+
+    @MainActor
     func testManualRecordingsDoNotAutoStopWithoutMicrophoneActivity() {
         XCTAssertFalse(AppModel.shouldAutoStop(method: .manual))
         XCTAssertTrue(AppModel.shouldAutoStop(method: .audioProcess))
