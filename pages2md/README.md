@@ -55,9 +55,10 @@ object is used only when it geometrically matches a figure detected by OCR;
 otherwise the object does not create a figure in the output. When no matching
 object is available, the OCR-detected figure is cropped from the rendered page.
 
-The model contract is intentionally narrow and immutable: ordered page windows
+The visual model contract is intentionally narrow: ordered page windows
 use Baidu's multi-page Base recipe, and affected pages use Baidu's Gundam recipe
-for local recovery. Deterministic Python code parses, validates, reconciles,
+for local recovery (`base_size=1024`, `image_size=640`, cropping enabled).
+Deterministic Python code parses, validates, reconciles,
 structures, and renders the result. The model is never prompted to emit JSON
 or arbitrate between its own readings. Page results and model observations are
 checkpointed in a private resumable workspace beside the input document.
@@ -110,9 +111,147 @@ Use `--ignore-embedded-text` for scans with a missing, stale, or low-quality
 text layer. This disables embedded text blocks, character/font repairs, text
 comparisons, and annotation-derived links. Rendering, OCR, PDF metadata and
 outlines, and geometry-matched embedded image objects remain enabled. The
-setting is part of the assembly fingerprint. When a workspace was created with
-the other mode, pages are reassembled from its saved raw OCR observations
-without rerunning the model.
+setting is part of the assembly fingerprint and, for the production backend,
+the OCR evidence policy. Older image-only observations remain reusable when
+guidance is enabled: the new decoder is used for new invocations, not silently
+rerun over old checkpoints. Conversely, a workspace that may contain
+native-guided observations cannot be reused for an image-only conversion.
+The incompatible workspace is retained, and the command reports the conflict.
+Turning off reconciliation cannot undo source influence during generation.
+
+## Decode guidance and recovery
+
+New invocations retain the reference exact n-gram hard mask and add bounded,
+soft candidate scoring (`source-progress-v1`), without changing model weights:
+
+- Positioned native text is assessed per region, independently of the OCR
+  being corrected. Words and numeric values retain their identities; emitted
+  occurrences advance local cursors. Grounding boxes and page markers select
+  local evidence. Positive bias starts only after a matching grounding box;
+  an ungrounded prefix cannot advance native cursors or steer into later text.
+  The next 12 occurrences provide limited skips, with two
+  initial region alternatives for reading order. This is not full beam search.
+- Prose prefixes receive at most a 1.5-logit bonus. The processor considers the
+  model's top 16 tokens plus tokenized local source continuations, so source
+  suggestions need not already be in top-k. Geometry-free, ignored, malformed,
+  and unsupported regions abstain. Math-only regions may corroborate source
+  progress but do not bias the decoder toward flattened native math.
+  Variables, numerals, uppercase acronyms, and math operator names form bias
+  boundaries even before a LaTeX opener has been emitted. Candidate lookahead
+  cannot jump across these boundaries to later prose.
+- Sustained phrase/formula cycles receive a soft penalty. Only explicit
+  counters are abstracted for detection; emitted indices are never rewritten.
+  Tables and grounding coordinates are excluded. Recent source progress
+  suppresses the loop penalty, allowing genuine repeated source occurrences.
+  Prefixes shorter than 512 characters are not structurally penalized: a live
+  regression showed that disturbing a short self-recovering prefix can prolong it.
+- EOS is never forbidden. A small penalty applies only while substantial
+  native text remains and alignment is active. After at least 512 generated
+  tokens, a source-unsupported loop persisting for a further 256 tokens stops
+  with `finish_reason=repetition_guard`. Short bad prefixes can still recover.
+  The pipeline then tries an independent visual recipe where available; it
+  does not repeat an identical deterministic one-page Base invocation.
+
+Each observation records its actual visual contract and decoding diagnostics:
+eligible/disabled regions, matched occurrences, bias steps, and policy version.
+Selected-token confidence describes the **post-constraint decoder distribution**,
+not calibrated transcription correctness. Guidance state is fresh for every
+invocation; cache rollback requires a new guide, rather than reusing consumed
+source state.
+
+Recovery preserves immutable raw attempts. An unsupported ungrounded prefix
+can be excluded from a derived candidate when at least two grounded body
+blocks have source support. A coherent page-local candidate can replace even
+a short or stop-terminated hallucination when both its source precision and
+coverage improve sufficiently. Failed whole-page candidates are not adopted
+into empty pages; independently corroborated valid regions may still be used.
+Unresolved, source-unsupported long canonical loops fail bundle verification;
+warnings from rejected attempts alone do not fail a recovered page.
+
+Development tools help evaluate changes without overwriting the corpus:
+
+```sh
+PYTHONPATH=pages2md/src python pages2md/scripts/replay_decoding.py paper.pages2md --pages 1 5
+HF_HUB_OFFLINE=1 PYTHONPATH=pages2md/src python pages2md/scripts/smoke_guidance.py page.png paper.pages2md/pages/page-0001.json --max-tokens 256
+```
+
+The first only replays saved observations. The second compares exact-n-gram,
+structural-only, and native-guided decoding on the same image, with a bounded
+token budget and stdout output. Embedded agreement is not independent ground
+truth: accuracy must be assessed against source renderings. These mechanisms
+do not yet implement alternative-beam model scoring, geometric PDF-to-LaTeX
+decoding, crop rollback, or model fine-tuning, and cannot guarantee recovery.
+
+Single-page calls automatically retry failed, ungrounded decodes with a constrained
+initial `<|det|>` marker. This steers the model into its grounded output format;
+region type, coordinates, content, and subsequent EOS remain model predictions.
+It composes with the exact
+n-gram constraint and available embedded guidance. A usable grounded body is
+not regenerated merely to remove an ungrounded prefix: broader tests found
+that unconditional prefix forcing can regress names and caption extraction.
+At most one startup rescue is attempted, with both raw attempts retained.
+An internal 4,096-token ungrounded-start budget prevents spending the full page
+budget on startup failure; already-grounded long pages retain their full budget.
+Multi-page starts are unchanged, and the pipeline skips visually blank pages
+before calling OCR. Forced prefix
+token counts and policy are recorded separately in decoding diagnostics; their
+post-constraint confidence is not evidence of transcription accuracy.
+
+The decoder also enforces incremental grounding-header syntax and valid ordered
+coordinates,
+tracks recent regions, and softly discourages suspicious same-region or
+compressed nearby copies. This automatic policy applies to single-page greedy
+decoding. Unlike the soft
+source-progress guide, the header grammar excludes EOS inside an unfinished
+header; it does not constrain mathematical content or forbid EOS in the body.
+Tables and similar formulas in distinct regions are not blanket-banned.
+
+If a completed near-duplicate remains, at most two fresh generations replay the
+exact token prefix and explore another continuation at the suspect block's body.
+Selection requires fewer detected duplicates, retained predicted-region coverage,
+no additional math syntax errors, and a bounded likelihood loss. These are
+heuristics, not independent source verification. All raw alternatives and
+selection diagnostics are retained; an unhelpful retry leaves the original
+unchanged. Selected replay candidates omit confidence summaries/spans because
+forced-prefix probabilities are misleading. Decoder selection and the bounded
+retry budget are internal policy, not user configuration: there are no decoder
+CLI flags or constructor options. Developer benchmarks use private ablations.
+See [automatic-decoder validation](experiments/automatic-decoding.md) for the
+broader tests, measured costs, and remaining errors.
+
+Recovery also checks local prose coverage inside predicted boxes, so an oversized
+box cannot conceal an omitted paragraph. Ligatures are normalized and flattened
+math identifiers are excluded from this prose test. Whole-page and local Detail
+selection must preserve corroborated Base prose; a higher global score is not
+enough to discard a good region. See [coverage and window validation](experiments/coverage-recovery.md).
+
+Small disputed display equations can receive up to two additional, visual-only
+region reads per page, each capped internally at 4096 tokens. Padding avoids
+neighboring blocks. A crop is adopted only when a complete expression agrees
+with an independent page-level read; crop coordinates are never used as page
+coordinates. All alternatives, crop geometry and selection provenance are kept.
+Ambiguous results leave the existing transcription unchanged. Two adjacent
+Latin-for-Greek math errors can also be repaired from uniquely anchored native
+glyphs with valid geometry, preserving the existing TeX structure.
+See [rerun readiness validation](experiments/rerun-readiness.md).
+
+Repeated reads of the same physical text region are checked across the whole
+page, not only within a short decoder window. They trigger independent page
+recovery and fail verification if they survive assembly; high embedded-vocabulary
+agreement does not excuse duplicated content. Source-corroborated openings can be
+preserved when a clean recovery clips the first line.
+
+New decoder policies apply to new OCR invocations. Existing raw observations
+remain reusable across these policy changes, with their original diagnostics;
+source, model, rendering and embedded-text compatibility checks still apply.
+Updating the decoder does not silently rerun the corpus.
+
+`scripts/benchmark_decoding.py` compares bounded variants on production-resolution
+renders and saves immutable-per-configuration raw outputs, hashes, diagnostics,
+and source/code provenance under an explicit output directory. It refuses a
+directory with a mismatching fingerprint. See [the hard-page experiment report](experiments/README.md)
+for measured results, equation errors, and reproduction commands. These tests
+neither deploy the decoder nor invalidate/reprocess existing corpus bundles.
 
 Hybrid reconciliation aligns full OCR context with individual PDF glyphs,
 retaining font references, baselines, and nested script relationships. It

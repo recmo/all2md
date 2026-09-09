@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import time
+import unicodedata
 from copy import deepcopy
 from dataclasses import asdict
 from difflib import SequenceMatcher
@@ -135,6 +136,8 @@ def _convert_workspace(
         "multi_page": True,
         "quality": "thorough",
     }
+    if getattr(backend, "supports_embedded_guidance", False):
+        ocr_fingerprint["embedded_decode"] = not ignore_embedded_text
     assembly_fingerprint = {
         "split_mode": "auto",
         "math_validator": validator_identity(),
@@ -142,7 +145,7 @@ def _convert_workspace(
         "code": _code_fingerprint(
             "adapters.py", "assets.py", "chapters.py", "compare.py", "formatting.py",
             "embedded.py", "alignment.py", "lists.py", "markdown.py", "model.py", "native.py", "pipeline.py",
-            "quality.py", "verify.py", "syntax.py", "reconciliation.py", "document.py", "edits.py", "mathlint.py", "katex_lint.cjs", "urls.py", "semantics.py", "footnotes.py",
+            "quality.py", "decoding.py", "region_recovery.py", "verify.py", "syntax.py", "reconciliation.py", "document.py", "edits.py", "mathlint.py", "katex_lint.cjs", "urls.py", "semantics.py", "footnotes.py",
         ),
     }
     previous = _read_json(bundle / "metadata.json")
@@ -152,7 +155,7 @@ def _convert_workspace(
         resume
         and resume_state
         and resume_state.get("source") == str(source)
-        and resume_state.get("ocr_fingerprint") == ocr_fingerprint
+        and _compatible_ocr_fingerprint(resume_state.get("ocr_fingerprint"), ocr_fingerprint)
     )
     can_resume_pages = bool(
         can_reuse_ocr
@@ -646,9 +649,12 @@ def _page_result(
     consensus_observations = sorted({
         entry["recovery_observation"]
         for entry in recovery
-        if entry.get("action") in {"selected_ocr_consensus", "selected_targeted_detail"}
+        if entry.get("action") in {"selected_ocr_consensus", "selected_targeted_detail",
+                                   "selected_source_supported_page", "recovered_uncovered_region", "selected_region_consensus"}
         and entry.get("recovery_observation")
     })
+    selected_page = next((entry["recovery_observation"] for entry in recovery
+                          if entry.get("action") == "selected_source_supported_page"), None)
     result = PageResult(
         number=source_page.number,
         image=source_page.image_path.name,
@@ -670,7 +676,7 @@ def _page_result(
             ],
             "canonical": {
                 "authoritative_observation": (
-                    "multi_base_with_targeted_detail" if consensus_observations else group_observation.id
+                    selected_page or ("multi_base_with_targeted_detail" if consensus_observations else group_observation.id)
                 ),
                 "selected_observations": consensus_observations,
             },
@@ -703,7 +709,10 @@ def _has_embedded_coverage_gap(
             if bbox[1] < 35 or bbox[3] > 925:
                 continue
             native_text = _coverage_text(text)
-            if native_text and native_text in visual_text:
+            prose = [word.casefold() for word in re.findall(
+                r"[^\W\d_]{3,}", unicodedata.normalize("NFKC", text)
+            ) if word.islower() or word.istitle()]
+            if len(prose) < 3 and native_text and native_text in visual_text:
                 continue
             covered = any(
                 block.bbox is not None
@@ -713,6 +722,16 @@ def _has_embedded_coverage_gap(
                 )
                 for block in blocks
             )
+            # A page-sized box is not evidence that its text was transcribed.
+            # For prose, require local lexical coverage too. Math serialization
+            # is deliberately excluded: PDF glyph order is not LaTeX order.
+            if covered and len(prose) >= 3:
+                local_text = _coverage_text(" ".join(
+                    block.markdown for block in blocks
+                    if block.bbox is not None
+                    and bbox_coverage(bbox, _expand_bbox(block.bbox, 8.0)) >= 0.55
+                ))
+                covered = sum(word in local_text.split() for word in prose) / len(prose) >= 0.65
             if not covered:
                 uncovered_characters += len(text)
                 if uncovered_characters >= 18:
@@ -721,7 +740,7 @@ def _has_embedded_coverage_gap(
 
 
 def _coverage_text(value: str) -> str:
-    return " ".join(re.findall(r"[\w]+", value.casefold(), re.UNICODE))
+    return " ".join(re.findall(r"[\w]+", unicodedata.normalize("NFKC", value).casefold(), re.UNICODE))
 
 
 def _expand_bbox(bbox, padding: float):
@@ -873,10 +892,43 @@ def _blank_page_result(source_page, ink_fraction: float) -> PageResult:
     )
 
 
+def _compatible_ocr_fingerprint(previous, current) -> bool:
+    """Old image-only observations remain evidence, but guided OCR is not reversible.
+
+    Changing deterministic assembly must not destroy or regenerate costly raw
+    observations. New decoder policies apply to new invocations, whose actual
+    recipe and diagnostics are recorded individually.
+    """
+    if not isinstance(previous, dict):
+        return False
+    old, new = dict(previous), dict(current)
+    old_guided, new_guided = old.pop("embedded_decode", False), new.pop("embedded_decode", False)
+    # Decoder improvements apply to new invocations, not retained observations.
+    # Keep model/source/render limits strict and never erase native influence.
+    for value in (old, new):
+        backend = value.get("backend")
+        if isinstance(backend, dict) and backend.get("engine") == "mlx-vlm":
+            backend = dict(backend)
+            for key in ("initial_grounding", "startup_recovery", "block_decoding", "block_retries"):
+                backend.pop(key, None)
+            value["backend"] = backend
+    return old == new and not (old_guided and not new_guided)
+
+
+def _recognize_with_evidence(backend, method: str, pages):
+    function = getattr(backend, method)
+    multiple = method == "recognize_pages"
+    image = [page.image_path for page in pages] if multiple else pages[0].image_path
+    if getattr(backend, "supports_embedded_guidance", False):
+        evidence = [page.embedded for page in pages] if multiple else pages[0].embedded
+        return function(image, embedded=evidence)
+    return function(image)
+
+
 def _recognize_primary(group, backend, bundle: Path):
     recognize_pages = getattr(backend, "recognize_pages", None)
     if callable(recognize_pages):
-        value = recognize_pages([page.image_path for page in group])
+        value = _recognize_with_evidence(backend, "recognize_pages", group)
         if _is_invocation(value):
             raw, generation = value
             parts = split_multi_page_output(raw, len(group))
@@ -898,7 +950,7 @@ def _recognize_primary(group, backend, bundle: Path):
     else:
         # Fixture compatibility. The production backend always exposes the
         # documented multi-page Base contract, including for one-page windows.
-        recognized = [backend.recognize(page.image_path) for page in group]
+        recognized = [_recognize_with_evidence(backend, "recognize", [page]) for page in group]
         raw = "\n<PAGE>\n".join(item[0] for item in recognized)
         generation = {"mode": "multi_base", "group_size": len(group), "compat_backend": True}
     observation = parse_native_observation(
@@ -944,12 +996,15 @@ def _collect_page_candidates(
     bundle,
 ):
     critical = {
+        "visual_region_repetition",
         "visual_empty_output",
         "visual_implausible_output_length",
         "visual_malformed_grounding",
         "visual_malformed_math",
         "visual_implausible_coordinates",
         "visual_text_repetition",
+        "visual_structural_repetition",
+        "visual_repetition_guard",
         "visual_truncated",
         "visual_malformed_table",
         "visual_page_transition_mismatch",
@@ -957,11 +1012,12 @@ def _collect_page_candidates(
     }
     markdown = _blocks_markdown(primary.blocks, "")
     comparison = _compare_with_embedded(markdown, source_page.embedded)
-    embedded_trust = assess_embedded(source_page.embedded, markdown)
+    embedded_trust = assess_embedded(source_page.embedded)
     embedded_disagreement = (
         comparison.character_similarity is not None
         and comparison.character_similarity < 0.75
-        and not (comparison.length_ratio is not None and comparison.length_ratio < 0.65)
+        and embedded_trust.geometric
+        and len(re.findall(r"\w+", source_page.embedded.text)) >= 8
     )
     group_problem = bool(set(group_observation.warnings) & critical)
     target_blocks = [
@@ -993,7 +1049,8 @@ def _collect_page_candidates(
     if not callable(recognize_detail):
         return [], ["visual_auxiliary_ocr_unavailable"]
     try:
-        raw, generation = recognize_detail(source_page.image_path)
+        detail_method = "recognize_detail" if callable(getattr(backend, "recognize_detail", None)) else "recognize"
+        raw, generation = _recognize_with_evidence(backend, detail_method, [source_page])
         generation = {
             **dict(generation),
             "target_block_indices": [index for index, _ in target_blocks],
@@ -1028,6 +1085,8 @@ def _collect_page_candidates(
             "visual_malformed_math",
             "visual_malformed_table",
             "visual_text_repetition",
+            "visual_structural_repetition",
+            "visual_repetition_guard",
             "visual_truncated",
         }
     ) or bool(
@@ -1037,9 +1096,12 @@ def _collect_page_candidates(
             source_page.embedded,
         )
     )
-    if structural_problem and detail_failed and callable(recognize_pages):
+    # Do not repeat the same deterministic one-page Base request. Cropped
+    # detail is already the independent retry in that case.
+    already_single_base = len(group_observation.source_pages) == 1 and group_observation.mode == "multi_base"
+    if (structural_problem or embedded_disagreement) and (detail_failed or "visual_region_repetition" in primary.warnings) and callable(recognize_pages) and not already_single_base:
         try:
-            value = recognize_pages([source_page.image_path])
+            value = _recognize_with_evidence(backend, "recognize_pages", [source_page])
             if _is_invocation(value):
                 raw, generation = value
                 raw = split_multi_page_output(raw, 1)[0]
@@ -1061,6 +1123,11 @@ def _collect_page_candidates(
             candidates.append(candidate)
         except Exception:
             warnings.append("visual_single_page_base_failed")
+    from .region_recovery import collect_regions
+    try:
+        candidates.extend(collect_regions(source_page, primary, candidates, backend, bundle, warnings=warnings))
+    except Exception:
+        warnings.append("visual_region_ocr_failed")
     return candidates, sorted(set(warnings))
 
 

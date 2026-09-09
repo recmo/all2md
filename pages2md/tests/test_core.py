@@ -455,8 +455,9 @@ def test_clean_candidate_recovers_reliably_covered_missing_region():
         "The omitted transition paragraph.",
         "The following paragraph remains.",
     ]
-    assert provenance[0]["action"] == "recovered_uncovered_region"
-    assert "visual_uncovered_region_recovered" in warnings
+    assert any(item["action"] == "excluded_unsupported_prefix" for item in provenance)
+    assert any(item["action"] == "selected_source_supported_page" for item in provenance)
+    assert "visual_text_repetition" not in warnings
 
 
 def test_recovery_keeps_ungrounded_content_until_document_evidence_filtering():
@@ -574,7 +575,10 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
     )
     backend = MlxUnlimitedOcr()
     backend._model = SimpleNamespace(config={})
-    backend._processor = object()
+    backend._processor = SimpleNamespace(
+        encode=lambda text, **kwargs: list(text.encode()),
+        decode=lambda ids, **kwargs: bytes(ids).decode(),
+    )
     images = [tmp_path / "1.png", tmp_path / "2.png"]
     _, multi = backend.recognize_pages(images)
     _, gundam = backend.recognize(images[0])
@@ -602,7 +606,7 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
     assert detail["contract"] == {
         "prompt": GUNDAM_PROMPT,
         "base_size": 1024,
-        "image_size": 1024,
+        "image_size": 640,
         "crop_mode": True,
         "temperature": 0.0,
         "no_repeat_ngram_size": 35,
@@ -611,7 +615,7 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
     }
     assert calls[0]["cropping"] is False and calls[0]["image_size"] == 1024
     assert calls[1]["cropping"] is True and calls[1]["image_size"] == 640
-    assert calls[2]["cropping"] is True and calls[2]["image_size"] == 1024
+    assert calls[2]["cropping"] is True and calls[2]["image_size"] == 640
 
 
 def test_mlx_backend_suppresses_model_load_stdout(monkeypatch, capsys):
@@ -902,7 +906,10 @@ def test_ignore_embedded_text_reassembles_cached_ocr_without_model_call(tmp_path
     output = tmp_path / "workspace"
 
     first = _convert_workspace(pdf, output, backend=backend)
-    assert backend.calls == 1
+    # Native disagreement now requests an independent recovery even when the
+    # primary is short; reassembly itself must still make zero model calls.
+    first_calls = backend.calls
+    assert first_calls >= 1
     second = _convert_workspace(
         pdf,
         output,
@@ -911,7 +918,7 @@ def test_ignore_embedded_text_reassembles_cached_ocr_without_model_call(tmp_path
     )
 
     assert second == first
-    assert backend.calls == 1
+    assert backend.calls == first_calls
     metadata = json.loads((second / "metadata.json").read_text())
     page_data = json.loads((second / "pages/page-0001.json").read_text())
     assert metadata["ignore_embedded_text"] is True
@@ -1256,10 +1263,14 @@ def test_resume_processes_only_pages_missing_from_persistent_workspace(tmp_path:
     assert json.loads((bundle / "progress.json").read_text())["completed_pages"] == [1, 2, 3]
 
 
-def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("decoder_changed", [False, True])
+def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Path, monkeypatch, decoder_changed):
     class CountingFixture(FixtureOcr):
         def __init__(self):
             self.calls = 0
+            self.identity = dict(MlxUnlimitedOcr().identity)
+            for key in ("startup_recovery", "block_decoding", "block_retries"):
+                self.identity.pop(key)
 
         def recognize(self, image: Path):
             self.calls += 1
@@ -1301,6 +1312,8 @@ def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Pat
 
     monkeypatch.setattr(pipeline, "reconcile_observations", record_reconciliation)
     code_revision["value"] = "v2"
+    if decoder_changed:
+        backend.identity = dict(MlxUnlimitedOcr().identity)
     resumed = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
 
     assert resumed == bundle
