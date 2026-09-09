@@ -93,6 +93,22 @@ def test_rejected_peer_cannot_confirm_crop(failure):
     assert "visual_region_ocr_unresolved" in warnings
 
 
+@pytest.mark.parametrize("canonical", [
+    "\\[" + BAD + "\\]\n\\[y_{index}=2\\]",
+    r"\[\begin{array}{l}" + BAD + r"\\y_{index}=2\end{array}\]",
+    r"\[z_{index}=3\]",
+])
+def test_crop_cannot_overwrite_a_changed_canonical_region(canonical):
+    base, peer, region = observation(BAD), observation(GOOD,"gundam_detail"), observation(GOOD,"region_detail")
+    region.generation["region_target_bbox"] = [100,400,400,440]
+    blocks = deepcopy(base.blocks)
+    blocks[0].markdown = canonical
+    before = deepcopy(blocks)
+    result, actions, _ = apply_regions(blocks, [region], [peer], base)
+    assert result == before
+    assert not actions
+
+
 def test_crop_padding_avoids_neighbor(tmp_path):
     page=tmp_path/"page.png"
     Image.new("RGB",(1000,1000),"white").save(page)

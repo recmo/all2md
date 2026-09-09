@@ -2,7 +2,11 @@
 
 The generation results below predate the maintenance cleanup. After removing
 production ablation switches and fixture-only backend fallbacks, the full suite
-still passes (472 tests). Historical runners are archived; current tools are
+still passed (472 tests). Subsequent review fixes protect detected figures,
+reject failed confirming reads, preserve changed/merged canonical equations,
+and reject stale benchmark source images. The current branch has 489 passing
+tests; this is not validation of an integrated main build.
+Historical runners are archived; current tools are
 listed in [the validation index](README.md). No new model reads were needed for
 that cleanup.
 

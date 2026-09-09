@@ -165,6 +165,13 @@ def apply_regions(blocks, regions, peers, primary):
         index, block = matches[0]
         if math_key(block.markdown) == key:
             continue
+        # Page reconciliation may have merged or replaced this region since
+        # the crop was requested. Never overwrite additional canonical content.
+        original = [b for b in primary.blocks if b.bbox and b.kind in FORMULA_KINDS
+                    and bbox_iou(b.bbox, target) >= .8]
+        if (len(original) != 1 or standalone_math(block) is None
+                or math_key(block.markdown) != math_key(original[0].markdown)):
+            continue
         replacement = deepcopy(block)
         replacement.markdown = "\\[\n" + body + "\n\\]"
         if math_syntax_errors(replacement.markdown):

@@ -85,14 +85,25 @@ def run(args):
         case_dir = output / case
         case_dir.mkdir(exist_ok=True)
         image = case_dir / f"source-{args.dpi}dpi.png"
+        source_path = case_dir / "source.json"
+        source_identity = {"source": str(pdf), "source_sha256": sha256_file(pdf),
+                           "pdf_page": number, "anchors": anchors}
+        if source_path.exists():
+            previous = json.loads(source_path.read_text())
+            if (any(previous.get(key) != value for key, value in source_identity.items())
+                    or not image.is_file()
+                    or previous.get("image_sha256") != sha256_file(image)):
+                raise ValueError("source or rendered image changed; choose a fresh --output")
+        elif image.exists():
+            raise ValueError("rendered image lacks source provenance; choose a fresh --output")
         with fitz.open(pdf) as document:
             page = document[number - 1]
             if not image.exists():
                 page.get_pixmap(matrix=fitz.Matrix(args.dpi / 72, args.dpi / 72), alpha=False).save(image)
             evidence = EmbeddedEvidence(text=page.get_text("text", sort=True), blocks=_raw_text_blocks(page), extractor="pymupdf")
-        provenance = {"source": str(pdf), "source_sha256": sha256_file(pdf), "pdf_page": number,
-                      "image_sha256": sha256_file(image), "anchors": anchors}
-        atomic_json(case_dir / "source.json", provenance)
+        provenance = {**source_identity, "image_sha256": sha256_file(image)}
+        if not source_path.exists():
+            atomic_json(source_path, provenance)
         for name in args.variants:
             result_path = case_dir / f"{name}.json"
             raw_path = case_dir / f"{name}.txt"
