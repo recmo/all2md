@@ -256,7 +256,7 @@ impl Repository {
         command(&root, &["config", "user.email", "mdstore@example.invalid"]);
         command(&root, &["config", "commit.gpgsign", "false"]);
         fs::write(root.join("config.yaml"), config_yaml()).unwrap();
-        fs::write(root.join("template.yaml"), template_yaml()).unwrap();
+        fs::write(root.join("template.md"), profile_template()).unwrap();
         fs::write(root.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
         fs::write(root.join("alice.md"), page("Alice")).unwrap();
         fs::write(root.join("bob.md"), page("Bob")).unwrap();
@@ -322,21 +322,14 @@ server:
 "#
 }
 
-fn template_yaml() -> String {
-    format!(
-        "frontmatter: {}\nstructure: {{additional_sections: true}}\nmetadata:\n  display_name: /name\nlinks:\n  markdown: true\n  wiki:\n    - '\\[\\[(?P<target>[^\\]|#]+)(?:#[^\\]|]+)?(?:\\|[^\\]]+)?\\]\\]'\nrelations:\n  - name: mentions\n    reciprocal: mentions\n    selector:\n      kind: markdown_links\n",
-        serde_json::from_str::<serde_json::Value>(schema()).unwrap()
-    )
-}
-
-fn schema() -> &'static str {
-    r#"{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "required": ["name"],
-  "properties": {"name": {"type": "string"}},
-  "additionalProperties": false
-}"#
+fn profile_template() -> &'static str {
+    r#"```starlark
+frontmatter(name=string(required=True))
+metadata(display_name="/name")
+links(wiki=[r"\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]"])
+relation("mentions", selector={"kind": "markdown_links"}, reciprocal="mentions")
+```
+"#
 }
 
 fn page(name: &str) -> String {
@@ -641,23 +634,26 @@ fn rejects_mixed_configuration_and_content_batch() {
 #[test]
 fn directory_templates_are_discoverable_read_only_and_atomic() {
     let repository = Repository::new();
-    let template = "instructions: Keep notes concise.\nstructure: {level: 1}\nsections:\n- heading: Notes\n  rules: {required: true, content: paragraphs, paragraphs: {minimum: 1, maximum: 1}}\n";
-    fs::write(repository.root.join("template.yaml"), template).unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    let template = r#"Keep notes concise.
+
+```starlark
+structure(level=1)
+section("Notes", required=True, content="paragraphs", paragraphs={"minimum": 1, "maximum": 1}, level=1)
+```
+"#;
+    fs::write(repository.root.join("template.md"), template).unwrap();
+    command(&repository.root, &["add", "template.md"]);
     command(&repository.root, &["commit", "-qm", "add template"]);
     let store = repository.store();
     let existing = store.get_page("alice.md", None).unwrap();
     assert!(existing.exists);
-    assert_eq!(existing.template.unwrap()["path"], "template.yaml");
+    assert_eq!(existing.template.unwrap()["path"], "template.md");
     let proposed = store.get_page("people/new.md", None).unwrap();
     assert!(!proposed.exists);
-    assert_eq!(
-        proposed.template.unwrap()["definition"]["instructions"],
-        "Keep notes concise."
-    );
+    assert_eq!(proposed.template.unwrap()["content"], template);
     assert!(
         store
-            .get_page("template.yaml", None)
+            .get_page("template.md", None)
             .unwrap()
             .content
             .contains("Keep notes concise.")
@@ -665,12 +661,12 @@ fn directory_templates_are_discoverable_read_only_and_atomic() {
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
     for edits in [
         vec![EditOperation::Replace {
-            path: "template.yaml".into(),
-            anchor: format!("1:{}", short_hash("instructions: Keep notes concise.")),
-            content: "instructions: Weaken rules".into(),
+            path: "template.md".into(),
+            anchor: format!("1:{}", short_hash("Keep notes concise.")),
+            content: "Weaken rules\n\n```starlark\n```\n".into(),
         }],
         vec![EditOperation::CreatePage {
-            path: "people/template.yaml".into(),
+            path: "people/template.md".into(),
             content: "{}".into(),
         }],
         vec![
@@ -716,11 +712,15 @@ fn invalid_templates_block_startup_even_without_matching_pages() {
     let repository = Repository::new();
     fs::create_dir(repository.root.join("empty")).unwrap();
     fs::write(
-        repository.root.join("empty/template.yaml"),
-        "sections: [{heading: A, rules: {words: {minimum: 5, maximum: 2}}}]",
+        repository.root.join("empty/template.md"),
+        r#"```starlark
+structure(additional_sections=False)
+section("A", words={"minimum": 5, "maximum": 2}, level=1)
+```
+"#,
     )
     .unwrap();
-    command(&repository.root, &["add", "empty/template.yaml"]);
+    command(&repository.root, &["add", "empty/template.md"]);
     command(&repository.root, &["commit", "-qm", "invalid template"]);
     assert!(Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).is_err());
 }
@@ -730,19 +730,19 @@ fn template_recovery_and_invalid_external_activation() {
     let repository = Repository::new();
     fs::create_dir(repository.root.join("stray")).unwrap();
     fs::write(
-        repository.root.join("stray/template.yaml"),
+        repository.root.join("stray/template.md"),
         "unknown: untracked",
     )
     .unwrap();
     let store = repository.store();
-    assert!(!repository.root.join("stray/template.yaml").exists());
+    assert!(!repository.root.join("stray/template.md").exists());
     assert!(store.get_page("alice.md", None).unwrap().template.is_some());
     fs::write(
-        repository.root.join("template.yaml"),
-        "sections: [{heading: Missing, rules: {required: true}}]",
+        repository.root.join("template.md"),
+        "```starlark\nstructure(additional_sections=False)\nsection(\"Missing\", required=True, level=1)\n```\n",
     )
     .unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    command(&repository.root, &["add", "template.md"]);
     command(
         &repository.root,
         &["commit", "-qm", "incompatible template"],
@@ -755,11 +755,15 @@ fn template_recovery_and_invalid_external_activation() {
 fn structured_sections_validate_activation_and_atomic_batches() {
     let repository = Repository::new();
     let template = format!(
-        "{}sections:\n- heading: Notes\n  rules:\n    required: true\n    list: {{minimum_items: 1, date_order: descending}}\n",
-        template_yaml()
+        r#"{}
+```starlark
+section("Notes", level=1, required=True, list={{"minimum_items": 1, "date_order": "descending"}})
+```
+"#,
+        profile_template()
     );
-    fs::write(repository.root.join("template.yaml"), template).unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    fs::write(repository.root.join("template.md"), template).unwrap();
+    command(&repository.root, &["add", "template.md"]);
     command(
         &repository.root,
         &["commit", "-qm", "require dated entries"],
@@ -801,22 +805,25 @@ fn structured_sections_validate_activation_and_atomic_batches() {
 fn markdown_style_activation_and_edits_are_atomic() {
     let repository = Repository::new();
     fs::write(
-        repository.root.join("template.yaml"),
-        format!("{}markdown: {{max_line_length: 5}}\n", template_yaml()),
-    )
-    .unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
-    command(&repository.root, &["commit", "-qm", "invalid style policy"]);
-    assert!(Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).is_err());
-    fs::write(
-        repository.root.join("template.yaml"),
+        repository.root.join("template.md"),
         format!(
-            "{}markdown: {{no_trailing_whitespace: true, closed_fences: true}}\n",
-            template_yaml()
+            "{}\n```starlark\nmarkdown(max_line_length=5)\n```\n",
+            profile_template()
         ),
     )
     .unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    command(&repository.root, &["add", "template.md"]);
+    command(&repository.root, &["commit", "-qm", "invalid style policy"]);
+    assert!(Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).is_err());
+    fs::write(
+        repository.root.join("template.md"),
+        format!(
+            "{}\n```starlark\nmarkdown(no_trailing_whitespace=True, closed_fences=True)\n```\n",
+            profile_template()
+        ),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "template.md"]);
     command(&repository.root, &["commit", "-qm", "valid style policy"]);
     let store = repository.store();
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
@@ -1139,7 +1146,16 @@ async fn reindex_removes_sidecars_without_a_current_page() {
 fn schemas_are_repository_configuration_not_rust_fields() {
     let repository = Repository::new();
     fs::create_dir(repository.root.join("projects")).unwrap();
-    fs::write(repository.root.join("projects/template.yaml"), "structure: {additional_sections: true}\nfrontmatter: {type: object, required: [code]}\nmetadata: {project_code: /code}\n").unwrap();
+    fs::write(
+        repository.root.join("projects/template.md"),
+        r#"```starlark
+structure(additional_sections=True)
+frontmatter(fields={"code": field({}, required=True)}, allow_extra=True)
+metadata(project_code="/code")
+```
+"#,
+    )
+    .unwrap();
     fs::write(
         repository.root.join("projects/a.md"),
         "---\ncode: A\n---\n# Project\n",
@@ -1170,7 +1186,7 @@ fn mcp_allowlist_is_exact() {
 fn configuration_resources_are_hashline_readable() {
     let repository = Repository::new();
     let store = repository.store();
-    for path in ["config.yaml", "template.yaml"] {
+    for path in ["config.yaml", "template.md"] {
         let response = store.get_page(path, Some((1, 2))).unwrap();
         assert!(response.content.starts_with("1:"));
         assert_eq!(response.metadata, serde_json::json!({}));
@@ -1198,19 +1214,19 @@ fn configuration_resources_are_hashline_readable() {
 fn dirty_and_staged_configuration_do_not_leak_into_the_published_state() {
     let repository = Repository::new();
     let store = repository.store();
-    let original = store.get_page("template.yaml", None).unwrap().content;
+    let original = store.get_page("template.md", None).unwrap().content;
 
-    fs::write(repository.root.join("template.yaml"), "not valid JSON\n").unwrap();
+    fs::write(repository.root.join("template.md"), "not valid JSON\n").unwrap();
     assert!(store.validate().is_ok());
     assert_eq!(
-        store.get_page("template.yaml", None).unwrap().content,
+        store.get_page("template.md", None).unwrap().content,
         original
     );
 
-    command(&repository.root, &["add", "template.yaml"]);
+    command(&repository.root, &["add", "template.md"]);
     assert!(store.validate().is_ok());
     assert_eq!(
-        store.get_page("template.yaml", None).unwrap().content,
+        store.get_page("template.md", None).unwrap().content,
         original
     );
 }
@@ -1606,9 +1622,9 @@ fn manual_push_uses_the_repository_write_lock() {
 fn manual_push_refreshes_external_configuration_before_selecting_push_settings() {
     let repository = Repository::new();
     let store = repository.store();
-    let schema = format!("\n{}", template_yaml());
-    fs::write(repository.root.join("template.yaml"), &schema).unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    let schema = format!("\n{}", profile_template());
+    fs::write(repository.root.join("template.md"), &schema).unwrap();
+    command(&repository.root, &["add", "template.md"]);
     command(
         &repository.root,
         &["commit", "-q", "-m", "external schema formatting"],
@@ -1617,7 +1633,7 @@ fn manual_push_refreshes_external_configuration_before_selecting_push_settings()
     assert!(matches!(store.push().unwrap(), PushState::Disabled));
     assert!(
         store
-            .get_page("template.yaml", None)
+            .get_page("template.md", None)
             .unwrap()
             .content
             .lines()
@@ -1673,7 +1689,7 @@ fn external_failures_never_replace_a_divergence_block() {
     fs::create_dir_all(repository.root.join(".git/mdstore")).unwrap();
     fs::write(
         repository.root.join(".git/mdstore/blocked"),
-        "remote history diverged",
+        r#"{"kind":"diverged"}"#,
     )
     .unwrap();
     let store = repository.store();
@@ -1747,19 +1763,19 @@ fn fresh_hashlines_cover_middle_edits() {
 fn edit_interface_cannot_remove_templates() {
     let repository = Repository::new();
     let store = repository.store();
-    let schema = fs::read_to_string(repository.root.join("template.yaml")).unwrap();
+    let schema = fs::read_to_string(repository.root.join("template.md")).unwrap();
     let count = schema.lines().count();
     let first = schema.lines().next().unwrap();
     let last = schema.lines().last().unwrap();
     let request = ApplyEditsRequest {
         edit_summary: "remove active schema".into(),
         edits: vec![EditOperation::RemovePage {
-            path: "template.yaml".into(),
+            path: "template.md".into(),
             anchor: format!("1:{}..{count}:{}", short_hash(first), short_hash(last)),
         }],
     };
     assert!(store.apply_edits(&request).is_err());
-    assert!(repository.root.join("template.yaml").is_file());
+    assert!(repository.root.join("template.md").is_file());
 }
 
 #[test]
@@ -1796,7 +1812,7 @@ fn persisted_write_blocks_survive_restart() {
     fs::create_dir_all(repository.root.join(".git/mdstore")).unwrap();
     fs::write(
         repository.root.join(".git/mdstore/blocked"),
-        "remote history diverged",
+        r#"{"kind":"diverged"}"#,
     )
     .unwrap();
     let store = repository.store();
@@ -2339,9 +2355,9 @@ fn staged_restart_never_overwrites_a_later_local_edit() {
 fn operational_config_rejects_document_rules() {
     for rule in [
         "schemas: []",
-        "sections: []",
+        "```starlark\nstructure(additional_sections=False)\n```\n",
         "markdown: {}",
-        "relations: []",
+        "```starlark\n```\n",
         "links: {}",
         "metadata: {}",
     ] {
@@ -2351,8 +2367,8 @@ fn operational_config_rejects_document_rules() {
     let store = repository.store();
     for path in [
         "config.yaml",
-        "template.yaml",
-        "people/template.yaml",
+        "template.md",
+        "people/template.md",
         ".mdstore/config.yaml",
         "schema.json",
     ] {
@@ -2707,4 +2723,296 @@ async fn daemon_embedding_worker_coalesces_edits_and_observes_direct_store_write
         "unchanged page must keep its vector"
     );
     server.abort();
+}
+
+const TASK_TEMPLATE: &str = include_str!("../examples/tasks/v1/template.md");
+
+fn task_repository() -> Repository {
+    let repository = Repository::new();
+    fs::create_dir_all(repository.root.join("tasks/v1")).unwrap();
+    fs::write(repository.root.join("tasks/v1/template.md"), TASK_TEMPLATE).unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "task policy"]);
+    repository
+}
+
+fn task_content() -> String {
+    "---\ntitle: Review\nstate: inbox\n---\n# Task\n\n## Timeline\n- 2026-09-09T10:00:00Z — Captured.\n".into()
+}
+
+fn task_create(slug: &str) -> ApplyEditsRequest {
+    ApplyEditsRequest {
+        edit_summary: format!("Create {slug}"),
+        edits: vec![EditOperation::CreatePage {
+            path: format!("tasks/v1/2026/09/09-{{serial:03}}-{slug}.md"),
+            content: task_content(),
+        }],
+    }
+}
+
+#[test]
+fn literate_templates_allocate_atomically_and_replay_after_restart() {
+    let repository = task_repository();
+    let store = repository.store();
+    let discovery = store
+        .get_page("tasks/v1/2026/09/09-new.md", None)
+        .unwrap()
+        .template
+        .unwrap();
+    assert_eq!(discovery["path"], "tasks/v1/template.md");
+    assert!(
+        discovery["content"]
+            .as_str()
+            .unwrap()
+            .contains("concrete intended outcome")
+    );
+    assert!(
+        store
+            .get_page("tasks/v1/template.md", None)
+            .unwrap()
+            .content
+            .contains("starlark")
+    );
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    assert!(
+        store
+            .apply_edits(&ApplyEditsRequest {
+                edit_summary: "weaken policy".into(),
+                edits: vec![EditOperation::CreatePage {
+                    path: "tasks/v2/template.md".into(),
+                    content: "# Empty".into()
+                }]
+            })
+            .is_err()
+    );
+    let mut invalid = task_create("invalid");
+    if let EditOperation::CreatePage { content, .. } = &mut invalid.edits[0] {
+        *content = "# No metadata".into();
+    }
+    assert!(store.apply_edits(&invalid).is_err());
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    let request = task_create("review");
+    let response = store.apply_edits(&request).unwrap();
+    assert_eq!(
+        response.touched_paths,
+        vec!["tasks/v1/2026/09/09-001-review.md"]
+    );
+    drop(store);
+    let store = repository.store();
+    let replay = store.apply_edits(&request).unwrap();
+    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
+    assert_eq!(replay.touched_paths, response.touched_paths);
+    assert_eq!(
+        store
+            .apply_edits(&task_create("other"))
+            .unwrap()
+            .touched_paths,
+        vec!["tasks/v1/2026/09/09-002-other.md"]
+    );
+}
+
+#[test]
+fn literate_template_concurrent_creates_and_failed_changes_preserve_state() {
+    let repository = task_repository();
+    let store = repository.store();
+    let handles: Vec<_> = ["alpha", "beta", "gamma", "delta"]
+        .into_iter()
+        .map(|slug| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store.apply_edits(&task_create(slug)).unwrap().touched_paths[0].clone()
+            })
+        })
+        .collect();
+    let paths: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    let serials: std::collections::HashSet<_> = paths
+        .iter()
+        .map(|path| path.rsplit('/').next().unwrap().split('-').nth(1).unwrap())
+        .collect();
+    assert_eq!(serials.len(), 4);
+    let path = &paths[0];
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    let request = |state: &str, timeline: bool| {
+        let mut edits = vec![EditOperation::Replace {
+            path: path.clone(),
+            anchor: format!("3:{}", short_hash("state: inbox")),
+            content: format!("state: {state}"),
+        }];
+        if timeline {
+            edits.push(EditOperation::InsertAfter {
+                path: path.clone(),
+                anchor: format!("8:{}", short_hash("- 2026-09-09T10:00:00Z — Captured.")),
+                content: "- 2026-09-09T11:00:00Z — Clarified.".into(),
+            });
+        }
+        ApplyEditsRequest {
+            edit_summary: "transition".into(),
+            edits,
+        }
+    };
+    assert!(store.apply_edits(&request("completed", true)).is_err());
+    assert!(store.apply_edits(&request("ready", false)).is_err());
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    store.apply_edits(&request("ready", true)).unwrap();
+    assert!(
+        store
+            .get_page(path, None)
+            .unwrap()
+            .content
+            .contains("state: ready")
+    );
+}
+
+#[test]
+fn literate_template_import_validates_the_final_snapshot() {
+    let repository = task_repository();
+    let store = repository.store();
+    let path = store
+        .apply_edits(&task_create("review"))
+        .unwrap()
+        .touched_paths[0]
+        .clone();
+    fs::write(repository.root.join(&path), "# Invalid task\n").unwrap();
+    command(&repository.root, &["add", "."]);
+    command(
+        &repository.root,
+        &["commit", "-qm", "incomplete external edit"],
+    );
+    assert!(store.push().is_err());
+    fs::write(
+        repository.root.join(&path),
+        task_content().replace("inbox", "completed"),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "."]);
+    command(
+        &repository.root,
+        &["commit", "-qm", "complete external edit"],
+    );
+    store.apply_edits(&task_create("second")).unwrap();
+    assert!(
+        store
+            .get_page(&path, None)
+            .unwrap()
+            .content
+            .contains("state: completed")
+    );
+}
+
+#[test]
+fn stale_hash_collision_cannot_overwrite_a_concurrent_edit() {
+    let repository = Repository::new();
+    let original = "Original instruction";
+    let concurrent = "Concurrent change 86";
+    // These lines collided under the previous one-byte hash.
+    fs::write(
+        repository.root.join("alice.md"),
+        page("Alice").replace("Alice profile.", original),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "original text"]);
+    let store = repository.store();
+    fs::write(
+        repository.root.join("alice.md"),
+        page("Alice").replace("Alice profile.", concurrent),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "concurrent edit"]);
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    for hash in [short_hash(original), "96".into()] {
+        let result = store.apply_edits(&ApplyEditsRequest {
+            edit_summary: "stale overwrite".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{hash}"),
+                content: "Overwrite".into(),
+            }],
+        });
+        assert!(result.is_err());
+        assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    }
+    assert!(
+        store
+            .get_page("alice.md", None)
+            .unwrap()
+            .content
+            .contains(concurrent)
+    );
+    assert_ne!(short_hash("Text"), short_hash("Text  "));
+}
+
+#[test]
+fn template_schemas_allow_internal_references_only() {
+    let repository = Repository::new();
+    let external = tempfile::NamedTempFile::new().unwrap();
+    fs::write(external.path(), "{}").unwrap();
+    for reference in [
+        format!("file://{}", external.path().display()),
+        "http://127.0.0.1:9/schema.json".into(),
+    ] {
+        fs::write(
+            repository.root.join("template.md"),
+            format!("```starlark\nfrontmatter(name=field({{\"$ref\": {reference:?}}}))\n```\n"),
+        )
+        .unwrap();
+        command(&repository.root, &["add", "."]);
+        command(&repository.root, &["commit", "-qm", "external reference"]);
+        let error =
+            Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("external schema references are forbidden"),
+            "{error:#}"
+        );
+    }
+    fs::write(repository.root.join("template.md"), r##"```starlark
+frontmatter(name=field({"$defs": {"value": {"type": "string"}}, "$ref": "#/properties/name/$defs/value"}, required=True))
+```
+"##).unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "internal reference"]);
+    assert!(repository.store().validate().is_ok());
+}
+
+#[test]
+fn nested_timeline_cannot_satisfy_the_task_transition_rule() {
+    let repository = task_repository();
+    let path = "tasks/v1/2026/09/09-001-review.md";
+    fs::create_dir_all(repository.root.join("tasks/v1/2026/09")).unwrap();
+    fs::write(
+        repository.root.join(path),
+        format!(
+            "{}\n## Notes\n### Timeline\n- Unrelated note.\n",
+            task_content()
+        ),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "nested heading"]);
+    let store = repository.store();
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    let result = store.apply_edits(&ApplyEditsRequest {
+        edit_summary: "skip task timeline".into(),
+        edits: vec![
+            EditOperation::Replace {
+                path: path.into(),
+                anchor: format!("3:{}", short_hash("state: inbox")),
+                content: "state: ready".into(),
+            },
+            EditOperation::InsertAfter {
+                path: path.into(),
+                anchor: format!("12:{}", short_hash("- Unrelated note.")),
+                content: "- No task timestamp or explanation.".into(),
+            },
+        ],
+    });
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains("Timeline"), "{error:#}");
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
 }

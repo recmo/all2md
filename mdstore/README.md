@@ -5,7 +5,7 @@ validates repository-defined schemas, exposes hashline-safe atomic edits, keeps
 adjacent binary embedding sidecars, and serves exact, vector, graph-assisted,
 and reranked search over MCP.
 
-Markdown, root `config.yaml`, and directory `template.yaml` files are canonical.
+Markdown, root `config.yaml`, and directory `template.md` files are canonical.
 Adjacent `*.mdstore` embedding files are disposable and ignored by Git. No
 repository `.mdstore/` directory is needed; daemon state lives in Git's private
 directory.
@@ -69,104 +69,76 @@ be ordinary text, and link fragments are not checked against headings.
 
 ### Directory templates
 
-Place `template.yaml` in the directory whose documents it governs. It applies
-recursively; the nearest ancestor template replaces its parent completely,
-without merging. Templates are ordinary versioned YAML files, not sidecars.
-All template definitions are checked, including those in empty directories.
-There are no additional global document-validation rules in `config.yaml`.
+Place `template.md` beside the documents it governs. The nearest ancestor
+template applies recursively and replaces its parent. Use directories such as
+`tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
+Templates are readable through `get_page`, protected from `apply_edits`, and
+excluded from search and embeddings.
 
-Example `people/template.yaml`:
+Markdown supplies instructions and examples. Only top-level fences labelled
+exactly `starlark` execute; their contents form one module in document order.
+See the complete [task template](examples/tasks/v1/template.md).
 
-```yaml
-instructions: Describe established facts, not speculation.
-examples: []
-frontmatter:
-  type: object
-  required: [name]
-  properties:
-    name: {type: string}
-metadata:
-  display_name: /name
-markdown:
-  closed_fences: true
-  nonempty_headings: true
-  no_trailing_whitespace: true
-  final_newline: true
-links:
-  markdown: true
-relations:
-  - name: related
-    reciprocal: related
-    selector: {kind: markdown_links}
-structure:
-  level: 2
-  order: enforced
-  additional_sections: false
-preamble:
-  words: {maximum: 10}
-sections:
-  - heading: Summary
-    instructions: Summarize the person in one concise paragraph.
-    rules:
-      required: true
-      content: paragraphs
-      paragraphs: {minimum: 1, maximum: 1}
-      words: {maximum: 100}
-  - heading: Timeline
-    instructions: Record meaningful interactions, newest first.
-    rules:
-      required: true
-      list:
-        ordered: false
-        minimum_items: 1
-        date_order: descending
-```
+Declarations register rules checked by Rust:
 
-Each section can have its own `instructions`, `examples`, `rules`, `structure`,
-and nested `sections`. Heading names are exact, siblings must be unique, and
-duplicate authored sections are rejected. `rules.required` defaults to false.
-`structure.level` defaults to one level below the parent (H1 at the root),
-`order` defaults to `unrestricted`, and `additional_sections` defaults to false.
-Initial headings above the root section level, such as an H1 document title
-before H2 sections, belong to the preamble. Structural headings must be outside
-lists and blockquotes. Extra sections, when allowed, have unconstrained content.
+| Declaration | Purpose |
+| --- | --- |
+| `frontmatter(**fields)` | Define fields; unknown fields are rejected. `fields={...}` supports arbitrary names; `allow_extra=True` permits extra fields. |
+| `string(...)`, `integer(...)`, `boolean(...)`, `enum(values, ...)`, `list_of(item, ...)` | Field constructors with `required=False` and `nullable=False`. Strings accept length/pattern constraints, integers minimum/maximum, and lists `unique`/`min_items`. |
+| `field(schema, required=False)` | Construct a field from JSON Schema, including nested objects. |
+| `section(heading, ...)` | Require or constrain a section. Defaults to H2; `parent=[...]` addresses previously declared parent sections. |
+| `dated_list(order="ascending", min_items=1, allow_equal_timestamps=True)` | Unordered entries starting with RFC3339 timestamps and explanations, ordered by instant. |
+| `filename(pattern, serial_scope=[])` | Match the complete repository-relative path; named regex captures define serial scopes. |
+| `metadata(**pointers)` | Project frontmatter fields through JSON pointers. |
+| `markdown(**rules)` | Set style checks, such as `final_newline`, `closed_fences`, and `max_line_length`. |
+| `links(markdown=True, wiki=[])` | Select link syntax; wiki regexes require a named `target` capture. |
+| `relation(name, selector, reciprocal=None)` | Select authored links or frontmatter arrays; reciprocal facts must be authored in the same batch. |
+| `structure(level=None, order="unrestricted", additional_sections=True)` | Set root heading policy before declaring sections. |
+| `preamble(**rules)` | Constrain content before the declared sections. |
 
-`preamble` uses the same content rules as sections. `content` may be
-`paragraphs`, `list`, `table`, `code`, `blockquotes`, or `empty`; omission allows
-any block type. `nonempty: true` requires non-whitespace text. `paragraphs`,
-`words`, `characters`, and `list_items` each accept optional `minimum` and
-`maximum`. Paragraphs are AST paragraphs, list-item counts include nested items,
-words are whitespace-delimited, and characters are Unicode scalar values of
-text with Markdown delimiters removed (not browser layout or grapheme counts).
-Block boundaries separate words; inline emphasis does not. Raw HTML is not
-rendered. Limits cover a section's own content unless
-`include_subsections: true`. `rules.list` uses the dated-list and item-pattern
-rules documented below. Instructions and examples are advisory, never evaluated
-by an LLM or used as blocking checks.
+Section rules include `required`, `nonempty`, `include_subsections`, and `content`
+(`paragraphs`, `list`, `table`, `code`, `blockquotes`, `empty`, or `dated_list()`).
+`paragraphs`, `words`, `characters`, and `list_items` accept `minimum`/`maximum`
+bounds. A plain `list` rule accepts `ordered`, `minimum_items`, `item_pattern`, and
+`date_order` for YYYY-MM-DD prefixes. Declared sections cannot repeat among
+siblings. Timeline entries may contain continuation paragraphs and nested lists.
 
-`get_page` includes `exists` and `template: {path, definition}` for Markdown.
-For a proposed, in-scope Markdown path it returns `exists: false`, empty content,
-and the applicable template, so agents can discover requirements before writing.
-Read the template itself through `get_page("people/template.yaml")` for hashline
-text. The same information is available through `mdstore get`.
+Custom rules use `validate(callback)` for a document or
+`validate_change(callback)` for an atomic edit's `before, after` snapshots.
+Creation supplies `before=None`; deletion supplies `after=None`. Call
+`require(condition, message, field="state")` or `require(..., at=entry)` to reject
+with a source location. Callbacks return `None`; schema failures skip document
+callbacks, and document failures prevent change validation.
 
-Templates are read-only through `apply_edits`, including creation and removal.
-Template editing/approval is not implemented. An externally committed template
-change is activated only if full-corpus validation succeeds. Direct untracked
-Markdown and template additions are quarantined by repository recovery rather
-than becoming an alternate source of authored state; sidecars remain disposable
-and Gitignored. Invalid edits reject the complete batch and include the template
-path, source line, and relevant section guidance in findings.
+Documents expose immutable `path`, `text`, `frontmatter`, `links`, `line`, and
+`sections`. Sections are keyed by unique heading text; ambiguous names are omitted, so direct
+lookup fails instead of selecting another section. Sections expose `text`, `level`, `line`, and `entries`. Entries expose
+`timestamp` (RFC3339 or `None`), `text`, `links` (destination strings), and `line`.
+YAML frontmatter must be a mapping with unique keys; values are never coerced.
+Schema references may resolve within the schema itself; external retrieval is forbidden.
 
-Template `frontmatter` is an inline JSON Schema; `metadata` maps output names to
-frontmatter JSON pointers. `markdown` selects deterministic style checks.
-`links` configures Markdown/wiki syntax, and `relations` selects authored links
-or frontmatter relations with optional reciprocal requirements. These settings
-use the nearest template, just like structure: a nested template replaces all
-parent policy. Reciprocal facts must still be authored atomically by callers;
-the daemon never generates them. `rules.list` supports `ordered`,
-`minimum_items`, `item_pattern`, and `date_order: ascending|descending`.
-Dates must be valid literal YYYY-MM-DD prefixes, with equal dates allowed.
+Modules are compiled and frozen at activation. Each evaluation has limits of
+100,000 ticks, 16 MiB of Starlark heap, and 64 stack frames; source is limited to
+1 MiB. No imports, filesystem, network, clock, or random APIs are available.
+These interpreter limits are best-effort, not process isolation.
+
+Every atomic edit validates the full proposed corpus and its transitions before
+writing. External Git imports and startup validate the final snapshot against
+its templates; they do not replay historical transitions.
+
+On creation, the single `path` argument accepts `{serial}` or `{serial:03}`.
+The placeholder must occupy the filename pattern's named `serial` capture.
+Under the repository lock, allocation chooses the greatest current serial in
+`serial_scope` plus one, including other creates in the batch. Padding is a
+minimum width, capped at 12. Deleting the highest serial permits reuse. Unknown
+or repeated placeholders and placeholders on other edit operations are rejected.
+Allocation changes only the path, and retries consult durable receipts first.
+Resolved paths are returned in `touched_paths` and `fresh_hashlines`.
+
+`get_page` returns `template: {path, definition, content}`, also for proposed paths
+with `exists: false`. The definition contains declared rules; content is the
+original Markdown. Template updates are authored externally and activated through
+validated Git synchronization.
 
 ## Local durability and background Git synchronization
 
@@ -226,7 +198,8 @@ mdstore --root /path/to/brain status
 mdstore --root /path/to/brain push
 ```
 
-An edit request uses `LINE:HASH` anchors returned by `get_page`:
+An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
+32 hexadecimal characters (128 bits of SHA-256) and include trailing whitespace:
 
 ```json
 {
@@ -235,13 +208,13 @@ An edit request uses `LINE:HASH` anchors returned by `get_page`:
     {
       "op": "insert_after",
       "path": "people/alice.md",
-      "anchor": "12:a3",
+      "anchor": "12:89f234b172385da91ba4cb0c4a7d3abf",
       "content": "- [Bob](bob.md)"
     },
     {
       "op": "insert_after",
       "path": "people/bob.md",
-      "anchor": "9:f1",
+      "anchor": "9:ce55a9a1d046372186e540e350b2d975",
       "content": "- [Alice](alice.md)"
     }
   ]

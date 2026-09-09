@@ -24,7 +24,7 @@ use crate::{
     hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
     markdown::{Edge, Finding, ParsedPage, validate_corpus},
     provider::{InputType, RetrievalProvider, ZeroEntropyProvider},
-    search::{SearchIndex, SearchResponse},
+    search::{PageChunks, SearchIndex, SearchResponse},
     sidecar::{self, Sidecar},
 };
 
@@ -36,7 +36,7 @@ pub struct Store {
     reindex_lock: tokio::sync::Mutex<()>,
     git_dir: PathBuf,
     reindex_notify: tokio::sync::Notify,
-    blocked: RwLock<Option<String>>,
+    blocked: RwLock<Option<WriteBlock>>,
     sync_lock: parking_lot::Mutex<()>,
     sync_notify: tokio::sync::Notify,
     replication: RwLock<ReplicationStatus>,
@@ -48,6 +48,24 @@ impl fmt::Debug for Store {
             .debug_struct("Store")
             .field("root", &self.root)
             .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
+enum WriteBlock {
+    Diverged,
+    ExternalCommit(String),
+}
+
+impl fmt::Display for WriteBlock {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Diverged => formatter.write_str("remote history diverged"),
+            Self::ExternalCommit(detail) => {
+                write!(formatter, "external commit is invalid: {detail}")
+            }
+        }
     }
 }
 
@@ -86,10 +104,6 @@ pub struct ApplyEditsResponse {
     pub touched_paths: Vec<String>,
     /// Current hashline windows for changed regions.
     pub fresh_hashlines: HashMap<String, String>,
-    /// Structured corpus findings when applicable.
-    pub validation_findings: Vec<Finding>,
-    /// Current or pending derived embedding state.
-    pub embedding_state: String,
 }
 
 #[derive(Debug)]
@@ -151,11 +165,13 @@ struct ReindexContext {
     model: String,
     dimensions: usize,
     actions: Vec<ReindexAction>,
+    ready: PageChunks,
 }
 
 enum ReindexAction {
     Remove(PathBuf),
     Embed {
+        path: String,
         text: String,
         chunks: Vec<Chunk>,
         sidecar_path: PathBuf,
@@ -307,15 +323,7 @@ impl Store {
         git_dir: PathBuf,
         provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     ) -> Result<Arc<Self>> {
-        let pages = load_pages(&root, &head, &config)?;
-        let extra = load_config_files(&root, &head)?;
-        let templates = crate::template::Templates::compile(&extra)
-            .map_err(|findings| ValidationError { findings })?;
-        let (parsed, edges) = validate_corpus(&pages, &templates).map_err(|findings| {
-            anyhow!(serde_json::to_string_pretty(&findings).unwrap_or_default())
-        })?;
-        ensure_sidecars_ignored(&root, pages.keys().map(String::as_str))?;
-        let index = build_index(&root, &config, &pages, &parsed, &edges, provider.as_ref());
+        let snapshot = load_snapshot(&root, head, config, provider, 0)?;
         let blocked = read_blocked(&git_dir)?;
         let replication_path = git_dir.join("mdstore/replication.json");
         let replication = if replication_path.exists() {
@@ -325,18 +333,7 @@ impl Store {
         };
         Ok(Arc::new(Self {
             root,
-            state: RwLock::new(Arc::new(StoreState {
-                head,
-                templates: Arc::new(templates),
-                config,
-                config_files: Arc::new(extra),
-                pages: Arc::new(pages),
-                parsed: Arc::new(parsed),
-                edges: Arc::new(edges),
-                index: Arc::new(index),
-                provider,
-                generation: 0,
-            })),
+            state: RwLock::new(Arc::new(snapshot)),
             provider_factory,
             reindex_lock: tokio::sync::Mutex::new(()),
             git_dir,
@@ -398,7 +395,7 @@ impl Store {
                 relations: Vec::new(),
             });
         }
-        if path.ends_with(".md") {
+        if path.ends_with(".md") && !crate::template::is_template(path) {
             ensure_paths_match_config(&state.config, [&path.to_owned()])?;
             return Ok(PageResponse {
                 exists: false,
@@ -448,15 +445,34 @@ impl Store {
         if let Some(response) = self.recover_pending(&digest)? {
             return Ok(response);
         }
-        if let Some(reason) = self.blocked.read().clone() {
+        if let Some(reason) = self.blocked.read().as_ref() {
             bail!("writes are blocked: {reason}");
         }
 
-        let mut paths = BTreeSet::new();
+        let current = self.state.read().clone();
+        let mut existing: std::collections::HashSet<_> = current.pages.keys().cloned().collect();
+        // Reserve explicitly named creates too, regardless of their position in the batch.
         for edit in &request.edits {
+            if let EditOperation::CreatePage { path, .. } = edit
+                && !path.contains(['{', '}'])
+            {
+                existing.insert(path.clone());
+            }
+        }
+        let mut edits = request.edits.clone();
+        for edit in &mut edits {
+            if let EditOperation::CreatePage { path, .. } = edit {
+                *path = current.templates.allocate_path(path, &existing)?;
+                existing.insert(path.clone());
+            } else if edit.path().contains(['{', '}']) {
+                bail!("path placeholders are supported only for creation");
+            }
+        }
+        let mut paths = BTreeSet::new();
+        for edit in &edits {
             let path = edit.path();
             validate_repo_path(path)?;
-            if !path.ends_with(".md") {
+            if !path.ends_with(".md") || crate::template::is_template(path) {
                 bail!(
                     "apply_edits may edit Markdown only; configuration and templates are read-only"
                 );
@@ -464,7 +480,6 @@ impl Store {
             paths.insert(path.to_owned());
         }
 
-        let current = self.state.read().clone();
         let mut base_head = current.head.clone();
         ensure_paths_match_config(&current.config, paths.iter())?;
 
@@ -481,7 +496,7 @@ impl Store {
                 bail!("untracked repository path already exists: {path}");
             }
         }
-        let applied = apply_operations_with_ranges(&originals, &request.edits)?;
+        let applied = apply_operations_with_ranges(&originals, &edits)?;
         let changes = &applied.changes;
         let mut pages = (*current.pages).clone();
         let extra = current.config_files.clone();
@@ -498,6 +513,10 @@ impl Store {
         let config = current.config.clone();
         ensure_pages_match_config(&config, &pages)?;
         let (parsed, edges) = validate_corpus(&pages, &current.templates)
+            .map_err(|findings| ValidationError { findings })?;
+        current
+            .templates
+            .validate_changes(&current.pages, &pages)
             .map_err(|findings| ValidationError { findings })?;
         ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
         let provider = current.provider.clone();
@@ -589,8 +608,6 @@ impl Store {
             push,
             touched_paths: path_list,
             fresh_hashlines,
-            validation_findings: Vec::new(),
-            embedding_state: "pending".into(),
         };
         self.write_receipt(&digest, &response, &preimages, &postimages)?;
         self.remove_pending(&digest)?;
@@ -646,7 +663,7 @@ impl Store {
         let snapshot = self.state.read().clone();
         let generation = snapshot.generation;
         let root = self.root.clone();
-        let context = blocking(move || prepare_reindex(&root, snapshot, force)).await?;
+        let mut context = blocking(move || prepare_reindex(&root, snapshot, force)).await?;
         if self.state.read().generation != generation {
             return Ok(());
         }
@@ -665,6 +682,7 @@ impl Store {
                     .await?;
                 }
                 ReindexAction::Embed {
+                    path,
                     text,
                     chunks,
                     sidecar_path,
@@ -699,7 +717,7 @@ impl Store {
                     let provider_identity = context.provider_identity.clone();
                     let model = context.model.clone();
                     let dimensions = context.dimensions;
-                    blocking(move || {
+                    let values = blocking(move || {
                         let sidecar = Sidecar::new(
                             &text,
                             &provider_identity,
@@ -708,25 +726,26 @@ impl Store {
                             &chunks,
                             &vectors,
                         )?;
-                        sidecar::write_atomic(&sidecar_path, &sidecar)
+                        sidecar::write_atomic(&sidecar_path, &sidecar)?;
+                        Ok(chunks
+                            .into_iter()
+                            .zip(vectors.into_iter().map(Some))
+                            .collect())
                     })
                     .await?;
+                    context.ready.insert(path, values);
                 }
             }
         }
         if self.state.read().generation != generation {
             return Ok(());
         }
-        let root = self.root.clone();
         let snapshot = context.snapshot;
         let index = blocking(move || {
-            Ok(build_index(
-                &root,
-                &snapshot.config,
-                &snapshot.pages,
+            Ok(SearchIndex::build(
                 &snapshot.parsed,
                 &snapshot.edges,
-                snapshot.provider.as_ref(),
+                context.ready,
             ))
         })
         .await?;
@@ -755,7 +774,7 @@ impl Store {
         let mut replication = self.current_replication();
         replication.pending_commits = git::pending_commits(&self.root)?;
         let unpushed = replication.pending_commits > 0;
-        let blocked = self.blocked.read().clone();
+        let blocked = self.blocked.read().as_ref().map(ToString::to_string);
         Ok(StatusResponse {
             replication,
             pages,
@@ -830,11 +849,11 @@ impl Store {
                     self.reindex_notify.notify_one();
                     local = incoming;
                 } else if !git::is_ancestor(&self.root, &incoming, &local)? {
-                    self.set_blocked(Some("remote history diverged".into()))?;
+                    self.set_blocked(Some(WriteBlock::Diverged))?;
                     return Ok(PushState::Diverged);
                 }
             }
-            if self.blocked.read().as_deref() == Some("remote history diverged") {
+            if matches!(*self.blocked.read(), Some(WriteBlock::Diverged)) {
                 self.set_blocked(None)?;
             }
             local
@@ -872,16 +891,11 @@ impl Store {
             return Ok(());
         }
         let state = self.load_candidate(&current, false).inspect_err(|error| {
-            let _ = self.set_external_blocked(format!("external commit is invalid: {error}"));
+            let _ = self.set_external_blocked(error.to_string());
         })?;
         *self.state.write() = Arc::new(state);
         self.reindex_notify.notify_one();
-        if self
-            .blocked
-            .read()
-            .as_deref()
-            .is_some_and(|reason| reason.starts_with("external commit"))
-        {
+        if matches!(*self.blocked.read(), Some(WriteBlock::ExternalCommit(_))) {
             self.set_blocked(None)?;
         }
         Ok(())
@@ -889,29 +903,6 @@ impl Store {
 
     fn load_candidate(&self, current: &str, allow_restart: bool) -> Result<StoreState> {
         let config = Config::from_yaml(&git::read_text(&self.root, current, "config.yaml")?)?;
-        let pages = load_pages(&self.root, current, &config)?;
-        let extra = load_config_files(&self.root, current)?;
-        let templates = crate::template::Templates::compile(&extra)
-            .map_err(|findings| ValidationError { findings })?;
-        let (parsed, edges) = match validate_corpus(&pages, &templates) {
-            Ok(value) => value,
-            Err(findings) => {
-                let reason = format!(
-                    "external commit is invalid:\n{}",
-                    serde_json::to_string_pretty(&findings).unwrap_or_default()
-                );
-                bail!(reason);
-            }
-        };
-        let sidecars: Vec<_> = pages
-            .keys()
-            .map(|path| {
-                sidecar::sidecar_path(Path::new(path))
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        git::ensure_ignored_at(&self.root, current, sidecars.iter().map(String::as_str))?;
         let current_state = self.state.read().clone();
         if !allow_restart && config.server != current_state.config.server {
             bail!("external commit changes server configuration; restart required");
@@ -925,26 +916,13 @@ impl Store {
         } else {
             current_state.provider.clone()
         };
-        let index = build_index(
+        load_snapshot(
             &self.root,
-            &config,
-            &pages,
-            &parsed,
-            &edges,
-            provider.as_ref(),
-        );
-        Ok(StoreState {
-            head: current.to_owned(),
-            templates: Arc::new(templates),
+            current.to_owned(),
             config,
-            config_files: Arc::new(extra),
-            pages: Arc::new(pages),
-            parsed: Arc::new(parsed),
-            edges: Arc::new(edges),
-            index: Arc::new(index),
             provider,
-            generation: current_state.generation + 1,
-        })
+            current_state.generation + 1,
+        )
     }
 
     fn activate_staged_restart(&self) -> Result<()> {
@@ -978,10 +956,10 @@ impl Store {
     }
 
     fn set_external_blocked(&self, reason: String) -> Result<()> {
-        if self.blocked.read().as_deref() == Some("remote history diverged") {
+        if matches!(*self.blocked.read(), Some(WriteBlock::Diverged)) {
             return Ok(());
         }
-        self.set_blocked(Some(reason))
+        self.set_blocked(Some(WriteBlock::ExternalCommit(reason)))
     }
 
     fn receipt_path(&self, digest: &str) -> PathBuf {
@@ -1017,8 +995,6 @@ impl Store {
             push: self.current_push_state()?,
             touched_paths: stored.touched_paths,
             fresh_hashlines,
-            validation_findings: Vec::new(),
-            embedding_state: "pending_or_ready".into(),
         }))
     }
 
@@ -1077,8 +1053,6 @@ impl Store {
             push,
             fresh_hashlines: self.current_hashlines(&pending.touched_paths),
             touched_paths: pending.touched_paths,
-            validation_findings: Vec::new(),
-            embedding_state: "pending_or_ready".into(),
         };
         self.write_receipt(digest, &response, &pending.preimages, &pending.postimages)?;
         self.remove_pending(digest)?;
@@ -1153,10 +1127,10 @@ impl Store {
         }
     }
 
-    fn set_blocked(&self, reason: Option<String>) -> Result<()> {
+    fn set_blocked(&self, reason: Option<WriteBlock>) -> Result<()> {
         let path = self.git_dir.join("mdstore/blocked");
         if let Some(reason) = &reason {
-            write_atomic(&path, reason.as_bytes())?;
+            write_atomic(&path, &serde_json::to_vec(reason)?)?;
         } else if path.exists() {
             fs::remove_file(path)?;
         }
@@ -1177,6 +1151,43 @@ fn edit_images(
         postimages.insert(path.clone(), updated.clone());
     }
     (preimages, postimages)
+}
+
+fn load_snapshot(
+    root: &Path,
+    head: String,
+    config: Config,
+    provider: Arc<dyn RetrievalProvider>,
+    generation: u64,
+) -> Result<StoreState> {
+    let pages = load_pages(root, &head, &config)?;
+    let config_files = load_config_files(root, &head)?;
+    let templates = crate::template::Templates::compile(&config_files)
+        .map_err(|findings| ValidationError { findings })?;
+    let (parsed, edges) =
+        validate_corpus(&pages, &templates).map_err(|findings| ValidationError { findings })?;
+    let sidecars: Vec<_> = pages
+        .keys()
+        .map(|path| {
+            sidecar::sidecar_path(Path::new(path))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    git::ensure_ignored_at(root, &head, sidecars.iter().map(String::as_str))?;
+    let index = build_index(root, &config, &pages, &parsed, &edges, provider.as_ref());
+    Ok(StoreState {
+        head,
+        config,
+        provider,
+        generation,
+        templates: Arc::new(templates),
+        config_files: Arc::new(config_files),
+        pages: Arc::new(pages),
+        parsed: Arc::new(parsed),
+        edges: Arc::new(edges),
+        index: Arc::new(index),
+    })
 }
 
 fn load_pages(root: &Path, revision: &str, config: &Config) -> Result<HashMap<String, String>> {
@@ -1234,6 +1245,7 @@ fn prepare_reindex(root: &Path, snapshot: Arc<StoreState>, force: bool) -> Resul
     let model = provider.model().to_owned();
     let dimensions = provider.dimensions();
     ensure_sidecars_ignored(root, paths.iter().map(String::as_str))?;
+    let mut ready = load_chunks(root, config, pages, parsed, provider.as_ref(), force);
     let mut actions = Vec::new();
     for path in paths {
         let sidecar_path = sidecar::sidecar_path(&root.join(&path));
@@ -1241,19 +1253,17 @@ fn prepare_reindex(root: &Path, snapshot: Arc<StoreState>, force: bool) -> Resul
             actions.push(ReindexAction::Remove(sidecar_path));
             continue;
         };
-        let page = parsed.get(&path).context("missing parsed page")?;
-        let context = embedding_context(config, page);
-        let chunks = chunk_page(text, page, &config.chunking, &context);
-        if !force
-            && sidecar::read(&sidecar_path).ok().is_some_and(|stored| {
-                stored
-                    .vectors_for(text, &provider_identity, &model, dimensions, &chunks)
-                    .is_some()
-            })
-        {
+        if !force && ready[&path].iter().all(|(_, vector)| vector.is_some()) {
             continue;
         }
+        let chunks = ready
+            .remove(&path)
+            .expect("prepared page")
+            .into_iter()
+            .map(|(chunk, _)| chunk)
+            .collect();
         actions.push(ReindexAction::Embed {
+            path,
             text: text.clone(),
             chunks,
             sidecar_path,
@@ -1265,6 +1275,7 @@ fn prepare_reindex(root: &Path, snapshot: Arc<StoreState>, force: bool) -> Resul
         model,
         dimensions,
         actions,
+        ready,
     })
 }
 
@@ -1276,6 +1287,21 @@ fn build_index(
     edges: &[Edge],
     provider: &dyn RetrievalProvider,
 ) -> SearchIndex {
+    SearchIndex::build(
+        parsed,
+        edges,
+        load_chunks(root, config, pages, parsed, provider, false),
+    )
+}
+
+fn load_chunks(
+    root: &Path,
+    config: &Config,
+    pages: &HashMap<String, String>,
+    parsed: &HashMap<String, ParsedPage>,
+    provider: &dyn RetrievalProvider,
+    force: bool,
+) -> PageChunks {
     let mut all_chunks = HashMap::new();
     let provider_identity = provider.embedding_provider_identity();
     for (path, text) in pages {
@@ -1284,31 +1310,29 @@ fn build_index(
         };
         let context = embedding_context(config, page);
         let chunks = chunk_page(text, page, &config.chunking, &context);
-        let vectors = sidecar::read(&sidecar::sidecar_path(&root.join(path)))
-            .ok()
-            .and_then(|stored| {
-                stored.vectors_for(
-                    text,
-                    &provider_identity,
-                    provider.model(),
-                    provider.dimensions(),
-                    &chunks,
-                )
-            });
+        let vectors = if force {
+            None
+        } else {
+            sidecar::read(&sidecar::sidecar_path(&root.join(path)))
+                .ok()
+                .and_then(|stored| {
+                    stored.vectors_for(
+                        text,
+                        &provider_identity,
+                        provider.model(),
+                        provider.dimensions(),
+                        &chunks,
+                    )
+                })
+        };
+        let mut vectors = vectors.unwrap_or_default().into_iter();
         let values = chunks
             .into_iter()
-            .enumerate()
-            .map(|(index, chunk)| {
-                let vector = vectors
-                    .as_ref()
-                    .and_then(|vectors| vectors.get(index))
-                    .cloned();
-                (chunk, vector)
-            })
+            .map(|chunk| (chunk, vectors.next()))
             .collect();
         all_chunks.insert(path.clone(), values);
     }
-    SearchIndex::build(parsed, edges, all_chunks)
+    all_chunks
 }
 
 fn ensure_sidecars_ignored<'a>(
@@ -1399,10 +1423,10 @@ fn zeroentropy_provider(config: ProviderConfig) -> Arc<dyn RetrievalProvider> {
     Arc::new(ZeroEntropyProvider::new(config))
 }
 
-fn read_blocked(git_dir: &Path) -> Result<Option<String>> {
+fn read_blocked(git_dir: &Path) -> Result<Option<WriteBlock>> {
     let path = git_dir.join("mdstore/blocked");
     if path.exists() {
-        Ok(Some(fs::read_to_string(path)?))
+        Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
     } else {
         Ok(None)
     }
