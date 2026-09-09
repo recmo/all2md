@@ -1,7 +1,7 @@
 //! Compiled literate Starlark modules. No loaders, filesystem, clock, or network globals.
 use anyhow::{Context, Result, bail};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use serde_json::{Value as Json, json};
+use serde_json::Value as Json;
 use starlark::{
     environment::{FrozenModule, GlobalsBuilder, Module},
     eval::Evaluator,
@@ -181,8 +181,8 @@ impl Script {
 
     pub(crate) fn check(
         &self,
-        before: Option<&Json>,
-        after: Option<&Json>,
+        before: Option<&Document<'_>>,
+        after: Option<&Document<'_>>,
         change: bool,
     ) -> Result<()> {
         let inputs = Module::with_temp_heap(|module| {
@@ -225,150 +225,94 @@ impl Script {
     }
 }
 
-fn alloc_json<'v>(heap: Heap<'v>, value: &Json) -> Value<'v> {
-    match value {
-        Json::Null => Value::new_none(),
-        Json::Bool(value) => heap.alloc(*value),
-        Json::Number(value) => {
-            if let Some(value) = value.as_i64() {
-                heap.alloc(value)
-            } else if let Some(value) = value.as_u64() {
-                heap.alloc(value)
-            } else {
-                heap.alloc(value.as_f64().expect("JSON number"))
-            }
-        }
-        Json::String(value) => heap.alloc(value.as_str()),
-        Json::Array(values) => heap.alloc(AllocList(values.iter().map(|v| alloc_json(heap, v)))),
-        Json::Object(values) => heap.alloc(AllocDict(
-            values
+pub(crate) struct Document<'a> {
+    path: &'a str,
+    text: &'a str,
+    page: &'a ParsedPage,
+}
+
+pub(crate) fn document<'a>(path: &'a str, text: &'a str, page: &'a ParsedPage) -> Document<'a> {
+    Document { path, text, page }
+}
+
+fn alloc_document<'v>(heap: Heap<'v>, doc: &Document<'_>) -> Value<'v> {
+    let page = doc.page;
+    let sections = heap.alloc(AllocDict(page.section_headings.iter().enumerate().map(
+        |(index, (level, name, start, content_start))| {
+            let end = page.section_headings[index + 1..]
                 .iter()
-                .map(|(k, v)| (k.as_str(), alloc_json(heap, v))),
-        )),
-    }
-}
-
-fn alloc_record<'v>(heap: Heap<'v>, value: &Json) -> Value<'v> {
-    heap.alloc(AllocStruct(
-        value
-            .as_object()
-            .expect("record")
-            .iter()
-            .map(|(k, v)| (k.as_str(), alloc_json(heap, v))),
-    ))
-}
-
-fn alloc_document<'v>(heap: Heap<'v>, value: &Json) -> Value<'v> {
-    let mut fields: Vec<_> = value
-        .as_object()
-        .expect("document")
-        .iter()
-        .filter(|(key, _)| key.as_str() != "sections")
-        .map(|(key, value)| (key.as_str(), alloc_json(heap, value)))
-        .collect();
-    let sections = value["sections"].as_object().expect("sections");
-    let sections = heap.alloc(AllocDict(sections.iter().map(|(name, section)| {
-        let entries = heap.alloc(AllocList(
-            section["entries"]
-                .as_array()
-                .expect("entries")
-                .iter()
-                .map(|entry| alloc_record(heap, entry)),
-        ));
-        let mut fields: Vec<_> = section
-            .as_object()
-            .expect("section")
-            .iter()
-            .filter(|(key, _)| key.as_str() != "entries")
-            .map(|(key, value)| (key.as_str(), alloc_json(heap, value)))
-            .collect();
-        fields.push(("entries", entries));
-        (name.as_str(), heap.alloc(AllocStruct(fields)))
-    })));
-    fields.push(("sections", sections));
-    heap.alloc(AllocStruct(fields))
-}
-
-/// Parsed data exposed to callbacks; no mutable store objects cross the boundary.
-pub(crate) fn document(path: &str, text: &str, page: &ParsedPage) -> Json {
-    let mut offsets = vec![0];
-    offsets.extend(text.match_indices('\n').map(|(offset, _)| offset + 1));
-    let body_start = offsets
-        .get(page.body_start_line - 1)
-        .copied()
-        .unwrap_or(text.len());
-    let mut headings = Vec::new();
-    let mut depth = 0;
-    for (event, range) in Parser::new_ext(&text[body_start..], Options::all()).into_offset_iter() {
-        match event {
-            Event::Start(tag) => {
-                if let Tag::Heading { level, .. } = tag {
-                    let line =
-                        offsets.partition_point(|offset| *offset <= range.start + body_start);
-                    if depth == 0
-                        && let Some(heading) =
-                            page.headings.iter().find(|heading| heading.line == line)
-                    {
-                        headings.push((
-                            level as u8,
-                            heading.text.clone(),
-                            line,
-                            range.start + body_start,
-                            range.end + body_start,
+                .find(|heading| heading.0 <= *level)
+                .map_or(doc.text.len(), |heading| heading.2);
+            let entries = heap.alloc(AllocList(
+                page.list_entries
+                    .iter()
+                    .filter(|entry| entry.range.start >= *content_start && entry.range.end <= end)
+                    .map(|entry| {
+                        let timestamp = entry
+                            .timestamp
+                            .map_or(Value::new_none(), |stamp| heap.alloc(stamp.to_rfc3339()));
+                        let end_line = entry.line
+                            + doc.text[entry.range.clone()]
+                                .trim_end_matches('\n')
+                                .bytes()
+                                .filter(|c| *c == b'\n')
+                                .count();
+                        let links = heap.alloc(AllocList(
+                            page.links
+                                .iter()
+                                .filter(|link| (entry.line..=end_line).contains(&link.line))
+                                .map(|link| link.target.as_str()),
                         ));
-                    }
-                }
-                depth += 1;
-            }
-            Event::End(_) => depth -= 1,
-            _ => {}
-        }
-    }
-    let mut sections = serde_json::Map::new();
-    for (index, (level, name, line, _, start)) in headings.iter().enumerate() {
-        let end = headings[index + 1..]
-            .iter()
-            .find(|h| h.0 <= *level)
-            .map_or(text.len(), |h| h.3);
-        let content = &text[*start..end];
-        let mut entries = Vec::new();
-        let mut depth = 0;
-        for (event, range) in Parser::new_ext(content, Options::all()).into_offset_iter() {
-            match event {
-                Event::Start(tag) => {
-                    if matches!(tag, Tag::Item) && depth == 1 {
-                        let raw = &content[range.clone()];
-                        let stripped = raw
-                            .trim_start()
-                            .trim_start_matches(['-', '+', '*'])
-                            .trim_start();
-                        let token_end =
-                            stripped.find(char::is_whitespace).unwrap_or(stripped.len());
-                        let stamp = &stripped[..token_end];
-                        let timestamp = chrono::DateTime::parse_from_rfc3339(stamp).ok();
-                        let entry_line =
-                            offsets.partition_point(|offset| *offset <= *start + range.start);
-                        let entry_end =
-                            offsets.partition_point(|offset| *offset < *start + range.end);
-                        entries.push(json!({
-                            "timestamp": timestamp.map(|date| date.to_rfc3339()),
-                            "text": if timestamp.is_some() { stripped[token_end..].trim_start().trim_start_matches('—').trim_start() } else { stripped },
-                            "line": entry_line,
-                            "links": page.links.iter().filter(|link| link.line >= entry_line && link.line <= entry_end).map(|link| &link.target).collect::<Vec<_>>(),
-                        }));
-                    }
-                    depth += 1;
-                }
-                Event::End(_) => depth -= 1,
-                _ => {}
-            }
-        }
-        sections.insert(
-            name.clone(),
-            json!({"text":content,"line":line,"level":level,"entries":entries}),
-        );
-    }
-    json!({"path":path,"text":text,"frontmatter":page.frontmatter,"sections":sections,"links":page.links,"line":1})
+                        heap.alloc(AllocStruct([
+                            ("timestamp", timestamp),
+                            (
+                                "text",
+                                heap.alloc(&doc.text[entry.text_start..entry.range.end]),
+                            ),
+                            ("line", heap.alloc(entry.line)),
+                            ("links", links),
+                        ]))
+                    }),
+            ));
+            (
+                name.as_str(),
+                heap.alloc(AllocStruct([
+                    ("text", heap.alloc(&doc.text[*content_start..end])),
+                    ("level", heap.alloc(*level as u32)),
+                    (
+                        "line",
+                        heap.alloc(doc.text[..*start].bytes().filter(|c| *c == b'\n').count() + 1),
+                    ),
+                    ("entries", entries),
+                ])),
+            )
+        },
+    )));
+    let links = heap.alloc(AllocList(page.links.iter().map(|link| {
+        heap.alloc(AllocDict([
+            ("target", heap.alloc(link.target.as_str())),
+            ("line", heap.alloc(link.line)),
+            (
+                "syntax",
+                heap.alloc(match link.syntax {
+                    crate::markdown::LinkSyntax::Markdown => "markdown",
+                    crate::markdown::LinkSyntax::Wiki => "wiki",
+                }),
+            ),
+            (
+                "sections",
+                heap.alloc(AllocList(link.sections.iter().map(String::as_str))),
+            ),
+        ]))
+    })));
+    heap.alloc(AllocStruct([
+        ("path", heap.alloc(doc.path)),
+        ("text", heap.alloc(doc.text)),
+        ("frontmatter", heap.alloc(&page.frontmatter)),
+        ("sections", sections),
+        ("links", links),
+        ("line", heap.alloc(1_i32)),
+    ]))
 }
 
 pub(crate) fn finding(path: &str, text: &str, template: &str, error: &anyhow::Error) -> Finding {
@@ -431,15 +375,6 @@ Record messages and decisions in order.
 ```starlark
 section("Timeline", required=True, content=dated_list())
 
-def transition(before, after):
-    if before != None and after != None:
-        old = before.frontmatter["state"]
-        new = after.frontmatter["state"]
-        require(old != "inbox" or new != "completed", "Clarify before completing", field="state")
-        if old != new:
-            require(len(after.sections["Timeline"].entries) > len(before.sections["Timeline"].entries), "Record the transition", at=after.sections["Timeline"])
-
-validate_change(transition)
 ```
 "#;
 
@@ -464,37 +399,6 @@ validate_change(transition)
         )
         .err()
         .unwrap_or_default()
-    }
-
-    #[test]
-    fn shipped_example_and_directory_versions() {
-        let templates = Templates::compile(&HashMap::from([
-            (
-                "tasks/v1/template.md".into(),
-                include_str!("../examples/tasks/v1/template.md").into(),
-            ),
-            (
-                "tasks/v2/template.md".into(),
-                "```starlark\nfrontmatter(owner=string(required=True))\n```\n".into(),
-            ),
-        ]))
-        .unwrap();
-        let path = "tasks/v1/2026/09/09-001-review.md";
-        let before = HashMap::from([(path.into(), page("inbox"))]);
-        validate_corpus(&before, &templates).unwrap();
-        let after = HashMap::from([(
-            path.into(),
-            format!("{}- 2026-09-09T11:00:00Z — Clarified.\n", page("ready")),
-        )]);
-        validate_corpus(&after, &templates).unwrap();
-        templates.validate_changes(&before, &after).unwrap();
-        assert!(
-            validate_corpus(
-                &HashMap::from([("tasks/v2/a.md".into(), page("inbox"))]),
-                &templates
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -534,32 +438,20 @@ validate_change(transition)
 
     #[test]
     fn change_callbacks_see_both_snapshots() {
-        let templates = templates(TEMPLATE);
+        let templates = templates(
+            r#"```starlark
+def check(before, after):
+    if before != None and after != None:
+        require(before.frontmatter["state"] != after.frontmatter["state"], "Change state")
+validate_change(check)
+```
+"#,
+        );
         let before = HashMap::from([("tasks/a.md".into(), page("inbox"))]);
-        let after = |state, extra: &str| {
-            HashMap::from([("tasks/a.md".into(), format!("{}{extra}", page(state)))])
-        };
-        assert!(
-            templates
-                .validate_changes(
-                    &before,
-                    &after("completed", "- 2026-09-09T11:00:00Z — Done.\n")
-                )
-                .is_err()
-        );
-        assert!(
-            templates
-                .validate_changes(&before, &after("ready", ""))
-                .is_err()
-        );
-        assert!(
-            templates
-                .validate_changes(
-                    &before,
-                    &after("ready", "- 2026-09-09T11:00:00Z — Clarified.\n")
-                )
-                .is_ok()
-        );
+        let after = HashMap::from([("tasks/a.md".into(), page("ready"))]);
+        let same_state = HashMap::from([("tasks/a.md".into(), format!("{}\n", page("inbox")))]);
+        assert!(templates.validate_changes(&before, &after).is_ok());
+        assert!(templates.validate_changes(&before, &same_state).is_err());
         assert!(templates.validate_changes(&HashMap::new(), &before).is_ok());
         assert!(templates.validate_changes(&before, &HashMap::new()).is_ok());
     }

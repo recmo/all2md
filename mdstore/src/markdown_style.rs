@@ -137,10 +137,7 @@ mod tests {
     use crate::{markdown::validate_corpus, template::test_templates};
 
     fn check(text: &str, rules: &str) -> Vec<crate::Finding> {
-        let templates = test_templates(&format!(
-            "structure: {{additional_sections: true}}\nmarkdown:\n{rules}"
-        ))
-        .unwrap();
+        let templates = test_templates(&format!("```starlark\nmarkdown({rules})\n```\n")).unwrap();
         validate_corpus(
             &HashMap::from([("page.md".into(), text.into())]),
             &templates,
@@ -158,7 +155,7 @@ mod tests {
             "- ```\n  x\n",
             "```\n```not a closing fence\n",
         ] {
-            let findings = check(text, "  closed_fences: true");
+            let findings = check(text, "closed_fences=True");
             assert_eq!(findings.len(), 1, "{text:?}: {findings:?}");
             assert_eq!(findings[0].line, Some(1));
         }
@@ -171,17 +168,17 @@ mod tests {
             "```\n```",
             "    ```\n",
         ] {
-            assert!(check(text, "  closed_fences: true").is_empty(), "{text:?}");
+            assert!(check(text, "closed_fences=True").is_empty(), "{text:?}");
         }
     }
 
     #[test]
     fn style_is_configured_and_reports_source_lines() {
         let text = "---\nname: value\n---\n#\n### Jump\n[text]()\n```\nx\n```\ntrailing \n\ttext\nlonger than ten";
-        assert!(check(text, "  final_newline: false").is_empty());
+        assert!(check(text, "final_newline=False").is_empty());
         let findings = check(
             text,
-            "  nonempty_headings: true\n  heading_increment: true\n  nonempty_links: true\n  fence_language: true\n  no_trailing_whitespace: true\n  no_tabs: true\n  max_line_length: 10\n  final_newline: true",
+            "nonempty_headings=True, heading_increment=True, nonempty_links=True, fence_language=True, no_trailing_whitespace=True, no_tabs=True, max_line_length=10, final_newline=True",
         );
         let lines: Vec<_> = findings.iter().map(|f| f.line.unwrap()).collect();
         assert_eq!(findings.len(), 8, "{findings:?}");
@@ -193,9 +190,9 @@ mod tests {
     #[test]
     fn preserves_frontmatter_code_and_hard_breaks() {
         let text = "---\nvalue: 'long value'\n---\n## 中\ntext  \n```rust\n\tlong code with spaces   \n```\n";
-        assert!(check(text, "  no_trailing_whitespace: true\n  no_tabs: true\n  max_line_length: 6\n  heading_increment: true\n  closed_fences: true").is_empty());
-        assert!(check("中日\r\n", "  max_line_length: 2\n  final_newline: true").is_empty());
-        assert!(test_templates("markdown: {max_line_length: 0}").is_err());
-        assert!(test_templates("markdown: {unknown_rule: true}").is_err());
+        assert!(check(text, "no_trailing_whitespace=True, no_tabs=True, max_line_length=6, heading_increment=True, closed_fences=True").is_empty());
+        assert!(check("中日\r\n", "max_line_length=2, final_newline=True").is_empty());
+        assert!(test_templates("```starlark\nmarkdown(max_line_length=0)\n```\n").is_err());
+        assert!(test_templates("```starlark\nmarkdown(unknown_rule=True)\n```\n").is_err());
     }
 }

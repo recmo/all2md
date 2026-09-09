@@ -16,10 +16,8 @@ frontmatter(
     tags=list_of(string(min_length=1), unique=True),
 )
 
-configure(
-    metadata={"title": "/title", "state": "/state", "tags": "/tags"},
-    markdown={"final_newline": True, "closed_fences": True},
-)
+metadata(title="/title", state="/state", tags="/tags")
+markdown(final_newline=True, closed_fences=True)
 
 def check_waiting(doc):
     if doc.frontmatter["state"] == "waiting":

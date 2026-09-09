@@ -263,7 +263,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read Markdown, template.md (or legacy template.yaml), or root config.yaml with hashline anchors. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration and templates are read-only.",
+            "description": "Read Markdown, template.md, or root config.yaml with hashline anchors. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration and templates are read-only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

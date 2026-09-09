@@ -4,16 +4,40 @@ _locations = {}
 _validators = []
 _change_validators = []
 
-def configure(**settings):
-    for key, value in settings.items():
-        if key in _definition and key not in ["structure", "sections"]:
-            fail("duplicate configuration: " + key)
-        _definition[key] = value
+def _declare(name, value):
+    if name in _definition:
+        fail(name + " is already declared")
+    _definition[name] = value
+
+def metadata(**pointers):
+    _declare("metadata", pointers)
+
+def markdown(**rules):
+    _declare("markdown", rules)
+
+def links(markdown=True, wiki=[]):
+    _declare("links", {"markdown": markdown, "wiki": wiki})
+
+def relation(name, selector, reciprocal=None):
+    if "relations" not in _definition:
+        _definition["relations"] = []
+    _definition["relations"].append({"name": name, "selector": selector, "reciprocal": reciprocal})
+
+def structure(level=None, order="unrestricted", additional_sections=True):
+    if _definition["sections"]:
+        fail("declare structure before sections")
+    _definition["structure"] = {"level": level, "order": order, "additional_sections": additional_sections}
+
+def preamble(**rules):
+    _declare("preamble", rules)
+
+def field(schema, required=False):
+    return {"schema": schema, "required": required}
 
 def _field(kind, required, nullable, constraints):
     schema = {"type": [kind, "null"] if nullable else kind}
     schema.update(constraints)
-    return {"schema": schema, "required": required}
+    return field(schema, required)
 
 def string(required=False, nullable=False, min_length=None, max_length=None, pattern=None):
     constraints = {}
@@ -55,13 +79,25 @@ def frontmatter(fields=None, allow_extra=False, **named_fields):
         "additionalProperties": allow_extra,
     }
 
-def dated_list(timestamp="rfc3339", order="ascending", min_items=1, allow_equal_timestamps=True):
-    return {"timestamp": timestamp, "order": order, "min_items": min_items, "allow_equal_timestamps": allow_equal_timestamps}
+def dated_list(order="ascending", min_items=1, allow_equal_timestamps=True):
+    return {"order": order, "min_items": min_items, "allow_equal_timestamps": allow_equal_timestamps}
 
-def section(heading, level=2, required=False, content=None, instructions="", **rules):
-    if _definition["sections"] and _definition["structure"].get("level") != level:
+def section(heading, level=None, parent=[], required=False, content=None, **rules):
+    node = _definition
+    parent_level = 1
+    for name in parent:
+        matches = [child for child in node["sections"] if child["heading"] == name]
+        if len(matches) != 1:
+            fail("declare the parent section first: " + name)
+        parent_level = node["structure"].get("level") or parent_level + 1
+        node = matches[0]
+    if level == None:
+        level = node["structure"].get("level")
+    if level == None:
+        level = parent_level + 1
+    if node["sections"] and node["structure"].get("level") != level:
         fail("sibling sections must use the same heading level")
-    _definition["structure"]["level"] = level
+    node["structure"]["level"] = level
     rules = dict(rules)
     rules["required"] = required
     if type(content) == "dict":
@@ -70,7 +106,7 @@ def section(heading, level=2, required=False, content=None, instructions="", **r
     elif content != None:
         rules["content"] = content
     _locations[heading] = _location()
-    _definition["sections"].append({"heading": heading, "instructions": instructions, "rules": rules})
+    node["sections"].append({"heading": heading, "rules": rules, "structure": {}, "sections": []})
 
 def filename(pattern, serial_scope=[]):
     if "filename" in _definition:

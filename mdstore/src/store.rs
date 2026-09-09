@@ -909,39 +909,6 @@ impl Store {
         Ok(())
     }
 
-    fn validate_incoming_changes(&self, base: &str, candidate: &str) -> Result<()> {
-        if base == candidate {
-            return Ok(());
-        }
-        // For a deliberate local rewind, validate the net edit under the accepted policy.
-        if !git::is_ancestor(&self.root, base, candidate)? {
-            let state = self.state.read().clone();
-            let config = Config::from_yaml(&git::read_text(&self.root, candidate, "config.yaml")?)?;
-            let pages = load_pages(&self.root, candidate, &config)?;
-            return state
-                .templates
-                .validate_changes(&state.pages, &pages)
-                .map_err(|findings| ValidationError { findings }.into());
-        }
-        for (parent, commit) in git::incoming_edges(&self.root, base, candidate)? {
-            let templates =
-                crate::template::Templates::compile(&load_config_files(&self.root, &parent)?)
-                    .map_err(|findings| ValidationError { findings })?;
-            if !templates.has_change_checks() {
-                continue;
-            }
-            let config = Config::from_yaml(&git::read_text(&self.root, &parent, "config.yaml")?)?;
-            let before = load_pages(&self.root, &parent, &config)?;
-            let config = Config::from_yaml(&git::read_text(&self.root, &commit, "config.yaml")?)?;
-            let after = load_pages(&self.root, &commit, &config)?;
-            templates
-                .validate_changes(&before, &after)
-                .map_err(|findings| ValidationError { findings })
-                .with_context(|| format!("change validation for commit {commit}"))?;
-        }
-        Ok(())
-    }
-
     fn load_candidate(&self, current: &str, allow_restart: bool) -> Result<StoreState> {
         let config = Config::from_yaml(&git::read_text(&self.root, current, "config.yaml")?)?;
         let pages = load_pages(&self.root, current, &config)?;
@@ -968,7 +935,6 @@ impl Store {
             .collect();
         git::ensure_ignored_at(&self.root, current, sidecars.iter().map(String::as_str))?;
         let current_state = self.state.read().clone();
-        self.validate_incoming_changes(&current_state.head, current)?;
         if !allow_restart && config.server != current_state.config.server {
             bail!("external commit changes server configuration; restart required");
         }

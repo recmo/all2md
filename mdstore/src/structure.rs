@@ -138,8 +138,12 @@ mod tests {
 
     fn check(text: &str) -> Vec<Finding> {
         let templates = Templates::compile(&HashMap::from([(
-            "people/template.yaml".into(),
-            "structure: {level: 2, additional_sections: true}\nsections:\n- heading: Timeline\n  rules:\n    required: true\n    list:\n      minimum_items: 1\n      ordered: false\n      date_order: descending\n".into(),
+            "people/template.md".into(),
+            r#"```starlark
+structure(level=2, additional_sections=True)
+section("Timeline", required=True, list={"minimum_items": 1, "ordered": False, "date_order": "descending"}, level=2)
+```
+"#.into(),
         )])).unwrap();
         crate::markdown::validate_corpus(
             &HashMap::from([
@@ -232,8 +236,12 @@ mod tests {
     #[test]
     fn alternative_folder_template_and_invalid_configuration() {
         let templates = Templates::compile(&HashMap::from([(
-            "projects/template.yaml".into(),
-            "sections:\n- heading: Milestones\n  rules:\n    required: true\n    list:\n      ordered: true\n      minimum_items: 2\n      date_order: ascending\n      item_pattern: '^\\d{4}-\\d{2}-\\d{2} M[0-9]+: '\n".into(),
+            "projects/template.md".into(),
+            r#"```starlark
+structure(additional_sections=False)
+section("Milestones", required=True, list={"ordered": True, "minimum_items": 2, "date_order": "ascending", "item_pattern": "^\\d{4}-\\d{2}-\\d{2} M[0-9]+: "}, level=1)
+```
+"#.into(),
         )])).unwrap();
         for (text, valid) in [
             (
@@ -260,13 +268,13 @@ mod tests {
             );
         }
         for setting in [
-            "structure: {level: 7}",
-            "structure: {level: 0}",
-            "rules: {list: {item_pattern: '['}}",
-            "rules: {list: {date_order: random}}",
-            "rules: {list: {unknown: true}}",
+            "structure(level=7)",
+            "structure(level=0)",
+            "section('Any', list={'item_pattern': '['})",
+            "section('Any', list={'date_order': 'random'})",
+            "section('Any', list={'unknown': True})",
         ] {
-            assert!(test_templates(&format!("sections:\n- heading: Any\n  {setting}\n")).is_err());
+            assert!(test_templates(&format!("```starlark\n{setting}\n```\n")).is_err());
         }
     }
 }

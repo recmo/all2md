@@ -67,178 +67,77 @@ These are explicit checks on CommonMark parsing, not a guarantee that every
 typo is rejected: unmatched emphasis and undefined reference syntax can still
 be ordinary text, and link fragments are not checked against headings.
 
-### Literate directory templates
+### Directory templates
 
-Place `template.md` in the directory whose documents it governs. It applies
-recursively; the nearest ancestor template replaces its parent completely.
-Template files are configuration resources: readable through `get_page`, protected
-from `apply_edits`, and excluded from the document corpus and embeddings.
-All templates are compiled, including those in empty or excluded directories.
+Place `template.md` beside the documents it governs. The nearest ancestor
+template applies recursively and replaces its parent. Use directories such as
+`tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
+Templates are readable through `get_page`, protected from `apply_edits`, and
+excluded from search and embeddings.
 
-Markdown headings and prose are instructions for people and agents. They impose
-no implicit document rules. Only top-level fenced blocks with the exact info
-string `starlark` execute. Other languages, indented code, and fences nested in
-lists or blockquotes are examples. Unclosed executable fences and obsolete
-`starlark schema`/`starlark validate` fence labels are rejected.
+Markdown supplies instructions and examples. Only top-level fences labelled
+exactly `starlark` execute; their contents form one module in document order.
+See the complete [task template](examples/tasks/v1/template.md).
 
-All executable blocks form one Starlark module in document order, so definitions
-can be shared across blocks. The module is compiled and frozen at activation;
-document validation reuses it. There are no imports, filesystem, network, clock,
-or random APIs. The dialect is standard Starlark, not full Python.
+Declarations register rules checked by Rust:
 
-For example, `tasks/v1/template.md`:
+| Declaration | Purpose |
+| --- | --- |
+| `frontmatter(**fields)` | Define fields; unknown fields are rejected. `fields={...}` supports arbitrary names; `allow_extra=True` permits extra fields. |
+| `string(...)`, `integer(...)`, `boolean(...)`, `enum(values, ...)`, `list_of(item, ...)` | Field constructors with `required=False` and `nullable=False`. Strings accept length/pattern constraints, integers minimum/maximum, and lists `unique`/`min_items`. |
+| `field(schema, required=False)` | Construct a field from JSON Schema, including nested objects. |
+| `section(heading, ...)` | Require or constrain a section. Defaults to H2; `parent=[...]` addresses previously declared parent sections. |
+| `dated_list(order="ascending", min_items=1, allow_equal_timestamps=True)` | Unordered entries starting with RFC3339 timestamps and explanations, ordered by instant. |
+| `filename(pattern, serial_scope=[])` | Match the complete repository-relative path; named regex captures define serial scopes. |
+| `metadata(**pointers)` | Project frontmatter fields through JSON pointers. |
+| `markdown(**rules)` | Set style checks, such as `final_newline`, `closed_fences`, and `max_line_length`. |
+| `links(markdown=True, wiki=[])` | Select link syntax; wiki regexes require a named `target` capture. |
+| `relation(name, selector, reciprocal=None)` | Select authored links or frontmatter arrays; reciprocal facts must be authored in the same batch. |
+| `structure(level=None, order="unrestricted", additional_sections=True)` | Set root heading policy before declaring sections. |
+| `preamble(**rules)` | Constrain content before the declared sections. |
 
-````markdown
-# Tasks
+Section rules include `required`, `nonempty`, `include_subsections`, and `content`
+(`paragraphs`, `list`, `table`, `code`, `blockquotes`, `empty`, or `dated_list()`).
+`paragraphs`, `words`, `characters`, and `list_items` accept `minimum`/`maximum`
+bounds. A plain `list` rule accepts `ordered`, `minimum_items`, `item_pattern`, and
+`date_order` for YYYY-MM-DD prefixes. Declared sections cannot repeat among
+siblings. Timeline entries may contain continuation paragraphs and nested lists.
 
-Name the intended outcome and record relevant events.
+Custom rules use `validate(callback)` for a document or
+`validate_change(callback)` for an atomic edit's `before, after` snapshots.
+Creation supplies `before=None`; deletion supplies `after=None`. Call
+`require(condition, message, field="state")` or `require(..., at=entry)` to reject
+with a source location. Callbacks return `None`; schema failures skip document
+callbacks, and document failures prevent change validation.
 
-```starlark
-frontmatter(
-    title=string(required=True, min_length=1),
-    state=enum(["inbox", "ready", "waiting", "completed"], required=True),
-    waiting_on=string(nullable=True),
-    tags=list_of(string(), unique=True),
-)
-```
+Documents expose immutable `path`, `text`, `frontmatter`, `links`, `line`, and
+`sections`. Sections are keyed by heading text (last occurrence for duplicate
+names) and expose `text`, `level`, `line`, and `entries`. Entries expose
+`timestamp` (RFC3339 or `None`), `text`, `links` (destination strings), and `line`.
+YAML frontmatter must be a mapping with unique keys; values are never coerced.
 
-## Waiting
+Modules are compiled and frozen at activation. Each evaluation has limits of
+100,000 ticks, 16 MiB of Starlark heap, and 64 stack frames; source is limited to
+1 MiB. No imports, filesystem, network, clock, or random APIs are available.
+These interpreter limits are best-effort, not process isolation.
 
-Explain the external dependency when a task is waiting.
+Every atomic edit validates the full proposed corpus and its transitions before
+writing. External Git imports and startup validate the final snapshot against
+its templates; they do not replay historical transitions.
 
-```starlark
-def check_waiting(doc):
-    if doc.frontmatter["state"] == "waiting":
-        require(bool((doc.frontmatter.get("waiting_on") or "").strip()),
-                "Explain what this task is waiting for", field="waiting_on")
+On creation, the single `path` argument accepts `{serial}` or `{serial:03}`.
+The placeholder must occupy the filename pattern's named `serial` capture.
+Under the repository lock, allocation chooses the greatest current serial in
+`serial_scope` plus one, including other creates in the batch. Padding is a
+minimum width, capped at 12. Deleting the highest serial permits reuse. Unknown
+or repeated placeholders and placeholders on other edit operations are rejected.
+Allocation changes only the path, and retries consult durable receipts first.
+Resolved paths are returned in `touched_paths` and `fresh_hashlines`.
 
-validate(check_waiting)
-```
-
-## Timeline
-
-Record messages and decisions chronologically.
-
-```starlark
-section("Timeline", required=True, content=dated_list())
-```
-````
-
-A complete [task template](examples/tasks/v1/template.md) includes filename
-allocation, state transitions, metadata projection, and Timeline rules.
-
-#### Declarations
-
-The following helpers register inspectable schema data, which Rust validates:
-
-- `frontmatter(**fields)`: declare top-level fields; unknown fields are rejected.
-  Use `fields={...}` for names that cannot be keyword arguments, or
-  `allow_extra=True` to allow additional fields. It may be called once.
-- `string(required=False, nullable=False, min_length=None, max_length=None,
-  pattern=None)`, `integer(required=False, nullable=False, minimum=None,
-  maximum=None)`, `boolean(required=False, nullable=False)`,
-  `enum(values, required=False, nullable=False)`, and
-  `list_of(item, required=False, nullable=False, unique=False, min_items=0)`
-  construct field definitions. Optional does not mean nullable. Values are never
-  coerced and defaults are not inserted.
-- `section(heading, level=2, required=False, content=None, instructions="",
-  **rules)` registers an exact section heading. Siblings have the same level;
-  declared sections cannot appear twice. Other sections are allowed by default.
-- `dated_list(timestamp="rfc3339", order="ascending", min_items=1,
-  allow_equal_timestamps=True)` is a section content rule. Entries must be
-  unordered list items starting with a literal RFC3339 timestamp and explanation.
-  Ordering compares instants, including timezone offsets. Equal instants are
-  optionally allowed. Continuation paragraphs, links, and nested supporting
-  lists are permitted; subsection headings are not.
-- `filename(pattern, serial_scope=[])` constrains the entire repository-relative
-  filename using a Rust regular expression. Named captures define serial scopes.
-- `configure(**settings)` exposes the existing Rust policy representation for
-  `frontmatter` (raw JSON Schema), `metadata`, `markdown`, `links`, `relations`,
-  `structure`, `preamble`, and nested `sections`. Use this for nested object
-  schemas and less common structural checks. Starlark uses `True`/`False`/`None`.
-
-Section `content` can also be `paragraphs`, `list`, `table`, `code`,
-`blockquotes`, or `empty`. Rules include `nonempty`, `include_subsections`, and
-`paragraphs`, `words`, `characters`, or `list_items` bounds, each with `minimum`
-and/or `maximum`. `structure` accepts `level`, `order` (`enforced` or
-`unrestricted`), and `additional_sections`. Recursive section declarations are
-available through `configure(sections=[...])`. Legacy `list` rules accept
-`ordered`, `minimum_items`, `item_pattern`, and `date_order`; their dates are
-literal YYYY-MM-DD prefixes, distinct from `dated_list` RFC3339 timestamps.
-
-`metadata` maps output names to frontmatter JSON pointers. `links` enables
-Markdown/wiki syntax. `relations` selects authored links or frontmatter arrays,
-with optional reciprocal requirements. Reciprocal facts must be authored in the
-same atomic edit batch; the daemon does not generate them.
-
-#### Custom validation
-
-`validate(callback)` registers a function taking `doc`.
-`validate_change(callback)` registers a function taking `before, after`;
-creation passes `before=None`, deletion passes `after=None`.
-Callbacks return `None`; `require(condition, message, field=None, at=None)`
-rejects the document when its condition is false. The first failing callback
-stops that document's script evaluation. Schema/structure failures skip custom
-document callbacks, and any document failure prevents change validation.
-
-Inputs are immutable snapshots. Documents expose `path`, `text`, `frontmatter`
-(a dictionary), `links`, `line`, and `sections` (a dictionary keyed by exact
-heading text). A section exposes `text`, `level`, `line`, and `entries`.
-Each top-level list entry exposes `timestamp` (RFC3339 or `None`), `text`,
-`links` (destination strings), and `line`. Use `doc.frontmatter["state"]` and
-`doc.sections["Timeline"].entries`. For independently addressable sections, use
-unique heading names; the section lookup keeps the last same-named heading.
-
-`field="state"` locates a top-level frontmatter field; `at=entry` or `at=section`
-locates a Markdown node. Errors include template paths and Starlark source
-locations; schema and section declarations also include the enclosing template
-heading. YAML must be a mapping with unique keys.
-
-Each module initialization or callback batch has a 100,000-tick budget, a 16 MiB
-Starlark heap budget, and a 64-frame call-stack limit; template source is limited
-to 1 MiB. These are best-effort interpreter limits, not process isolation or a
-hard bound on native allocations. Templates are repository-controlled code.
-
-Full-corpus validation remains the correctness baseline. Change rules execute
-before local writes. Incoming Git commits also run parent-policy change checks
-for each incoming commit edge, so a legal sequence is not collapsed into an
-illegal direct transition. The final snapshot must pass its own templates.
-Startup validates the current snapshot, without replaying historical transitions.
-A rejected transition remains rejected in that history; correct the import or
-explicitly adopt a new baseline rather than expecting a later commit to erase it.
-
-#### Filename allocation and directory versions
-
-Every edit uses one `path` argument. Literal paths remain literal. On creation,
-`{serial}` or `{serial:03}` requests allocation; unknown placeholders, multiple
-placeholders, and placeholders on non-create operations are rejected. Padding
-is a minimum width (at most 12), not a limit on the serial value.
-
-The applicable `filename` pattern must capture `serial`; `serial_scope` names
-other captures, such as `year`, `month`, and `day`. Allocation chooses one more
-than the greatest current serial in that scope, under the repository lock.
-It includes other creates in the batch, including explicitly named creates.
-No counters or ID fields are stored in the document. Deleting the highest
-number can make it available again; this is not an everlasting sequence.
-Accepted paths are returned in `touched_paths` and `fresh_hashlines`, and retries
-use the existing durable receipts before allocation. An untracked file collision
-rejects the batch. Allocation substitutes the path only, never document content.
-
-Use `tasks/v1/template.md`, `tasks/v2/template.md`, etc. for incompatible formats.
-There is no version field or registry. Old documents remain in their original
-directories and editable under their original policies. Migrating a document
-means explicitly moving its identity, changing content, and updating references.
-
-`get_page` returns `template: {path, definition, content}` for documents,
-including proposed in-scope paths with `exists: false`. `definition` is the
-resolved declaration data; `content` is the literate template Markdown.
-Templates are read-only through `apply_edits`; changes are authored externally
-and activated through validated Git synchronization.
-
-Legacy `template.yaml` remains supported during migration, with its existing
-schema and structural semantics. A directory containing both `template.md` and
-`template.yaml` is rejected. Replace the YAML file with Markdown in one commit.
-A nearer legacy or Markdown template replaces all parent policy.
+`get_page` returns `template: {path, definition, content}`, also for proposed paths
+with `exists: false`. The definition contains declared rules; content is the
+original Markdown. Template updates are authored externally and activated through
+validated Git synchronization.
 
 ## Local durability and background Git synchronization
 

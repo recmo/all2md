@@ -256,7 +256,7 @@ impl Repository {
         command(&root, &["config", "user.email", "mdstore@example.invalid"]);
         command(&root, &["config", "commit.gpgsign", "false"]);
         fs::write(root.join("config.yaml"), config_yaml()).unwrap();
-        fs::write(root.join("template.yaml"), template_yaml()).unwrap();
+        fs::write(root.join("template.md"), profile_template()).unwrap();
         fs::write(root.join(".gitignore"), "*.mdstore\n!.mdstore/\n").unwrap();
         fs::write(root.join("alice.md"), page("Alice")).unwrap();
         fs::write(root.join("bob.md"), page("Bob")).unwrap();
@@ -322,21 +322,14 @@ server:
 "#
 }
 
-fn template_yaml() -> String {
-    format!(
-        "frontmatter: {}\nstructure: {{additional_sections: true}}\nmetadata:\n  display_name: /name\nlinks:\n  markdown: true\n  wiki:\n    - '\\[\\[(?P<target>[^\\]|#]+)(?:#[^\\]|]+)?(?:\\|[^\\]]+)?\\]\\]'\nrelations:\n  - name: mentions\n    reciprocal: mentions\n    selector:\n      kind: markdown_links\n",
-        serde_json::from_str::<serde_json::Value>(schema()).unwrap()
-    )
-}
-
-fn schema() -> &'static str {
-    r#"{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "required": ["name"],
-  "properties": {"name": {"type": "string"}},
-  "additionalProperties": false
-}"#
+fn profile_template() -> &'static str {
+    r#"```starlark
+frontmatter(name=string(required=True))
+metadata(display_name="/name")
+links(wiki=[r"\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]"])
+relation("mentions", selector={"kind": "markdown_links"}, reciprocal="mentions")
+```
+"#
 }
 
 fn page(name: &str) -> String {
@@ -641,23 +634,26 @@ fn rejects_mixed_configuration_and_content_batch() {
 #[test]
 fn directory_templates_are_discoverable_read_only_and_atomic() {
     let repository = Repository::new();
-    let template = "instructions: Keep notes concise.\nstructure: {level: 1}\nsections:\n- heading: Notes\n  rules: {required: true, content: paragraphs, paragraphs: {minimum: 1, maximum: 1}}\n";
-    fs::write(repository.root.join("template.yaml"), template).unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    let template = r#"Keep notes concise.
+
+```starlark
+structure(level=1)
+section("Notes", required=True, content="paragraphs", paragraphs={"minimum": 1, "maximum": 1}, level=1)
+```
+"#;
+    fs::write(repository.root.join("template.md"), template).unwrap();
+    command(&repository.root, &["add", "template.md"]);
     command(&repository.root, &["commit", "-qm", "add template"]);
     let store = repository.store();
     let existing = store.get_page("alice.md", None).unwrap();
     assert!(existing.exists);
-    assert_eq!(existing.template.unwrap()["path"], "template.yaml");
+    assert_eq!(existing.template.unwrap()["path"], "template.md");
     let proposed = store.get_page("people/new.md", None).unwrap();
     assert!(!proposed.exists);
-    assert_eq!(
-        proposed.template.unwrap()["definition"]["instructions"],
-        "Keep notes concise."
-    );
+    assert_eq!(proposed.template.unwrap()["content"], template);
     assert!(
         store
-            .get_page("template.yaml", None)
+            .get_page("template.md", None)
             .unwrap()
             .content
             .contains("Keep notes concise.")
@@ -665,12 +661,12 @@ fn directory_templates_are_discoverable_read_only_and_atomic() {
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
     for edits in [
         vec![EditOperation::Replace {
-            path: "template.yaml".into(),
-            anchor: format!("1:{}", short_hash("instructions: Keep notes concise.")),
-            content: "instructions: Weaken rules".into(),
+            path: "template.md".into(),
+            anchor: format!("1:{}", short_hash("Keep notes concise.")),
+            content: "Weaken rules\n\n```starlark\n```\n".into(),
         }],
         vec![EditOperation::CreatePage {
-            path: "people/template.yaml".into(),
+            path: "people/template.md".into(),
             content: "{}".into(),
         }],
         vec![
@@ -716,11 +712,15 @@ fn invalid_templates_block_startup_even_without_matching_pages() {
     let repository = Repository::new();
     fs::create_dir(repository.root.join("empty")).unwrap();
     fs::write(
-        repository.root.join("empty/template.yaml"),
-        "sections: [{heading: A, rules: {words: {minimum: 5, maximum: 2}}}]",
+        repository.root.join("empty/template.md"),
+        r#"```starlark
+structure(additional_sections=False)
+section("A", words={"minimum": 5, "maximum": 2}, level=1)
+```
+"#,
     )
     .unwrap();
-    command(&repository.root, &["add", "empty/template.yaml"]);
+    command(&repository.root, &["add", "empty/template.md"]);
     command(&repository.root, &["commit", "-qm", "invalid template"]);
     assert!(Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).is_err());
 }
@@ -730,19 +730,19 @@ fn template_recovery_and_invalid_external_activation() {
     let repository = Repository::new();
     fs::create_dir(repository.root.join("stray")).unwrap();
     fs::write(
-        repository.root.join("stray/template.yaml"),
+        repository.root.join("stray/template.md"),
         "unknown: untracked",
     )
     .unwrap();
     let store = repository.store();
-    assert!(!repository.root.join("stray/template.yaml").exists());
+    assert!(!repository.root.join("stray/template.md").exists());
     assert!(store.get_page("alice.md", None).unwrap().template.is_some());
     fs::write(
-        repository.root.join("template.yaml"),
-        "sections: [{heading: Missing, rules: {required: true}}]",
+        repository.root.join("template.md"),
+        "```starlark\nstructure(additional_sections=False)\nsection(\"Missing\", required=True, level=1)\n```\n",
     )
     .unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    command(&repository.root, &["add", "template.md"]);
     command(
         &repository.root,
         &["commit", "-qm", "incompatible template"],
@@ -755,11 +755,15 @@ fn template_recovery_and_invalid_external_activation() {
 fn structured_sections_validate_activation_and_atomic_batches() {
     let repository = Repository::new();
     let template = format!(
-        "{}sections:\n- heading: Notes\n  rules:\n    required: true\n    list: {{minimum_items: 1, date_order: descending}}\n",
-        template_yaml()
+        r#"{}
+```starlark
+section("Notes", level=1, required=True, list={{"minimum_items": 1, "date_order": "descending"}})
+```
+"#,
+        profile_template()
     );
-    fs::write(repository.root.join("template.yaml"), template).unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    fs::write(repository.root.join("template.md"), template).unwrap();
+    command(&repository.root, &["add", "template.md"]);
     command(
         &repository.root,
         &["commit", "-qm", "require dated entries"],
@@ -801,22 +805,25 @@ fn structured_sections_validate_activation_and_atomic_batches() {
 fn markdown_style_activation_and_edits_are_atomic() {
     let repository = Repository::new();
     fs::write(
-        repository.root.join("template.yaml"),
-        format!("{}markdown: {{max_line_length: 5}}\n", template_yaml()),
-    )
-    .unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
-    command(&repository.root, &["commit", "-qm", "invalid style policy"]);
-    assert!(Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).is_err());
-    fs::write(
-        repository.root.join("template.yaml"),
+        repository.root.join("template.md"),
         format!(
-            "{}markdown: {{no_trailing_whitespace: true, closed_fences: true}}\n",
-            template_yaml()
+            "{}\n```starlark\nmarkdown(max_line_length=5)\n```\n",
+            profile_template()
         ),
     )
     .unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    command(&repository.root, &["add", "template.md"]);
+    command(&repository.root, &["commit", "-qm", "invalid style policy"]);
+    assert!(Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).is_err());
+    fs::write(
+        repository.root.join("template.md"),
+        format!(
+            "{}\n```starlark\nmarkdown(no_trailing_whitespace=True, closed_fences=True)\n```\n",
+            profile_template()
+        ),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "template.md"]);
     command(&repository.root, &["commit", "-qm", "valid style policy"]);
     let store = repository.store();
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
@@ -1139,7 +1146,16 @@ async fn reindex_removes_sidecars_without_a_current_page() {
 fn schemas_are_repository_configuration_not_rust_fields() {
     let repository = Repository::new();
     fs::create_dir(repository.root.join("projects")).unwrap();
-    fs::write(repository.root.join("projects/template.yaml"), "structure: {additional_sections: true}\nfrontmatter: {type: object, required: [code]}\nmetadata: {project_code: /code}\n").unwrap();
+    fs::write(
+        repository.root.join("projects/template.md"),
+        r#"```starlark
+structure(additional_sections=True)
+frontmatter(fields={"code": field({}, required=True)}, allow_extra=True)
+metadata(project_code="/code")
+```
+"#,
+    )
+    .unwrap();
     fs::write(
         repository.root.join("projects/a.md"),
         "---\ncode: A\n---\n# Project\n",
@@ -1170,7 +1186,7 @@ fn mcp_allowlist_is_exact() {
 fn configuration_resources_are_hashline_readable() {
     let repository = Repository::new();
     let store = repository.store();
-    for path in ["config.yaml", "template.yaml"] {
+    for path in ["config.yaml", "template.md"] {
         let response = store.get_page(path, Some((1, 2))).unwrap();
         assert!(response.content.starts_with("1:"));
         assert_eq!(response.metadata, serde_json::json!({}));
@@ -1198,19 +1214,19 @@ fn configuration_resources_are_hashline_readable() {
 fn dirty_and_staged_configuration_do_not_leak_into_the_published_state() {
     let repository = Repository::new();
     let store = repository.store();
-    let original = store.get_page("template.yaml", None).unwrap().content;
+    let original = store.get_page("template.md", None).unwrap().content;
 
-    fs::write(repository.root.join("template.yaml"), "not valid JSON\n").unwrap();
+    fs::write(repository.root.join("template.md"), "not valid JSON\n").unwrap();
     assert!(store.validate().is_ok());
     assert_eq!(
-        store.get_page("template.yaml", None).unwrap().content,
+        store.get_page("template.md", None).unwrap().content,
         original
     );
 
-    command(&repository.root, &["add", "template.yaml"]);
+    command(&repository.root, &["add", "template.md"]);
     assert!(store.validate().is_ok());
     assert_eq!(
-        store.get_page("template.yaml", None).unwrap().content,
+        store.get_page("template.md", None).unwrap().content,
         original
     );
 }
@@ -1606,9 +1622,9 @@ fn manual_push_uses_the_repository_write_lock() {
 fn manual_push_refreshes_external_configuration_before_selecting_push_settings() {
     let repository = Repository::new();
     let store = repository.store();
-    let schema = format!("\n{}", template_yaml());
-    fs::write(repository.root.join("template.yaml"), &schema).unwrap();
-    command(&repository.root, &["add", "template.yaml"]);
+    let schema = format!("\n{}", profile_template());
+    fs::write(repository.root.join("template.md"), &schema).unwrap();
+    command(&repository.root, &["add", "template.md"]);
     command(
         &repository.root,
         &["commit", "-q", "-m", "external schema formatting"],
@@ -1617,7 +1633,7 @@ fn manual_push_refreshes_external_configuration_before_selecting_push_settings()
     assert!(matches!(store.push().unwrap(), PushState::Disabled));
     assert!(
         store
-            .get_page("template.yaml", None)
+            .get_page("template.md", None)
             .unwrap()
             .content
             .lines()
@@ -1747,19 +1763,19 @@ fn fresh_hashlines_cover_middle_edits() {
 fn edit_interface_cannot_remove_templates() {
     let repository = Repository::new();
     let store = repository.store();
-    let schema = fs::read_to_string(repository.root.join("template.yaml")).unwrap();
+    let schema = fs::read_to_string(repository.root.join("template.md")).unwrap();
     let count = schema.lines().count();
     let first = schema.lines().next().unwrap();
     let last = schema.lines().last().unwrap();
     let request = ApplyEditsRequest {
         edit_summary: "remove active schema".into(),
         edits: vec![EditOperation::RemovePage {
-            path: "template.yaml".into(),
+            path: "template.md".into(),
             anchor: format!("1:{}..{count}:{}", short_hash(first), short_hash(last)),
         }],
     };
     assert!(store.apply_edits(&request).is_err());
-    assert!(repository.root.join("template.yaml").is_file());
+    assert!(repository.root.join("template.md").is_file());
 }
 
 #[test]
@@ -2339,9 +2355,9 @@ fn staged_restart_never_overwrites_a_later_local_edit() {
 fn operational_config_rejects_document_rules() {
     for rule in [
         "schemas: []",
-        "sections: []",
+        "```starlark\nstructure(additional_sections=False)\n```\n",
         "markdown: {}",
-        "relations: []",
+        "```starlark\n```\n",
         "links: {}",
         "metadata: {}",
     ] {
@@ -2351,8 +2367,8 @@ fn operational_config_rejects_document_rules() {
     let store = repository.store();
     for path in [
         "config.yaml",
-        "template.yaml",
-        "people/template.yaml",
+        "template.md",
+        "people/template.md",
         ".mdstore/config.yaml",
         "schema.json",
     ] {
@@ -2709,24 +2725,7 @@ async fn daemon_embedding_worker_coalesces_edits_and_observes_direct_store_write
     server.abort();
 }
 
-const TASK_TEMPLATE: &str = r#"# Tasks
-
-Use concrete outcomes and record decisions in the timeline.
-
-```starlark
-frontmatter(title=string(required=True), state=enum(["inbox", "ready", "completed"], required=True))
-section("Timeline", required=True, content=dated_list())
-filename(r"tasks/v1/(?P<year>[0-9]{4})/(?P<month>[0-9]{2})/(?P<day>[0-9]{2})-(?P<serial>[0-9]+)-[a-z-]+\.md", serial_scope=["year", "month", "day"])
-
-def transition(before, after):
-    if before != None and after != None:
-        require(before.frontmatter["state"] != "inbox" or after.frontmatter["state"] != "completed", "Clarify before completing", field="state")
-        if before.frontmatter["state"] != after.frontmatter["state"]:
-            require(len(after.sections["Timeline"].entries) > len(before.sections["Timeline"].entries), "Record the transition", at=after.sections["Timeline"])
-
-validate_change(transition)
-```
-"#;
+const TASK_TEMPLATE: &str = include_str!("../examples/tasks/v1/template.md");
 
 fn task_repository() -> Repository {
     let repository = Repository::new();
@@ -2765,7 +2764,7 @@ fn literate_templates_allocate_atomically_and_replay_after_restart() {
         discovery["content"]
             .as_str()
             .unwrap()
-            .contains("concrete outcomes")
+            .contains("concrete intended outcome")
     );
     assert!(
         store
@@ -2868,7 +2867,7 @@ fn literate_template_concurrent_creates_and_failed_changes_preserve_state() {
 }
 
 #[test]
-fn literate_template_git_import_checks_each_transition_not_just_final_state() {
+fn literate_template_import_validates_the_final_snapshot() {
     let repository = task_repository();
     let store = repository.store();
     let path = store
@@ -2876,20 +2875,23 @@ fn literate_template_git_import_checks_each_transition_not_just_final_state() {
         .unwrap()
         .touched_paths[0]
         .clone();
-    for (state, time) in [("ready", "11"), ("completed", "12")] {
-        let previous = fs::read_to_string(repository.root.join(&path)).unwrap();
-        let old = if state == "ready" { "inbox" } else { "ready" };
-        fs::write(
-            repository.root.join(&path),
-            format!(
-                "{}- 2026-09-09T{time}:00:00Z — Transition.\n",
-                previous.replace(&format!("state: {old}"), &format!("state: {state}"))
-            ),
-        )
-        .unwrap();
-        command(&repository.root, &["add", "."]);
-        command(&repository.root, &["commit", "-qm", "external transition"]);
-    }
+    fs::write(repository.root.join(&path), "# Invalid task\n").unwrap();
+    command(&repository.root, &["add", "."]);
+    command(
+        &repository.root,
+        &["commit", "-qm", "incomplete external edit"],
+    );
+    assert!(store.push().is_err());
+    fs::write(
+        repository.root.join(&path),
+        task_content().replace("inbox", "completed"),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "."]);
+    command(
+        &repository.root,
+        &["commit", "-qm", "complete external edit"],
+    );
     store.apply_edits(&task_create("second")).unwrap();
     assert!(
         store
@@ -2897,27 +2899,5 @@ fn literate_template_git_import_checks_each_transition_not_just_final_state() {
             .unwrap()
             .content
             .contains("state: completed")
-    );
-    let second = "tasks/v1/2026/09/09-002-second.md";
-    fs::write(
-        repository.root.join(second),
-        format!(
-            "{}- 2026-09-09T13:00:00Z — Skipped clarification.\n",
-            task_content().replace("inbox", "completed")
-        ),
-    )
-    .unwrap();
-    command(&repository.root, &["add", "."]);
-    command(
-        &repository.root,
-        &["commit", "-qm", "invalid external transition"],
-    );
-    assert!(store.apply_edits(&task_create("third")).is_err());
-    assert!(
-        store
-            .get_page(second, None)
-            .unwrap()
-            .content
-            .contains("state: inbox")
     );
 }
