@@ -55,9 +55,10 @@ object is used only when it geometrically matches a figure detected by OCR;
 otherwise the object does not create a figure in the output. When no matching
 object is available, the OCR-detected figure is cropped from the rendered page.
 
-The model contract is intentionally narrow and immutable: ordered page windows
+The visual model contract is intentionally narrow: ordered page windows
 use Baidu's multi-page Base recipe, and affected pages use Baidu's Gundam recipe
-for local recovery. Deterministic Python code parses, validates, reconciles,
+for local recovery (`base_size=1024`, `image_size=640`, cropping enabled).
+Deterministic Python code parses, validates, reconciles,
 structures, and renders the result. The model is never prompted to emit JSON
 or arbitrate between its own readings. Page results and model observations are
 checkpointed in a private resumable workspace beside the input document.
@@ -73,7 +74,8 @@ long indexed-math repetitions trigger review. These are conservative heuristic
 findings and can include false positives, especially on complex mathematics.
 
 Recovery first tries saved OCR candidates, then at most four fresh crop calls
-per newly recognized page, using two context/scale variants. A replacement must
+per newly recognized page, using two context/scale variants and at most 4096
+tokens per generation attempt. A replacement must
 increase matched source coverage without losing already-matched glyphs or
 introducing a finding in a new source region. Changed blocks must have no local
 quality or structure findings. Replacements are spliced into the existing
@@ -159,9 +161,34 @@ Use `--ignore-embedded-text` for scans with a missing, stale, or low-quality
 text layer. This disables embedded text blocks, character/font repairs, text
 comparisons, and annotation-derived links. Rendering, OCR, PDF metadata and
 outlines, and geometry-matched embedded image objects remain enabled. The
-setting is part of the assembly fingerprint. When a workspace was created with
-the other mode, pages are reassembled from its saved raw OCR observations
-without rerunning the model.
+setting is part of the assembly fingerprint and the OCR evidence policy.
+Older image-only observations remain reusable when
+guidance is enabled: the new decoder is used for new invocations, not silently
+rerun over old checkpoints. Conversely, a workspace that may contain
+native-guided observations cannot be reused for an image-only conversion.
+The incompatible workspace is retained, and the command reports the conflict.
+Turning off reconciliation cannot undo source influence during generation.
+
+## Decode guidance and recovery
+
+Decoding is automatic: exact n-gram constraints, structural-loop steering,
+positioned native-prose guidance, and single-page grounding-header validation.
+Native text does not dictate mathematical structure.
+
+Failed ungrounded starts get one marker-constrained rescue. Same-region
+duplicates get at most two prefix-replay attempts. Selection protects coverage
+and math syntax; unresolved region repetition fails verification. Up to two
+small disputed equations per page can receive visual-only crops, capped at
+4096 tokens per generation attempt, and require independent complete-expression corroboration.
+The normal page token budget is unchanged for grounded content.
+
+Raw attempts, crop geometry, and selection provenance are retained. Confidence
+after constraints is not calibrated transcription accuracy. New decoder policy
+applies to new reads; compatible raw checkpoints are reused, not silently
+regenerated. Mathematical transcription still needs source verification.
+
+See [validation and developer tools](experiments/README.md) for targeted runs,
+cached replay, measured results, and historical evidence.
 
 Hybrid reconciliation aligns full OCR context with individual PDF glyphs,
 retaining font references, baselines, and nested script relationships. It

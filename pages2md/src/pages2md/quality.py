@@ -8,11 +8,54 @@ from bs4 import BeautifulSoup
 
 from .compare import normalize
 from .syntax import math_spans
+from .decoding import structural_loop, words
+from .embedded import bbox_iou
 from .model import OcrObservation
 
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 MAX_PAGE_CHARACTERS = 20_000
+
+
+def unresolved_decode_errors(page: dict) -> list[str]:
+    """Check the remaining canonical content, never rejected attempt warnings."""
+    text = page.get("visual_markdown", "")
+    if repeated_region_pairs(page.get("blocks", [])):
+        return ["unresolved OCR region repetition"]
+    native = page.get("embedded", {}).get("text", "")
+    observed, source = Counter(words(text)), Counter(words(native))
+    support = sum((observed & source).values()) / max(1, sum(observed.values()))
+    if support >= .8:
+        return []  # source-backed repetition remains a review warning
+    problems = []
+    if len(text) >= 256 and structural_loop(text):
+        problems.append("unresolved OCR repetition")
+    return problems
+
+
+def repeated_region_pairs(blocks: list[dict]) -> list[tuple[int, int]]:
+    """Detect repeated reads of the same physical region, across a whole page.
+
+    Legitimate repeated text at different positions is not repetition damage.
+    This check must precede global native vocabulary agreement: copying a real
+    paragraph twice still has excellent vocabulary agreement.
+    """
+    prepared = []
+    for index, block in enumerate(blocks):
+        box, kind = block.get("bbox"), block.get("kind")
+        text = normalize(block.get("markdown", ""))
+        if kind not in {"paragraph", "text", "heading", "formula", "equation"} or not box or len(text) < 64:
+            continue
+        prepared.append((index,kind,box,text,block.get("source_pages",[])))
+    pairs = []
+    for position,(index,kind,box,text,pages) in enumerate(prepared):
+        for previous,other_kind,other_box,other_text,other_pages in prepared[:position]:
+            if kind != other_kind or pages != other_pages or bbox_iou(box,other_box) < .85:
+                continue
+            if SequenceMatcher(None,text,other_text,autojunk=False).ratio() >= .85:
+                pairs.append((previous,index))
+                break
+    return pairs
 
 
 def candidate_rejection(observation: OcrObservation) -> str | None:
@@ -33,6 +76,8 @@ def output_quality_warnings(markdown: str, *, page_count: int = 1) -> list[str]:
         warnings.append("visual_implausible_output_length")
     if severe_text_repetition(markdown):
         warnings.append("visual_text_repetition")
+    if structural_loop(markdown):
+        warnings.append("visual_structural_repetition")
     if mathematical_runaway(markdown):
         warnings.append("visual_math_repetition")
     if table_quality_errors(markdown):

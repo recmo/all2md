@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Protocol
 
 from .constants import MODEL_ID, MODEL_REVISION
-from .model import Block
+from .model import Block, EmbeddedEvidence
+from .decoding import (DecodeLogitsProcessor, InitialGroundingProcessor, GROUNDING_START_VERSION,
+                       POLICY_VERSION, loop_pattern, structural_atoms, structural_loop)
+from .block_decoding import (BlockLogitsProcessor, ReplayBranchProcessor, VERSION as BLOCK_POLICY,
+                             blocks as grounded_blocks, duplicate_blocks, area, region_coverage)
 
 MULTI_PAGE_PROMPT = "<image>Multi page parsing."
 GUNDAM_PROMPT = "<image>document parsing."
@@ -42,15 +46,20 @@ def parse_output(raw: str) -> tuple[str, list[Block]]:
 
 class OcrBackend(Protocol):
     identity: dict[str, str]
+    supports_region_recovery: bool
 
-    def recognize(self, image: Path) -> tuple[str, dict[str, object]]: ...
+    def recognize(self, image: Path, *, embedded: EmbeddedEvidence | None = None) -> tuple[str, dict[str, object]]: ...
 
-    def recognize_pages(self, images: list[Path]) -> tuple[str, dict[str, object]]: ...
+    def recognize_pages(self, images: list[Path], *, embedded: list[EmbeddedEvidence] | None = None) -> tuple[str, dict[str, object]]: ...
 
-    def recognize_detail(self, image: Path) -> tuple[str, dict[str, object]]: ...
+    def recognize_detail(self, image: Path, *, embedded: EmbeddedEvidence | None = None) -> tuple[str, dict[str, object]]: ...
+
+    def recognize_region(self, image: Path) -> tuple[str, dict[str, object]]: ...
 
 
 class MlxUnlimitedOcr:
+    supports_region_recovery = True
+
     def __init__(self, max_tokens: int = 32768):
         self.max_tokens = max_tokens
         self.precision = {"vision": "float32", "decoder": "bfloat16"}
@@ -61,6 +70,9 @@ class MlxUnlimitedOcr:
             "max_tokens": str(max_tokens),
             "vision_precision": self.precision["vision"],
             "decoder_precision": self.precision["decoder"],
+            "startup_recovery": "ungrounded-recovery-v1",
+            "block_decoding": BLOCK_POLICY,
+            "block_retries": "2",
         }
         self._model = None
         self._processor = None
@@ -108,7 +120,7 @@ class MlxUnlimitedOcr:
         processor.process_one = process_one
         processor._pages2md_fp32_images = True
 
-    def recognize(self, image: Path) -> tuple[str, dict[str, object]]:
+    def recognize(self, image: Path, *, embedded: EmbeddedEvidence | None = None) -> tuple[str, dict[str, object]]:
         return self._recognize(
             image,
             task=GUNDAM_PROMPT.removeprefix("<image>"),
@@ -116,19 +128,29 @@ class MlxUnlimitedOcr:
             image_size=640,
             mode="gundam",
             ngram_window=128,
+            embedded=embedded,
         )
 
-    def recognize_detail(self, image: Path) -> tuple[str, dict[str, object]]:
+    def recognize_detail(self, image: Path, *, embedded: EmbeddedEvidence | None = None) -> tuple[str, dict[str, object]]:
         return self._recognize(
             image,
             task=GUNDAM_PROMPT.removeprefix("<image>"),
             cropping=True,
-            image_size=1024,
+            image_size=640,
             mode="gundam_detail",
             ngram_window=128,
+            embedded=embedded,
         )
 
-    def recognize_pages(self, images: list[Path]) -> tuple[str, dict[str, object]]:
+    def recognize_region(self, image: Path) -> tuple[str, dict[str, object]]:
+        """Small visual-only recovery with an internal, bounded token budget."""
+        return self._recognize(
+            image, task=GUNDAM_PROMPT.removeprefix("<image>"), cropping=True,
+            image_size=640, mode="region_detail", ngram_window=128,
+            max_tokens=min(self.max_tokens, 4096),
+        )
+
+    def recognize_pages(self, images: list[Path], *, embedded: list[EmbeddedEvidence] | None = None) -> tuple[str, dict[str, object]]:
         """Port Unlimited-OCR's `infer_multi` contract to MLX.
 
         The reference implementation expands every page at one image-token position.
@@ -136,7 +158,9 @@ class MlxUnlimitedOcr:
         produces the same contiguous image-token sequence.
         """
         if not images:
-            return []
+            raise ValueError("recognize_pages requires at least one image")
+        if embedded is not None and len(embedded) != len(images):
+            raise ValueError("embedded evidence must match the image count")
         self._load()
         from mlx_vlm.prompt_utils import apply_chat_template
 
@@ -146,7 +170,9 @@ class MlxUnlimitedOcr:
             "Multi page parsing.",
             num_images=len(images),
         )
+        processors = self._decode_processors(1024, embedded or [], single_page=len(images) == 1)
         result, confidence = self._generate_with_confidence(
+            _retry_factory=lambda: self._decode_processors(1024, embedded or [], single_page=len(images) == 1),
             model=self._model,
             processor=self._processor,
             image=[str(image) for image in images],
@@ -156,7 +182,7 @@ class MlxUnlimitedOcr:
             cropping=False,
             image_size=1024,
             base_size=1024,
-            logits_processors=[SlidingWindowNoRepeatNgramProcessor(35, 1024)],
+            logits_processors=processors,
         )
         return result.text, {
             "prompt_tokens": result.prompt_tokens,
@@ -167,6 +193,7 @@ class MlxUnlimitedOcr:
             "group_size": len(images),
             "confidence": confidence["summary"],
             "_confidence_spans": confidence["spans"],
+            "decoding": confidence.get("decoding", self._decode_diagnostics(processors)),
             "contract": {
                 "prompt": MULTI_PAGE_PROMPT,
                 "base_size": 1024,
@@ -188,6 +215,8 @@ class MlxUnlimitedOcr:
         image_size: int,
         mode: str,
         ngram_window: int,
+        embedded: EmbeddedEvidence | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[str, dict[str, object]]:
         self._load()
         from mlx_vlm.prompt_utils import apply_chat_template
@@ -198,17 +227,19 @@ class MlxUnlimitedOcr:
             task,
             num_images=1,
         )
+        processors = self._decode_processors(ngram_window, [embedded] if embedded is not None else [])
         result, confidence = self._generate_with_confidence(
+            _retry_factory=lambda: self._decode_processors(ngram_window, [embedded] if embedded is not None else []),
             model=self._model,
             processor=self._processor,
             image=str(image),
             prompt=prompt,
-            max_tokens=self.max_tokens,
+            max_tokens=self.max_tokens if max_tokens is None else max_tokens,
             temperature=0.0,
             cropping=cropping,
             image_size=image_size,
             base_size=1024,
-            logits_processors=[SlidingWindowNoRepeatNgramProcessor(35, ngram_window)],
+            logits_processors=processors,
         )
         return result.text, {
             "prompt_tokens": result.prompt_tokens,
@@ -218,6 +249,7 @@ class MlxUnlimitedOcr:
             "mode": mode,
             "confidence": confidence["summary"],
             "_confidence_spans": confidence["spans"],
+            "decoding": confidence.get("decoding", self._decode_diagnostics(processors)),
             "contract": {
                 "prompt": GUNDAM_PROMPT,
                 "base_size": 1024,
@@ -226,11 +258,162 @@ class MlxUnlimitedOcr:
                 "temperature": 0.0,
                 "no_repeat_ngram_size": 35,
                 "ngram_window": ngram_window,
+                **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                 "precision": self.precision,
             },
         }
 
-    def _generate_with_confidence(self, **kwargs):
+    def _decode_processors(self, window: int, embedded: list[EmbeddedEvidence], *, single_page: bool = True):
+        tokenizer = getattr(self._processor, "tokenizer", self._processor)
+        processors = [SlidingWindowNoRepeatNgramProcessor(35, window)]
+        processors.append(DecodeLogitsProcessor(tokenizer, embedded))
+        if single_page:
+            processors.append(BlockLogitsProcessor(tokenizer))
+        return processors
+
+    def _decode_diagnostics(self, processors):
+        guide = next((p.guide for p in processors if isinstance(p, DecodeLogitsProcessor)), None)
+        diagnostics = guide.diagnostics() if guide else {"policy": POLICY_VERSION, "unavailable": True}
+        prefix = next((p for p in processors if isinstance(p, InitialGroundingProcessor)), None)
+        if prefix:
+            diagnostics.update(initial_grounding=GROUNDING_START_VERSION,
+                               forced_prefix_tokens=len(prefix.prefix),
+                               confidence_basis="post_constraint_decoder_distribution")
+        block = next((p for p in processors if isinstance(p, BlockLogitsProcessor)), None)
+        if block:
+            diagnostics["blocks"] = block.diagnostics()
+        return diagnostics
+
+    def _generate_with_confidence(self, *, _retry_factory=None, _startup_attempted=False, **kwargs):
+        """Bounded block retry. Raw alternatives remain in observation metadata."""
+        from .quality import math_syntax_errors
+
+        processors = kwargs.get("logits_processors", [])
+        tracker = next((p for p in processors if isinstance(p, BlockLogitsProcessor)), None)
+        result, confidence = self._stream_with_confidence(**kwargs)
+        if tracker is None or _retry_factory is None:
+            return result, confidence
+        # Do not perturb a usable grounded body merely to remove its prefix.
+        # On a genuine ungrounded failure, try one structurally steered decode.
+        regions = grounded_blocks(result.text)
+        body_present = any(r.kind not in {"page_number", "header", "footer"} for r in regions)
+        stray_prefix = result.text.split("<|det|>", 1)[0].strip()
+        if (not _startup_attempted and not body_present
+                and not any(isinstance(p, InitialGroundingProcessor) for p in processors)
+                and (result.finish_reason != "stop" or structural_loop(result.text)
+                     or (not regions and len(result.text.strip()) < 128)
+                     or (bool(regions) and len(stray_prefix) >= 128))):
+            return self._recover_startup(result, confidence, _retry_factory, kwargs)
+        issues = duplicate_blocks(tracker.text)
+        diagnostics = self._decode_diagnostics(processors)
+        confidence["decoding"] = diagnostics
+        if not issues:
+            return result, confidence
+        fork = tracker.fork(issues[0])
+        if fork is None or fork >= int(kwargs.get("max_tokens", self.max_tokens)) - 32:
+            diagnostics["block_retry"] = {"skipped": "no_safe_fork_within_budget"}
+            return result, confidence
+
+        original_regions = grounded_blocks(tracker.text)
+        duplicate_indices = {issue["block"] for issue in issues}
+        reference = [r for i, r in enumerate(original_regions) if i not in duplicate_indices and area(r.box) > 0]
+
+        def measure(candidate, state):
+            regions = grounded_blocks(state.text)
+            coverage = min((max((region_coverage(r.box, c.box) for c in regions
+                                 if c.kind == r.kind), default=0.0) for r in reference), default=0.0)
+            values = [v for v in state.model_scores[fork + 1:] if math.isfinite(v)]
+            return {"duplicates": len(duplicate_blocks(state.text)),
+                    "math_errors": len(math_syntax_errors(candidate.text)),
+                    "region_coverage": coverage,
+                    "mean_logprob": sum(values) / len(values) if values else None}
+
+        original = measure(result, tracker)
+        attempts = [{"raw": result.text, "finish_reason": result.finish_reason,
+                     "generation_tokens": result.generation_tokens, "scores": original}]
+        prefix = tracker.ids[:fork]
+        banned = {tracker.ids[fork]}
+        best_result, best_confidence, best_scores, selected = result, confidence, original, 0
+        for attempt in range(1, 3):
+            fresh = _retry_factory()
+            branch = next(p for p in fresh if isinstance(p, BlockLogitsProcessor))
+            fresh.append(ReplayBranchProcessor(prefix, banned))
+            try:
+                candidate, candidate_confidence = self._stream_with_confidence(**{**kwargs, "logits_processors": fresh})
+            except ValueError as error:
+                attempts.append({"error": str(error), "raw": branch.text,
+                                 "generation_tokens": len(branch.ids), "eligible": False})
+                break  # preserve the original instead of losing a costly page
+            scores = measure(candidate, branch)
+            attempts.append({"raw": candidate.text, "finish_reason": candidate.finish_reason,
+                             "generation_tokens": candidate.generation_tokens, "scores": scores,
+                             "banned_tokens": sorted(banned)})
+            if len(branch.ids) > fork:
+                banned.add(branch.ids[fork])
+            eligible = (candidate.finish_reason == "stop" and branch.ids[:fork] == prefix
+                        and scores["duplicates"] < original["duplicates"]
+                        and scores["region_coverage"] >= .9
+                        and scores["math_errors"] <= original["math_errors"]
+                        and scores["mean_logprob"] is not None and original["mean_logprob"] is not None
+                        and scores["mean_logprob"] >= original["mean_logprob"] - 1.0)
+            attempts[-1]["eligible"] = eligible
+            best_likelihood = best_scores["mean_logprob"] if best_scores["mean_logprob"] is not None else -float("inf")
+            if eligible and (scores["duplicates"], -scores["mean_logprob"]) < (best_scores["duplicates"], -best_likelihood):
+                best_result, best_confidence, best_scores, selected = candidate, candidate_confidence, scores, attempt
+                best_confidence["decoding"] = self._decode_diagnostics(fresh)
+            if eligible and scores["duplicates"] == 0:
+                break
+        best_confidence["decoding"]["block_retry"] = {
+            "method": "fresh_state_exact_prefix_replay", "fork_token": fork,
+            "selected_attempt": selected, "attempts": attempts,
+            "total_generation_tokens": sum(a["generation_tokens"] for a in attempts),
+            "confidence_omitted": bool(selected),
+        }
+        if selected:
+            best_confidence["summary"], best_confidence["spans"] = None, []
+        return best_result, best_confidence
+
+    def _recover_startup(self, original, confidence, factory, kwargs):
+        """One fresh initial-marker rescue; keep usable existing bodies intact."""
+        def grounded_factory():
+            fresh = factory()
+            tracker = next(p for p in fresh if isinstance(p, BlockLogitsProcessor))
+            fresh.append(InitialGroundingProcessor(tracker.tokenizer))
+            return fresh
+
+        first = {"raw": original.text, "finish_reason": original.finish_reason,
+                 "generation_tokens": original.generation_tokens,
+                 "decoding": self._decode_diagnostics(kwargs["logits_processors"])}
+        attempts = [first]
+        selected = 0
+        result, selected_confidence = original, confidence
+        fresh = []
+        try:
+            fresh = grounded_factory()
+            candidate, candidate_confidence = self._generate_with_confidence(
+                _retry_factory=grounded_factory, _startup_attempted=True,
+                **{**kwargs, "logits_processors": fresh})
+            eligible = (candidate.finish_reason == "stop" and candidate.text.startswith("<|det|>")
+                        and bool(grounded_blocks(candidate.text)) and not structural_loop(candidate.text)
+                        and not duplicate_blocks(candidate.text))
+            retry = candidate_confidence.get("decoding", {}).get("block_retry", {})
+            attempts.append({"raw": candidate.text, "finish_reason": candidate.finish_reason,
+                             "generation_tokens": retry.get("total_generation_tokens", candidate.generation_tokens),
+                             "decoding": candidate_confidence.get("decoding", {}), "eligible": eligible})
+            if eligible:
+                result, selected_confidence, selected = candidate, candidate_confidence, 1
+        except ValueError as error:
+            tracker = next((p for p in fresh if isinstance(p, BlockLogitsProcessor)), None)
+            attempts.append({"raw": tracker.text if tracker else "", "generation_tokens": len(tracker.ids) if tracker else 0,
+                             "error": str(error), "eligible": False})
+        diagnostics = dict(selected_confidence.get("decoding", self._decode_diagnostics(kwargs["logits_processors"])))
+        diagnostics["startup_retry"] = {"policy": "ungrounded-recovery-v1", "selected_attempt": selected,
+                                        "attempts": attempts,
+                                        "total_generation_tokens": sum(a["generation_tokens"] for a in attempts)}
+        selected_confidence["decoding"] = diagnostics
+        return result, selected_confidence
+
+    def _stream_with_confidence(self, **kwargs):
         """Stream generation so selected-token probabilities are not discarded."""
         try:
             from mlx_vlm import stream_generate
@@ -247,19 +430,48 @@ class MlxUnlimitedOcr:
         last_response = None
         tokenizer = self._processor.tokenizer if hasattr(self._processor, "tokenizer") else self._processor
         special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
-        for response in stream_generate(**kwargs):
-            generation_tokens = int(response.generation_tokens or 0)
-            if generation_tokens > last_generation_tokens:
-                selected = _selected_logprob(response.token, response.logprobs)
-                token = int(response.token)
-                generated.append((token, selected))
-                if selected is not None and token not in special_ids:
-                    all_logprobs.append(selected)
-                last_generation_tokens = generation_tokens
-            segment = response.text or ""
-            if segment:
-                text += segment
-            last_response = response
+        stream = stream_generate(**kwargs)
+        loop_since = None
+        processors = kwargs.get("logits_processors", [])
+        startup_guard = (any(isinstance(p, BlockLogitsProcessor) for p in processors)
+                         and not any(isinstance(p, InitialGroundingProcessor) for p in processors))
+        try:
+            for response in stream:
+                generation_tokens = int(response.generation_tokens or 0)
+                if generation_tokens > last_generation_tokens:
+                    selected = _selected_logprob(response.token, response.logprobs)
+                    token = int(response.token)
+                    generated.append((token, selected))
+                    if selected is not None and token not in special_ids:
+                        all_logprobs.append(selected)
+                    last_generation_tokens = generation_tokens
+                segment = response.text or ""
+                if segment:
+                    text += segment
+                last_response = response
+                # Bound ungrounded startup independently of the full-page budget.
+                # Beyond this tested limit a failed decoder can fabricate a late
+                # grounded table and evade rescue. Ordinary grounded pages keep
+                # their full token budget; the raw failed attempt is retained.
+                if startup_guard and generation_tokens >= 4096 and generation_tokens % 32 == 0:
+                    regions = grounded_blocks(text)
+                    if not any(r.kind not in {"page_number", "header", "footer"} for r in regions):
+                        last_response.finish_reason = "ungrounded_guard"
+                        break
+                # A short garbage prefix may recover. Stop only sustained loops
+                # after soft steering has had a bounded opportunity to escape.
+                if generation_tokens >= 512 and generation_tokens % 32 == 0:
+                    source_progress = any(isinstance(p, DecodeLogitsProcessor) and p.guide.recent_source_progress
+                                          for p in kwargs.get("logits_processors", []))
+                    looping = not source_progress and loop_pattern(structural_atoms(text[-8192:])) is not None
+                    loop_since = (loop_since if loop_since is not None else generation_tokens) if looping else None
+                    if loop_since is not None and generation_tokens - loop_since >= 256:
+                        last_response.finish_reason = "repetition_guard"
+                        break
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
         if last_response is None:
             from types import SimpleNamespace
