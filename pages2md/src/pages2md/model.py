@@ -49,6 +49,19 @@ class OcrObservation:
     warnings: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class RecoveryAttempt:
+    reason: str
+    accepted: bool = False
+    observation: str | None = None
+    bbox: Box | None = None
+    cache: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+
 @dataclass
 class Comparison:
     character_similarity: float | None = None

@@ -10,9 +10,10 @@ Historical runners are archived; current tools are
 listed in [the validation index](README.md). No new model reads were needed for
 that cleanup.
 
-**Status: ready for a staged full rerun.** 472 tests pass. Both complete document
-canaries (35 physical pages total) publish and pass the strengthened verifier.
-The previous corpus OCR has not been modified, and the full rerun has not started.
+**Status: integrated validation in progress; not yet cleared for a full rerun.**
+The earlier document canaries (35 physical pages total) predate the merge with
+main. Fresh integrated canaries are still required. The original corpus OCR
+has not been modified, and the full rerun has not started.
 
 ## What changed
 

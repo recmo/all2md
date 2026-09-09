@@ -45,6 +45,9 @@ from .quality import adjacent_overlap, output_quality_warnings, runaway_repetiti
 from .util import atomic_json, sha256_file
 from .util import atomic_text
 from .verify import verify_bundle
+from .region_recovery import recover_regions
+from .region_review import write_review
+from .crop_store import CropStore
 
 # Bump only when stored raw observations are incompatible with recognition.
 OCR_CHECKPOINT_VERSION = 1
@@ -78,6 +81,7 @@ def convert(
     force: bool = False,
     backend: OcrBackend | None = None,
     ignore_embedded_text: bool = False,
+    recover_regions_fresh: bool = False,
 ) -> Path:
     """Convert a document, checkpointing pages beside the source before publishing."""
     source = source.resolve()
@@ -96,6 +100,7 @@ def convert(
         backend=backend,
         force=force,
         ignore_embedded_text=ignore_embedded_text,
+        recover_regions_fresh=recover_regions_fresh,
     )
     verification = verify_bundle(workspace)
     for warning in verification.warnings:
@@ -122,6 +127,7 @@ def _convert_workspace(
     force: bool = False,
     resume: bool = True,
     ignore_embedded_text: bool = False,
+    recover_regions_fresh: bool = False,
 ) -> Path:
     source = source.resolve()
     if not source.exists():
@@ -144,7 +150,9 @@ def _convert_workspace(
         "code": _code_fingerprint(
             "adapters.py", "assets.py", "chapters.py", "compare.py", "formatting.py",
             "embedded.py", "alignment.py", "lists.py", "markdown.py", "model.py", "native.py", "pipeline.py",
-            "quality.py", "decoding.py", "region_recovery.py", "verify.py", "syntax.py", "reconciliation.py", "document.py", "edits.py", "mathlint.py", "katex_lint.cjs", "urls.py", "semantics.py", "footnotes.py",
+            "quality.py", "decoding.py", "equation_recovery.py", "verify.py", "syntax.py", "reconciliation.py", "document.py", "edits.py", "mathlint.py", "katex_lint.cjs", "urls.py", "semantics.py", "footnotes.py",
+            "latex.py", "texstructure.py", "regions.py", "region_recovery.py",
+            "crop_store.py", "region_review.py",
         ),
     }
     previous = _read_json(bundle / "metadata.json")
@@ -158,6 +166,10 @@ def _convert_workspace(
     )
     can_resume_pages = bool(
         can_reuse_ocr
+        and not recover_regions_fresh
+        # "opening" records the new assembly hash before any page is rebuilt.
+        # Existing page files may still belong to the previous assembly.
+        and resume_state.get("status") != "opening"
         and resume_state.get("assembly_fingerprint") == assembly_fingerprint
     )
     if bundle.exists() and not can_reuse_ocr:
@@ -182,6 +194,7 @@ def _convert_workspace(
     work = bundle / ".work"
     work.mkdir(exist_ok=True)
     assets = AssetStore(bundle / "assets", load_existing=can_reuse_ocr)
+    crop_store = CropStore(bundle)
     fingerprint = {"ocr": ocr_fingerprint, "assembly": assembly_fingerprint}
     started = time.time()
     _write_progress(
@@ -208,7 +221,13 @@ def _convert_workspace(
             if not isinstance(value, dict) or value.get("number") != source_page.number:
                 continue
             try:
-                resumed[source_page.number] = _page_from_dict(value)
+                if value.get("visual", {}).get("assembly_fingerprint") == assembly_fingerprint:
+                    resumed[source_page.number] = _page_from_dict(value)
+                else:
+                    result = _reassemble_cached_page(source_page, value, bundle, assets, document.outline,
+                                                     crop_store=crop_store)
+                    if result is not None:
+                        reassembled[source_page.number] = result
             except (KeyError, TypeError, ValueError):
                 continue
     elif can_reuse_ocr:
@@ -224,6 +243,8 @@ def _convert_workspace(
                     bundle,
                     assets,
                     document.outline,
+                    backend=backend if recover_regions_fresh else None,
+                    crop_store=crop_store,
                 )
             except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
                 continue
@@ -257,6 +278,7 @@ def _convert_workspace(
                 continue
             if page.number in reassembled:
                 result = reassembled[page.number]
+                result.visual["assembly_fingerprint"] = assembly_fingerprint
                 assets.write_manifest()
                 atomic_json(bundle / "pages" / f"page-{page.number:04d}.json", result.to_dict())
                 page_results.append(result)
@@ -332,8 +354,12 @@ def _convert_workspace(
                         validation_warnings,
                         assets,
                         document.outline,
+                        backend=backend,
+                        bundle=bundle,
+                        crop_store=crop_store,
                     )
                     assets.write_manifest()
+                    result.visual["assembly_fingerprint"] = assembly_fingerprint
                     atomic_json(page_path, result.to_dict())
                     page_results.append(result)
                     completed_pages.add(source_page.number)
@@ -366,6 +392,7 @@ def _convert_workspace(
     normalize_document(page_results)
     merge_continued_tables(page_results)
     for result in page_results:
+        result.visual["assembly_fingerprint"] = assembly_fingerprint
         for block in result.blocks:
             if block.kind not in FIGURE_KINDS:
                 block.markdown = clean_latex(block.markdown, assume_math=block.kind in FORMULA_KINDS)
@@ -452,6 +479,9 @@ def _convert_workspace(
         "pages": [page.to_dict() for page in page_results],
     }
     atomic_json(bundle / "document.json", document_json)
+    region_review = write_review(bundle, page_results, document.pages)
+    if region_review["status"] == "needs_review":
+        warnings.append("transcription_review_required")
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "fingerprint": fingerprint,
@@ -476,6 +506,7 @@ def _convert_workspace(
             "preservation_skips": format_result.preservation_skips,
         },
         "math_validation": asdict(format_result.math_validation),
+        "transcription_review": region_review,
         "output_fingerprints": output_fingerprints,
         "failed_pages": failed,
         "duration_seconds": round(time.time() - started, 3),
@@ -609,6 +640,10 @@ def _page_result(
     validation_warnings: list[str],
     assets,
     outline,
+    *,
+    backend=None,
+    bundle=None,
+    crop_store=None,
 ) -> PageResult:
     embedded_trust = assess_embedded(
         source_page.embedded,
@@ -634,6 +669,12 @@ def _page_result(
     )
     blocks = normalize_page_blocks(blocks)
     validation_warnings.extend(reconcile_text(blocks, source_page.embedded, embedded_trust))
+    blocks, region_result = recover_regions(
+        source_page, blocks, [primary, *(r for r in recoveries if r.mode != "region_detail")],
+        backend=backend if backend is not None and backend.supports_region_recovery else None, bundle=bundle,
+        crop_store=crop_store,
+    )
+    blocks = normalize_page_blocks(blocks)
     _strip_review_metadata(blocks)
     visual_markdown = _blocks_markdown(blocks, "")
     comparison = _compare_with_embedded(visual_markdown, source_page.embedded)
@@ -666,6 +707,7 @@ def _page_result(
         source_assets=source_page.source_assets,
         raw_ocr=primary.raw,
         visual={
+            "region_review": region_result,
             "multi_page": observation_dict(
                 group_observation,
                 raw_path=f"{raw_root}/{group_observation.id}.txt",
@@ -757,6 +799,9 @@ def _reassemble_cached_page(
     bundle: Path,
     assets: AssetStore,
     outline: list[dict[str, Any]],
+    *,
+    backend=None,
+    crop_store=None,
 ) -> PageResult | None:
     """Re-run deterministic assembly from saved model observations."""
     generation = value.get("generation", {})
@@ -808,6 +853,9 @@ def _reassemble_cached_page(
         validation_warnings,
         assets,
         outline,
+        bundle=bundle,
+        backend=backend,
+        crop_store=crop_store,
     )
 
 
@@ -1088,7 +1136,7 @@ def _collect_page_candidates(
             candidates.append(candidate)
         except Exception:
             warnings.append("visual_single_page_base_failed")
-    from .region_recovery import collect_regions
+    from .equation_recovery import collect_regions
     try:
         candidates.extend(collect_regions(source_page, primary, candidates, backend, bundle, warnings=warnings))
     except Exception:
@@ -1420,6 +1468,13 @@ def _canonicalize_figure_blocks(
                 })
                 warnings.append("visual_text_glyph_figure_reclassified")
                 continue
+            if _visual_proof_square(grayscale, block, blocks[max(0, index - 2):index]):
+                block.kind = "paragraph"
+                block.markdown = r"\(\square\)"
+                block.metadata.update({"reclassified_from": "figure",
+                                       "reclassification_reason": "proof_context_and_square_shape"})
+                warnings.append("visual_proof_square_reclassified")
+                continue
             block.bbox = _padded_bbox(block.bbox)
             blank, touches_edge = _figure_crop_status(grayscale, block.bbox)
             if blank:
@@ -1507,6 +1562,37 @@ def _embedded_proof_anchor(blocks: list[Block], embedded: EmbeddedEvidence, glyp
     if candidates and (len(candidates) == 1 or candidates[0][0] - candidates[1][0] > .1):
         return candidates[0][1]
     return None
+
+
+def _visual_proof_square(image: Image.Image, block: Block, preceding: list[Block]) -> bool:
+    """Require proof-ending context, text-scale geometry and an outlined square."""
+    if not block.bbox or block.bbox[2] - block.bbox[0] > 45:
+        return False
+    context = next((b for b in reversed(preceding) if b.bbox and b.kind not in FIGURE_KINDS
+                    and re.search(r"(?:as desired|as required|completes the proof[^\n]*|"
+                                  r"concludes the proof[^\n]*|which proves[^\n]*)[.]\s*$",
+                                  b.markdown, re.I)), None)
+    if context is None or context.bbox[2] >= block.bbox[0]:
+        return False
+    line_height = context.bbox[3] - context.bbox[1]
+    if abs((context.bbox[1] + context.bbox[3] - block.bbox[1] - block.bbox[3]) / 2) > line_height:
+        return False
+    w, h = image.size
+    a, b, c, d = block.bbox
+    crop = image.crop((int(a*w/1000), int(b*h/1000), int(c*w/1000), int(d*h/1000)))
+    ink = crop.point(lambda x: 255 if x < 210 else 0)
+    bounds = ink.getbbox()
+    if bounds is None:
+        return False
+    ink = ink.crop(bounds)
+    iw, ih = ink.size
+    if not (.8 <= iw / max(1, ih) <= 1.25 and 3 <= ih <= 1.5 * line_height*h/1000):
+        return False
+    sample = ink.resize((12, 12))
+    edge = [sample.getpixel((x, y)) for x in range(12) for y in range(12)
+            if x in (0, 11) or y in (0, 11)]
+    center = [sample.getpixel((x, y)) for x in range(3, 9) for y in range(3, 9)]
+    return sum(edge) / len(edge) > 170 and sum(center) / len(center) < 35
 
 
 def _restore_embedded_proof_marks(

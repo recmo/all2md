@@ -4,7 +4,7 @@ from PIL import Image
 import pytest
 from pages2md.model import Block
 from pages2md.native import parse_native_observation, reconcile_observations
-from pages2md.region_recovery import math_key, corroborates, disputed_regions, render_region, apply_regions
+from pages2md.equation_recovery import math_key, corroborates, disputed_regions, render_region, apply_regions
 
 
 GOOD = r"\leq n_{\text{out}}\cdot\epsilon_{\mathrm{MCA}}(\gamma)"
@@ -109,6 +109,18 @@ def test_crop_cannot_overwrite_a_changed_canonical_region(canonical):
     assert not actions
 
 
+@pytest.mark.parametrize("separator", [r"\\", r"\cr", r"\newline"])
+def test_original_multiline_equation_cannot_be_replaced_by_one_row(separator):
+    base = observation(r"\begin{aligned}x_{index}&=0" + separator + r" y_{index}&=2\end{aligned}")
+    peer = observation(r"x_{index}=1", "gundam_detail")
+    crop = observation(r"x_{index}=1", "region_detail")
+    crop.generation["region_target_bbox"] = [100,400,400,440]
+    assert not disputed_regions(base, [peer])
+    blocks, actions, _ = apply_regions(deepcopy(base.blocks), [crop], [peer], base)
+    assert blocks == base.blocks
+    assert not actions
+
+
 def test_crop_padding_avoids_neighbor(tmp_path):
     page=tmp_path/"page.png"
     Image.new("RGB",(1000,1000),"white").save(page)
@@ -119,7 +131,7 @@ def test_crop_padding_avoids_neighbor(tmp_path):
 
 def test_one_failed_crop_keeps_other_attempt(monkeypatch,tmp_path):
     from types import SimpleNamespace
-    import pages2md.region_recovery as region
+    import pages2md.equation_recovery as region
     base=observation(BAD)
     base.blocks.append(deepcopy(base.blocks[0]))
     def read(*args):
@@ -145,7 +157,7 @@ def test_region_budget_is_internal(monkeypatch):
 
 def test_identical_crop_text_retains_distinct_targets(tmp_path):
     from types import SimpleNamespace
-    from pages2md.region_recovery import collect_regions
+    from pages2md.equation_recovery import collect_regions
     page=tmp_path/"page.png"
     Image.new("RGB",(1000,1000),"white").save(page)
     base=observation(BAD)

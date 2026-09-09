@@ -14,6 +14,7 @@ from statistics import median
 
 from .embedded import embedded_characters_for_bbox, iter_embedded_characters
 from .model import EmbeddedEvidence
+from .texstructure import TexGroup, tex_groups
 
 
 @dataclass
@@ -336,48 +337,6 @@ def math_font_role(glyph: dict) -> str | None:
     return None
 
 
-@dataclass
-class TexGroup:
-    start: int
-    end: int
-    script: str | None
-    children: list[TexGroup]
-
-
-def tex_groups(value: str) -> list[TexGroup]:
-    """Parse balanced TeX groups and braced script arguments, preserving ranges.
-
-    Commands remain opaque; malformed groups are never repaired by guessing a
-    closing delimiter. This small structural parser does not evaluate TeX.
-    """
-    roots: list[TexGroup] = []
-    stack: list[TexGroup] = []
-    pending = None
-    index = 0
-    while index < len(value):
-        char = value[index]
-        if char == "\\":
-            command = re.match(r"\\(?:[A-Za-z]+|.)", value[index:])
-            index += len(command[0]) if command else 1
-            pending = None
-            continue
-        if char in "_^":
-            pending = char
-        elif char == "{":
-            group = TexGroup(index + 1, -1, pending, [])
-            (stack[-1].children if stack else roots).append(group)
-            stack.append(group)
-            pending = None
-        elif char == "}":
-            if stack:
-                stack.pop().end = index
-            pending = None
-        elif not char.isspace():
-            pending = None
-        index += 1
-    return roots
-
-
 def script_edits(markdown: str, alignment: GlyphAlignment) -> list[tuple[int, int, str]]:
     """Reconstruct a simple script subtree only from fully aligned PDF glyphs.
 
@@ -390,8 +349,6 @@ def script_edits(markdown: str, alignment: GlyphAlignment) -> list[tuple[int, in
     def visit(group: TexGroup) -> None:
         if group.end < 0:
             return
-        for child in group.children:
-            visit(child)
         if not group.script:
             return
         indexes = [i for i, (s, e) in enumerate(alignment.spans) if group.start <= s < e <= group.end]
@@ -424,8 +381,17 @@ def script_edits(markdown: str, alignment: GlyphAlignment) -> list[tuple[int, in
         canonical = re.sub(r"([_^])([A-Za-z0-9])", r"\1{\2}", re.sub(r"\s+", "", original))
         if "\\" not in original and canonical != target:
             edits.append((group.start, group.end, target))
-    for root in tex_groups(markdown):
-        visit(root)
+    # Preserve child-before-parent processing without recursing on OCR nesting.
+    pending = [(root, False) for root in reversed(tex_groups(markdown))]
+    while pending:
+        group, visited = pending.pop()
+        if group.end < 0:
+            continue
+        if visited:
+            visit(group)
+        else:
+            pending.append((group, True))
+            pending.extend((child, False) for child in reversed(group.children))
     return [edit for edit in edits if not any(other[0] < edit[0] and edit[1] < other[1] for other in edits)]
 
 

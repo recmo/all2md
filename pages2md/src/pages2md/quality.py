@@ -10,6 +10,7 @@ from .compare import normalize
 from .syntax import math_spans
 from .decoding import structural_loop, words
 from .embedded import bbox_iou
+from .model import OcrObservation
 
 HTML_TABLE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
@@ -57,6 +58,16 @@ def repeated_region_pairs(blocks: list[dict]) -> list[tuple[int, int]]:
     return pairs
 
 
+def candidate_rejection(observation: OcrObservation) -> str | None:
+    """Shared pre-alignment guard over rendered content, not grounding markup."""
+    text = "\n\n".join(block.markdown for block in observation.blocks).strip() or observation.raw
+    if len(text) > MAX_PAGE_CHARACTERS * max(1, len(observation.source_pages)):
+        return "visual_implausible_output_length"
+    if mathematical_runaway(text):
+        return "visual_math_repetition"
+    return None
+
+
 def output_quality_warnings(markdown: str, *, page_count: int = 1) -> list[str]:
     """Return content-derived warnings which do not require domain knowledge."""
     warnings: list[str] = []
@@ -67,11 +78,48 @@ def output_quality_warnings(markdown: str, *, page_count: int = 1) -> list[str]:
         warnings.append("visual_text_repetition")
     if structural_loop(markdown):
         warnings.append("visual_structural_repetition")
+    if mathematical_runaway(markdown):
+        warnings.append("visual_math_repetition")
     if table_quality_errors(markdown):
         warnings.append("visual_malformed_table")
     if math_syntax_errors(markdown):
         warnings.append("visual_malformed_math")
     return sorted(set(warnings))
+
+
+def mathematical_runaway(markdown: str) -> bool:
+    """Detect long repeated math templates, including changing indices.
+
+    This is a recovery signal only. Legitimate indexed sequences must never be
+    shortened by the prose repetition repair.
+    """
+    spans, _ = math_spans(markdown)
+    previous = None
+    count = 0
+    end = 0
+    for span in spans:
+        tex = markdown[span.content_start:span.content_end]
+        signature = re.sub(r"\d+", "#", re.sub(r"\s+", "", tex))
+        if signature == previous and not markdown[end:span.start].strip(" \t\r\n,;"):
+            count += 1
+        else:
+            count = 1
+        if count >= 32:
+            return True
+        previous, end = signature, span.end
+        if len(tex) > 1000:
+            atoms = re.findall(r"\\[A-Za-z]+(?:\s*[_^]\s*\{?\d+\}?)*|[^\s]", tex)
+            normalized = [re.sub(r"\d+", "#", a) for a in atoms]
+            for size in range(1, 17):
+                streak = 0
+                for i in range(size, len(normalized), size):
+                    if normalized[i:i + size] == normalized[i - size:i]:
+                        streak += 1
+                        if streak * size >= 128:
+                            return True
+                    else:
+                        streak = 0
+    return False
 
 
 def severe_text_repetition(markdown: str) -> bool:

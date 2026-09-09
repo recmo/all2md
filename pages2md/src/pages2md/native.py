@@ -15,7 +15,7 @@ from .embedded import assess_embedded, bbox_coverage, bbox_iou, embedded_text_fo
 from .lists import annotate_native_list_block
 from .embedded import bbox_iou as _iou, bbox_coverage as _coverage
 from .model import Block, EmbeddedEvidence, OcrObservation, FIGURE_KINDS
-from .quality import output_quality_warnings, math_syntax_errors, repeated_region_pairs
+from .quality import output_quality_warnings, math_syntax_errors, repeated_region_pairs, candidate_rejection
 from .decoding import words
 
 PAGE_TOKEN = re.compile(r"\s*<PAGE>\s*")
@@ -298,7 +298,7 @@ def reconcile_observations(
     embedded_text: str = "",
     embedded: EmbeddedEvidence | None = None,
 ) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
-    from .region_recovery import apply_regions
+    from .equation_recovery import apply_regions
     regions = [r for r in recoveries if r.mode == "region_detail" and r.source_pages == primary.source_pages]
     peers = [r for r in recoveries if r.mode != "region_detail"]
     blocks, provenance, warnings = _reconcile_observations(primary, peers, embedded_text=embedded_text, embedded=embedded)
@@ -340,6 +340,15 @@ def _reconcile_observations(
                                "action": "selected_source_supported_page"})
             return blocks, provenance, sorted(set(winner.warnings))
     warnings: list[str] = list(primary.warnings)
+    # Cached observations can predate quality checks. Reject runaway auxiliary
+    # output BEFORE quadratic alignment, while retaining its raw checkpoint.
+    usable_recoveries = []
+    for recovery in recoveries:
+        if candidate_rejection(recovery):
+            warnings.append("visual_runaway_candidate_rejected")
+        else:
+            usable_recoveries.append(recovery)
+    recoveries = usable_recoveries
     canonical = [_copy_block(block) for block in primary.blocks]
     primary_bad = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
     trust_visual = _observation_text(primary)
@@ -1094,6 +1103,7 @@ def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObs
 
 _SEVERE_OBSERVATION_WARNINGS = {
     "visual_region_repetition",
+    "visual_math_repetition",
     "visual_empty_output",
     "visual_implausible_output_length",
     "visual_malformed_grounding",
