@@ -74,7 +74,8 @@ long indexed-math repetitions trigger review. These are conservative heuristic
 findings and can include false positives, especially on complex mathematics.
 
 Recovery first tries saved OCR candidates, then at most four fresh crop calls
-per newly recognized page, using two context/scale variants. A replacement must
+per newly recognized page, using two context/scale variants and at most 4096
+tokens per generation attempt. A replacement must
 increase matched source coverage without losing already-matched glyphs or
 introducing a finding in a new source region. Changed blocks must have no local
 quality or structure findings. Replacements are spliced into the existing
@@ -178,7 +179,7 @@ Failed ungrounded starts get one marker-constrained rescue. Same-region
 duplicates get at most two prefix-replay attempts. Selection protects coverage
 and math syntax; unresolved region repetition fails verification. Up to two
 small disputed equations per page can receive visual-only crops, capped at
-4096 tokens each, and require independent complete-expression corroboration.
+4096 tokens per generation attempt, and require independent complete-expression corroboration.
 The normal page token budget is unchanged for grounded content.
 
 Raw attempts, crop geometry, and selection provenance are retained. Confidence
