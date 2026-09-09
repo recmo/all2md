@@ -180,11 +180,7 @@ impl SearchIndex {
         let exact_index = Arc::clone(self);
         let exact_config = config.clone();
         let exact_formulations = formulations.clone();
-        let (mut scores, mut arms) = tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            if exact_formulations.first().map(String::as_str) == Some("__slow_retrieval__") {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
+        let (mut scores, mut arms) = retrieval_task(move || {
             let mut scores: HashMap<usize, f64> = HashMap::new();
             let mut arms: HashMap<usize, HashSet<String>> = HashMap::new();
             for (formulation_index, formulation) in exact_formulations.iter().enumerate() {
@@ -203,8 +199,7 @@ impl SearchIndex {
             }
             (scores, arms)
         })
-        .await
-        .context("exact retrieval task failed")?;
+        .await?;
         let mut degraded = Vec::new();
         let query_vectors = match provider.embed(InputType::Query, &formulations).await {
             Ok(query_vectors) => {
@@ -227,7 +222,7 @@ impl SearchIndex {
         };
         let vector_index = Arc::clone(self);
         let vector_config = config.clone();
-        let (mut ranked, mut arms, documents) = tokio::task::spawn_blocking(move || {
+        let (mut ranked, mut arms, documents) = retrieval_task(move || {
             if let Some(query_vectors) = query_vectors {
                 for (formulation_index, vector) in query_vectors.iter().enumerate() {
                     for (rank, (index, _)) in vector_index
@@ -257,8 +252,7 @@ impl SearchIndex {
                 .collect();
             (ranked, arms, documents)
         })
-        .await
-        .context("vector retrieval task failed")?;
+        .await?;
         let mut rerank_scores = HashMap::new();
         match provider
             .rerank(query, &documents, config.search.limit)
@@ -420,6 +414,14 @@ impl SearchIndex {
             arms.entry(index).or_default().insert("graph".into());
         }
     }
+}
+
+async fn retrieval_task<T: Send + 'static>(
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(operation)
+        .await
+        .context("retrieval task failed")
 }
 
 fn term_counts(text: &str) -> HashMap<String, usize> {
@@ -731,23 +733,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retrieval_scans_do_not_stall_the_async_scheduler() {
-        let (config, index) = matrix_index(&[("a.md", "ordinary text", None)], &[]);
-        let provider = Arc::new(MatrixProvider {
-            vectors: HashMap::new(),
-            embed_fails: true,
-            rerank: RerankMode::Fail,
-        });
-        let search = tokio::spawn(async move {
-            index
-                .search(&config, provider.as_ref(), "__slow_retrieval__", &[])
-                .await
-        });
-        let started = std::time::Instant::now();
-        tokio::task::yield_now().await;
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(started.elapsed() < std::time::Duration::from_millis(250));
-        search.await.unwrap().unwrap();
+    async fn retrieval_work_yields_the_runtime_until_released() {
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let task = tokio::spawn(retrieval_task(move || {
+            started.send(()).unwrap();
+            // The timeout bounds a failing test if work accidentally runs on the runtime thread.
+            wait.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        }));
+        ready.await.unwrap();
+        release.send(()).unwrap();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

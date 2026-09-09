@@ -144,8 +144,33 @@ impl ZeroEntropyProvider {
             .context(format!("{} is not set", self.config.api_key_env))
     }
 
-    async fn retry_delay(attempt: usize) {
-        tokio::time::sleep(std::time::Duration::from_millis(100 * (1_u64 << attempt))).await;
+    async fn post(&self, endpoint: &str, body: &impl Serialize) -> Result<reqwest::Response> {
+        let mut attempt = 0;
+        loop {
+            let response = self
+                .client
+                .post(self.endpoint(endpoint))
+                .bearer_auth(self.key()?)
+                .json(body)
+                .send()
+                .await
+                .with_context(|| format!("call ZeroEntropy {endpoint}"))?;
+            let status = response.status();
+            if attempt < 2 && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100 * (1_u64 << attempt)))
+                    .await;
+                attempt += 1;
+                continue;
+            }
+            if status != StatusCode::OK {
+                bail!(
+                    "ZeroEntropy {endpoint} returned {status}: {}",
+                    response.text().await.unwrap_or_default()
+                );
+            }
+            return Ok(response);
+        }
     }
 }
 
@@ -187,38 +212,18 @@ impl RetrievalProvider for ZeroEntropyProvider {
         if input.is_empty() {
             return Ok(Vec::new());
         }
-        let mut response = None;
-        for attempt in 0..3 {
-            let current = self
-                .client
-                .post(self.endpoint("models/embed"))
-                .bearer_auth(self.key()?)
-                .json(&EmbedRequest {
+        let response = self
+            .post(
+                "models/embed",
+                &EmbedRequest {
                     model: &self.config.embedding_model,
                     input_type: input_type.as_str(),
                     input,
                     dimensions: self.config.dimensions,
                     encoding_format: "float",
-                })
-                .send()
-                .await
-                .context("call ZeroEntropy embedding endpoint")?;
-            let retryable = current.status() == StatusCode::TOO_MANY_REQUESTS
-                || current.status().is_server_error();
-            response = Some(current);
-            if !retryable || attempt == 2 {
-                break;
-            }
-            Self::retry_delay(attempt).await;
-        }
-        let response = response.context("embedding request was not attempted")?;
-        let status = response.status();
-        if status != StatusCode::OK {
-            bail!(
-                "ZeroEntropy embedding endpoint returned {status}: {}",
-                response.text().await.unwrap_or_default()
-            );
-        }
+                },
+            )
+            .await?;
         let body: EmbedResponse = response.json().await.context("decode embedding response")?;
         let vectors: Vec<Vec<f32>> = body
             .results
@@ -238,37 +243,17 @@ impl RetrievalProvider for ZeroEntropyProvider {
         if documents.is_empty() {
             return Ok(Vec::new());
         }
-        let mut response = None;
-        for attempt in 0..3 {
-            let current = self
-                .client
-                .post(self.endpoint("models/rerank"))
-                .bearer_auth(self.key()?)
-                .json(&RerankRequest {
+        let response = self
+            .post(
+                "models/rerank",
+                &RerankRequest {
                     model: &self.config.rerank_model,
                     query,
                     documents,
                     top_n,
-                })
-                .send()
-                .await
-                .context("call ZeroEntropy rerank endpoint")?;
-            let retryable = current.status() == StatusCode::TOO_MANY_REQUESTS
-                || current.status().is_server_error();
-            response = Some(current);
-            if !retryable || attempt == 2 {
-                break;
-            }
-            Self::retry_delay(attempt).await;
-        }
-        let response = response.context("rerank request was not attempted")?;
-        let status = response.status();
-        if status != StatusCode::OK {
-            bail!(
-                "ZeroEntropy rerank endpoint returned {status}: {}",
-                response.text().await.unwrap_or_default()
-            );
-        }
+                },
+            )
+            .await?;
         Ok(response
             .json::<RerankResponse>()
             .await

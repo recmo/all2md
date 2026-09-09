@@ -1689,7 +1689,7 @@ fn external_failures_never_replace_a_divergence_block() {
     fs::create_dir_all(repository.root.join(".git/mdstore")).unwrap();
     fs::write(
         repository.root.join(".git/mdstore/blocked"),
-        "remote history diverged",
+        r#"{"kind":"diverged"}"#,
     )
     .unwrap();
     let store = repository.store();
@@ -1812,7 +1812,7 @@ fn persisted_write_blocks_survive_restart() {
     fs::create_dir_all(repository.root.join(".git/mdstore")).unwrap();
     fs::write(
         repository.root.join(".git/mdstore/blocked"),
-        "remote history diverged",
+        r#"{"kind":"diverged"}"#,
     )
     .unwrap();
     let store = repository.store();

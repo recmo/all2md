@@ -138,7 +138,7 @@ pub(crate) fn ensure_ignored_at<'a>(
     {
         let name = std::str::from_utf8(name)?;
         if paths.contains(&name) {
-            bail!("incoming tree tracks derived sidecar {name}");
+            bail!("derived sidecar {name} must be ignored and untracked");
         }
         if Path::new(name)
             .file_name()
