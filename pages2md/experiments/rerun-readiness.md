@@ -1,5 +1,11 @@
 # Targeted region recovery and rerun readiness
 
+The generation results below predate the maintenance cleanup. After removing
+production ablation switches and fixture-only backend fallbacks, the full suite
+still passes (472 tests). Historical runners are archived; current tools are
+listed in [the validation index](README.md). No new model reads were needed for
+that cleanup.
+
 **Status: ready for a staged full rerun.** 472 tests pass. Both complete document
 canaries (35 physical pages total) publish and pass the strengthened verifier.
 The previous corpus OCR has not been modified, and the full rerun has not started.

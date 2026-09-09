@@ -104,7 +104,6 @@ def test_replay_rebuilds_prefix_then_excludes_only_explored_branch():
 
 def test_block_policy_is_automatic_single_page_and_identity_is_explicit():
     b = MlxUnlimitedOcr()
-    b._decode_guidance = False
     b._processor = Tokenizer()
     assert b.identity["block_retries"] == "2"
     assert any(isinstance(p, BlockLogitsProcessor) for p in b._decode_processors(128, []))
@@ -122,7 +121,6 @@ def test_bounded_retry_preserves_raw_attempts_and_omits_forced_confidence(monkey
     original = first + region((100,202,300,218), BODY.replace("F_i", "G_i")) + short + footer
     corrected = first + short + footer
     backend = MlxUnlimitedOcr()
-    backend._decode_guidance = False
     tokenizer = Tokenizer()
     factory = lambda: [BlockLogitsProcessor(tokenizer)]
     calls = []
@@ -205,7 +203,6 @@ def test_startup_recovery_is_bounded_and_does_not_perturb_usable_bodies(monkeypa
         original_encode = tokenizer.encode
         tokenizer.encode = lambda text, **kw: [] if text == "<|det|>" else original_encode(text, **kw)
     backend = MlxUnlimitedOcr()
-    backend._decode_guidance = False
     corrected = region((100,100,900,200), "Recovered source paragraph.", "text")
     original = "repeated loop " * 30
     if outcome == "short":
@@ -257,7 +254,6 @@ def test_startup_budget_does_not_cap_grounded_long_pages(monkeypatch, grounded):
     closed = []
     backend = MlxUnlimitedOcr()
     backend._processor = Tokenizer()
-    backend._decode_guidance = False  # isolate startup budget from loop heuristics
 
     def stream_generate(**kwargs):
         try:

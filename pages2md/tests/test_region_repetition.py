@@ -64,8 +64,9 @@ def test_region_repetition_requests_base_even_when_detail_is_clean(tmp_path):
     group=deepcopy(primary);group.source_pages=[1,2];group.warnings=[]
     calls=[]
     backend=SimpleNamespace(
-        recognize_detail=lambda image:(calls.append('detail') or raw,{'finish_reason':'stop'}),
-        recognize_pages=lambda images:(calls.append('base') or raw,{'finish_reason':'stop'}),
+        supports_region_recovery=False,
+        recognize_detail=lambda image, **kw:(calls.append('detail') or raw,{'finish_reason':'stop'}),
+        recognize_pages=lambda images, **kw:(calls.append('base') or raw,{'finish_reason':'stop'}),
     )
     source=SimpleNamespace(number=1,image_path=tmp_path/'page.png',embedded=EmbeddedEvidence())
     candidates,warnings=_collect_page_candidates(source,primary,group,backend,tmp_path)

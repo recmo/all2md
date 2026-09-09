@@ -71,6 +71,28 @@ def test_disputes_are_bounded_and_agreement_skips_work():
     assert not disputed_regions(base,[observation(BAD,"gundam_detail")])
 
 
+@pytest.mark.parametrize("failure", ["truncated", "missing_finish", "rejected", "stale_warnings"])
+def test_rejected_peer_cannot_confirm_crop(failure):
+    base, peer, region = observation(BAD), observation(GOOD,"gundam_detail"), observation(GOOD,"region_detail")
+    region.generation["region_target_bbox"] = [100,400,400,440]
+    if failure == "truncated":
+        peer.generation["finish_reason"] = "length"
+    elif failure == "missing_finish":
+        peer.generation.pop("finish_reason")
+    elif failure == "rejected":
+        peer.warnings.append("visual_structural_repetition")
+    else:
+        # A cached warning list must not hide a newly detectable duplicate.
+        peer.blocks.append(deepcopy(peer.blocks[0]))
+        peer.blocks[-1].markdown = "A sufficiently long repeated paragraph of real words. " * 2
+        peer.blocks.append(deepcopy(peer.blocks[-1]))
+        peer.warnings = []
+    result, actions, warnings = apply_regions(deepcopy(base.blocks), [region], [peer], base)
+    assert result == base.blocks
+    assert not actions
+    assert "visual_region_ocr_unresolved" in warnings
+
+
 def test_crop_padding_avoids_neighbor(tmp_path):
     page=tmp_path/"page.png"
     Image.new("RGB",(1000,1000),"white").save(page)
@@ -113,7 +135,7 @@ def test_identical_crop_text_retains_distinct_targets(tmp_path):
     base=observation(BAD)
     base.blocks.append(deepcopy(base.blocks[0]))
     raw=observation(GOOD).raw
-    backend=SimpleNamespace(supports_region_recovery=True,recognize_detail=lambda image:(raw,{"finish_reason":"stop"}))
+    backend=SimpleNamespace(supports_region_recovery=True,recognize_region=lambda image:(raw,{"finish_reason":"stop"}))
     regions=collect_regions(SimpleNamespace(image_path=page,number=1),base,[observation(GOOD)],backend,tmp_path)
     assert len(regions)==2
     assert regions[0].raw==regions[1].raw

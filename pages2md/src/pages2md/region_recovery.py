@@ -95,7 +95,7 @@ def render_region(image, target, neighbors, destination):
 
 
 def collect_regions(source_page, primary, peers, backend, bundle, *, warnings=None):
-    if not getattr(backend, "supports_region_recovery", False):
+    if not backend.supports_region_recovery:
         return []
     results = []
     for index, block in disputed_regions(primary, peers):
@@ -111,8 +111,7 @@ def _read_region(source_page, primary, index, block, backend, bundle):
     from .native import parse_native_observation
     image = bundle / "region-crops" / f"page-{source_page.number}-{primary.id}-{index}.png"
     geometry = render_region(source_page.image_path,block.bbox,primary.blocks,image)
-    recognize = getattr(backend,"recognize_region",backend.recognize_detail)
-    raw, generation = recognize(image)
+    raw, generation = backend.recognize_region(image)
     generation = {**generation,"coordinate_frame":"crop","region_geometry":geometry,
                   "region_target_bbox":list(block.bbox),"region_target_kind":block.kind,
                   "region_target_index":index,"region_primary":primary.id,
@@ -129,6 +128,13 @@ def _read_region(source_page, primary, index, block, backend, bundle):
 
 
 def apply_regions(blocks, regions, peers, primary):
+    from .native import _SEVERE_OBSERVATION_WARNINGS, validate_observation
+
+    confirming_peers = [
+        peer for peer in peers
+        if peer.mode != "region_detail" and peer.generation.get("finish_reason") == "stop"
+        and not (set(peer.warnings) | set(validate_observation(peer))) & _SEVERE_OBSERVATION_WARNINGS
+    ]
     provenance, warnings = [], []
     for region in regions:
         target = region.generation.get("region_target_bbox")
@@ -146,8 +152,8 @@ def apply_regions(blocks, regions, peers, primary):
         key = math_key(body)
         if len(key) < 8:
             continue
-        confirming = next((peer for peer in peers
-            if peer.source_pages == region.source_pages and peer.mode != "region_detail"
+        confirming = next((peer for peer in confirming_peers
+            if peer.source_pages == region.source_pages
             and sum(corroborates(body,b.markdown) for b in peer.blocks) == 1),None)
         if confirming is None:
             warnings.append("visual_region_ocr_unresolved")

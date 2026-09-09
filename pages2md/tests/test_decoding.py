@@ -251,15 +251,12 @@ def test_automatic_decoder_reuses_old_raw_without_relaxing_source_model_or_nativ
     assert not _compatible_ocr_fingerprint(old, {**current, "embedded_decode": False})
 
 
-def test_backend_evidence_is_per_invocation_and_fixture_compatible():
+def test_backend_evidence_is_per_invocation():
     page = SourcePage(1, Path("one.png"), evidence("Reliable source text here."))
     seen = []
-    backend = SimpleNamespace(supports_embedded_guidance=True,
-                              recognize_pages=lambda images, **kw: seen.append((images, kw)))
+    backend = SimpleNamespace(recognize_pages=lambda images, **kw: seen.append((images, kw)))
     _recognize_with_evidence(backend, "recognize_pages", [page])
     assert seen == [([page.image_path], {"embedded": [page.embedded]})]
-    fixture = SimpleNamespace(recognize=lambda image: str(image))
-    assert _recognize_with_evidence(fixture, "recognize", [page]) == "one.png"
 
 
 class CharacterTokenizer:
@@ -300,22 +297,14 @@ def test_initial_grounding_rejects_invalid_tokenizer_batch_and_conflicting_mask(
         processor(mx.array([1]), mx.full((1, 128), -float("inf")))
 
 
-def test_initial_grounding_is_internal_recovery_single_page_and_reported_without_native_guidance():
-    enabled = MlxUnlimitedOcr()
-    enabled._decode_guidance = False
-    enabled._processor = CharacterTokenizer()
-    assert enabled.identity["startup_recovery"] == "ungrounded-recovery-v1"
-    assert not any(isinstance(p, InitialGroundingProcessor) for p in enabled._decode_processors(128, []))
-    enabled._initial_grounding = True  # internal ablation, not a user setting
-    first = enabled._decode_processors(128, [])
-    second = enabled._decode_processors(128, [])
-    assert isinstance(first[-1], InitialGroundingProcessor)
-    assert first[-1] is not second[-1]
-    assert enabled._decode_diagnostics(first)["forced_prefix_tokens"] == len("<|det|>")
-    assert enabled._decode_diagnostics(first)["method"] == "exact_ngram_and_initial_grounding"
-    multi = enabled._decode_processors(128, [], single_page=False)
-    assert not any(isinstance(p, InitialGroundingProcessor) for p in multi)
-    assert "initial_grounding" not in enabled._decode_diagnostics(multi)
+def test_initial_grounding_is_only_added_during_recovery():
+    backend = MlxUnlimitedOcr()
+    backend._processor = CharacterTokenizer()
+    processors = backend._decode_processors(128, [])
+    assert not any(isinstance(p, InitialGroundingProcessor) for p in processors)
+    processors.append(InitialGroundingProcessor(backend._processor))
+    assert backend._decode_diagnostics(processors)["forced_prefix_tokens"] == len("<|det|>")
+
 
 
 def test_mlx_adapter_can_promote_source_outside_topk_and_keeps_hard_masks():

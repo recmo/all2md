@@ -2,6 +2,8 @@ from pages2md.model import Block, EmbeddedEvidence
 from pages2md.pipeline import _has_embedded_coverage_gap
 from pages2md.native import _preserves_supported_text, _source_supported_page, _salvage_grounded_body, _merge_supported_spans, parse_native_observation
 from pages2md.quality import math_syntax_errors
+from copy import deepcopy
+import pytest
 
 
 def evidence():
@@ -94,3 +96,32 @@ def test_local_splice_cannot_unbalance_math_braces():
     assert not math_syntax_errors(base)
     assert not math_syntax_errors(detail)
     assert not math_syntax_errors(merged)
+
+
+@pytest.mark.parametrize("figure", ["missing", "wrong_position", "retained"])
+@pytest.mark.parametrize("truncated", [False, True])
+def test_page_recovery_preserves_detected_figure(figure, truncated):
+    from pages2md.native import reconcile_observations
+
+    primary = parse_native_observation(
+        "<|det|>text [100,100,900,125]<|/det|>Unrelated hallucinated prose words totally wrong."
+        "<|det|>figure [100,400,900,700]<|/det|>",
+        mode="multi_base", source_pages=[1],
+        generation={"finish_reason": "length" if truncated else "stop"},
+    )
+    detail = parse_native_observation(
+        "<|det|>text [100,100,900,125]<|/det|>The missing opening paragraph."
+        "<|det|>text [100,200,900,225]<|/det|>The covered continuation paragraph.",
+        mode="gundam_detail", source_pages=[1], generation={"finish_reason": "stop"},
+    )
+    if figure != "missing":
+        copied = deepcopy(primary.blocks[-1])
+        if figure == "wrong_position":
+            copied.bbox = (100,750,900,950)
+        detail.blocks.append(copied)
+    before = deepcopy(primary)
+    winner = _source_supported_page(primary, [detail], evidence())
+    assert (winner is detail) == (figure == "retained")
+    blocks, _, _ = reconcile_observations(primary, [detail], embedded=evidence())
+    assert any(b.kind == "figure" and b.bbox == primary.blocks[-1].bbox for b in blocks)
+    assert primary == before

@@ -136,8 +136,7 @@ def _convert_workspace(
         "multi_page": True,
         "quality": "thorough",
     }
-    if getattr(backend, "supports_embedded_guidance", False):
-        ocr_fingerprint["embedded_decode"] = not ignore_embedded_text
+    ocr_fingerprint["embedded_decode"] = not ignore_embedded_text
     assembly_fingerprint = {
         "split_mode": "auto",
         "math_validator": validator_identity(),
@@ -919,40 +918,17 @@ def _recognize_with_evidence(backend, method: str, pages):
     function = getattr(backend, method)
     multiple = method == "recognize_pages"
     image = [page.image_path for page in pages] if multiple else pages[0].image_path
-    if getattr(backend, "supports_embedded_guidance", False):
-        evidence = [page.embedded for page in pages] if multiple else pages[0].embedded
-        return function(image, embedded=evidence)
-    return function(image)
+    evidence = [page.embedded for page in pages] if multiple else pages[0].embedded
+    return function(image, embedded=evidence)
 
 
 def _recognize_primary(group, backend, bundle: Path):
-    recognize_pages = getattr(backend, "recognize_pages", None)
-    if callable(recognize_pages):
-        value = _recognize_with_evidence(backend, "recognize_pages", group)
-        if _is_invocation(value):
-            raw, generation = value
-            parts = split_multi_page_output(raw, len(group))
-            recognized = [
-                (
-                    part,
-                    {
-                        **dict(generation),
-                        **_segment_confidence(raw, part, generation),
-                        "group_index": index,
-                    },
-                )
-                for index, part in enumerate(parts)
-            ]
-        else:
-            recognized = list(value)
-            raw = "\n<PAGE>\n".join(item[0] for item in recognized)
-            generation = {"mode": "multi_base", "group_size": len(group), "compat_backend": True}
-    else:
-        # Fixture compatibility. The production backend always exposes the
-        # documented multi-page Base contract, including for one-page windows.
-        recognized = [_recognize_with_evidence(backend, "recognize", [page]) for page in group]
-        raw = "\n<PAGE>\n".join(item[0] for item in recognized)
-        generation = {"mode": "multi_base", "group_size": len(group), "compat_backend": True}
+    raw, generation = _recognize_with_evidence(backend, "recognize_pages", group)
+    parts = split_multi_page_output(raw, len(group))
+    recognized = [
+        (part, {**generation, **_segment_confidence(raw, part, generation), "group_index": index})
+        for index, part in enumerate(parts)
+    ]
     observation = parse_native_observation(
         raw,
         mode="multi_base",
@@ -1043,14 +1019,8 @@ def _collect_page_candidates(
 
     candidates: list[OcrObservation] = []
     warnings: list[str] = []
-    recognize_detail = getattr(backend, "recognize_detail", None)
-    if not callable(recognize_detail):
-        recognize_detail = getattr(backend, "recognize", None)
-    if not callable(recognize_detail):
-        return [], ["visual_auxiliary_ocr_unavailable"]
     try:
-        detail_method = "recognize_detail" if callable(getattr(backend, "recognize_detail", None)) else "recognize"
-        raw, generation = _recognize_with_evidence(backend, detail_method, [source_page])
+        raw, generation = _recognize_with_evidence(backend, "recognize_detail", [source_page])
         generation = {
             **dict(generation),
             "target_block_indices": [index for index, _ in target_blocks],
@@ -1075,7 +1045,6 @@ def _collect_page_candidates(
     # Base candidate as well as the cropped Gundam view. This is deliberately a
     # different visual contract, not another deterministic sample of the same
     # prompt.
-    recognize_pages = getattr(backend, "recognize_pages", None)
     detail_failed = not candidates or bool(
         set(candidates[0].warnings)
         & {
@@ -1099,14 +1068,10 @@ def _collect_page_candidates(
     # Do not repeat the same deterministic one-page Base request. Cropped
     # detail is already the independent retry in that case.
     already_single_base = len(group_observation.source_pages) == 1 and group_observation.mode == "multi_base"
-    if (structural_problem or embedded_disagreement) and (detail_failed or "visual_region_repetition" in primary.warnings) and callable(recognize_pages) and not already_single_base:
+    if (structural_problem or embedded_disagreement) and (detail_failed or "visual_region_repetition" in primary.warnings) and not already_single_base:
         try:
-            value = _recognize_with_evidence(backend, "recognize_pages", [source_page])
-            if _is_invocation(value):
-                raw, generation = value
-                raw = split_multi_page_output(raw, 1)[0]
-            else:
-                raw, generation = list(value)[0]
+            raw, generation = _recognize_with_evidence(backend, "recognize_pages", [source_page])
+            raw = split_multi_page_output(raw, 1)[0]
             generation = {
                 **dict(generation),
                 "mode": "single_page_base",
@@ -1165,15 +1130,6 @@ def _store_raw_observation(bundle: Path, observation: OcrObservation) -> Path:
     if not path.exists():
         atomic_text(path, observation.raw)
     return path
-
-
-def _is_invocation(value) -> bool:
-    return (
-        isinstance(value, tuple)
-        and len(value) == 2
-        and isinstance(value[0], str)
-        and isinstance(value[1], dict)
-    )
 
 
 def _ocr_groups(pages, outline: list[dict], maximum: int = 8):

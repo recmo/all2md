@@ -46,27 +46,22 @@ def parse_output(raw: str) -> tuple[str, list[Block]]:
 
 class OcrBackend(Protocol):
     identity: dict[str, str]
+    supports_region_recovery: bool
 
-    def recognize(self, image: Path) -> tuple[str, dict[str, object]]: ...
+    def recognize(self, image: Path, *, embedded: EmbeddedEvidence | None = None) -> tuple[str, dict[str, object]]: ...
 
-    def recognize_pages(self, images: list[Path]) -> tuple[str, dict[str, object]]: ...
+    def recognize_pages(self, images: list[Path], *, embedded: list[EmbeddedEvidence] | None = None) -> tuple[str, dict[str, object]]: ...
 
-    def recognize_detail(self, image: Path) -> tuple[str, dict[str, object]]: ...
+    def recognize_detail(self, image: Path, *, embedded: EmbeddedEvidence | None = None) -> tuple[str, dict[str, object]]: ...
+
+    def recognize_region(self, image: Path) -> tuple[str, dict[str, object]]: ...
 
 
 class MlxUnlimitedOcr:
     supports_region_recovery = True
-    supports_embedded_guidance = True
 
     def __init__(self, max_tokens: int = 32768):
         self.max_tokens = max_tokens
-        # Automatic production policy. Private switches exist only for controlled
-        # benchmark ablations, never as user configuration or CLI flags.
-        self._decode_guidance = True
-        self._initial_grounding = False
-        self._startup_recovery = True
-        self._block_decoding = True
-        self._block_retries = 2
         self.precision = {"vision": "float32", "decoder": "bfloat16"}
         self.identity = {
             "engine": "mlx-vlm",
@@ -271,27 +266,19 @@ class MlxUnlimitedOcr:
     def _decode_processors(self, window: int, embedded: list[EmbeddedEvidence], *, single_page: bool = True):
         tokenizer = getattr(self._processor, "tokenizer", self._processor)
         processors = [SlidingWindowNoRepeatNgramProcessor(35, window)]
-        if self._decode_guidance and callable(getattr(tokenizer, "decode", None)) and callable(getattr(tokenizer, "encode", None)):
-            processors.append(DecodeLogitsProcessor(tokenizer, embedded))
-        if self._block_decoding and single_page:
+        processors.append(DecodeLogitsProcessor(tokenizer, embedded))
+        if single_page:
             processors.append(BlockLogitsProcessor(tokenizer))
-        if self._initial_grounding and single_page:
-            processors.append(InitialGroundingProcessor(tokenizer))
         return processors
 
     def _decode_diagnostics(self, processors):
         guide = next((p.guide for p in processors if isinstance(p, DecodeLogitsProcessor)), None)
-        if not self._decode_guidance:
-            diagnostics = {"policy": "exact-ngram", "method": "exact_ngram_only"}
-        else:
-            diagnostics = guide.diagnostics() if guide else {"policy": POLICY_VERSION, "unavailable": True}
+        diagnostics = guide.diagnostics() if guide else {"policy": POLICY_VERSION, "unavailable": True}
         prefix = next((p for p in processors if isinstance(p, InitialGroundingProcessor)), None)
         if prefix:
             diagnostics.update(initial_grounding=GROUNDING_START_VERSION,
                                forced_prefix_tokens=len(prefix.prefix),
                                confidence_basis="post_constraint_decoder_distribution")
-            if not self._decode_guidance:
-                diagnostics["method"] = "exact_ngram_and_initial_grounding"
         block = next((p for p in processors if isinstance(p, BlockLogitsProcessor)), None)
         if block:
             diagnostics["blocks"] = block.diagnostics()
@@ -311,7 +298,7 @@ class MlxUnlimitedOcr:
         regions = grounded_blocks(result.text)
         body_present = any(r.kind not in {"page_number", "header", "footer"} for r in regions)
         stray_prefix = result.text.split("<|det|>", 1)[0].strip()
-        if (self._startup_recovery and not _startup_attempted and not body_present
+        if (not _startup_attempted and not body_present
                 and not any(isinstance(p, InitialGroundingProcessor) for p in processors)
                 and (result.finish_reason != "stop" or structural_loop(result.text)
                      or (not regions and len(result.text.strip()) < 128)
@@ -320,7 +307,7 @@ class MlxUnlimitedOcr:
         issues = duplicate_blocks(tracker.text)
         diagnostics = self._decode_diagnostics(processors)
         confidence["decoding"] = diagnostics
-        if not issues or not self._block_retries:
+        if not issues:
             return result, confidence
         fork = tracker.fork(issues[0])
         if fork is None or fork >= int(kwargs.get("max_tokens", self.max_tokens)) - 32:
@@ -347,7 +334,7 @@ class MlxUnlimitedOcr:
         prefix = tracker.ids[:fork]
         banned = {tracker.ids[fork]}
         best_result, best_confidence, best_scores, selected = result, confidence, original, 0
-        for attempt in range(1, self._block_retries + 1):
+        for attempt in range(1, 3):
             fresh = _retry_factory()
             branch = next(p for p in fresh if isinstance(p, BlockLogitsProcessor))
             fresh.append(ReplayBranchProcessor(prefix, banned))
@@ -446,8 +433,7 @@ class MlxUnlimitedOcr:
         stream = stream_generate(**kwargs)
         loop_since = None
         processors = kwargs.get("logits_processors", [])
-        startup_guard = (self._startup_recovery
-                         and any(isinstance(p, BlockLogitsProcessor) for p in processors)
+        startup_guard = (any(isinstance(p, BlockLogitsProcessor) for p in processors)
                          and not any(isinstance(p, InitialGroundingProcessor) for p in processors))
         try:
             for response in stream:
@@ -474,7 +460,7 @@ class MlxUnlimitedOcr:
                         break
                 # A short garbage prefix may recover. Stop only sustained loops
                 # after soft steering has had a bounded opportunity to escape.
-                if self._decode_guidance and generation_tokens >= 512 and generation_tokens % 32 == 0:
+                if generation_tokens >= 512 and generation_tokens % 32 == 0:
                     source_progress = any(isinstance(p, DecodeLogitsProcessor) and p.guide.recent_source_progress
                                           for p in kwargs.get("logits_processors", []))
                     looping = not source_progress and loop_pattern(structural_atoms(text[-8192:])) is not None

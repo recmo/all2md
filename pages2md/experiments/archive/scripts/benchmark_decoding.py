@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -26,8 +27,76 @@ from pages2md.ocr import MlxUnlimitedOcr
 from pages2md.util import atomic_json, atomic_text, sha256_file
 
 
-CASES = json.loads((Path(__file__).with_name("hard-pages.json")).read_text())
-VARIANTS = ("base", "detail")
+CASES = {
+    "BCIKS20-61": ("BCIKS20", 61, ["For any of the", "Repeating the argument", "From here the rest of the claim",
+                                    "Proof of Claim", "By definition", "This completes the proof"]),
+    "BCGM25-40": ("BCGM25", 40, ["Polynomial generators have MCA", "Definition", "Theorem", "We proceed in two steps",
+                                  "Proof of Theorem", "Applying Lemmas", "Proof of Lemma"]),
+    "ABF26-25": ("ABF26", 25, ["Theorem", "Limitations", "Finally we present evidence", "characteristic",
+                                "In fact the above holds", "by the Johnson bound", "large compared to"]),
+    "Jo26-1": ("Jo26", 1, ["Interleaving Stability", "Sunghyeon Jo", "Abstract", "We prove that row",
+                             "the transfer is exact", "We further establish", "smaller interleaved"]),
+}
+
+
+CASES.update({
+    "BCGM25-4": ("BCGM25", 4, ["seed", "generator", "mutual correlated agreement"]),
+    "Jo26-3": ("Jo26", 3, ["affine", "interleaving", "curve"]),
+    "ABF26-34": ("ABF26", 34, ["This instantiation closely resembles", "Knowledge soundness upperbound",
+                                  "We consider the above expression", "Fixing", "Argument size when enforcing",
+                                  "We detail the result"]),
+    "ABF26-35": ("ABF26", 35, ["Round by round knowledge soundness", "Soundness lower bound",
+                                  "We lower bound both terms", "List decoding lowerbound", "Additionally"]),
+    "ABF26-45": ("ABF26", 45, ["Definition", "Empty transcript", "Prover moves", "Full transcript",
+                                  "total extraction time", "Univariate multiplicity codes", "Using the formal derivative"]),
+    "Jo26-10": ("Jo26", 10, ["For proof system analyses", "by an exact identity", "The list size term remains",
+                                "In the concrete parametrizations", "Polynomial Generators", "We use two closure properties"]),
+    "Jo26-11": ("Jo26", 11, ["be a polynomial generator", "Run the proof", "By the tensor product closure lemma",
+                                "Corollary", "Thus the same polynomial generator bound", "Reed Solomon polynomial generator bounds"]),
+    "Jo26-14": ("Jo26", 14, ["Exact Preservation", "Projection does not increase distance", "At every coordinate",
+                                "Exact preservation of curve decodability", "Fix a marked instance", "Scalar closure is identical"]),
+    "GaoKL24-5": ("GaoKL24", 5, ["Their analysis is confined", "A previous version", "Applications",
+                                   "We introduce the application", "In practical applications", "Preliminaries"]),
+    "GaoKL24-14": ("GaoKL24", 14, ["Bad combining over affine spaces", "In real world applications",
+                                     "Bad combining points", "We use induction", "According to our assumption", "For the second item"]),
+    "BCGM25-23": ("BCGM25", 23, ["Lemma", "Our goal is to bound", "By the law of total probability",
+                                    "can be rewritten as follows", "The probability inside the expectation", "which is bounded above"]),
+    "BCGM25-45": ("BCGM25", 45, ["so that if there exists", "can naturally be considered", "Further for all", "We compute"]),
+    "BCIKS20-57": ("BCIKS20", 57, ["this bound by finding", "The number of variables", "Claim",
+                                      "For this computation", "The size of the index set", "where the inequality"]),
+    "CS25-21": ("CS25", 21, ["having degree at most", "are independent and uniformly distributed",
+                                "Substituting we now have", "We now turn our attention", "For the denominator", "For the numerator"]),
+})
+
+
+@dataclass(frozen=True)
+class Variant:
+    visual: str
+    guidance: bool = False
+    native: bool = False
+    grounded: bool = False
+    blocks: bool = False
+    retries: int = 2
+
+
+VARIANTS = {
+    "base-automatic": Variant("base", True, True, blocks=True),
+    "detail-automatic": Variant("detail", True, True, blocks=True),
+    "base-blocks-guided": Variant("base", True, True, True, True),
+    "detail-blocks-guided": Variant("detail", True, True, True, True),
+    "base-blocks": Variant("base", grounded=True, blocks=True),
+    "base-blocks-no-retry": Variant("base", grounded=True, blocks=True, retries=0),
+    "detail-blocks": Variant("detail", grounded=True, blocks=True),
+    "base-exact": Variant("base"),
+    "base-guided": Variant("base", True, True),
+    "base-grounded": Variant("base", grounded=True),
+    "base-grounded-guided": Variant("base", True, True, True),
+    "detail-exact": Variant("detail"),
+    "detail-guided": Variant("detail", True, True),
+    "detail-grounded": Variant("detail", grounded=True),
+    "detail-grounded-guided": Variant("detail", True, True, True),
+    "legacy-detail": Variant("legacy"),
+}
 
 
 def matching_text(text):
@@ -62,7 +131,7 @@ def run(args):
     fingerprint = {"model_revision": MODEL_REVISION, "declared_mlx_vlm_revision": MLX_VLM_REVISION,
                    "dpi": args.dpi, "max_tokens": args.max_tokens,
                    "code": {name: sha256_file(source_root / name) for name in ("ocr.py", "decoding.py", "block_decoding.py", "native.py")},
-                   "harness_sha256": sha256_file(Path(__file__)), "cases": CASES}
+                   "harness_sha256": sha256_file(Path(__file__))}
     manifest_path = output / "manifest.json"
     if manifest_path.exists() and json.loads(manifest_path.read_text()) != fingerprint:
         raise ValueError("experiment directory belongs to a different configuration; choose a fresh --output")
@@ -103,11 +172,21 @@ def run(args):
                 results.append(result)
                 print(json.dumps({"case": case, "variant": name, "cached": True, **result["metrics"]}), flush=True)
                 continue
+            variant = VARIANTS[name]
+            backend._decode_guidance = variant.guidance
+            backend._initial_grounding = variant.grounded
+            backend._block_decoding = variant.blocks
+            backend._block_retries = variant.retries
+            backend._startup_recovery = name.endswith("automatic")
+            supplied = evidence if variant.native else None
             start = perf_counter()
-            if name == "base":
-                raw, generation = backend.recognize_pages([image], embedded=[evidence])
+            if variant.visual == "base":
+                raw, generation = backend.recognize_pages([image], embedded=[supplied] if supplied else None)
+            elif variant.visual == "detail":
+                raw, generation = backend.recognize_detail(image, embedded=supplied)
             else:
-                raw, generation = backend.recognize_detail(image, embedded=evidence)
+                raw, generation = backend._recognize(image, task="document parsing.", cropping=True,
+                                                     image_size=1024, mode="legacy_detail", ngram_window=128)
             seconds = round(perf_counter() - start, 3)
             generation.pop("_confidence_spans", None)
             result = {"case": case, "variant": name, "seconds": seconds, "source": provenance,
@@ -127,7 +206,7 @@ if __name__ == "__main__":
     parser.add_argument("--corpus", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cases", nargs="+", default=list(CASES), help="PDF-stem-PAGE; known cases also have manually reviewed probes")
-    parser.add_argument("--variants", choices=VARIANTS, nargs="+", default=list(VARIANTS))
+    parser.add_argument("--variants", choices=VARIANTS, nargs="+", default=["base-exact", "base-guided", "detail-exact", "base-grounded"])
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--dpi", type=int, default=300)
     args = parser.parse_args()

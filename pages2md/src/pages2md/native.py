@@ -14,7 +14,7 @@ from .compare import compare_text, normalize
 from .embedded import assess_embedded, bbox_coverage, bbox_iou, embedded_text_for_bbox
 from .lists import annotate_native_list_block
 from .embedded import bbox_iou as _iou, bbox_coverage as _coverage
-from .model import Block, EmbeddedEvidence, OcrObservation
+from .model import Block, EmbeddedEvidence, OcrObservation, FIGURE_KINDS
 from .quality import output_quality_warnings, math_syntax_errors, repeated_region_pairs
 from .decoding import words
 
@@ -536,6 +536,18 @@ def _salvage_grounded_body(observation: OcrObservation, embedded: EmbeddedEviden
                       "original_block_indices": removed, "raw_preserved": True}]
 
 
+def _preserves_figure_regions(primary, recovery):
+    # Native prose cannot establish whether a non-text figure was retained.
+    return all(
+        block.bbox and any(
+            candidate.kind in FIGURE_KINDS and candidate.bbox
+            and bbox_iou(block.bbox, candidate.bbox) >= .8
+            for candidate in recovery.blocks
+        )
+        for block in primary.blocks if block.kind in FIGURE_KINDS
+    )
+
+
 def _source_supported_page(primary, recoveries, embedded):
     """Replace a poorly supported page with a coherent, corroborated local read.
 
@@ -559,7 +571,7 @@ def _source_supported_page(primary, recoveries, embedded):
             _preserves_supported_text(block, recovery.blocks, embedded)
             for block in primary.blocks if _supported_grounded_block(block, embedded)
         )
-        if preserves and precision >= .65 and recall >= .7 and min(precision, recall) >= old_score + .18 and supported >= 2:
+        if preserves and _preserves_figure_regions(primary, recovery) and precision >= .65 and recall >= .7 and min(precision, recall) >= old_score + .18 and supported >= 2:
             candidates.append((min(precision, recall), recovery))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
@@ -1061,6 +1073,8 @@ def _structural_penalty(value: str) -> float:
 
 
 def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObservation) -> bool:
+    if not _preserves_figure_regions(primary, recovery):
+        return False
     severe = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
     if not severe or set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS:
         return False
