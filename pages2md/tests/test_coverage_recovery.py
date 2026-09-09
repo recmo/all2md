@@ -100,7 +100,8 @@ def test_local_splice_cannot_unbalance_math_braces():
 
 @pytest.mark.parametrize("figure", ["missing", "wrong_position", "retained"])
 @pytest.mark.parametrize("truncated", [False, True])
-def test_page_recovery_preserves_detected_figure(figure, truncated):
+@pytest.mark.parametrize("kind", ["figure", "formula", "table"])
+def test_page_recovery_preserves_nonprose_region(figure, truncated, kind):
     from pages2md.native import reconcile_observations
 
     primary = parse_native_observation(
@@ -109,19 +110,30 @@ def test_page_recovery_preserves_detected_figure(figure, truncated):
         mode="multi_base", source_pages=[1],
         generation={"finish_reason": "length" if truncated else "stop"},
     )
+    primary.blocks[-1].kind = kind
+    primary.blocks[-1].markdown = {
+        "figure": "", "formula": r"\(x^2+y^2=z^2\)",
+        "table": "<table><tr><td>123</td><td>456</td></tr></table>",
+    }[kind]
     detail = parse_native_observation(
         "<|det|>text [100,100,900,125]<|/det|>The missing opening paragraph."
         "<|det|>text [100,200,900,225]<|/det|>The covered continuation paragraph.",
         mode="gundam_detail", source_pages=[1], generation={"finish_reason": "stop"},
     )
+    native = evidence()
+    for source, block in zip(native.blocks, detail.blocks):
+        source["text"] += " Additional reliable prose supplies enough source context for the whole page score."
+        source["lines"][0]["text"] = source["text"]
+        block.markdown = source["text"]
+    native.text = " ".join(b["text"] for b in native.blocks)
     if figure != "missing":
         copied = deepcopy(primary.blocks[-1])
         if figure == "wrong_position":
             copied.bbox = (100,750,900,950)
         detail.blocks.append(copied)
     before = deepcopy(primary)
-    winner = _source_supported_page(primary, [detail], evidence())
+    winner = _source_supported_page(primary, [detail], native)
     assert (winner is detail) == (figure == "retained")
-    blocks, _, _ = reconcile_observations(primary, [detail], embedded=evidence())
-    assert any(b.kind == "figure" and b.bbox == primary.blocks[-1].bbox for b in blocks)
+    blocks, _, _ = reconcile_observations(primary, [detail], embedded=native)
+    assert any(b.kind == kind and b.bbox == primary.blocks[-1].bbox for b in blocks)
     assert primary == before
