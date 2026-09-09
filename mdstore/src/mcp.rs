@@ -263,7 +263,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read Markdown, template.yaml, or root config.yaml with hashline anchors. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration and templates are read-only.",
+            "description": "Read Markdown, template.md (or legacy template.yaml), or root config.yaml with hashline anchors. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration and templates are read-only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -277,7 +277,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "apply_edits",
-            "description": "Atomically validate, commit, and push a hashline-anchored edit batch.",
+            "description": "Atomically validate and locally commit a hashline-anchored edit batch. Templates are read-only. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

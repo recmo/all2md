@@ -16,6 +16,7 @@ use crate::{SectionListRule, markdown::Finding};
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Template {
     frontmatter: Option<serde_json::Value>,
+    filename: Option<FilenameRule>,
     pub(crate) markdown: crate::MarkdownConfig,
     pub(crate) links: crate::LinkConfig,
     pub(crate) relations: Vec<crate::RelationRule>,
@@ -71,6 +72,7 @@ struct Rules {
     list_items: Bounds,
     include_subsections: bool,
     list: Option<SectionListRule>,
+    dated_list: Option<DatedList>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,10 +93,27 @@ struct Bounds {
     maximum: Option<usize>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilenameRule {
+    pattern: String,
+    #[serde(default)]
+    serial_scope: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DatedList {
+    timestamp: String,
+    order: String,
+    min_items: usize,
+    allow_equal_timestamps: bool,
+}
+
 pub(crate) fn is_template(path: &str) -> bool {
     Path::new(path)
         .file_name()
-        .is_some_and(|name| name == "template.yaml")
+        .is_some_and(|name| name == "template.yaml" || name == "template.md")
 }
 
 pub(crate) struct Templates {
@@ -106,6 +125,8 @@ struct CompiledTemplate {
     template: Template,
     schema: Option<jsonschema::Validator>,
     definition: serde_json::Value,
+    script: Option<crate::template_script::Script>,
+    markdown_source: Option<String>,
 }
 
 impl Templates {
@@ -113,7 +134,32 @@ impl Templates {
         let mut entries = HashMap::new();
         let mut findings = Vec::new();
         for (path, text) in files.iter().filter(|(path, _)| is_template(path)) {
-            match parse(text) {
+            let directory = Path::new(path).parent().unwrap_or(Path::new(""));
+            if files.contains_key(&directory.join("template.md").to_string_lossy().into_owned())
+                && files.contains_key(
+                    &directory
+                        .join("template.yaml")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            {
+                findings.push(Finding {
+                    path: path.clone(),
+                    line: None,
+                    message: "directory has both template.md and template.yaml".into(),
+                });
+                continue;
+            }
+            let result = if path.ends_with(".md") {
+                crate::template_script::Script::compile(path, text).and_then(
+                    |(script, definition)| {
+                        compile_definition(definition, Some(script), Some(text.clone()))
+                    },
+                )
+            } else {
+                parse(text)
+            };
+            match result {
                 Ok(template) => {
                     entries.insert(path.clone(), template);
                 }
@@ -137,12 +183,11 @@ impl Templates {
     fn applicable(&self, path: &str) -> Option<(String, &CompiledTemplate)> {
         let mut directory = Path::new(path).parent()?;
         loop {
-            let candidate = directory
-                .join("template.yaml")
-                .to_string_lossy()
-                .into_owned();
-            if let Some(template) = self.entries.get(&candidate) {
-                return Some((candidate, template));
+            for name in ["template.md", "template.yaml"] {
+                let candidate = directory.join(name).to_string_lossy().into_owned();
+                if let Some(template) = self.entries.get(&candidate) {
+                    return Some((candidate, template));
+                }
             }
             directory = directory.parent()?;
         }
@@ -156,7 +201,7 @@ impl Templates {
     pub(crate) fn discovery(&self, path: &str) -> Option<serde_json::Value> {
         self.applicable(path).map(|(path, entry)| {
             serde_json::json!({
-                "path": path, "definition": entry.definition
+                "path": path, "definition": entry.definition, "content": entry.markdown_source
             })
         })
     }
@@ -171,13 +216,184 @@ impl Templates {
         let Some((template_path, entry)) = self.applicable(path) else {
             return;
         };
+        let initial = findings.len();
         validate_page(path, text, page, &template_path, entry, findings);
+        if initial == findings.len()
+            && let Some(script) = &entry.script
+        {
+            let doc = crate::template_script::document(path, text, page);
+            if let Err(error) = script.check(None, Some(&doc), false) {
+                findings.push(crate::template_script::finding(
+                    path,
+                    text,
+                    &template_path,
+                    &error,
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn has_change_checks(&self) -> bool {
+        self.entries.values().any(|entry| {
+            entry
+                .script
+                .as_ref()
+                .is_some_and(|script| script.has_change_checks)
+        })
+    }
+
+    pub(crate) fn validate_changes(
+        &self,
+        before: &HashMap<String, String>,
+        after: &HashMap<String, String>,
+    ) -> Result<(), Vec<Finding>> {
+        let mut paths: std::collections::BTreeSet<_> = before.keys().collect();
+        paths.extend(after.keys());
+        let mut findings = Vec::new();
+        for path in paths {
+            if before.get(path) == after.get(path) {
+                continue;
+            }
+            let Some((template_path, entry)) = self.applicable(path) else {
+                continue;
+            };
+            let Some(script) = &entry.script else {
+                continue;
+            };
+            if !script.has_change_checks {
+                continue;
+            }
+            let parse = |pages: &HashMap<String, String>| -> Result<Option<serde_json::Value>> {
+                pages
+                    .get(path)
+                    .map(|text| {
+                        let page = crate::markdown::parse_page(text, &entry.template.links)?;
+                        Ok(crate::template_script::document(path, text, &page))
+                    })
+                    .transpose()
+            };
+            let result = (|| {
+                let old = parse(before)?;
+                let new = parse(after)?;
+                script.check(old.as_ref(), new.as_ref(), true)
+            })();
+            if let Err(error) = result {
+                let text = after
+                    .get(path)
+                    .or_else(|| before.get(path))
+                    .map_or("", String::as_str);
+                findings.push(crate::template_script::finding(
+                    path,
+                    text,
+                    &template_path,
+                    &error,
+                ));
+            }
+        }
+        if findings.is_empty() {
+            Ok(())
+        } else {
+            Err(findings)
+        }
+    }
+
+    /// Allocation is called under the repository lock, after receipt recovery.
+    pub(crate) fn allocate_path(
+        &self,
+        requested: &str,
+        existing: &HashSet<String>,
+    ) -> Result<String> {
+        if !requested.contains(['{', '}']) {
+            return Ok(requested.to_owned());
+        }
+        let placeholder = Regex::new(r"\{serial(?::0?([1-9][0-9]?))?\}").expect("constant pattern");
+        let captures = placeholder
+            .captures(requested)
+            .context("unknown path placeholder")?;
+        let marker = captures.get(0).expect("whole match");
+        let prefix = &requested[..marker.start()];
+        let suffix = &requested[marker.end()..];
+        if prefix.contains(['{', '}']) || suffix.contains(['{', '}']) {
+            bail!("only one serial placeholder is allowed");
+        }
+        let width: usize = captures
+            .get(1)
+            .map_or(Ok(1), |value| value.as_str().parse())?;
+        if width > 12 {
+            bail!("serial padding must not exceed 12 digits");
+        }
+        let probe = format!("{prefix}{:0width$}{suffix}", 1);
+        let policy = self.policy(&probe);
+        let rule = policy
+            .filename
+            .as_ref()
+            .context("serial allocation requires a filename declaration")?;
+        let pattern = Regex::new(&rule.pattern)?;
+        let target = pattern
+            .captures(&probe)
+            .context("path does not match template filename pattern")?;
+        if target.get(0).is_none_or(|found| found.as_str() != probe) {
+            bail!("path does not match template filename pattern");
+        }
+        let serial_capture = target
+            .name("serial")
+            .context("serial allocation requires a named serial capture")?;
+        if serial_capture.start() != prefix.len()
+            || serial_capture.end() != probe.len() - suffix.len()
+        {
+            bail!("serial placeholder must occupy the named serial capture");
+        }
+        let mut maximum = 0_u64;
+        for path in existing {
+            if let Some(found) = pattern.captures(path)
+                && found.get(0).is_some_and(|matched| matched.as_str() == path)
+                && rule.serial_scope.iter().all(|key| {
+                    found.name(key).map(|v| v.as_str()) == target.name(key).map(|v| v.as_str())
+                })
+            {
+                let serial: u64 = found
+                    .name("serial")
+                    .context("filename requires serial capture")?
+                    .as_str()
+                    .parse()?;
+                maximum = maximum.max(serial);
+            }
+        }
+        let serial = maximum.checked_add(1).context("serial counter exhausted")?;
+        let path = format!("{prefix}{serial:0width$}{suffix}");
+        let final_match = pattern
+            .find(&path)
+            .context("allocated path violates filename pattern")?;
+        if final_match.start() != 0 || final_match.end() != path.len() || existing.contains(&path) {
+            bail!("allocated path violates filename pattern or already exists");
+        }
+        Ok(path)
     }
 }
 
 fn parse(text: &str) -> Result<CompiledTemplate> {
     let definition: serde_yaml::Value = serde_yaml::from_str(text)?;
-    let template: Template = serde_yaml::from_value(definition.clone())?;
+    compile_definition(serde_json::to_value(definition)?, None, None)
+}
+
+fn compile_definition(
+    definition: serde_json::Value,
+    script: Option<crate::template_script::Script>,
+    markdown_source: Option<String>,
+) -> Result<CompiledTemplate> {
+    let template: Template = serde_json::from_value(definition.clone())?;
+    if let Some(rule) = &template.filename {
+        let pattern = Regex::new(&rule.pattern)?;
+        let names: HashSet<_> = pattern.capture_names().flatten().collect();
+        if !rule.serial_scope.is_empty() && !names.contains("serial") {
+            bail!("serial_scope requires a named serial capture");
+        }
+        for key in &rule.serial_scope {
+            if key == "serial" || !names.contains(key.as_str()) {
+                bail!("invalid serial scope capture {key}");
+            }
+        }
+    }
     validate_definition(&template.structure, &template.sections, 0)?;
     validate_rules(&template.preamble)?;
     if template.markdown.max_line_length == Some(0) {
@@ -226,11 +442,22 @@ fn parse(text: &str) -> Result<CompiledTemplate> {
     Ok(CompiledTemplate {
         template,
         schema,
-        definition: serde_json::to_value(definition)?,
+        definition,
+        script,
+        markdown_source,
     })
 }
 
 fn validate_rules(rules: &Rules) -> Result<()> {
+    if let Some(list) = &rules.dated_list {
+        if list.timestamp != "rfc3339" || !matches!(list.order.as_str(), "ascending" | "descending")
+        {
+            bail!("dated_list requires rfc3339 timestamps and ascending or descending order");
+        }
+        if rules.content != Some(Content::List) || rules.list.is_some() {
+            bail!("dated_list requires list content and cannot be combined with list rules");
+        }
+    }
     for bounds in [
         &rules.paragraphs,
         &rules.words,
@@ -291,13 +518,42 @@ fn validate_page(
     findings: &mut Vec<Finding>,
 ) {
     let template = &entry.template;
+    if let Some(rule) = &template.filename {
+        let pattern = Regex::new(&rule.pattern).expect("validated filename pattern");
+        if !pattern
+            .find(path)
+            .is_some_and(|found| found.start() == 0 && found.end() == path.len())
+        {
+            findings.push(Finding {
+                path: path.into(),
+                line: None,
+                message: format!(
+                    "{template_path}: path does not match filename pattern {}",
+                    rule.pattern
+                ),
+            });
+        }
+    }
     if let Some(validator) = &entry.schema {
         for error in validator.iter_errors(&page.frontmatter) {
             findings.push(Finding {
                 path: path.to_owned(),
-                line: Some(1),
+                line: Some(crate::template_script::field_line(
+                    text,
+                    error
+                        .instance_path
+                        .to_string()
+                        .trim_start_matches('/')
+                        .split('/')
+                        .next()
+                        .unwrap_or(""),
+                )),
                 message: format!(
-                    "{template_path}: frontmatter{}: {error}",
+                    "{template_path}{}: frontmatter{}: {error}",
+                    entry
+                        .script
+                        .as_ref()
+                        .map_or(String::new(), |script| script.rule_context("frontmatter")),
                     error.instance_path
                 ),
             });
@@ -338,7 +594,20 @@ fn validate_page(
         findings.push(Finding {
             path: path.to_owned(),
             line: Some(offsets.partition_point(|start| *start <= offset)),
-            message: format!("{template_path}: {message}"),
+            message: {
+                let context = template
+                    .sections
+                    .iter()
+                    .find(|section| message.contains(&format!("{:?}", section.heading)))
+                    .and_then(|section| {
+                        entry
+                            .script
+                            .as_ref()
+                            .map(|script| script.rule_context(&section.heading))
+                    })
+                    .unwrap_or_default();
+                format!("{template_path}{context}: {message}")
+            },
         })
     };
     let first_section = headings
@@ -547,10 +816,78 @@ fn check_content(
             );
         }
     }
+    if let Some(list) = &rules.dated_list {
+        let list_rule = SectionListRule {
+            ordered: Some(false),
+            minimum_items: list.min_items,
+            date_order: None,
+            item_pattern: None,
+        };
+        crate::structure::validate_list(text, offset, offsets, &list_rule, &mut |line, message| {
+            report(offsets[line.saturating_sub(1)], message)
+        });
+        validate_timestamps(text, offset, list, report);
+    }
     if let Some(list) = &rules.list {
         crate::structure::validate_list(text, offset, offsets, list, &mut |line, message| {
             report(offsets[line.saturating_sub(1)], message)
         });
+    }
+}
+
+fn validate_timestamps(
+    text: &str,
+    offset: usize,
+    rule: &DatedList,
+    report: &mut dyn FnMut(usize, String),
+) {
+    let mut depth = 0;
+    let mut previous = None;
+    for (event, range) in Parser::new_ext(text, Options::all()).into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                if matches!(tag, Tag::Item) && depth == 1 {
+                    let raw = text[range.clone()].trim_start();
+                    let content = raw.get(1..).unwrap_or("").trim_start();
+                    let stamp = content.split_whitespace().next().unwrap_or("");
+                    match chrono::DateTime::parse_from_rfc3339(stamp) {
+                        Ok(date) => {
+                            if previous.is_some_and(|prev| {
+                                (if rule.order == "ascending" {
+                                    date < prev
+                                } else {
+                                    date > prev
+                                }) || (!rule.allow_equal_timestamps && date == prev)
+                            }) {
+                                report(
+                                    offset + range.start,
+                                    "timeline timestamp is out of order".into(),
+                                );
+                            }
+                            previous = Some(date);
+                            if content[stamp.len()..]
+                                .trim()
+                                .trim_start_matches('—')
+                                .trim()
+                                .is_empty()
+                            {
+                                report(
+                                    offset + range.start,
+                                    "timeline entry must explain what happened".into(),
+                                );
+                            }
+                        }
+                        Err(_) => report(
+                            offset + range.start,
+                            "timeline entry must start with a literal RFC3339 timestamp".into(),
+                        ),
+                    }
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
     }
 }
 

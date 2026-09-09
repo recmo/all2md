@@ -2708,3 +2708,216 @@ async fn daemon_embedding_worker_coalesces_edits_and_observes_direct_store_write
     );
     server.abort();
 }
+
+const TASK_TEMPLATE: &str = r#"# Tasks
+
+Use concrete outcomes and record decisions in the timeline.
+
+```starlark
+frontmatter(title=string(required=True), state=enum(["inbox", "ready", "completed"], required=True))
+section("Timeline", required=True, content=dated_list())
+filename(r"tasks/v1/(?P<year>[0-9]{4})/(?P<month>[0-9]{2})/(?P<day>[0-9]{2})-(?P<serial>[0-9]+)-[a-z-]+\.md", serial_scope=["year", "month", "day"])
+
+def transition(before, after):
+    if before != None and after != None:
+        require(before.frontmatter["state"] != "inbox" or after.frontmatter["state"] != "completed", "Clarify before completing", field="state")
+        if before.frontmatter["state"] != after.frontmatter["state"]:
+            require(len(after.sections["Timeline"].entries) > len(before.sections["Timeline"].entries), "Record the transition", at=after.sections["Timeline"])
+
+validate_change(transition)
+```
+"#;
+
+fn task_repository() -> Repository {
+    let repository = Repository::new();
+    fs::create_dir_all(repository.root.join("tasks/v1")).unwrap();
+    fs::write(repository.root.join("tasks/v1/template.md"), TASK_TEMPLATE).unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "task policy"]);
+    repository
+}
+
+fn task_content() -> String {
+    "---\ntitle: Review\nstate: inbox\n---\n# Task\n\n## Timeline\n- 2026-09-09T10:00:00Z — Captured.\n".into()
+}
+
+fn task_create(slug: &str) -> ApplyEditsRequest {
+    ApplyEditsRequest {
+        edit_summary: format!("Create {slug}"),
+        edits: vec![EditOperation::CreatePage {
+            path: format!("tasks/v1/2026/09/09-{{serial:03}}-{slug}.md"),
+            content: task_content(),
+        }],
+    }
+}
+
+#[test]
+fn literate_templates_allocate_atomically_and_replay_after_restart() {
+    let repository = task_repository();
+    let store = repository.store();
+    let discovery = store
+        .get_page("tasks/v1/2026/09/09-new.md", None)
+        .unwrap()
+        .template
+        .unwrap();
+    assert_eq!(discovery["path"], "tasks/v1/template.md");
+    assert!(
+        discovery["content"]
+            .as_str()
+            .unwrap()
+            .contains("concrete outcomes")
+    );
+    assert!(
+        store
+            .get_page("tasks/v1/template.md", None)
+            .unwrap()
+            .content
+            .contains("starlark")
+    );
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    assert!(
+        store
+            .apply_edits(&ApplyEditsRequest {
+                edit_summary: "weaken policy".into(),
+                edits: vec![EditOperation::CreatePage {
+                    path: "tasks/v2/template.md".into(),
+                    content: "# Empty".into()
+                }]
+            })
+            .is_err()
+    );
+    let mut invalid = task_create("invalid");
+    if let EditOperation::CreatePage { content, .. } = &mut invalid.edits[0] {
+        *content = "# No metadata".into();
+    }
+    assert!(store.apply_edits(&invalid).is_err());
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    let request = task_create("review");
+    let response = store.apply_edits(&request).unwrap();
+    assert_eq!(
+        response.touched_paths,
+        vec!["tasks/v1/2026/09/09-001-review.md"]
+    );
+    drop(store);
+    let store = repository.store();
+    let replay = store.apply_edits(&request).unwrap();
+    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
+    assert_eq!(replay.touched_paths, response.touched_paths);
+    assert_eq!(
+        store
+            .apply_edits(&task_create("other"))
+            .unwrap()
+            .touched_paths,
+        vec!["tasks/v1/2026/09/09-002-other.md"]
+    );
+}
+
+#[test]
+fn literate_template_concurrent_creates_and_failed_changes_preserve_state() {
+    let repository = task_repository();
+    let store = repository.store();
+    let handles: Vec<_> = ["alpha", "beta", "gamma", "delta"]
+        .into_iter()
+        .map(|slug| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store.apply_edits(&task_create(slug)).unwrap().touched_paths[0].clone()
+            })
+        })
+        .collect();
+    let paths: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    let serials: std::collections::HashSet<_> = paths
+        .iter()
+        .map(|path| path.rsplit('/').next().unwrap().split('-').nth(1).unwrap())
+        .collect();
+    assert_eq!(serials.len(), 4);
+    let path = &paths[0];
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    let request = |state: &str, timeline: bool| {
+        let mut edits = vec![EditOperation::Replace {
+            path: path.clone(),
+            anchor: format!("3:{}", short_hash("state: inbox")),
+            content: format!("state: {state}"),
+        }];
+        if timeline {
+            edits.push(EditOperation::InsertAfter {
+                path: path.clone(),
+                anchor: format!("8:{}", short_hash("- 2026-09-09T10:00:00Z — Captured.")),
+                content: "- 2026-09-09T11:00:00Z — Clarified.".into(),
+            });
+        }
+        ApplyEditsRequest {
+            edit_summary: "transition".into(),
+            edits,
+        }
+    };
+    assert!(store.apply_edits(&request("completed", true)).is_err());
+    assert!(store.apply_edits(&request("ready", false)).is_err());
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    store.apply_edits(&request("ready", true)).unwrap();
+    assert!(
+        store
+            .get_page(path, None)
+            .unwrap()
+            .content
+            .contains("state: ready")
+    );
+}
+
+#[test]
+fn literate_template_git_import_checks_each_transition_not_just_final_state() {
+    let repository = task_repository();
+    let store = repository.store();
+    let path = store
+        .apply_edits(&task_create("review"))
+        .unwrap()
+        .touched_paths[0]
+        .clone();
+    for (state, time) in [("ready", "11"), ("completed", "12")] {
+        let previous = fs::read_to_string(repository.root.join(&path)).unwrap();
+        let old = if state == "ready" { "inbox" } else { "ready" };
+        fs::write(
+            repository.root.join(&path),
+            format!(
+                "{}- 2026-09-09T{time}:00:00Z — Transition.\n",
+                previous.replace(&format!("state: {old}"), &format!("state: {state}"))
+            ),
+        )
+        .unwrap();
+        command(&repository.root, &["add", "."]);
+        command(&repository.root, &["commit", "-qm", "external transition"]);
+    }
+    store.apply_edits(&task_create("second")).unwrap();
+    assert!(
+        store
+            .get_page(&path, None)
+            .unwrap()
+            .content
+            .contains("state: completed")
+    );
+    let second = "tasks/v1/2026/09/09-002-second.md";
+    fs::write(
+        repository.root.join(second),
+        format!(
+            "{}- 2026-09-09T13:00:00Z — Skipped clarification.\n",
+            task_content().replace("inbox", "completed")
+        ),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "."]);
+    command(
+        &repository.root,
+        &["commit", "-qm", "invalid external transition"],
+    );
+    assert!(store.apply_edits(&task_create("third")).is_err());
+    assert!(
+        store
+            .get_page(second, None)
+            .unwrap()
+            .content
+            .contains("state: inbox")
+    );
+}

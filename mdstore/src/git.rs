@@ -63,7 +63,7 @@ pub(crate) fn tracked_markdown(
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).into_owned())
-        .filter(|path| path.ends_with(".md"))
+        .filter(|path| path.ends_with(".md") && !crate::template::is_template(path))
         .filter(|path| include.is_match(path) && !exclude.is_match(path))
         .collect())
 }
@@ -1335,4 +1335,22 @@ mod tests {
                 .is_empty()
         );
     }
+}
+
+/// Incoming commit edges in parent-before-child order, including merge parents.
+pub(crate) fn incoming_edges(
+    root: &Path,
+    base: &str,
+    candidate: &str,
+) -> Result<Vec<(String, String)>> {
+    let range = format!("{base}..{candidate}");
+    let output = checked(root, ["rev-list", "--reverse", "--topo-order", &range])?;
+    let mut edges = Vec::new();
+    for commit in String::from_utf8(output.stdout)?.lines() {
+        let output = checked(root, ["rev-list", "--parents", "-n", "1", commit])?;
+        for parent in String::from_utf8(output.stdout)?.split_whitespace().skip(1) {
+            edges.push((parent.to_owned(), commit.to_owned()));
+        }
+    }
+    Ok(edges)
 }

@@ -398,7 +398,7 @@ impl Store {
                 relations: Vec::new(),
             });
         }
-        if path.ends_with(".md") {
+        if path.ends_with(".md") && !crate::template::is_template(path) {
             ensure_paths_match_config(&state.config, [&path.to_owned()])?;
             return Ok(PageResponse {
                 exists: false,
@@ -452,11 +452,30 @@ impl Store {
             bail!("writes are blocked: {reason}");
         }
 
-        let mut paths = BTreeSet::new();
+        let current = self.state.read().clone();
+        let mut existing: std::collections::HashSet<_> = current.pages.keys().cloned().collect();
+        // Reserve explicitly named creates too, regardless of their position in the batch.
         for edit in &request.edits {
+            if let EditOperation::CreatePage { path, .. } = edit
+                && !path.contains(['{', '}'])
+            {
+                existing.insert(path.clone());
+            }
+        }
+        let mut edits = request.edits.clone();
+        for edit in &mut edits {
+            if let EditOperation::CreatePage { path, .. } = edit {
+                *path = current.templates.allocate_path(path, &existing)?;
+                existing.insert(path.clone());
+            } else if edit.path().contains(['{', '}']) {
+                bail!("path placeholders are supported only for creation");
+            }
+        }
+        let mut paths = BTreeSet::new();
+        for edit in &edits {
             let path = edit.path();
             validate_repo_path(path)?;
-            if !path.ends_with(".md") {
+            if !path.ends_with(".md") || crate::template::is_template(path) {
                 bail!(
                     "apply_edits may edit Markdown only; configuration and templates are read-only"
                 );
@@ -464,7 +483,6 @@ impl Store {
             paths.insert(path.to_owned());
         }
 
-        let current = self.state.read().clone();
         let mut base_head = current.head.clone();
         ensure_paths_match_config(&current.config, paths.iter())?;
 
@@ -481,7 +499,7 @@ impl Store {
                 bail!("untracked repository path already exists: {path}");
             }
         }
-        let applied = apply_operations_with_ranges(&originals, &request.edits)?;
+        let applied = apply_operations_with_ranges(&originals, &edits)?;
         let changes = &applied.changes;
         let mut pages = (*current.pages).clone();
         let extra = current.config_files.clone();
@@ -498,6 +516,10 @@ impl Store {
         let config = current.config.clone();
         ensure_pages_match_config(&config, &pages)?;
         let (parsed, edges) = validate_corpus(&pages, &current.templates)
+            .map_err(|findings| ValidationError { findings })?;
+        current
+            .templates
+            .validate_changes(&current.pages, &pages)
             .map_err(|findings| ValidationError { findings })?;
         ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
         let provider = current.provider.clone();
@@ -887,6 +909,39 @@ impl Store {
         Ok(())
     }
 
+    fn validate_incoming_changes(&self, base: &str, candidate: &str) -> Result<()> {
+        if base == candidate {
+            return Ok(());
+        }
+        // For a deliberate local rewind, validate the net edit under the accepted policy.
+        if !git::is_ancestor(&self.root, base, candidate)? {
+            let state = self.state.read().clone();
+            let config = Config::from_yaml(&git::read_text(&self.root, candidate, "config.yaml")?)?;
+            let pages = load_pages(&self.root, candidate, &config)?;
+            return state
+                .templates
+                .validate_changes(&state.pages, &pages)
+                .map_err(|findings| ValidationError { findings }.into());
+        }
+        for (parent, commit) in git::incoming_edges(&self.root, base, candidate)? {
+            let templates =
+                crate::template::Templates::compile(&load_config_files(&self.root, &parent)?)
+                    .map_err(|findings| ValidationError { findings })?;
+            if !templates.has_change_checks() {
+                continue;
+            }
+            let config = Config::from_yaml(&git::read_text(&self.root, &parent, "config.yaml")?)?;
+            let before = load_pages(&self.root, &parent, &config)?;
+            let config = Config::from_yaml(&git::read_text(&self.root, &commit, "config.yaml")?)?;
+            let after = load_pages(&self.root, &commit, &config)?;
+            templates
+                .validate_changes(&before, &after)
+                .map_err(|findings| ValidationError { findings })
+                .with_context(|| format!("change validation for commit {commit}"))?;
+        }
+        Ok(())
+    }
+
     fn load_candidate(&self, current: &str, allow_restart: bool) -> Result<StoreState> {
         let config = Config::from_yaml(&git::read_text(&self.root, current, "config.yaml")?)?;
         let pages = load_pages(&self.root, current, &config)?;
@@ -913,6 +968,7 @@ impl Store {
             .collect();
         git::ensure_ignored_at(&self.root, current, sidecars.iter().map(String::as_str))?;
         let current_state = self.state.read().clone();
+        self.validate_incoming_changes(&current_state.head, current)?;
         if !allow_restart && config.server != current_state.config.server {
             bail!("external commit changes server configuration; restart required");
         }

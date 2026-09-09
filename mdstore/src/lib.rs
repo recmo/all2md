@@ -13,6 +13,7 @@ mod sidecar;
 mod store;
 mod structure;
 mod template;
+mod template_script;
 
 use std::path::Path;
 

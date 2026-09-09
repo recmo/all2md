@@ -320,6 +320,9 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
             let value: serde_yaml::Value =
                 serde_yaml::from_str(&yaml).context("parse YAML frontmatter")?;
             let json = serde_json::to_value(value).context("convert YAML frontmatter")?;
+            if !json.is_object() {
+                anyhow::bail!("frontmatter must be a YAML mapping");
+            }
             return Ok((json, line_number + 1, &text[offset..]));
         }
         yaml.push_str(line);
