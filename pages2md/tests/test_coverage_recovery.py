@@ -137,3 +137,43 @@ def test_page_recovery_preserves_nonprose_region(figure, truncated, kind):
     blocks, _, _ = reconcile_observations(primary, [detail], embedded=native)
     assert any(b.kind == kind and b.bbox == primary.blocks[-1].bbox for b in blocks)
     assert primary == before
+
+
+@pytest.mark.parametrize("ink_y, blank_expected", [(2927, True), (2928, False)])
+def test_blank_region_does_not_borrow_adjacent_line_pixel(tmp_path, ink_y, blank_expected):
+    from PIL import Image
+    from pages2md.native import _blank_nonprose_regions
+
+    primary = parse_native_observation(
+        r"<|det|>equation [465,887,531,903]<|/det|>\[T\subseteq S\]",
+        mode="multi_base", source_pages=[16],
+    )
+    image = Image.new("L", (2550,3300), 255)
+    image.putpixel((1351,ink_y), 254)
+    path = tmp_path/"page.png"
+    image.save(path)
+    assert bool(_blank_nonprose_regions(primary, path)) == blank_expected
+
+
+@pytest.mark.parametrize("pixel", [255, 254, 0])
+def test_only_white_raster_regions_can_waive_preservation(tmp_path, pixel):
+    from PIL import Image
+    from pages2md.native import _blank_nonprose_regions, _preserves_nonprose_regions
+
+    primary = parse_native_observation(
+        r"<|det|>equation [100,400,900,700]<|/det|>\[x=1\]",
+        mode="multi_base", source_pages=[1],
+    )
+    recovery = deepcopy(primary)
+    recovery.blocks = []
+    image = Image.new("L", (1000,1000), 255)
+    image.putpixel((500,500), pixel)
+    path = tmp_path/"page.png"
+    image.save(path)
+    before = deepcopy(primary)
+    blank = _blank_nonprose_regions(primary, path)
+    assert bool(blank) == (pixel == 255)
+    assert _preserves_nonprose_regions(primary, recovery, blank) == (pixel == 255)
+    assert not _preserves_nonprose_regions(primary, recovery)
+    assert not _blank_nonprose_regions(primary, None)
+    assert primary == before

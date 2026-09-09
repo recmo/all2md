@@ -1,19 +1,36 @@
 # Targeted region recovery and rerun readiness
 
-The generation results below predate the maintenance cleanup. After removing
-production ablation switches and fixture-only backend fallbacks, the full suite
-still passed (472 tests). Subsequent review fixes protect detected figures,
-reject failed confirming reads, preserve changed/merged canonical equations,
-and reject stale benchmark source images. The current branch has 489 passing
-tests; this is not validation of an integrated main build.
-Historical runners are archived; current tools are
-listed in [the validation index](README.md). No new model reads were needed for
-that cleanup.
+**Status: ready to merge and perform a staged full rerun.** The original corpus OCR remains
+untouched. A full rerun must use fresh staged bundles, retaining old results.
+Historical runners are archived; maintained tools are listed in
+[the validation index](README.md).
 
-**Status: integrated validation in progress; not yet cleared for a full rerun.**
-The earlier document canaries (35 physical pages total) predate the merge with
-main. Fresh integrated canaries are still required. The original corpus OCR
-has not been modified, and the full rerun has not started.
+## Integrated review (2026-09-09)
+
+- Main `3d714fe` was merged in `f77268e`. The full regression suite passes
+  (539 tests, five existing SWIG deprecation warnings).
+- `integrated-canary-01` contains new Jo26 (19 pages) and KKH26 (16 pages)
+  document reads. Jo26 resumed after five checkpointed pages when general crops
+  were moved to the bounded region entry point in `e759d49`; this is not a claim
+  that every saved observation used that final policy.
+- The same troublesome crop consumed 70,314 aggregate tokens under the old path.
+  `bounded-crop-probe` used 12,324 total tokens with every retry capped at 4096.
+  It abstained rather than recovering the text; the cap is per generation, not
+  per region including all retries. Concurrent timings are not throughput data.
+- Jo26 page 16 exposed a preservation veto caused by a phantom equation in a
+  blank source region. Fully enclosed raster pixels now distinguish blankness
+  from an adjacent line's boundary pixel; even faint interior ink retains the
+  veto. Missing native text alone never waives preservation.
+- Final-code, model-forbidden reassembly is retained in `integrated-canary-final`.
+  Both complete documents verify and publish successfully (35 pages total).
+  Jo26 page 16 uses the clean saved Detail body and preserves its correct opening;
+  Corollaries 5.9 and 5.10 each appear once as statements, with the correct ending.
+  All 33 pre-resume evidence files are hash-identical. The rejected artifact is
+  retained separately.
+- Source-page inspection checked Jo26 page 16 and KKH26's opening abstract and
+  equations. KKH26's exponent is correct; author affiliation markers still have
+  cosmetic duplication. Advisory source-region and Markdown lint warnings remain.
+  Verification is not certification of every mathematical symbol.
 
 ## What changed
 
@@ -105,7 +122,7 @@ that every mathematical symbol in the corpus is certified correct. Native
 disagreement, uncertain OCR and Markdown lint warnings still require honest
 reporting; mathematical use of the transcription should retain source access.
 
-The final suite has 472 passing tests (five existing SWIG deprecation warnings).
+The earlier pre-integration suite had 472 passing tests.
 This includes crop budget/identity/failure isolation, image-integrity checks,
 two-glyph repair abstention, legitimate repetition controls, long-distance region
 duplication, automatic independent rereading, and opening preservation. Visual

@@ -342,6 +342,7 @@ def _convert_workspace(
                         candidates,
                         embedded_text=source_page.embedded.text,
                         embedded=source_page.embedded,
+                        page_image=source_page.image_path,
                     )
                     validation_warnings.extend(candidate_warnings)
                     result = _page_result(
@@ -842,6 +843,7 @@ def _reassemble_cached_page(
         candidates,
         embedded_text=source_page.embedded.text,
         embedded=source_page.embedded,
+        page_image=source_page.image_path,
     )
     return _page_result(
         source_page,

@@ -297,11 +297,20 @@ def reconcile_observations(
     *,
     embedded_text: str = "",
     embedded: EmbeddedEvidence | None = None,
+    page_image=None,
 ) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
     from .equation_recovery import apply_regions
     regions = [r for r in recoveries if r.mode == "region_detail" and r.source_pages == primary.source_pages]
     peers = [r for r in recoveries if r.mode != "region_detail"]
-    blocks, provenance, warnings = _reconcile_observations(primary, peers, embedded_text=embedded_text, embedded=embedded)
+    blank_regions = _blank_nonprose_regions(primary, page_image)
+    blocks, provenance, warnings = _reconcile_observations(
+        primary, peers, embedded_text=embedded_text, embedded=embedded,
+        blank_regions=blank_regions,
+    )
+    if blank_regions:
+        for action in provenance:
+            if action.get("action") == "selected_source_supported_page":
+                action["blank_source_regions"] = sorted(blank_regions)
     blocks, actions, extra = apply_regions(blocks, regions, peers, primary)
     return blocks, [*provenance,*actions], sorted(set([*warnings,*extra]))
 
@@ -312,6 +321,7 @@ def _reconcile_observations(
     *,
     embedded_text: str = "",
     embedded: EmbeddedEvidence | None = None,
+    blank_regions=frozenset(),
 ) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
     """Keep multi-page structure and apply only confidently aligned Gundam spans."""
     provenance: list[dict[str, Any]] = []
@@ -331,7 +341,7 @@ def _reconcile_observations(
             cleaned.append(recovery)
             provenance.extend(actions)
         recoveries = cleaned
-        winner = _source_supported_page(primary, recoveries, embedded)
+        winner = _source_supported_page(primary, recoveries, embedded, blank_regions=blank_regions)
         if winner is not None:
             blocks = [_copy_block(block) for block in winner.blocks]
             for block in blocks:
@@ -399,7 +409,7 @@ def _reconcile_observations(
         if set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS:
             continue
         warnings.extend(recovery.warnings)
-        if _should_replace_corrupt_local_page(primary, recovery):
+        if _should_replace_corrupt_local_page(primary, recovery, blank_regions=blank_regions):
             recovery_text = normalize(_observation_text(recovery)).casefold()
             retained_headings = [
                 block
@@ -545,9 +555,37 @@ def _salvage_grounded_body(observation: OcrObservation, embedded: EmbeddedEviden
                       "original_block_indices": removed, "raw_preserved": True}]
 
 
-def _preserves_nonprose_regions(primary, recovery):
+def _blank_nonprose_regions(primary, page_image):
+    # Only an actual white raster region can waive a non-prose preservation
+    # veto; absent or unparseable native text is not evidence of blankness.
+    if page_image is None:
+        return frozenset()
+    from PIL import Image
+    blank = set()
+    with Image.open(page_image) as image:
+        gray = image.convert("L")
+        for block in primary.blocks:
+            box = block.bbox
+            if block.kind not in FIGURE_KINDS | FORMULA_KINDS | {"table"} or not box:
+                continue
+            if not (0 <= box[0] < box[2] <= 1000 and 0 <= box[1] < box[3] <= 1000):
+                continue
+            # Inspect only fully enclosed pixels: outward rounding can borrow
+            # a partial pixel of ink from the adjacent prose line.
+            pixels = (math.ceil(box[0]*gray.width/1000), math.ceil(box[1]*gray.height/1000),
+                      math.floor(box[2]*gray.width/1000), math.floor(box[3]*gray.height/1000))
+            if pixels[2] <= pixels[0] or pixels[3] <= pixels[1]:
+                continue
+            if gray.crop(pixels).getextrema() == (255, 255):
+                blank.add(tuple(box))
+    return frozenset(blank)
+
+
+def _preserves_nonprose_regions(primary, recovery, blank_regions=frozenset()):
     # Native prose cannot establish whether figures, formulas or tables remain.
     for block in primary.blocks:
+        if block.bbox and tuple(block.bbox) in blank_regions:
+            continue
         family = next((kinds for kinds in (FIGURE_KINDS, FORMULA_KINDS, {"table"})
                        if block.kind in kinds), None)
         if family is not None and not (block.bbox and any(
@@ -559,7 +597,7 @@ def _preserves_nonprose_regions(primary, recovery):
     return True
 
 
-def _source_supported_page(primary, recoveries, embedded):
+def _source_supported_page(primary, recoveries, embedded, *, blank_regions=frozenset()):
     """Replace a poorly supported page with a coherent, corroborated local read.
 
     This also handles short hallucinations and stop-terminated loops: neither
@@ -582,7 +620,7 @@ def _source_supported_page(primary, recoveries, embedded):
             _preserves_supported_text(block, recovery.blocks, embedded)
             for block in primary.blocks if _supported_grounded_block(block, embedded)
         )
-        if preserves and _preserves_nonprose_regions(primary, recovery) and precision >= .65 and recall >= .7 and min(precision, recall) >= old_score + .18 and supported >= 2:
+        if preserves and _preserves_nonprose_regions(primary, recovery, blank_regions) and precision >= .65 and recall >= .7 and min(precision, recall) >= old_score + .18 and supported >= 2:
             candidates.append((min(precision, recall), recovery))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
@@ -1083,8 +1121,8 @@ def _structural_penalty(value: str) -> float:
     return penalty
 
 
-def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObservation) -> bool:
-    if not _preserves_nonprose_regions(primary, recovery):
+def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObservation, *, blank_regions=frozenset()) -> bool:
+    if not _preserves_nonprose_regions(primary, recovery, blank_regions):
         return False
     severe = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
     if not severe or set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS:
