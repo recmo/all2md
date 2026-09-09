@@ -237,57 +237,71 @@ pub(crate) fn document<'a>(path: &'a str, text: &'a str, page: &'a ParsedPage) -
 
 fn alloc_document<'v>(heap: Heap<'v>, doc: &Document<'_>) -> Value<'v> {
     let page = doc.page;
-    let sections = heap.alloc(AllocDict(page.section_headings.iter().enumerate().map(
-        |(index, (level, name, start, content_start))| {
-            let end = page.section_headings[index + 1..]
-                .iter()
-                .find(|heading| heading.0 <= *level)
-                .map_or(doc.text.len(), |heading| heading.2);
-            let entries = heap.alloc(AllocList(
-                page.list_entries
+    let mut counts = std::collections::HashMap::new();
+    for (_, name, _, _) in &page.section_headings {
+        *counts.entry(name).or_insert(0) += 1;
+    }
+    // A name identifies a section only when it is unique across the document.
+    // Ambiguous names are unavailable, so lookup cannot silently select a different scope.
+    let sections = heap.alloc(AllocDict(
+        page.section_headings
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, name, _, _))| counts[name] == 1)
+            .map(|(index, (level, name, start, content_start))| {
+                let end = page.section_headings[index + 1..]
                     .iter()
-                    .filter(|entry| entry.range.start >= *content_start && entry.range.end <= end)
-                    .map(|entry| {
-                        let timestamp = entry
-                            .timestamp
-                            .map_or(Value::new_none(), |stamp| heap.alloc(stamp.to_rfc3339()));
-                        let end_line = entry.line
-                            + doc.text[entry.range.clone()]
-                                .trim_end_matches('\n')
-                                .bytes()
-                                .filter(|c| *c == b'\n')
-                                .count();
-                        let links = heap.alloc(AllocList(
-                            page.links
-                                .iter()
-                                .filter(|link| (entry.line..=end_line).contains(&link.line))
-                                .map(|link| link.target.as_str()),
-                        ));
-                        heap.alloc(AllocStruct([
-                            ("timestamp", timestamp),
-                            (
-                                "text",
-                                heap.alloc(&doc.text[entry.text_start..entry.range.end]),
+                    .find(|heading| heading.0 <= *level)
+                    .map_or(doc.text.len(), |heading| heading.2);
+                let entries = heap.alloc(AllocList(
+                    page.list_entries
+                        .iter()
+                        .filter(|entry| {
+                            entry.range.start >= *content_start && entry.range.end <= end
+                        })
+                        .map(|entry| {
+                            let timestamp = entry
+                                .timestamp
+                                .map_or(Value::new_none(), |stamp| heap.alloc(stamp.to_rfc3339()));
+                            let end_line = entry.line
+                                + doc.text[entry.range.clone()]
+                                    .trim_end_matches('\n')
+                                    .bytes()
+                                    .filter(|c| *c == b'\n')
+                                    .count();
+                            let links = heap.alloc(AllocList(
+                                page.links
+                                    .iter()
+                                    .filter(|link| (entry.line..=end_line).contains(&link.line))
+                                    .map(|link| link.target.as_str()),
+                            ));
+                            heap.alloc(AllocStruct([
+                                ("timestamp", timestamp),
+                                (
+                                    "text",
+                                    heap.alloc(&doc.text[entry.text_start..entry.range.end]),
+                                ),
+                                ("line", heap.alloc(entry.line)),
+                                ("links", links),
+                            ]))
+                        }),
+                ));
+                (
+                    name.as_str(),
+                    heap.alloc(AllocStruct([
+                        ("text", heap.alloc(&doc.text[*content_start..end])),
+                        ("level", heap.alloc(*level as u32)),
+                        (
+                            "line",
+                            heap.alloc(
+                                doc.text[..*start].bytes().filter(|c| *c == b'\n').count() + 1,
                             ),
-                            ("line", heap.alloc(entry.line)),
-                            ("links", links),
-                        ]))
-                    }),
-            ));
-            (
-                name.as_str(),
-                heap.alloc(AllocStruct([
-                    ("text", heap.alloc(&doc.text[*content_start..end])),
-                    ("level", heap.alloc(*level as u32)),
-                    (
-                        "line",
-                        heap.alloc(doc.text[..*start].bytes().filter(|c| *c == b'\n').count() + 1),
-                    ),
-                    ("entries", entries),
-                ])),
-            )
-        },
-    )));
+                        ),
+                        ("entries", entries),
+                    ])),
+                )
+            }),
+    ));
     let links = heap.alloc(AllocList(page.links.iter().map(|link| {
         heap.alloc(AllocDict([
             ("target", heap.alloc(link.target.as_str())),

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
-use xxhash_rust::xxh32::xxh32;
 
 #[derive(Debug, Error, Clone, Serialize)]
 /// Failure to resolve or combine hashline edit anchors.
@@ -107,10 +107,9 @@ impl EditOperation {
 }
 
 #[must_use]
-/// Computes the two-digit hash used in a hashline anchor.
+/// Computes the 128-bit SHA-256 prefix used in a hashline anchor.
 pub fn short_hash(line: &str) -> String {
-    let value = xxh32(line.trim_end().as_bytes(), 0) as u8;
-    format!("{value:02x}")
+    format!("{:x}", Sha256::digest(line.as_bytes()))[..32].to_owned()
 }
 
 #[must_use]
@@ -439,7 +438,7 @@ fn resolve_line(anchor: &str, lines: &[String]) -> Result<usize, HashlineError> 
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| HashlineError::InvalidAnchor(anchor.into()))?;
-    if expected.len() != 2 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if expected.len() != 32 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(HashlineError::InvalidAnchor(anchor.into()));
     }
     if lines
@@ -478,7 +477,7 @@ fn resolve_line(anchor: &str, lines: &[String]) -> Result<usize, HashlineError> 
         });
     }
     let start = number.saturating_sub(3).max(1);
-    let end = (number + 2).min(lines.len());
+    let end = number.saturating_add(2).min(lines.len());
     Err(HashlineError::StaleAnchor {
         anchor: anchor.into(),
         context: render(&lines.join("\n"), Some((start, end))),

@@ -330,6 +330,17 @@ impl Templates {
     }
 }
 
+struct LocalSchemaOnly;
+
+impl jsonschema::Retrieve for LocalSchemaOnly {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(format!("external schema references are forbidden: {uri}").into())
+    }
+}
+
 fn compile_definition(
     definition: serde_json::Value,
     script: crate::template_script::Script,
@@ -391,7 +402,12 @@ fn compile_definition(
     let schema = template
         .frontmatter
         .as_ref()
-        .map(jsonschema::validator_for)
+        .map(|schema| {
+            jsonschema::options()
+                .with_retriever(LocalSchemaOnly)
+                .build(schema)
+                .map_err(|error| anyhow::anyhow!("{error}"))
+        })
         .transpose()?;
     Ok(CompiledTemplate {
         template,

@@ -2901,3 +2901,118 @@ fn literate_template_import_validates_the_final_snapshot() {
             .contains("state: completed")
     );
 }
+
+#[test]
+fn stale_hash_collision_cannot_overwrite_a_concurrent_edit() {
+    let repository = Repository::new();
+    let original = "Original instruction";
+    let concurrent = "Concurrent change 86";
+    // These lines collided under the previous one-byte hash.
+    fs::write(
+        repository.root.join("alice.md"),
+        page("Alice").replace("Alice profile.", original),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "original text"]);
+    let store = repository.store();
+    fs::write(
+        repository.root.join("alice.md"),
+        page("Alice").replace("Alice profile.", concurrent),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "concurrent edit"]);
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    for hash in [short_hash(original), "96".into()] {
+        let result = store.apply_edits(&ApplyEditsRequest {
+            edit_summary: "stale overwrite".into(),
+            edits: vec![EditOperation::Replace {
+                path: "alice.md".into(),
+                anchor: format!("6:{hash}"),
+                content: "Overwrite".into(),
+            }],
+        });
+        assert!(result.is_err());
+        assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+    }
+    assert!(
+        store
+            .get_page("alice.md", None)
+            .unwrap()
+            .content
+            .contains(concurrent)
+    );
+    assert_ne!(short_hash("Text"), short_hash("Text  "));
+}
+
+#[test]
+fn template_schemas_allow_internal_references_only() {
+    let repository = Repository::new();
+    let external = tempfile::NamedTempFile::new().unwrap();
+    fs::write(external.path(), "{}").unwrap();
+    for reference in [
+        format!("file://{}", external.path().display()),
+        "http://127.0.0.1:9/schema.json".into(),
+    ] {
+        fs::write(
+            repository.root.join("template.md"),
+            format!("```starlark\nfrontmatter(name=field({{\"$ref\": {reference:?}}}))\n```\n"),
+        )
+        .unwrap();
+        command(&repository.root, &["add", "."]);
+        command(&repository.root, &["commit", "-qm", "external reference"]);
+        let error =
+            Store::open_with_provider(&repository.root, Arc::new(FakeProvider)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("external schema references are forbidden"),
+            "{error:#}"
+        );
+    }
+    fs::write(repository.root.join("template.md"), r##"```starlark
+frontmatter(name=field({"$defs": {"value": {"type": "string"}}, "$ref": "#/properties/name/$defs/value"}, required=True))
+```
+"##).unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "internal reference"]);
+    assert!(repository.store().validate().is_ok());
+}
+
+#[test]
+fn nested_timeline_cannot_satisfy_the_task_transition_rule() {
+    let repository = task_repository();
+    let path = "tasks/v1/2026/09/09-001-review.md";
+    fs::create_dir_all(repository.root.join("tasks/v1/2026/09")).unwrap();
+    fs::write(
+        repository.root.join(path),
+        format!(
+            "{}\n## Notes\n### Timeline\n- Unrelated note.\n",
+            task_content()
+        ),
+    )
+    .unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "nested heading"]);
+    let store = repository.store();
+    let head = command(&repository.root, &["rev-parse", "HEAD"]);
+    let result = store.apply_edits(&ApplyEditsRequest {
+        edit_summary: "skip task timeline".into(),
+        edits: vec![
+            EditOperation::Replace {
+                path: path.into(),
+                anchor: format!("3:{}", short_hash("state: inbox")),
+                content: "state: ready".into(),
+            },
+            EditOperation::InsertAfter {
+                path: path.into(),
+                anchor: format!("12:{}", short_hash("- Unrelated note.")),
+                content: "- No task timestamp or explanation.".into(),
+            },
+        ],
+    });
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains("Timeline"), "{error:#}");
+    assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+}

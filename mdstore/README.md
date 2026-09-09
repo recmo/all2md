@@ -111,10 +111,11 @@ with a source location. Callbacks return `None`; schema failures skip document
 callbacks, and document failures prevent change validation.
 
 Documents expose immutable `path`, `text`, `frontmatter`, `links`, `line`, and
-`sections`. Sections are keyed by heading text (last occurrence for duplicate
-names) and expose `text`, `level`, `line`, and `entries`. Entries expose
+`sections`. Sections are keyed by unique heading text; ambiguous names are omitted, so direct
+lookup fails instead of selecting another section. Sections expose `text`, `level`, `line`, and `entries`. Entries expose
 `timestamp` (RFC3339 or `None`), `text`, `links` (destination strings), and `line`.
 YAML frontmatter must be a mapping with unique keys; values are never coerced.
+Schema references may resolve within the schema itself; external retrieval is forbidden.
 
 Modules are compiled and frozen at activation. Each evaluation has limits of
 100,000 ticks, 16 MiB of Starlark heap, and 64 stack frames; source is limited to
@@ -197,7 +198,8 @@ mdstore --root /path/to/brain status
 mdstore --root /path/to/brain push
 ```
 
-An edit request uses `LINE:HASH` anchors returned by `get_page`:
+An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
+32 hexadecimal characters (128 bits of SHA-256) and include trailing whitespace:
 
 ```json
 {
@@ -206,13 +208,13 @@ An edit request uses `LINE:HASH` anchors returned by `get_page`:
     {
       "op": "insert_after",
       "path": "people/alice.md",
-      "anchor": "12:a3",
+      "anchor": "12:89f234b172385da91ba4cb0c4a7d3abf",
       "content": "- [Bob](bob.md)"
     },
     {
       "op": "insert_after",
       "path": "people/bob.md",
-      "anchor": "9:f1",
+      "anchor": "9:ce55a9a1d046372186e540e350b2d975",
       "content": "- [Alice](alice.md)"
     }
   ]
