@@ -48,8 +48,10 @@ from .region_recovery import recover_regions
 from .region_review import write_review
 from .crop_store import CropStore
 
-# Bump only when stored raw observations are incompatible with recognition.
-OCR_CHECKPOINT_VERSION = 1
+# Bump when stored raw observations are incompatible with recognition. The
+# decoder source fingerprint below catches future changes without requiring a
+# manual bump for every implementation-only edit.
+OCR_CHECKPOINT_VERSION = 2
 
 EMBEDDED_PROOF_MARKS = {"□": r"\(\square\)", "∎": r"\(\blacksquare\)"}
 REVIEW_METADATA_KEYS = {
@@ -137,6 +139,7 @@ def _convert_workspace(
         "contract_version": OCR_CHECKPOINT_VERSION,
         "source_sha256": _source_hash(source),
         "backend": dict(backend.identity),
+        "decoder_code": _decoder_code_fingerprint(),
         "dpi": DEFAULT_DPI,
         "multi_page": True,
         "quality": "thorough",
@@ -1831,6 +1834,18 @@ def _code_fingerprint(*names: str) -> str:
         digest.update(name.encode())
         digest.update(bytes.fromhex(sha256_file(path)))
     return digest.hexdigest()
+
+
+def _decoder_code_fingerprint() -> str:
+    """Fingerprint code that can change the raw OCR observation itself."""
+    root = Path(__file__).parent
+    names = ["ocr.py"]
+    names.extend(
+        name
+        for name in ("decoding.py", "block_decoding.py")
+        if (root / name).is_file()
+    )
+    return _code_fingerprint(*names)
 
 
 def _read_json(path: Path):

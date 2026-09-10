@@ -91,9 +91,12 @@ findings, source crops, and separate recovery attempt history. The metadata and
 bundle verifier explicitly report unresolved coverage. Publication remains
 allowed with warnings; it does not certify the math.
 Raw crop observations (including failures) are cached in region-observations/.
-Ordinary code-only reassembly makes no OCR calls. Use --recover-regions to
-permit bounded fresh crop requests on cached pages; already attempted requests
-remain cached. Existing page observations are not invalidated.
+Ordinary assembly-only code changes make no OCR calls. The raw OCR checkpoint
+contract includes the source, model revision, rendering settings, and decoder
+source fingerprint. Decoder changes therefore invalidate raw observations and
+require --force for a fresh read; assembly-only changes replay cached raw OCR.
+Use --recover-regions to permit bounded fresh crop requests on cached pages;
+already attempted requests remain cached.
 
 Recovery policy, crop persistence, and report rendering are separate modules.
 The document-scoped crop store indexes the existing flat cache once; decoding
