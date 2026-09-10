@@ -1839,7 +1839,7 @@ def _code_fingerprint(*names: str) -> str:
 def _decoder_code_fingerprint() -> str:
     """Fingerprint code that can change the raw OCR observation itself."""
     root = Path(__file__).parent
-    names = ["ocr.py"]
+    names = ["ocr.py", "embedded.py", "quality.py"]
     names.extend(
         name
         for name in ("decoding.py", "block_decoding.py")
