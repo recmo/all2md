@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Protocol
 
-from .constants import MODEL_ID, MODEL_REVISION
+from .constants import MLX_VLM_REVISION, MODEL_ID, MODEL_REVISION
 from .model import Block, EmbeddedEvidence
 from .decoding import (DecodeLogitsProcessor, InitialGroundingProcessor, GROUNDING_START_VERSION,
                        POLICY_VERSION, loop_pattern, structural_atoms, structural_loop)
@@ -67,6 +67,7 @@ class MlxUnlimitedOcr:
             "engine": "mlx-vlm",
             "model": MODEL_ID,
             "revision": MODEL_REVISION,
+            "mlx_vlm_revision": MLX_VLM_REVISION,
             "max_tokens": str(max_tokens),
             "vision_precision": self.precision["vision"],
             "decoder_precision": self.precision["decoder"],
