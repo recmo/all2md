@@ -94,9 +94,10 @@ bundle verifier explicitly report unresolved coverage. Publication remains
 allowed with warnings; it does not certify the math.
 Raw crop observations (including failures) are cached in region-observations/.
 Ordinary assembly-only code changes make no OCR calls. The raw OCR checkpoint
-contract includes the source, model revision, rendering settings, and decoder
-source fingerprint. Decoder changes therefore invalidate raw observations and
-require --force for a fresh read; assembly-only changes replay cached raw OCR.
+contract includes the source, model and runtime revisions, rendering settings,
+and decoder source fingerprint. Decoder changes therefore invalidate raw
+observations and require --force for a fresh read; assembly-only changes replay
+cached raw OCR.
 Use --recover-regions to permit bounded fresh crop requests on cached pages;
 already attempted requests remain cached.
 
