@@ -342,9 +342,11 @@ def test_crop_failure_is_cached_and_replay_makes_no_calls(tmp_path):
     class Backend:
         identity = {"name": "test"}
         calls = 0
-        def recognize_detail(self, path):
+        def recognize_region(self, path):
             self.calls += 1
             raise RuntimeError("offline")
+        def recognize_detail(self, path):
+            raise AssertionError("crop recovery must use the bounded region entry point")
     backend = Backend()
     initial = [Block("paragraph", "The missing equation", BOX)]
     recover_regions(source, initial, [], backend=backend, bundle=tmp_path, budget=2)

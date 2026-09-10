@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ocr_fixture import FixtureBackend
+
 from copy import deepcopy
 import json
 
@@ -552,13 +554,13 @@ def test_enclosed_math_is_not_specific_to_decimal_two_item_lists(first, second):
 
 
 def test_list_output_is_stable_without_publishing_intermediates(tmp_path):
-    class ListOcr:
+    class ListOcr(FixtureBackend):
         identity = {"engine": "fixture-list", "model": "fixture", "revision": "1"}
 
         def __init__(self):
             self.calls = 0
 
-        def recognize(self, image):
+        def recognize(self, image, *, embedded=None):
             self.calls += 1
             return (
                 "<|det|>list [100,180,800,300]<|/det|>\n"

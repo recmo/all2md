@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ocr_fixture import FixtureBackend
+
 import json
 import sys
 import zipfile
@@ -53,10 +55,10 @@ from pages2md.model import Block, Comparison, EmbeddedEvidence, Link, PageResult
 from pages2md.verify import verify_bundle
 
 
-class FixtureOcr:
+class FixtureOcr(FixtureBackend):
     identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
 
-    def recognize(self, image: Path):
+    def recognize(self, image, *, embedded=None):
         return (
             "<|det|>title [100, 80, 900, 150]<|/det|>Chapter One\n"
             "<|det|>text [100, 180, 900, 500]<|/det|>The visual text has $x^2$.\n"
@@ -65,10 +67,10 @@ class FixtureOcr:
         )
 
 
-class TableFixtureOcr:
+class TableFixtureOcr(FixtureBackend):
     identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
 
-    def recognize(self, image: Path):
+    def recognize(self, image, *, embedded=None):
         return (
             "<|det|>table [150, 350, 420, 600]<|/det|>"
             "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>",
@@ -76,26 +78,26 @@ class TableFixtureOcr:
         )
 
 
-class RecoveryFixtureOcr:
+class RecoveryFixtureOcr(FixtureBackend):
     identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
 
-    def recognize_pages(self, images: list[Path]):
+    def recognize_pages(self, images, *, embedded=None):
         return (
             "<|det|>text [100,100,800,300]<|/det|>A truncated local sentence",
             {"mode": "multi_base", "finish_reason": "length"},
         )
 
-    def recognize(self, image: Path):
+    def recognize(self, image, *, embedded=None):
         return (
             "<|det|>text [100,100,800,300]<|/det|>A truncated local sentence with recovered detail.",
             {"mode": "gundam", "finish_reason": "stop"},
         )
 
 
-class RepeatingFixtureOcr:
+class RepeatingFixtureOcr(FixtureBackend):
     identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
 
-    def recognize(self, image: Path):
+    def recognize(self, image, *, embedded=None):
         return (
             "<|det|>text [100,100,800,300]<|/det|>Useful introduction. "
             + "repeated phrase " * 20,
@@ -103,10 +105,10 @@ class RepeatingFixtureOcr:
         )
 
 
-class LongFixtureOcr:
+class LongFixtureOcr(FixtureBackend):
     identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
 
-    def recognize(self, image: Path):
+    def recognize(self, image, *, embedded=None):
         text = " ".join(f"token{index:05d}" for index in range(2_500))
         return (
             f"<|det|>text [100,100,800,300]<|/det|>{text}",
@@ -114,14 +116,14 @@ class LongFixtureOcr:
         )
 
 
-class InterruptingFixtureOcr:
+class InterruptingFixtureOcr(FixtureBackend):
     identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
 
     def __init__(self):
         self.fail_page_two = True
         self.calls: dict[int, int] = {}
 
-    def recognize_pages(self, images: list[Path]):
+    def recognize_pages(self, images, *, embedded=None):
         number = int(images[0].stem.rsplit("-", 1)[-1])
         self.calls[number] = self.calls.get(number, 0) + 1
         if number == 2 and self.fail_page_two:
@@ -132,7 +134,7 @@ class InterruptingFixtureOcr:
             {"mode": "multi_base", "finish_reason": "stop"},
         )
 
-    def recognize(self, image: Path):
+    def recognize(self, image, *, embedded=None):
         raise AssertionError("Gundam recovery is not expected for matching fixture text")
 
 
@@ -456,8 +458,9 @@ def test_clean_candidate_recovers_reliably_covered_missing_region():
         "The omitted transition paragraph.",
         "The following paragraph remains.",
     ]
-    assert provenance[0]["action"] == "recovered_uncovered_region"
-    assert "visual_uncovered_region_recovered" in warnings
+    assert any(item["action"] == "excluded_unsupported_prefix" for item in provenance)
+    assert any(item["action"] == "selected_source_supported_page" for item in provenance)
+    assert "visual_text_repetition" not in warnings
 
 
 def test_recovery_keeps_ungrounded_content_until_document_evidence_filtering():
@@ -575,7 +578,10 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
     )
     backend = MlxUnlimitedOcr()
     backend._model = SimpleNamespace(config={})
-    backend._processor = object()
+    backend._processor = SimpleNamespace(
+        encode=lambda text, **kwargs: list(text.encode()),
+        decode=lambda ids, **kwargs: bytes(ids).decode(),
+    )
     images = [tmp_path / "1.png", tmp_path / "2.png"]
     _, multi = backend.recognize_pages(images)
     _, gundam = backend.recognize(images[0])
@@ -603,7 +609,7 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
     assert detail["contract"] == {
         "prompt": GUNDAM_PROMPT,
         "base_size": 1024,
-        "image_size": 1024,
+        "image_size": 640,
         "crop_mode": True,
         "temperature": 0.0,
         "no_repeat_ngram_size": 35,
@@ -612,7 +618,7 @@ def test_mlx_backend_uses_only_documented_model_contracts(monkeypatch, tmp_path:
     }
     assert calls[0]["cropping"] is False and calls[0]["image_size"] == 1024
     assert calls[1]["cropping"] is True and calls[1]["image_size"] == 640
-    assert calls[2]["cropping"] is True and calls[2]["image_size"] == 1024
+    assert calls[2]["cropping"] is True and calls[2]["image_size"] == 640
 
 
 def test_mlx_backend_identity_includes_runtime_revision():
@@ -812,10 +818,10 @@ def test_single_markdown_with_figures_publishes_only_final_artifacts(tmp_path: P
 
 
 def test_ocr_detected_figure_prefers_matching_embedded_pdf_image(tmp_path: Path):
-    class MatchingFigureOcr:
+    class MatchingFigureOcr(FixtureBackend):
         identity = {"engine": "fixture", "model": "fixture", "revision": "1"}
 
-        def recognize(self, image: Path):
+        def recognize(self, image, *, embedded=None):
             return (
                 "<|det|>diagram [163, 379, 409, 568]<|/det|>A matched diagram.",
                 {"finish_reason": "stop"},
@@ -888,12 +894,12 @@ def test_ignore_embedded_text_keeps_pdf_images_metadata_and_outline(tmp_path: Pa
     assert len(opened.pages[0].source_assets) == 1
 
 
-def test_ignore_embedded_text_reassembles_cached_ocr_without_model_call(tmp_path: Path):
+def test_image_only_conversion_rejects_guided_cache_without_model_call(tmp_path: Path):
     class CountingFixture(FixtureOcr):
         def __init__(self):
             self.calls = 0
 
-        def recognize(self, image: Path):
+        def recognize(self, image, *, embedded=None):
             self.calls += 1
             return super().recognize(image)
 
@@ -907,28 +913,13 @@ def test_ignore_embedded_text_reassembles_cached_ocr_without_model_call(tmp_path
     output = tmp_path / "workspace"
 
     first = _convert_workspace(pdf, output, backend=backend)
-    assert backend.calls == 1
-    second = _convert_workspace(
-        pdf,
-        output,
-        backend=backend,
-        ignore_embedded_text=True,
-    )
-
-    assert second == first
-    assert backend.calls == 1
-    metadata = json.loads((second / "metadata.json").read_text())
-    page_data = json.loads((second / "pages/page-0001.json").read_text())
-    assert metadata["ignore_embedded_text"] is True
-    assert "embedded_text" not in metadata["ocr_fingerprint"]
-    assert metadata["assembly_fingerprint"]["embedded_text"] == "ignored"
-    assert page_data["embedded"] == {
-        "text": "",
-        "blocks": [],
-        "links": [],
-        "extractor": "ignored",
-    }
-    assert "embedded_text_absent" not in metadata["warnings"]
+    first_calls = backend.calls
+    assert first_calls >= 1
+    before = (first / "metadata.json").read_bytes()
+    with pytest.raises(RuntimeError, match="incompatible intermediate bundle retained"):
+        _convert_workspace(pdf, output, backend=backend, ignore_embedded_text=True)
+    assert backend.calls == first_calls
+    assert (first / "metadata.json").read_bytes() == before
 
 
 def test_blank_pages_are_not_grouped_with_content(tmp_path: Path):
@@ -1203,7 +1194,7 @@ def test_failed_conversion_retains_intermediate_results_for_resume(tmp_path: Pat
         def __init__(self):
             self.failed = False
 
-        def recognize_pages(self, images):
+        def recognize_pages(self, images, *, embedded=None):
             if not self.failed:
                 self.failed = True
                 raise RuntimeError("simulated interruption")
@@ -1231,7 +1222,7 @@ def test_resume_processes_only_pages_missing_from_persistent_workspace(tmp_path:
         def __init__(self):
             self.calls = 0
 
-        def recognize(self, image: Path):
+        def recognize(self, image, *, embedded=None):
             self.calls += 1
             number = int(image.stem.rsplit("-", 1)[-1])
             return (
@@ -1261,12 +1252,16 @@ def test_resume_processes_only_pages_missing_from_persistent_workspace(tmp_path:
     assert json.loads((bundle / "progress.json").read_text())["completed_pages"] == [1, 2, 3]
 
 
-def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("decoder_changed", [False, True])
+def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Path, monkeypatch, decoder_changed):
     class CountingFixture(FixtureOcr):
         def __init__(self):
             self.calls = 0
+            self.identity = dict(MlxUnlimitedOcr().identity)
+            for key in ("startup_recovery", "block_decoding", "block_retries"):
+                self.identity.pop(key)
 
-        def recognize(self, image: Path):
+        def recognize(self, image, *, embedded=None):
             self.calls += 1
             number = int(image.stem.rsplit("-", 1)[-1])
             return (
@@ -1308,6 +1303,8 @@ def test_code_change_reprocesses_checkpoints_without_repeating_ocr(tmp_path: Pat
 
     monkeypatch.setattr(pipeline, "reconcile_observations", record_reconciliation)
     code_revision["value"] = "v2"
+    if decoder_changed:
+        backend.identity = dict(MlxUnlimitedOcr().identity)
     resumed = _convert_workspace(pdf, _intermediate_root(pdf), backend=backend)
 
     assert resumed == bundle

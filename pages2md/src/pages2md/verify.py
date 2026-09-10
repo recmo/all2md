@@ -11,7 +11,8 @@ from bs4 import BeautifulSoup
 from .formatting import is_formatted_idempotently
 from .lists import BULLETS, validate_list_node
 from .markdown import local_links, markdown_anchors
-from .quality import adjacent_overlap, math_syntax_errors, output_quality_warnings, table_quality_errors
+from .quality import adjacent_overlap, math_syntax_errors, output_quality_warnings, table_quality_errors, unresolved_decode_errors
+from .util import sha256_file
 
 
 @dataclass
@@ -123,6 +124,7 @@ def verify_bundle(root: Path) -> Verification:
     if comments != page_numbers:
         errors.append("page comments are missing, duplicated, or reordered")
     for page in pages:
+        errors.extend(f"page {page.get('number')}: {problem}" for problem in unresolved_decode_errors(page))
         for warning in output_quality_warnings(page.get("visual_markdown", "")):
             warnings.append(f"page {page.get('number')} needs content review: {warning}")
     if metadata.get("transcription_review", {}).get("status") == "needs_review":
@@ -174,8 +176,12 @@ def verify_bundle(root: Path) -> Verification:
             raw_path = observation.get("raw_path", "")
             if not raw_path or not (root / raw_path).exists():
                 errors.append(f"missing raw observation: {observation.get('id', '<unknown>')}")
+            errors.extend(_verify_region_evidence(observation, root))
         for recovery in page.get("recovery", []):
-            for key in ("primary_observation", "recovery_observation"):
+            keys = ["primary_observation", "recovery_observation"]
+            if "confirming_observation" in recovery:
+                keys.append("confirming_observation")
+            for key in keys:
                 reference = recovery.get(key)
                 if not reference or reference not in observation_ids | {
                     item.get("id", "") for item in observations
@@ -195,6 +201,22 @@ def verify_bundle(root: Path) -> Verification:
         warnings.append(f"page {failed.get('page')} failed: {failed.get('error')}")
     warnings.extend(metadata.get("warnings", []))
     return Verification(not errors, errors, sorted(set(warnings)), len(markdown_paths), len(manifest.get("assets", [])))
+
+
+def _verify_region_evidence(observation: dict, root: Path) -> list[str]:
+    if observation.get("mode") != "region_detail":
+        return []
+    generation = observation.get("generation", {})
+    relative = generation.get("region_image")
+    digest = generation.get("region_geometry", {}).get("image_sha256")
+    if not isinstance(relative, str) or not isinstance(digest, str):
+        return ["region observation lacks image provenance"]
+    image = (root / relative).resolve()
+    if not image.is_relative_to(root.resolve()) or not image.is_file():
+        return ["region observation image is missing or outside bundle"]
+    if sha256_file(image) != digest:
+        return ["region observation image hash mismatch"]
+    return []
 
 
 def _verify_public_output(root: Path) -> Verification:

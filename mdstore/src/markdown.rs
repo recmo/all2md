@@ -19,12 +19,26 @@ pub(crate) struct ParsedPage {
     pub body_start_line: usize,
     /// Parsed headings in source order.
     pub headings: Vec<Heading>,
+    #[serde(skip)]
+    pub events: Vec<(Event<'static>, Range<usize>)>,
+    #[serde(skip)]
+    pub section_headings: Vec<(u8, String, usize, usize)>,
+    #[serde(skip)]
+    pub list_entries: Vec<ListEntry>,
     /// Fenced and indented code block ranges.
     pub code_blocks: Vec<SourceRange>,
     /// Source lines that begin or end structural blocks.
     pub structural_boundaries: Vec<usize>,
     /// Authored Markdown and configured wiki links.
     pub links: Vec<RawLink>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ListEntry {
+    pub range: Range<usize>,
+    pub line: usize,
+    pub timestamp: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub text_start: usize,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -112,6 +126,12 @@ pub struct Finding {
 pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
     let (frontmatter, body_start_line, body) = parse_frontmatter(text)?;
     let mut headings = Vec::new();
+    let mut events = Vec::new();
+    let mut section_headings = Vec::new();
+    let mut list_entries = Vec::new();
+    let mut depth = 0;
+    let mut section_span = None;
+    let body_offset = text.len() - body.len();
     let mut code_blocks = Vec::new();
     let mut structural_boundaries = Vec::new();
     let mut markdown_links = Vec::new();
@@ -131,6 +151,41 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
                 .bytes()
                 .filter(|byte| *byte == b'\n')
                 .count();
+        events.push((
+            event.clone().into_static(),
+            body_offset + range.start..body_offset + range.end,
+        ));
+        match &event {
+            Event::Start(tag) => {
+                if matches!(tag, Tag::Heading { .. }) && depth == 0 {
+                    section_span = Some((body_offset + range.start, body_offset + range.end));
+                }
+                if matches!(tag, Tag::Item) && depth == 1 {
+                    let raw = &body[range.clone()];
+                    let marker = raw.find(char::is_whitespace).unwrap_or(raw.len());
+                    let content = raw[marker..].trim_start();
+                    let stamp = content.split_whitespace().next().unwrap_or("");
+                    let timestamp = chrono::DateTime::parse_from_rfc3339(stamp).ok();
+                    let narrative = if timestamp.is_some() {
+                        content[stamp.len()..]
+                            .trim_start()
+                            .trim_start_matches('—')
+                            .trim_start()
+                    } else {
+                        content
+                    };
+                    list_entries.push(ListEntry {
+                        range: body_offset + range.start..body_offset + range.end,
+                        line,
+                        timestamp,
+                        text_start: body_offset + range.end - narrative.len(),
+                    });
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 heading = Some((heading_level(level), String::new(), line));
@@ -175,6 +230,9 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
                 if let Some((level, text, line)) = heading.take() {
                     heading_stack.truncate(usize::from(level.saturating_sub(1)));
                     heading_stack.push(text.trim().into());
+                    if let Some((start, end)) = section_span.take() {
+                        section_headings.push((level, text.trim().into(), start, end));
+                    }
                     headings.push(Heading {
                         level,
                         text: text.trim().into(),
@@ -222,6 +280,9 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
         frontmatter,
         body_start_line,
         headings,
+        events,
+        section_headings,
+        list_entries,
         code_blocks,
         structural_boundaries,
         links,
@@ -320,6 +381,9 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
             let value: serde_yaml::Value =
                 serde_yaml::from_str(&yaml).context("parse YAML frontmatter")?;
             let json = serde_json::to_value(value).context("convert YAML frontmatter")?;
+            if !json.is_object() {
+                anyhow::bail!("frontmatter must be a YAML mapping");
+            }
             return Ok((json, line_number + 1, &text[offset..]));
         }
         yaml.push_str(line);
@@ -709,15 +773,12 @@ mod tests {
     #[test]
     fn configured_wiki_links_take_precedence_over_markdown_parsing() {
         let templates = test_templates(
-            r#"structure: {additional_sections: true}
-links:
-  markdown: true
-  wiki: ['\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]']
-relations:
-  - name: markdown
-    selector: {kind: markdown_links, syntax: markdown}
-  - name: wiki
-    selector: {kind: markdown_links, syntax: wiki}
+            r#"```starlark
+structure(additional_sections=True)
+links(markdown=True, wiki=["\\[\\[(?P<target>[^\\]|#]+)(?:#[^\\]|]+)?(?:\\|[^\\]]+)?\\]\\]"])
+relation(name="markdown", selector={"kind": "markdown_links", "syntax": "markdown"})
+relation(name="wiki", selector={"kind": "markdown_links", "syntax": "wiki"})
+```
 "#,
         )
         .unwrap();
@@ -739,15 +800,12 @@ relations:
     #[test]
     fn markdown_relation_selectors_keep_types_separate() {
         let templates = test_templates(
-            r#"structure: {additional_sections: true}
-links: {markdown: true}
-relations:
-  - name: friend
-    reciprocal: friend
-    selector: {kind: markdown_links, section: Friends}
-  - name: source
-    reciprocal: source
-    selector: {kind: markdown_links, section: Sources}
+            r#"```starlark
+structure(additional_sections=True)
+links(markdown=True)
+relation(name="friend", reciprocal="friend", selector={"kind": "markdown_links", "section": "Friends"})
+relation(name="source", reciprocal="source", selector={"kind": "markdown_links", "section": "Sources"})
+```
 "#,
         )
         .unwrap();
@@ -769,7 +827,7 @@ relations:
 
     #[test]
     fn required_sections_are_enforced_by_templates() {
-        let templates = test_templates("structure: {additional_sections: true}\nsections: [{heading: Notes, rules: {required: true}}]").unwrap();
+        let templates = test_templates("```starlark\nstructure(additional_sections=True)\nsection(\"Notes\", required=True, level=1)\n```\n").unwrap();
         let pages = HashMap::from([("page.md".into(), "# Other\n".into())]);
         assert!(validate_corpus(&pages, &templates).is_err());
     }
@@ -778,12 +836,12 @@ relations:
     fn directory_templates_select_heterogeneous_page_types() {
         let templates = Templates::compile(&HashMap::from([
             (
-                "people/template.yaml".into(),
-                "sections: [{heading: Biography, rules: {required: true}}]".into(),
+                "people/template.md".into(),
+                "```starlark\nstructure(additional_sections=False)\nsection(\"Biography\", required=True, level=1)\n```\n".into(),
             ),
             (
-                "tasks/template.yaml".into(),
-                "sections: [{heading: Status, rules: {required: true}}]".into(),
+                "tasks/template.md".into(),
+                "```starlark\nstructure(additional_sections=False)\nsection(\"Status\", required=True, level=1)\n```\n".into(),
             ),
         ]))
         .unwrap();
@@ -896,13 +954,14 @@ relations:
 
     #[test]
     fn template_schema_errors_are_reported_once_and_page_errors_per_page() {
-        let invalid = test_templates("frontmatter: {type: not_a_type}")
-            .err()
-            .unwrap();
+        let invalid =
+            test_templates("```starlark\nfrontmatter(x=field({\"type\": \"not_a_type\"}))\n```\n")
+                .err()
+                .unwrap();
         assert_eq!(invalid.len(), 1);
-        assert_eq!(invalid[0].path, "template.yaml");
+        assert_eq!(invalid[0].path, "template.md");
         let templates =
-            test_templates("frontmatter: {type: object, required: [required]}").unwrap();
+            test_templates("```starlark\nfrontmatter(fields={\"required\": field({}, required=True)}, allow_extra=True)\n```\n").unwrap();
         let pages = HashMap::from([
             ("one.md".into(), "---\nvalue: one\n---\n".into()),
             ("two.md".into(), "---\nvalue: two\n---\n".into()),
