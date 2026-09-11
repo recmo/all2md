@@ -1467,7 +1467,7 @@ def test_latex_diagnostics_are_metadata_warnings_not_review_markers(tmp_path, mo
     assert f"latex {category}: book.md:3:5: test finding" in capsys.readouterr().err
 
 
-def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path):
+def test_figure_crops_merge_nested_and_near_duplicate_boxes(tmp_path: Path):
     image_path = tmp_path / "page.png"
     image = Image.new("RGB", (1000, 1000), "white")
     draw = ImageDraw.Draw(image)
@@ -1481,15 +1481,15 @@ def test_figure_crops_reject_only_blank_and_near_duplicate_boxes(tmp_path: Path)
         Block("figure", "", bbox=(750, 750, 850, 850)),
     ]
     warnings = _canonicalize_figure_blocks(blocks, image_path)
-    assert len(blocks) == 2
-    assert blocks[0].bbox == (284.0, 284.0, 716.0, 716.0)
+    assert len(blocks) == 1
+    assert blocks[0].bbox == (282.0, 282.0, 718.0, 718.0)
     assert blocks[0].markdown == "Important caption"
-    assert blocks[1].bbox == (342.0, 342.0, 658.0, 658.0)
+    assert len(blocks[0].metadata["merged_figure_blocks"]) == 3
     assert not any(key.startswith("review_") for block in blocks for key in block.metadata)
     assert warnings == [
         "visual_blank_figure_crop_rejected",
-        "visual_duplicate_figure_crop_rejected",
         "visual_figure_crop_may_be_clipped",
+        "visual_overlapping_figure_crops_merged",
     ]
 
 
