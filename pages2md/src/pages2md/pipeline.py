@@ -38,7 +38,7 @@ from .markdown import (
     strict_page_markdown,
     write_markdown,
 )
-from .model import FIGURE_KINDS, FORMULA_KINDS, Block, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult
+from .model import FIGURE_KINDS, FORMULA_KINDS, Block, Box, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult
 from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, confidence_summary, split_multi_page_output
 from .quality import adjacent_overlap, output_quality_warnings, runaway_repetition_span
@@ -662,6 +662,7 @@ def _page_result(
             blocks,
             source_page.image_path,
             trusted_embedded,
+            source_assets=source_page.source_assets,
         )
     )
     validation_warnings.extend(
@@ -1438,11 +1439,14 @@ def _canonicalize_figure_blocks(
     blocks: list[Block],
     page_image: Path,
     embedded: EmbeddedEvidence | None = None,
+    *,
+    source_assets: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Clamp figure boxes and reject blank, duplicate, or glyph-explained crops."""
     candidates: list[tuple[int, Block]] = []
     warnings: list[str] = []
     rejected: set[int] = set()
+    raw_boxes: dict[int, Box] = {}
     proof_glyphs = list(_embedded_characters(embedded, EMBEDDED_PROOF_MARKS))
     with Image.open(page_image) as source:
         grayscale = source.convert("L")
@@ -1460,6 +1464,7 @@ def _canonicalize_figure_blocks(
             if matching_glyph is not None:
                 block.kind = "paragraph"
                 block.markdown = EMBEDDED_PROOF_MARKS[matching_glyph["text"]]
+                block.asset_id = None
                 block.bbox = tuple(matching_glyph["bbox"])
                 block.metadata.update({
                     "embedded_glyph": matching_glyph["text"],
@@ -1473,15 +1478,20 @@ def _canonicalize_figure_blocks(
                 })
                 warnings.append("visual_text_glyph_figure_reclassified")
                 continue
-            if _visual_proof_square(grayscale, block, blocks[max(0, index - 2):index]):
+            square = _visual_proof_square(grayscale, block)
+            if square is not None:
                 block.kind = "paragraph"
-                block.markdown = r"\(\square\)"
+                block.markdown, block.bbox = square
+                block.asset_id = None
                 block.metadata.update({"reclassified_from": "figure",
-                                       "reclassification_reason": "proof_context_and_square_shape"})
+                                       "reclassification_reason": "glyph_sized_square_shape"})
                 warnings.append("visual_proof_square_reclassified")
                 continue
+            if _expand_figure_labels(grayscale, block, blocks):
+                warnings.append("visual_figure_crop_expanded_to_labels")
+            raw_boxes[index] = block.bbox
             block.bbox = _padded_bbox(block.bbox)
-            blank, touches_edge = _figure_crop_status(grayscale, block.bbox)
+            blank, _ = _figure_crop_status(grayscale, block.bbox)
             if blank:
                 warnings.append("visual_blank_figure_crop_rejected")
                 if block.markdown.strip():
@@ -1490,34 +1500,147 @@ def _canonicalize_figure_blocks(
                 else:
                     rejected.add(index)
                 continue
-            if touches_edge:
-                warnings.append("visual_figure_crop_may_be_clipped")
             candidates.append((index, block))
 
-    # Only near-identical boxes are duplicates. Nested boxes can represent
-    # legitimate panels, labels, or inset figures and must remain available.
-    retained: list[tuple[int, Block]] = []
-    for candidate in sorted(
-        candidates,
-        key=lambda item: (
-            bool(item[1].markdown.strip()),
-            len(item[1].markdown.strip()),
-            len(item[1].provenance),
-            len(item[1].metadata),
-            _bbox_area(item[1].bbox),
-        ),
-        reverse=True,
-    ):
-        _, block = candidate
-        if any(_iou(block.bbox, kept.bbox) >= 0.90 for _, kept in retained):
-            rejected.add(candidate[0])
-            warnings.append("visual_duplicate_figure_crop_rejected")
-            continue
-        retained.append(candidate)
+    merged, merge_warnings = _merge_figure_regions(candidates, raw_boxes, source_assets or [])
+    rejected.update(merged)
+    warnings.extend(merge_warnings)
+    if any(index not in rejected and _figure_crop_status(grayscale, block.bbox)[1]
+           for index, block in candidates):
+        warnings.append("visual_figure_crop_may_be_clipped")
 
     if rejected:
         blocks[:] = [block for index, block in enumerate(blocks) if index not in rejected]
+    _place_visual_proof_marks(blocks)
     return sorted(set(warnings))
+
+
+def _expand_figure_labels(image: Image.Image, figure: Block, blocks: list[Block]) -> bool:
+    """Recover formula labels cut by a figure edge using boxes and visible ink.
+
+    Only inspect labels already overlapping the original figure horizontally
+    and contained in its vertical span. Require ink to continue across the cut;
+    nearby detached equations cannot enlarge a figure, nor can labels chain
+    into surrounding prose through an incrementally growing box.
+    """
+    left, top, right, bottom = figure.bbox
+    w, h = image.size
+    labels = []
+    for block in blocks:
+        if block.kind not in FORMULA_KINDS or not block.bbox:
+            continue
+        a, b, c, d = block.bbox
+        if not (top <= b < d <= bottom):
+            continue
+        if left <= a < right < c:
+            edge = right
+        elif a < left < c <= right:
+            edge = left
+        else:
+            continue
+        # A short horizontal bridge must lie within the formula box on both
+        # sides of the cut, over several scanlines (not just one noisy pixel).
+        x0 = max(0, round(max(a, edge - 2) * w / 1000))
+        x1 = min(w, round(min(c, edge + 2) * w / 1000))
+        y0, y1 = max(0, round(b * h / 1000)), min(h, round(d * h / 1000))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        crop = image.crop((x0, y0, x1, y1))
+        rows = sum(all(crop.getpixel((x, y)) < 230 for x in range(crop.width))
+                   for y in range(crop.height))
+        if rows >= max(3, round(h / 1000)):
+            labels.append(block)
+    if not labels:
+        return False
+    figure.metadata["figure_label_crop_expansion"] = {
+        "original_bbox": list(figure.bbox),
+        "labels": [asdict(block) for block in labels],
+        "reason": "overlapping_formula_boxes_and_ink_crossing_crop_edge",
+    }
+    figure.bbox = _figure_envelope([figure.bbox, *(block.bbox for block in labels)])
+    return True
+
+
+def _figure_envelope(boxes: list[Box]) -> Box:
+    return (min(box[0] for box in boxes), min(box[1] for box in boxes),
+            max(box[2] for box in boxes), max(box[3] for box in boxes))
+
+
+def _same_figure_extent(left: Box, right: Box) -> bool:
+    """Allow crop-border drift, but require both regions to cover each other."""
+    return (bbox_coverage(left, _padded_bbox(right)) >= .98
+            and bbox_coverage(right, _padded_bbox(left)) >= .98)
+
+
+def _merge_figure_regions(
+    candidates: list[tuple[int, Block]],
+    raw_boxes: dict[int, Box],
+    source_assets: list[dict[str, Any]],
+) -> tuple[set[int], list[str]]:
+    """Emit each overlapping region once while retaining observation evidence.
+
+    Compare unpadded detections so crop padding cannot join adjacent figures.
+    Nested panels are already visible in their enclosing figure. Substantially
+    overlapping detections are rendered as a union so neither loses content.
+    Disjoint detections join only when they cover one embedded image placement.
+    """
+    groups = [{index} for index, _ in candidates]
+
+    def join(indices):
+        nonlocal groups
+        touching = [group for group in groups if group & indices]
+        if touching:
+            groups = [group for group in groups if not group & indices]
+            groups.append(set.union(*touching))
+
+    for offset, (index, _) in enumerate(candidates):
+        box = raw_boxes[index]
+        for other, _ in candidates[offset + 1:]:
+            other_box = raw_boxes[other]
+            if (_iou(box, other_box) >= .5
+                    or bbox_coverage(box, other_box) >= .98
+                    or bbox_coverage(other_box, box) >= .98):
+                join({index, other})
+
+    for placement in source_assets:
+        box = placement.get("bbox")
+        if not box or len(box) != 4:
+            continue
+        members = {index for index, _ in candidates
+                   if bbox_coverage(raw_boxes[index], _padded_bbox(box)) >= .98}
+        if len(members) > 1 and _same_figure_extent(
+                _figure_envelope([raw_boxes[index] for index in members]), box):
+            join(members)
+
+    by_index = dict(candidates)
+    rejected, warnings = set(), set()
+    for group in sorted(groups, key=min):
+        if len(group) < 2:
+            continue
+        indices = sorted(group)
+        blocks = [by_index[index] for index in indices]
+        snapshots = [asdict(block) for block in blocks]
+        envelope = _figure_envelope([raw_boxes[index] for index in indices])
+        warning = ("visual_duplicate_figure_crop_rejected"
+                   if all(_iou(raw_boxes[index], envelope) >= .9 for index in indices)
+                   else "visual_overlapping_figure_crops_merged")
+        retained = blocks[0]
+        captions = list(dict.fromkeys(block.markdown.strip() for block in blocks
+                                      if block.markdown.strip()))
+        provenance = []
+        for block in blocks:
+            for entry in block.provenance:
+                if entry not in provenance:
+                    provenance.append(entry)
+        retained.bbox = _padded_bbox(envelope)
+        retained.markdown = "\n\n".join(captions)
+        retained.asset_id = None
+        retained.provenance = provenance
+        retained.source_pages = sorted({page for block in blocks for page in block.source_pages})
+        retained.metadata["merged_figure_blocks"] = snapshots
+        rejected.update(indices[1:])
+        warnings.add(warning)
+    return rejected, sorted(warnings)
 
 
 def _embedded_characters(
@@ -1569,35 +1692,82 @@ def _embedded_proof_anchor(blocks: list[Block], embedded: EmbeddedEvidence, glyp
     return None
 
 
-def _visual_proof_square(image: Image.Image, block: Block, preceding: list[Block]) -> bool:
-    """Require proof-ending context, text-scale geometry and an outlined square."""
-    if not block.bbox or block.bbox[2] - block.bbox[0] > 45:
-        return False
-    context = next((b for b in reversed(preceding) if b.bbox and b.kind not in FIGURE_KINDS
-                    and re.search(r"(?:as desired|as required|completes the proof[^\n]*|"
-                                  r"concludes the proof[^\n]*|which proves[^\n]*)[.]\s*$",
-                                  b.markdown, re.I)), None)
-    if context is None or context.bbox[2] >= block.bbox[0]:
-        return False
-    line_height = context.bbox[3] - context.bbox[1]
-    if abs((context.bbox[1] + context.bbox[3] - block.bbox[1] - block.bbox[3]) / 2) > line_height:
-        return False
-    w, h = image.size
+def _visual_proof_square(
+    image: Image.Image, block: Block,
+) -> tuple[str, Box] | None:
+    """Return the glyph and tight box for an outlined or filled text-sized square.
+
+    Classification uses only raster shape and size, independently of text,
+    reading order, or page position.
+    """
+    if not block.bbox:
+        return None
     a, b, c, d = block.bbox
-    crop = image.crop((int(a*w/1000), int(b*h/1000), int(c*w/1000), int(d*h/1000)))
+    if not (0 < c - a <= 45 and 0 < d - b <= 45):
+        return None
+    w, h = image.size
+    # Tight OCR boxes occasionally clip the final antialiased border row.
+    left, top = max(0, int((a - 2) * w / 1000)), max(0, int((b - 2) * h / 1000))
+    crop = image.crop((left, top, min(w, int((c + 2) * w / 1000)),
+                       min(h, int((d + 2) * h / 1000))))
     ink = crop.point(lambda x: 255 if x < 210 else 0)
     bounds = ink.getbbox()
     if bounds is None:
-        return False
+        return None
     ink = ink.crop(bounds)
     iw, ih = ink.size
-    if not (.8 <= iw / max(1, ih) <= 1.25 and 3 <= ih <= 1.5 * line_height*h/1000):
-        return False
+    # Use physical pixel aspect ratio, and page-relative glyph size rather
+    # than the height of a potentially multiline paragraph or display.
+    if not (.8 <= iw / max(1, ih) <= 1.25 and 3 <= ih
+            and 4 <= ih * 1000 / h <= 18 and iw * 1000 / w <= 24):
+        return None
+    bbox = ((left + bounds[0]) * 1000 / w, (top + bounds[1]) * 1000 / h,
+            (left + bounds[2]) * 1000 / w, (top + bounds[3]) * 1000 / h)
     sample = ink.resize((12, 12))
-    edge = [sample.getpixel((x, y)) for x in range(12) for y in range(12)
-            if x in (0, 11) or y in (0, 11)]
+    sides = [
+        [sample.getpixel((x, y)) for x, y in coordinates]
+        for coordinates in (
+            [(x, 0) for x in range(12)], [(x, 11) for x in range(12)],
+            [(0, y) for y in range(12)], [(11, y) for y in range(12)],
+        )
+    ]
     center = [sample.getpixel((x, y)) for x in range(3, 9) for y in range(3, 9)]
-    return sum(edge) / len(edge) > 170 and sum(center) / len(center) < 35
+    if not all(sum(side) / len(side) > 170 for side in sides):
+        return None
+    if sum(center) / len(center) < 35:
+        return r"\(\square\)", bbox
+    if min(sample.getpixel((x, y)) for x in range(12) for y in range(12)) > 210:
+        return r"\(\blacksquare\)", bbox
+    return None
+
+
+def _place_visual_proof_marks(blocks: list[Block]) -> None:
+    """Place recognized squares after nearby text, without affecting detection."""
+    marks = [block for block in blocks if block.metadata.get("reclassification_reason")
+             == "glyph_sized_square_shape"]
+    tails: dict[int, Block] = {}
+    for mark in sorted(marks, key=lambda block: (block.bbox[1], block.bbox[0])):
+        left, top, right, bottom = mark.bbox
+        center = (top + bottom) / 2
+        candidates = [
+            (index, block) for index, block in enumerate(blocks)
+            if block.bbox and block.metadata.get("reclassification_reason") != "glyph_sized_square_shape"
+            and block.kind in {"paragraph", *FORMULA_KINDS}
+            and block.bbox[1] <= center
+            and abs(block.bbox[3] - bottom) <= 3 * (bottom - top)
+            and block.bbox[0] <= right
+            and (block.bbox[2] <= left + 24 or block.bbox[3] <= bottom + 2)
+        ]
+        if not candidates:
+            continue  # Keep OCR order when there is no geometric text anchor.
+        _, anchor = min(candidates, key=lambda item: (
+            abs(item[1].bbox[3] - bottom),
+            max(0, left - item[1].bbox[2]), -item[0],
+        ))
+        after = tails.get(id(anchor), anchor)
+        blocks.pop(next(i for i, block in enumerate(blocks) if block is mark))
+        blocks.insert(next(i for i, block in enumerate(blocks) if block is after) + 1, mark)
+        tails[id(anchor)] = mark
 
 
 def _restore_embedded_proof_marks(
@@ -1677,8 +1847,6 @@ def _restore_embedded_proof_marks(
     return ["visual_embedded_proof_mark_recovered"] if restored else []
 
 
-
-
 def _padded_bbox(
     bbox: tuple[float, float, float, float],
     *,
@@ -1740,11 +1908,13 @@ def _matching_original(bbox, placements, assets: AssetStore):
         candidate = tuple(placement.get("bbox", ()))
         if len(candidate) != 4:
             continue
+        if not _same_figure_extent(bbox, candidate):
+            continue
         overlap = _iou(bbox, candidate)
         if overlap > best_overlap:
             best_overlap = overlap
             best = assets.get(placement.get("asset_id", ""))
-    return best if best_overlap >= 0.25 else None
+    return best
 
 
 def _sanitize_page_links(markdown: str, available_pages: set[int]) -> tuple[str, list[int]]:

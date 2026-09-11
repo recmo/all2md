@@ -375,21 +375,6 @@ def test_raster_inventory_distinguishes_association_from_transcription(tmp_path)
     assert all(r["status"] == "visually_associated" for r in audit.regions)
 
 
-def test_proof_square_requires_shape_and_context():
-    from PIL import ImageDraw
-    from pages2md.pipeline import _visual_proof_square
-    image = Image.new("L", (1000, 1000), 255)
-    ImageDraw.Draw(image).rectangle((867, 225, 878, 236), outline=0, width=2)
-    block = Block("figure", "", (855, 215, 890, 245))
-    preceding = [Block("paragraph", "as desired.", (100, 220, 200, 240))]
-    assert _visual_proof_square(image, block, preceding)
-    preceding[0].markdown = "This completes the proof of Theorem 1.16."
-    assert _visual_proof_square(image, block, preceding)
-    assert not _visual_proof_square(image, block, [])
-    preceding[0].markdown = "An example diagram."
-    assert not _visual_proof_square(image, block, preceding)
-
-
 def test_heading_math_and_multiple_late_boundaries_survive():
     from pages2md.markdown import strict_page_markdown
     from pages2md.model import PageResult, Comparison
