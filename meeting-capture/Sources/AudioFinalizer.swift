@@ -32,8 +32,8 @@ enum AudioFinalizer {
         temporaryDestination: URL,
         finalDestination: URL
     ) throws -> ArchiveResult {
-        let microphoneSegments = microphoneSegments.filter { FileManager.default.fileExists(atPath: $0.url.path) }
-        let participants = participants.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        let microphoneSegments = try microphoneSegments.filter { try containsAudio($0.url) }
+        let participants = try participants.flatMap { try containsAudio($0) ? $0 : nil }
         guard !microphoneSegments.isEmpty || participants != nil else {
             throw CaptureError.writerFailure("no captured audio is available for finalization")
         }
@@ -133,14 +133,23 @@ enum AudioFinalizer {
 
     static func recoveredSegments(from urls: [URL], startedAt: Date) throws -> [CapturedAudioSegment] {
         var cursor = startedAt
-        return try urls.sorted { $0.lastPathComponent < $1.lastPathComponent }.map { url in
+        return try urls.sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { url in
             let input = try AVAudioFile(forReading: url)
+            guard input.length > 0 else { return nil }
             let duration = input.processingFormat.sampleRate > 0
                 ? Double(input.length) / input.processingFormat.sampleRate
                 : 0
             let segment = CapturedAudioSegment(url: url, startedAt: cursor, endedAt: cursor.addingTimeInterval(duration))
             cursor = segment.endedAt
             return segment
+        }
+    }
+
+    static func containsAudio(_ url: URL) throws -> Bool {
+        do {
+            return try AVAudioFile(forReading: url).length > 0
+        } catch {
+            throw CaptureError.writerFailure("Cannot read \(url.lastPathComponent); original audio preserved: \(error.localizedDescription)")
         }
     }
 
@@ -189,6 +198,11 @@ enum AudioFinalizer {
         if let bundled = Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "bin"),
            FileManager.default.isExecutableFile(atPath: bundled.path) {
             return bundled
+        }
+        if let executable = Bundle.main.executableURL {
+            let appBundled = executable.deletingLastPathComponent().deletingLastPathComponent()
+                .appending(path: "Resources/bin/\(name)")
+            if FileManager.default.isExecutableFile(atPath: appBundled.path) { return appBundled }
         }
         var paths = ProcessInfo.processInfo.environment["PATH"]?.split(separator: ":").map(String.init) ?? []
         paths += [

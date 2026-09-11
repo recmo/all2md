@@ -14,7 +14,26 @@ struct StatusMenuView: View {
             switch model.state {
             case .idle:
                 Label("Watching microphone activity", systemImage: "mic")
+                if let report = model.startupReport {
+                    Text(report.systemAudioObserved
+                         ? "Startup recording check passed"
+                         : "Microphone verified; system capture authorized. No system audio was observed during the check.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("App and worker storage / archive checks passed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(report.accessibility).font(.caption).foregroundStyle(.secondary)
+                    Button("Accessibility Settings (optional)") { model.openAccessibilitySettings() }
+                }
+                Button("Check recording access again") { model.checkPermissions() }
                 Button("Start recording manually") { model.manualStart() }
+                if !model.activeOutputClients.isEmpty {
+                    Text("Active audio applications").font(.caption).foregroundStyle(.secondary)
+                    ForEach(model.activeOutputClients) { client in
+                        Button("Record \(client.applicationName)") {
+                            model.manualStart(client: client)
+                        }
+                    }
+                }
             case let .detecting(client, _):
                 Label("Checking \(client.applicationName)…", systemImage: "waveform")
                 Text(client.inputDeviceSummary).font(.caption).foregroundStyle(.secondary)
@@ -37,24 +56,45 @@ struct StatusMenuView: View {
                 Button("Stop") { model.stopRecording() }.keyboardShortcut(.defaultAction)
             case .finalizing:
                 ProgressView("Preparing recording…")
+            case .checkingPermissions:
+                ProgressView("Checking recording access…")
+                Text("A brief test captures microphone and system audio, then deletes it. Respond to any macOS permission prompts.")
+                    .font(.caption).foregroundStyle(.secondary)
             case .permissionRequired:
-                Label("Screen & System Audio Recording permission is required", systemImage: "exclamationmark.triangle.fill")
+                Label("Recording check failed", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                Text("Meeting Capture is paused until access is granted. If macOS requests it, quit and reopen the app after enabling access.")
+                Text(model.permissionMessage)
+                Text("Enable access for this installed app, then retry. If macOS requests a restart, quit and reopen Meeting Capture.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("Open Screen & System Audio Settings") { model.openScreenRecordingSettings() }
+                Button("Open Microphone Settings") { model.openMicrophoneSettings() }
+                Button("Open Files & Folders Settings") { model.openFilesSettings() }
+                Button("Retry recording check") { model.checkPermissions() }
             case let .error(message):
                 Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Button("Dismiss") { model.dismissError() }
             }
-            if model.lastManifest != nil { Button("Reveal last recording") { model.revealLastRecording() } }
-            if !model.recoverableFiles.isEmpty {
-                Text("\(model.recoverableFiles.count) interrupted recording file(s) need recovery").font(.caption).foregroundStyle(.orange)
-                Button("Recover interrupted recording") { model.recoverInterruptedRecordings() }
+            if model.showsMaintenance {
+                if model.lastManifest != nil { Button("Reveal last recording") { model.revealLastRecording() } }
+                if model.finalizationsInProgress > 0 {
+                    ProgressView("Finalizing \(model.finalizationsInProgress) recording(s) in isolated workers…")
+                }
+                if !model.recoverableFiles.isEmpty {
+                    Text("\(model.recoverableFiles.count) interrupted recording file(s) need recovery").font(.caption).foregroundStyle(.orange)
+                    if model.recoveryInProgress {
+                        ProgressView("Recovering in an isolated worker…")
+                    } else {
+                        Button("Recover interrupted recording") { model.recoverInterruptedRecordings() }
+                    }
+                }
+                if let recoveryError = model.recoveryError {
+                    Text(recoveryError).font(.caption).foregroundStyle(.orange)
+                }
             }
             Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }
+                .disabled(!model.allowsTermination)
         }
         .padding(14)
         .frame(width: 320)

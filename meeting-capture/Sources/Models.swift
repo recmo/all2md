@@ -65,7 +65,7 @@ struct AccessibilityArtifact: Codable, Equatable, Sendable {
     let sha256: String
 }
 
-struct CapturedAudioSegment: Equatable, Sendable {
+struct CapturedAudioSegment: Codable, Equatable, Sendable {
     let url: URL
     let startedAt: Date
     let endedAt: Date
@@ -106,7 +106,7 @@ struct CaptureManifest: Codable, Equatable, Sendable {
     let status: Status
 }
 
-struct RecordingPaths: Sendable {
+struct RecordingPaths: Codable, Sendable {
     let directory: URL
     let baseName: String
     func microphoneTemporary(segment: Int) -> URL {

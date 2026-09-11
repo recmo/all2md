@@ -6,6 +6,7 @@ import Foundation
 @MainActor
 final class AudioActivityMonitor {
     var onClientsChanged: (([AudioClient]) -> Void)?
+    var onOutputClientsChanged: (([AudioClient]) -> Void)?
     private var timer: Timer?
     private var deviceListeners: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
     private let ownPID = ProcessInfo.processInfo.processIdentifier
@@ -28,10 +29,9 @@ final class AudioActivityMonitor {
     private func poll() {
         let objectIDs = processObjectIDs()
         synchronizeDeviceListeners(for: objectIDs)
-        var seen = Set<pid_t>()
-        let clients = objectIDs
-            .compactMap(audioClient)
-            .filter { $0.processID != ownPID && seen.insert($0.processID).inserted }
+        let clients = runningClients(from: objectIDs, selector: kAudioProcessPropertyIsRunningInput)
+        let outputClients = runningClients(from: objectIDs, selector: kAudioProcessPropertyIsRunningOutput)
+        onOutputClientsChanged?(outputClients)
         if clients.isEmpty, defaultInputIsRunning() {
             let device = defaultInputDevice().flatMap(audioInputDevice)
             onClientsChanged?([AudioClient(
@@ -44,6 +44,17 @@ final class AudioActivityMonitor {
         } else {
             onClientsChanged?(clients)
         }
+    }
+
+    private func runningClients(
+        from objectIDs: [AudioObjectID],
+        selector: AudioObjectPropertySelector
+    ) -> [AudioClient] {
+        var seen = Set<pid_t>()
+        return objectIDs
+            .compactMap { audioClient(for: $0, runningSelector: selector) }
+            .filter { $0.processID != ownPID && seen.insert($0.processID).inserted }
+            .sorted { $0.applicationName.localizedStandardCompare($1.applicationName) == .orderedAscending }
     }
 
     private func synchronizeDeviceListeners(for objectIDs: [AudioObjectID]) {
@@ -86,8 +97,11 @@ final class AudioActivityMonitor {
         return values
     }
 
-    private func audioClient(for objectID: AudioObjectID) -> AudioClient? {
-        guard uint32Property(kAudioProcessPropertyIsRunningInput, objectID: objectID) == 1,
+    private func audioClient(
+        for objectID: AudioObjectID,
+        runningSelector: AudioObjectPropertySelector
+    ) -> AudioClient? {
+        guard uint32Property(runningSelector, objectID: objectID) == 1,
               let pidValue = pidProperty(objectID: objectID) else { return nil }
         let bundleID = bundleIDProperty(objectID: objectID)
         let app = ProcessApplicationResolver.resolve(processID: pidValue, bundleID: bundleID)
