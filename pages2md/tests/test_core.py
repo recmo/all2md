@@ -1549,7 +1549,6 @@ def test_figure_crops_merge_nested_and_near_duplicate_boxes(tmp_path: Path):
     assert not any(key.startswith("review_") for block in blocks for key in block.metadata)
     assert warnings == [
         "visual_blank_figure_crop_rejected",
-        "visual_figure_crop_may_be_clipped",
         "visual_overlapping_figure_crops_merged",
     ]
 

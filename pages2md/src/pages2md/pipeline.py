@@ -1491,7 +1491,7 @@ def _canonicalize_figure_blocks(
                 warnings.append("visual_figure_crop_expanded_to_labels")
             raw_boxes[index] = block.bbox
             block.bbox = _padded_bbox(block.bbox)
-            blank, touches_edge = _figure_crop_status(grayscale, block.bbox)
+            blank, _ = _figure_crop_status(grayscale, block.bbox)
             if blank:
                 warnings.append("visual_blank_figure_crop_rejected")
                 if block.markdown.strip():
@@ -1500,13 +1500,14 @@ def _canonicalize_figure_blocks(
                 else:
                     rejected.add(index)
                 continue
-            if touches_edge:
-                warnings.append("visual_figure_crop_may_be_clipped")
             candidates.append((index, block))
 
     merged, merge_warnings = _merge_figure_regions(candidates, raw_boxes, source_assets or [])
     rejected.update(merged)
     warnings.extend(merge_warnings)
+    if any(index not in rejected and _figure_crop_status(grayscale, block.bbox)[1]
+           for index, block in candidates):
+        warnings.append("visual_figure_crop_may_be_clipped")
 
     if rejected:
         blocks[:] = [block for index, block in enumerate(blocks) if index not in rejected]
