@@ -251,7 +251,8 @@
             inherit (finalAttrs) pname version src;
             inherit pnpm;
             fetcherVersion = 4;
-            hash = "sha256-u/Vfmt9KQylPst2GxZoPYSzGBlouU7tcJHLRoDjZgCs=";
+            pnpmInstallFlags = [ "--network-concurrency=4" "--fetch-timeout=600000" ];
+            hash = "sha256-1lyvyUY2vrzaJdEGHnaCCdkHWBschmNuWrwwxkTfnUE=";
           };
           nativeBuildInputs = [ systemPkgs.nodejs pnpm systemPkgs.pnpmConfigHook ];
           buildPhase = ''
