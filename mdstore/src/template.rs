@@ -17,7 +17,7 @@ use crate::{SectionListRule, markdown::Finding};
 pub(crate) struct Template {
     frontmatter: Option<serde_json::Value>,
     filename: Option<FilenameRule>,
-    pub(crate) markdown: crate::MarkdownConfig,
+    markdown: Option<String>,
     pub(crate) links: crate::LinkConfig,
     pub(crate) relations: Vec<crate::RelationRule>,
     pub(crate) metadata: std::collections::BTreeMap<String, String>,
@@ -117,6 +117,7 @@ pub(crate) struct Templates {
 struct CompiledTemplate {
     template: Template,
     schema: Option<jsonschema::Validator>,
+    markdown: Option<crate::markdown_lint::MarkdownLint>,
     definition: serde_json::Value,
     script: crate::template_script::Script,
     markdown_source: String,
@@ -128,13 +129,15 @@ impl Templates {
         let mut findings = Vec::new();
         for (path, text) in files.iter().filter(|(path, _)| is_template(path)) {
             let result = crate::template_script::Script::compile(path, text).and_then(
-                |(script, definition)| compile_definition(definition, script, text.clone()),
+                |(script, definition)| {
+                    compile_definition(definition, script, text.clone(), path, files)
+                },
             );
             match result {
                 Ok(template) => {
                     entries.insert(path.clone(), template);
                 }
-                Err(error) => findings.push(Finding {
+                Err(error) => findings.push(Finding { source: None,
                     path: path.clone(),
                     line: None,
                     message: format!("invalid template: {error}"),
@@ -162,6 +165,19 @@ impl Templates {
         }
     }
 
+    pub(crate) fn same_policy(&self, other: &Self, path: &str) -> bool {
+        match (self.applicable(path), other.applicable(path)) {
+            (None, None) => true,
+            (Some((a, left)), Some((b, right))) => {
+                a == b
+                    && left.markdown_source == right.markdown_source
+                    && left.markdown.as_ref().map(|lint| lint.source())
+                        == right.markdown.as_ref().map(|lint| lint.source())
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn policy(&self, path: &str) -> &Template {
         self.applicable(path)
             .map_or(&self.default, |(_, entry)| &entry.template)
@@ -182,9 +198,18 @@ impl Templates {
         page: &crate::markdown::ParsedPage,
         findings: &mut Vec<Finding>,
     ) {
+        if page.frontmatter["mdstore"] == "app" {
+            if let Err(error) = crate::apps::validate_definition(path, text) {
+                findings.push(Finding { source: None, path: path.into(), message: format!("invalid app: {error}"), line: None });
+            }
+            return;
+        }
         let Some((template_path, entry)) = self.applicable(path) else {
             return;
         };
+        if let Some(lint) = &entry.markdown {
+            lint.validate(path, text, findings);
+        }
         let initial = findings.len();
         validate_page(path, text, page, &template_path, entry, findings);
         if initial == findings.len() {
@@ -226,8 +251,9 @@ impl Templates {
                     .transpose()
             };
             let result = (|| {
-                let old = parse(before)?;
-                let new = parse(after)?;
+                let old = parse(before)?.filter(|page| page.frontmatter["mdstore"] != "app");
+                let new = parse(after)?.filter(|page| page.frontmatter["mdstore"] != "app");
+                if old.is_none() && new.is_none() { return Ok(()); }
                 let old = old
                     .as_ref()
                     .map(|page| crate::template_script::document(path, &before[path], page));
@@ -345,6 +371,8 @@ fn compile_definition(
     definition: serde_json::Value,
     script: crate::template_script::Script,
     markdown_source: String,
+    template_path: &str,
+    files: &HashMap<String, String>,
 ) -> Result<CompiledTemplate> {
     let template: Template = serde_json::from_value(definition.clone())?;
     if let Some(rule) = &template.filename {
@@ -361,9 +389,13 @@ fn compile_definition(
     }
     validate_definition(&template.structure, &template.sections, 0)?;
     validate_rules(&template.preamble)?;
-    if template.markdown.max_line_length == Some(0) {
-        bail!("markdown.max_line_length must be greater than zero");
-    }
+    let markdown = template
+        .markdown
+        .as_ref()
+        .map(|reference| {
+            crate::markdown_lint::MarkdownLint::compile(template_path, reference, files)
+        })
+        .transpose()?;
     for wiki in &template.links.wiki {
         let pattern =
             Regex::new(wiki).with_context(|| format!("invalid wiki-link pattern {wiki:?}"))?;
@@ -412,6 +444,7 @@ fn compile_definition(
     Ok(CompiledTemplate {
         template,
         schema,
+        markdown,
         definition,
         script,
         markdown_source,
@@ -493,7 +526,7 @@ fn validate_page(
             .find(path)
             .is_some_and(|found| found.start() == 0 && found.end() == path.len())
         {
-            findings.push(Finding {
+            findings.push(Finding { source: None,
                 path: path.into(),
                 line: None,
                 message: format!(
@@ -505,7 +538,7 @@ fn validate_page(
     }
     if let Some(validator) = &entry.schema {
         for error in validator.iter_errors(&page.frontmatter) {
-            findings.push(Finding {
+            findings.push(Finding { source: None,
                 path: path.to_owned(),
                 line: Some(crate::template_script::field_line(
                     text,
@@ -534,7 +567,7 @@ fn validate_page(
     let events = &page.events;
     let headings = &page.section_headings;
     let mut report = |offset: usize, message: String| {
-        findings.push(Finding {
+        findings.push(Finding { source: None,
             path: path.to_owned(),
             line: Some(offsets.partition_point(|start| *start <= offset)),
             message: {

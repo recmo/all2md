@@ -12,8 +12,8 @@ def _declare(name, value):
 def metadata(**pointers):
     _declare("metadata", pointers)
 
-def markdown(**rules):
-    _declare("markdown", rules)
+def markdown(config):
+    _declare("markdown", config)
 
 def links(markdown=True, wiki=[]):
     _declare("links", {"markdown": markdown, "wiki": wiki})

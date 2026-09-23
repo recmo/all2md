@@ -1,11 +1,14 @@
 //! Git-backed Markdown storage, validation, indexing, and MCP services.
 
 mod chunk;
+// Shared client entry points are exercised by WASM and native parity tests.
+#[allow(dead_code)]
+mod client_validation;
 mod config;
 mod git;
 mod hashline;
 mod markdown;
-mod markdown_style;
+mod markdown_lint;
 mod mcp;
 mod provider;
 mod search;
@@ -14,15 +17,16 @@ mod store;
 mod structure;
 mod template;
 mod template_script;
+mod web;
 
 use std::path::Path;
 
 use anyhow::Result;
 
 pub use config::{
-    ChunkConfig, Config, DateOrder, DocumentConfig, GitConfig, LinkConfig, MarkdownConfig,
-    ProviderConfig, RelationLinkSyntax, RelationRule, RelationSelector, SearchConfig,
-    SectionListRule, ServerConfig,
+    ChunkConfig, Config, DateOrder, DocumentConfig, GitConfig, LinkConfig, ProviderConfig,
+    RelationLinkSyntax, RelationRule, RelationSelector, SearchConfig, SectionListRule,
+    ServerConfig,
 };
 pub use git::PushState;
 pub use hashline::{EditOperation, short_hash};
@@ -42,3 +46,6 @@ pub fn load_repository_config(root: &Path) -> Result<Config> {
     let head = git::head(root)?;
     Config::from_yaml(&git::read_text(root, &head, "config.yaml")?)
 }
+
+#[allow(dead_code)] // Shared app evaluator is used by the WASM client and native parity tests.
+mod apps;

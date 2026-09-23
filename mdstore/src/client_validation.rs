@@ -1,0 +1,445 @@
+//! Portable validation of edits over a server-validated, source-light baseline.
+use crate::{
+    config::Config,
+    markdown::{self, Edge, Finding, ParsedPage},
+    template::Templates,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+
+pub(crate) const SNAPSHOT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SnapshotDocument {
+    pub hash: String,
+    pub parsed: ParsedPage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ValidationSnapshot {
+    pub version: u32,
+    pub revision: String,
+    pub files: HashMap<String, String>,
+    pub documents: HashMap<String, SnapshotDocument>,
+    pub edges: Vec<Edge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub(crate) enum ClientEdit {
+    DeletePage {
+        path: String,
+        base: String,
+    },
+    ReplacePage {
+        path: String,
+        base: String,
+        content: String,
+    },
+    CreatePage {
+        path: String,
+        content: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ClientValidationInput {
+    pub snapshot: ValidationSnapshot,
+    pub edits: Vec<ClientEdit>,
+    #[serde(default)]
+    pub sources: HashMap<String, String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct ClientValidationResult {
+    pub valid: bool,
+    pub findings: Vec<Finding>,
+    pub needs: Vec<String>,
+    pub server_required: Option<String>,
+    pub restart_required: bool,
+}
+
+pub(crate) fn source_hash(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+pub(crate) fn validate(input: ClientValidationInput) -> ClientValidationResult {
+    match check(input) {
+        Ok(result) => result,
+        Err(findings) => ClientValidationResult {
+            findings,
+            ..Default::default()
+        },
+    }
+}
+fn finding(path: &str, message: impl Into<String>) -> Vec<Finding> {
+    vec![Finding { source: None,
+        path: path.into(),
+        line: None,
+        message: message.into(),
+    }]
+}
+fn parse_config(files: &HashMap<String, String>) -> Result<Config, Vec<Finding>> {
+    Config::from_yaml(
+        files
+            .get("config.yaml")
+            .ok_or_else(|| finding("config.yaml", "Missing configuration"))?,
+    )
+    .map_err(|error| finding("config.yaml", format!("invalid configuration: {error:#}")))
+}
+
+fn check(input: ClientValidationInput) -> Result<ClientValidationResult, Vec<Finding>> {
+    let snapshot = input.snapshot;
+    if snapshot.version != SNAPSHOT_VERSION {
+        return Ok(ClientValidationResult {
+            server_required: Some(
+                "Validation snapshot version changed; reconnect to refresh.".into(),
+            ),
+            ..Default::default()
+        });
+    }
+    let old_config = parse_config(&snapshot.files)?;
+    let old_templates = Templates::compile(&snapshot.files)?;
+    let mut files = snapshot.files.clone();
+    // Unchanged source is never parsed or passed to callbacks. Its parsed facts
+    // come from the validated baseline; hashes are opaque equality markers only.
+    let mut before: HashMap<String, String> = snapshot
+        .documents
+        .iter()
+        .map(|(path, doc)| (path.clone(), doc.hash.clone()))
+        .collect();
+    let mut after = before.clone();
+    let mut edited = std::collections::HashSet::new();
+    for edit in &input.edits {
+        let (path, base, content) = match edit {
+            ClientEdit::ReplacePage {
+                path,
+                base,
+                content,
+            } => (path, Some(base), Some(content)),
+            ClientEdit::CreatePage { path, content } => (path, None, Some(content)),
+            ClientEdit::DeletePage { path, base } => (path, Some(base), None),
+        };
+        crate::config::validate_repo_path(path)
+            .map_err(|error| finding(path, error.to_string()))?;
+        if !edited.insert(path.clone()) {
+            return Err(finding(path, "Multiple edits for the same document"));
+        }
+        let resource =
+            crate::config::is_config_resource_path(path) || crate::template::is_template(path);
+        if (crate::config::is_config_resource_path(path) && !old_config.server.allow_config_edits)
+            || (crate::template::is_template(path) && !old_config.server.allow_template_edits)
+            || (!old_config.server.allow_template_edits &&
+                (base.is_some_and(|text| crate::apps::is_app(text)) || content.is_some_and(|text| crate::apps::is_app(text))))
+            || (!resource && !path.ends_with(".md"))
+        {
+            return Err(finding(
+                path,
+                "This file is read-only with the current server permissions.",
+            ));
+        }
+        let existing_hash = if resource {
+            snapshot.files.get(path).map(|text| source_hash(text))
+        } else {
+            snapshot.documents.get(path).map(|doc| doc.hash.clone())
+        };
+        match (base, existing_hash) {
+            (Some(base), Some(hash)) if source_hash(base) == hash => {}
+            (None, None) => {}
+            _ => {
+                return Err(finding(
+                    path,
+                    "document changed on the server; reconcile the draft before submitting",
+                ));
+            }
+        }
+        if resource {
+            if let Some(content) = content {
+                files.insert(path.clone(), content.clone());
+            } else {
+                files.remove(path);
+            }
+        } else {
+            if let Some(base) = base {
+                before.insert(path.clone(), base.clone());
+            }
+            if let Some(content) = content {
+                after.insert(path.clone(), content.clone());
+            } else {
+                after.remove(path);
+            }
+        }
+    }
+    let config = parse_config(&files)?;
+    let templates = Templates::compile(&files)?;
+    // A broader include glob can introduce tracked files absent from this inventory.
+    if serde_json::to_value(&config.documents).unwrap()
+        != serde_json::to_value(&old_config.documents).unwrap()
+    {
+        return Ok(ClientValidationResult {
+            server_required: Some(
+                "Document selection changed; the server must validate the newly selected corpus."
+                    .into(),
+            ),
+            ..Default::default()
+        });
+    }
+    let (include, exclude) = config
+        .document_globs()
+        .map_err(|error| finding("config.yaml", error.to_string()))?;
+    for path in after.keys() {
+        if !include.is_match(path) || exclude.is_match(path) {
+            return Err(finding(
+                path,
+                "edited page is outside configured document globs",
+            ));
+        }
+    }
+    let mut needs = Vec::new();
+    for (path, doc) in &snapshot.documents {
+        if edited.contains(path) || templates.same_policy(&old_templates, path) {
+            continue;
+        }
+        match input
+            .sources
+            .get(path)
+            .filter(|source| source_hash(source) == doc.hash)
+        {
+            Some(source) => {
+                before.insert(path.clone(), source.clone());
+                after.insert(path.clone(), source.clone());
+            }
+            None => needs.push(path.clone()),
+        }
+    }
+    if !needs.is_empty() {
+        needs.sort();
+        return Ok(ClientValidationResult {
+            needs,
+            ..Default::default()
+        });
+    }
+    let parsed = snapshot
+        .documents
+        .into_iter()
+        .map(|(path, doc)| (path, doc.parsed))
+        .collect();
+    markdown::validate_incremental(
+        &after,
+        &templates,
+        markdown::ValidationBaseline {
+            pages: &before,
+            parsed: &parsed,
+            edges: &snapshot.edges,
+            templates: &old_templates,
+        },
+    )?;
+    old_templates.validate_changes(&before, &after)?;
+    templates.validate_changes(&before, &after)?;
+    Ok(ClientValidationResult {
+        valid: true,
+        restart_required: config.server.listen != old_config.server.listen
+            || config.server.bearer_token_env != old_config.server.bearer_token_env,
+        ..Default::default()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn fixture() -> (ValidationSnapshot, HashMap<String, String>) {
+        let files = HashMap::from([
+            ("config.yaml".into(), "documents:\n  include: [\"**/*.md\"]\nserver:\n  allow_template_edits: true\n".into()),
+            ("template.md".into(), "```starlark\nrelation('mentions', selector={'kind': 'markdown_links'}, reciprocal='mentions')\n```\n".into()),
+        ]);
+        let pages: HashMap<String, String> = HashMap::from([
+            ("a.md".into(), "[B](b.md)\n".into()),
+            ("b.md".into(), "[A](a.md)\n".into()),
+        ]);
+        let templates = Templates::compile(&files).unwrap();
+        let (parsed, edges) = markdown::validate_corpus(&pages, &templates).unwrap();
+        let snapshot = ValidationSnapshot {
+            version: SNAPSHOT_VERSION,
+            revision: "test".into(),
+            files,
+            documents: pages
+                .iter()
+                .map(|(path, text)| {
+                    (
+                        path.clone(),
+                        SnapshotDocument {
+                            hash: source_hash(text),
+                            parsed: parsed[path].clone(),
+                        },
+                    )
+                })
+                .collect(),
+            edges,
+        };
+        // Exercise precisely the baseline wire representation, with no source events.
+        (
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap(),
+            pages,
+        )
+    }
+    #[test]
+    fn app_definitions_beside_schema_are_validated_and_privileged() {
+        let (mut snapshot, _) = fixture();
+        snapshot.files.insert("tasks/v1/template.md".into(), include_str!("../examples/tasks/v1/template.md").into());
+        snapshot.files.insert("tasks/v1/rumdl.toml".into(), include_str!("../examples/tasks/v1/rumdl.toml").into());
+        let source = include_str!("../examples/tasks/v1/app.md");
+        let input = |snapshot, content: String| ClientValidationInput {
+            snapshot, sources: HashMap::new(),
+            edits: vec![ClientEdit::CreatePage {path: "tasks/v1/planner.md".into(), content}],
+        };
+        let valid = validate(input(snapshot.clone(), source.into()));
+        assert!(valid.valid, "{valid:?}");
+        assert!(!validate(input(snapshot.clone(), source.replace("collection(\"tasks\", tasks)", "collection(\"other\", tasks)"))).valid);
+        assert!(!validate(input(snapshot.clone(), source.replace("mdstore: app", "mdstore: ordinary"))).valid);
+        *snapshot.files.get_mut("config.yaml").unwrap() = "documents:\n  include: [\"**/*.md\"]\nserver:\n  allow_template_edits: false\n".into();
+        assert!(!validate(input(snapshot, source.into())).valid);
+    }
+
+    #[test]
+    fn moved_page_requires_rewritten_incoming_links() {
+        let (snapshot, pages) = fixture();
+        let mut edits = vec![
+            ClientEdit::DeletePage {
+                path: "b.md".into(),
+                base: pages["b.md"].clone(),
+            },
+            ClientEdit::CreatePage {
+                path: "moved/renamed.md".into(),
+                content: "[A](../a.md)\n".into(),
+            },
+        ];
+        let input = |edits| ClientValidationInput {
+            snapshot: snapshot.clone(),
+            edits,
+            sources: HashMap::new(),
+        };
+        assert!(!validate(input(edits.clone())).valid);
+        edits.push(ClientEdit::ReplacePage {
+            path: "a.md".into(),
+            base: pages["a.md"].clone(),
+            content: "[B](moved/renamed.md)\n".into(),
+        });
+        let result = validate(input(edits));
+        assert!(result.valid, "{:?}", result.findings);
+    }
+
+    #[test]
+    fn lint_config_changes_invalidate_governed_documents() {
+        let (mut snapshot, pages) = fixture();
+        snapshot
+            .files
+            .get_mut("config.yaml")
+            .unwrap()
+            .push_str("  allow_config_edits: true\n");
+        snapshot
+            .files
+            .get_mut("template.md")
+            .unwrap()
+            .push_str("\n```starlark\nmarkdown('rumdl.toml')\n```\n");
+        snapshot
+            .files
+            .insert("rumdl.toml".into(), "[global]\nenable=[]\n".into());
+        let input = |sources| ClientValidationInput {
+            snapshot: snapshot.clone(),
+            edits: vec![ClientEdit::ReplacePage {
+                path: "rumdl.toml".into(),
+                base: snapshot.files["rumdl.toml"].clone(),
+                content: "[global]\nenable=['MD041']\n".into(),
+            }],
+            sources,
+        };
+        let missing = validate(input(HashMap::new()));
+        assert_eq!(missing.needs.len(), 2);
+        assert!(!missing.valid);
+        let result = validate(input(pages));
+        assert!(result.needs.is_empty());
+        assert!(!result.valid);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.message.starts_with("MD041:"))
+        );
+    }
+    #[test]
+    fn partial_baseline_preserves_incoming_reciprocal_checks() {
+        let (snapshot, pages) = fixture();
+        for content in [
+            "[B](b.md)\nMore prose.\n",
+            "# Removed backlink\n",
+            "[Missing](missing.md)\n",
+        ] {
+            let result = validate(ClientValidationInput {
+                snapshot: snapshot.clone(),
+                edits: vec![ClientEdit::ReplacePage {
+                    path: "a.md".into(),
+                    base: pages["a.md"].clone(),
+                    content: content.into(),
+                }],
+                sources: HashMap::new(),
+            });
+            let mut after = pages.clone();
+            after.insert("a.md".into(), content.into());
+            let expected =
+                markdown::validate_corpus(&after, &Templates::compile(&snapshot.files).unwrap());
+            assert_eq!(result.valid, expected.is_ok());
+            assert!(result.needs.is_empty());
+            if content.contains("Removed") {
+                assert!(result.findings.iter().any(
+                    |finding| finding.path == "b.md" && finding.message.contains("reciprocal")
+                ));
+            }
+        }
+    }
+    #[test]
+    fn template_changes_request_only_affected_source_and_validate_it() {
+        let (snapshot, pages) = fixture();
+        let content = "```starlark\nfrontmatter(name=string(required=True))\n```\n";
+        let input = |sources| ClientValidationInput {
+            snapshot: snapshot.clone(),
+            edits: vec![ClientEdit::ReplacePage {
+                path: "template.md".into(),
+                base: snapshot.files["template.md"].clone(),
+                content: content.into(),
+            }],
+            sources,
+        };
+        let result = validate(input(HashMap::new()));
+        assert_eq!(result.needs, ["a.md", "b.md"]);
+        assert!(!result.valid);
+        let result = validate(input(pages));
+        assert!(result.needs.is_empty());
+        assert_eq!(result.findings.len(), 2);
+    }
+    #[test]
+    fn stale_base_and_template_syntax_fail_locally() {
+        let (snapshot, _) = fixture();
+        let result = validate(ClientValidationInput {
+            snapshot: snapshot.clone(),
+            edits: vec![ClientEdit::ReplacePage {
+                path: "a.md".into(),
+                base: "wrong".into(),
+                content: "anything".into(),
+            }],
+            sources: HashMap::new(),
+        });
+        assert!(result.findings[0].message.contains("document changed"));
+        let result = validate(ClientValidationInput {
+            edits: vec![ClientEdit::ReplacePage {
+                path: "template.md".into(),
+                base: snapshot.files["template.md"].clone(),
+                content: "```starlark\nmissing_function()\n```\n".into(),
+            }],
+            snapshot,
+            sources: HashMap::new(),
+        });
+        assert!(result.findings[0].message.contains("invalid template"));
+        assert!(result.needs.is_empty());
+    }
+}

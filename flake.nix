@@ -216,6 +216,50 @@
             echo "Run: uv sync --project doc2md --extra dev"
           '';
         };
+      mdstoreSourceFilter = path: type:
+        nixpkgs.lib.cleanSourceFilter path type
+        && !(nixpkgs.lib.hasSuffix "/web/src/lib/wasm" (toString path))
+        && !(builtins.elem (builtins.baseNameOf path) [ "target" "node_modules" ".svelte-kit" "build" "test-results" "playwright-report" ]);
+      mkMdstoreWasm = mdSystem:
+        let systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+        in systemPkgs.rustPlatform.buildRustPackage {
+          pname = "mdstore-validation-wasm";
+          version = "0.1.0";
+          src = nixpkgs.lib.cleanSourceWith { name = "source"; src = ./mdstore; filter = mdstoreSourceFilter; };
+          sourceRoot = "source/wasm";
+          cargoLock.lockFile = ./mdstore/wasm/Cargo.lock;
+          nativeBuildInputs = [ systemPkgs.wasm-bindgen-cli systemPkgs.llvmPackages.lld ];
+          doCheck = false;
+          buildPhase = ''
+            runHook preBuild
+            cargo build --offline --frozen --target wasm32-unknown-unknown --release
+            runHook postBuild
+          '';
+          installPhase = ''
+            wasm-bindgen target/wasm32-unknown-unknown/release/mdstore_validation_wasm.wasm --target web --omit-default-module-path --remove-name-section --out-dir $out --out-name validator
+          '';
+        };
+      mkMdstoreWeb = mdSystem:
+        let
+          systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+          pnpm = systemPkgs.pnpm_11;
+        in systemPkgs.stdenvNoCC.mkDerivation (finalAttrs: {
+          pname = "mdstore-web";
+          version = "0.1.0";
+          src = nixpkgs.lib.cleanSourceWith { src = ./mdstore/web; filter = mdstoreSourceFilter; };
+          pnpmDeps = systemPkgs.fetchPnpmDeps {
+            inherit (finalAttrs) pname version src;
+            inherit pnpm;
+            fetcherVersion = 4;
+            hash = "sha256-u/Vfmt9KQylPst2GxZoPYSzGBlouU7tcJHLRoDjZgCs=";
+          };
+          nativeBuildInputs = [ systemPkgs.nodejs pnpm systemPkgs.pnpmConfigHook ];
+          buildPhase = ''
+            cp -r ${mkMdstoreWasm mdSystem} src/lib/wasm
+            pnpm check && pnpm test && pnpm exec vite build
+          '';
+          installPhase = "cp -r build $out";
+        });
       mkMdstore =
         mdSystem:
         let
@@ -224,7 +268,10 @@
         systemPkgs.rustPlatform.buildRustPackage {
           pname = "mdstore";
           version = "0.1.0";
-          src = ./mdstore;
+          src = nixpkgs.lib.cleanSourceWith { src = ./mdstore; filter = mdstoreSourceFilter; };
+          preBuild = "cp -r ${mkMdstoreWeb mdSystem} web/build";
+          passthru.web = mkMdstoreWeb mdSystem;
+          passthru.wasm = mkMdstoreWasm mdSystem;
           cargoLock.lockFile = ./mdstore/Cargo.lock;
           nativeCheckInputs = [ systemPkgs.git ];
           nativeBuildInputs = [ systemPkgs.makeWrapper ];
@@ -252,10 +299,13 @@
             systemPkgs.clippy
             systemPkgs.git
             systemPkgs.rustc
+            systemPkgs.wasm-bindgen-cli
             systemPkgs.rustfmt
+            systemPkgs.nodejs
+            systemPkgs.pnpm_11
           ];
           shellHook = ''
-            echo "Run: cargo test --manifest-path mdstore/Cargo.toml"
+            echo "Run: pnpm --dir mdstore/web install --frozen-lockfile && pnpm --dir mdstore/web build && cargo test --manifest-path mdstore/Cargo.toml"
           '';
         };
     in

@@ -6,6 +6,8 @@ license = "MIT"
 description = "Git-backed Markdown search and editing daemon"
 
 [dependencies]
+toml = "1.1"
+rumdl = { version = "=0.2.75", default-features = false }
 anyhow = "1.0"
 async-trait = "0.1"
 axum = "0.8"

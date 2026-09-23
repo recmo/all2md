@@ -3,6 +3,8 @@
 A task describes one concrete intended outcome. Keep its current state in
 frontmatter and its relevant messages, decisions, and state changes in Timeline.
 
+Use the first H1 heading as the task title. Do not duplicate it in frontmatter.
+
 ## Frontmatter
 
 Use `inbox` for captured work, `ready` for clarified work, and `waiting` for an
@@ -10,16 +12,21 @@ external dependency. Completed and cancelled tasks remain as historical records.
 
 ```starlark
 frontmatter(
-    title=string(required=True, min_length=1),
     state=enum(["inbox", "ready", "waiting", "completed", "cancelled"], required=True),
     waiting_on=string(nullable=True),
     tags=list_of(string(min_length=1), unique=True),
+    start=string(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"),
+    end=string(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"),
+    assignee=string(min_length=1),
+    effort=integer(minimum=0),
+    depends_on=list_of(string(min_length=1), unique=True),
 )
 
-metadata(title="/title", state="/state", tags="/tags")
-markdown(final_newline=True, closed_fences=True)
+metadata(state="/state", tags="/tags")
+markdown("rumdl.toml")
 
 def check_waiting(doc):
+    require(bool(doc.title.strip()), "Add an H1 heading for the task title")
     if doc.frontmatter["state"] == "waiting":
         require(
             bool((doc.frontmatter.get("waiting_on") or "").strip()),

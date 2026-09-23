@@ -22,8 +22,8 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
 #[derive(Clone)]
-struct AppState {
-    store: Arc<Store>,
+pub(crate) struct AppState {
+    pub(crate) store: Arc<Store>,
     bearer_token: Option<String>,
 }
 
@@ -33,10 +33,12 @@ fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
         bearer_token,
     };
     Router::new()
+        .merge(crate::web::api_router())
         .route("/health", get(health))
         .route("/mcp", post(mcp))
         .route("/cli", post(cli))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
+        .merge(crate::web::assets())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -131,7 +133,9 @@ async fn cli(State(state): State<AppState>, Json(command): Json<CliCommand>) -> 
     }
 }
 
-async fn run_blocking<T>(operation: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
+pub(crate) async fn run_blocking<T>(
+    operation: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T>
 where
     T: Send + 'static,
 {
@@ -149,10 +153,47 @@ fn internal_error(error: &anyhow::Error) -> Response {
 }
 
 async fn authorize(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    if request.headers().contains_key(ORIGIN) {
+    // With no credential, reject DNS-rebinding hosts as well as cross-site fetches.
+    if state.bearer_token.is_none() {
+        let host = request
+            .headers()
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<axum::http::uri::Authority>().ok());
+        let allowed = host.as_ref().is_some_and(|host| {
+            let name = host.host().trim_matches(['[', ']']);
+            state
+                .store
+                .config()
+                .server
+                .allowed_hosts
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(allowed))
+                || name == "localhost"
+                || name
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !allowed {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "This hostname is not allowed. Configure server.allowed_hosts for the private reverse proxy."}))).into_response();
+        }
+    }
+    let same_origin = request
+        .headers()
+        .get(ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .zip(request.headers().get("host").and_then(|v| v.to_str().ok()))
+        .is_some_and(|(origin, host)| {
+            origin == format!("http://{host}") || origin == format!("https://{host}")
+        });
+    let cross_site = request
+        .headers()
+        .get("sec-fetch-site")
+        .is_some_and(|v| v == "cross-site");
+    if cross_site || (request.headers().contains_key(ORIGIN) && !same_origin) {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": "browser origins are not allowed"})),
+            Json(json!({"error": "cross-origin requests are not allowed"})),
         )
             .into_response();
     }
@@ -263,7 +304,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read Markdown, template.md, or root config.yaml with hashline anchors. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration and templates are read-only.",
+            "description": "Read Markdown, template.md, or root config.yaml with hashline anchors and exact source text for full-page reads. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -277,7 +318,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "apply_edits",
-            "description": "Atomically validate and locally commit a hashline-anchored edit batch. Templates are read-only. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
+            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener and authentication changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -296,7 +337,7 @@ fn tools() -> Vec<Value> {
 }
 
 fn edit_operation_schemas() -> Vec<Value> {
-    [
+    let mut schemas: Vec<Value> = [
         ("replace", true, true),
         ("insert_before", true, true),
         ("insert_after", true, true),
@@ -326,7 +367,18 @@ fn edit_operation_schemas() -> Vec<Value> {
             "additionalProperties": false
         })
     })
-    .collect()
+    .collect();
+    schemas.push(json!({
+        "type": "object",
+        "properties": {"op": {"const": "replace_page"}, "path": {"type": "string"}, "base": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["op", "path", "base", "content"], "additionalProperties": false
+    }));
+    schemas.push(json!({
+        "type": "object",
+        "properties": {"op": {"const": "delete_page"}, "path": {"type": "string"}, "base": {"type": "string"}},
+        "required": ["op", "path", "base"], "additionalProperties": false
+    }));
+    schemas
 }
 
 #[derive(Deserialize)]
