@@ -3587,6 +3587,10 @@ fn colocated_app_definitions_validate_without_task_record_rules() {
     command(&repository.root, &["commit", "-qm", "Allow app definitions"]);
     let store = repository.store();
     assert!(store.apply_edits(&request(&source.replace("collection(\"tasks\", tasks)", "collection(\"missing\", tasks)"))).is_err());
+    let broken = "---\nmdstore: app\n---\n```starlark\ncollection('bad', lambda docs: [d.missing for d in docs])\n```\n";
+    store.apply_edits(&task_create("existing-record")).unwrap();
+    assert!(store.validate_edits(&request(broken)).unwrap_err().to_string().contains("missing"));
+    assert!(store.apply_edits(&request(broken)).is_err());
     assert!(!repository.root.join("tasks/v1/planner.md").exists());
     store.apply_edits(&request(source)).unwrap();
     assert_eq!(store.get_page("tasks/v1/planner.md", None).unwrap().text.unwrap(), source);

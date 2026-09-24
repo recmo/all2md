@@ -375,9 +375,10 @@ impl Store {
             || config.server.bearer_token_env != self.startup_server.bearer_token_env
     }
 
-    pub(crate) fn validation_snapshot(&self) -> crate::client_validation::ValidationSnapshot {
+    /// Returns versioned baseline metadata for incremental validation clients.
+    pub fn validation_snapshot(&self) -> serde_json::Value {
         let state = self.state.read();
-        crate::client_validation::ValidationSnapshot {
+        serde_json::to_value(crate::client_validation::ValidationSnapshot {
             version: crate::client_validation::SNAPSHOT_VERSION,
             revision: state.head.clone(),
             files: (*state.config_files).clone(),
@@ -395,10 +396,11 @@ impl Store {
                 })
                 .collect(),
             edges: (*state.edges).clone(),
-        }
+        }).expect("validation snapshot is serializable")
     }
 
-    pub(crate) fn web_documents(&self) -> serde_json::Value {
+    /// Lists readable paths, repository identity, and edit permissions.
+    pub fn documents(&self) -> serde_json::Value {
         let state = self.state.read();
         let mut paths: Vec<_> = state
             .pages
@@ -486,7 +488,12 @@ impl Store {
         self.apply_inner(request, false)
     }
 
-    pub(crate) fn apply_inner(
+    /// Validates the same edit batch as apply_edits without committing it.
+    pub fn validate_edits(&self, request: &ApplyEditsRequest) -> Result<ApplyEditsResponse> {
+        self.apply_inner(request, true)
+    }
+
+    fn apply_inner(
         &self,
         request: &ApplyEditsRequest,
         dry_run: bool,

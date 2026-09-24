@@ -16,7 +16,8 @@ directory.
 
 ## Web workspace
 
-The daemon serves a SvelteKit SPA at its root URL. Build it before compiling Rust:
+The daemon serves a SvelteKit SPA at its root URL. Build it before compiling Rust
+to embed the UI:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -29,7 +30,11 @@ mdstore --root /path/to/brain serve
 
 Open the configured daemon address (default `http://127.0.0.1:3131/`). Nix builds
 and embeds the frontend automatically; production still needs only the Rust binary.
-See [frontend development and tests](web/README.md).
+See [frontend development and tests](../webui/README.md).
+
+A plain Cargo build/test does not require Node or frontend assets. Without a built
+UI, the daemon serves a setup page and the API remains available. Packaging can
+set `MDSTORE_WEB_DIST` to a built asset directory; an invalid explicit path fails.
 
 Browse documents and templates, or search using the MCP `search` tool,
 including optional query variants and degradation reporting. Reads and submissions
@@ -473,3 +478,8 @@ existing H2 Timeline. Kanban events contain `path`, `value` and an explicit UTC
 body content, and pass through ordinary local validation, reconciliation and
 atomic server submission. Invalid transitions remain visible drafts for review;
 action execution does not bypass template validation or commit automatically.
+
+App definition validation executes collection queries against the proposed document
+inventory and checks view/action references. Action callbacks execute only when
+invoked with a real event; their proposed edits go through ordinary validation.
+Offline validation of an edited app requires the collection source documents.

@@ -1,5 +1,5 @@
-import { expect, it } from 'vitest';
-import { isApp, appDocuments, applyAppEdit, field } from './apps';
+import { expect, it, vi } from 'vitest';
+import { isApp, appDocuments, applyAppEdit, field, evaluateApp } from './apps';
 import { emptyCache } from './cache';
 it('collections include local drafts and omit staged deletions with explicit missing metadata', () => {
   const cache = emptyCache('repo');
@@ -46,4 +46,36 @@ it('updates nested date bindings while preserving comments and rejecting stale d
   expect(updated).toContain('end: 2026-09-26');
   expect(updated).toContain('other: unchanged');
   expect(() => applyAppEdit(updated,edit)).toThrow('Task dates changed');
+});
+
+it('fresh page source overrides stale snapshot metadata and app classification', () => {
+  const cache = emptyCache('repo');
+  cache.paths = ['task.md'];
+  cache.validationSnapshot = {version:1,revision:'old',files:{},edges:[],documents:{'task.md':{
+    hash:'old',parsed:{frontmatter:{mdstore:'app',state:'inbox'},headings:[{level:1,text:'Old'}]}
+  }}} as unknown as NonNullable<typeof cache.validationSnapshot>;
+  cache.pages['task.md'] = {path:'task.md',exists:true,template:null,text:'---\nstate: ready\n---\n# Fresh\n'};
+  expect(appDocuments(cache).documents[0]).toMatchObject({title:'Fresh',frontmatter:{state:'ready'},text:cache.pages['task.md'].text});
+  cache.pages['task.md'].text = '---\nmdstore: app\n---\n# Planner\n';
+  expect(appDocuments(cache).documents).toEqual([]);
+});
+
+it('aborting app evaluation terminates its worker and clears its timeout', async () => {
+  const terminate = vi.fn();
+  const postMessage = vi.fn();
+  vi.useFakeTimers();
+  vi.stubGlobal('Worker', class { terminate = terminate; postMessage = postMessage; });
+  try {
+    const controller = new AbortController();
+    const pending = evaluateApp('app.md', '', [], undefined, undefined, controller.signal);
+    const rejected = expect(pending).rejects.toMatchObject({name:'AbortError'});
+    await Promise.resolve();
+    expect(postMessage).toHaveBeenCalledOnce();
+    controller.abort();
+    await rejected;
+    expect(terminate).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(evaluateApp('app.md', '', [], undefined, undefined, controller.signal)).rejects.toMatchObject({name:'AbortError'});
+    expect(postMessage).toHaveBeenCalledOnce();
+  } finally { vi.unstubAllGlobals(); vi.useRealTimers(); }
 });

@@ -11,16 +11,17 @@
   $effect(() => {
     const documents = inventory.documents, text = source, filename = path;
     let stale = false;
+    const controller = new AbortController();
     loading = true; error = '';
     const timer = setTimeout(async () => {
       if (!filename || !text) { result = undefined; loading = false; return; }
       try {
-        const value = await evaluateApp(filename, text, documents);
+        const value = await evaluateApp(filename, text, documents, undefined, undefined, controller.signal);
         if (!stale) { result = value; error = ''; }
       } catch (e) { if (!stale) { error = String(e); result = undefined; } }
       finally { if (!stale) loading = false; }
     }, 200);
-    return () => { stale = true; clearTimeout(timer); };
+    return () => { stale = true; clearTimeout(timer); controller.abort(); };
   });
   const view = $derived(result?.views.find(v => v.name === tab) || result?.views[0]);
   const rows = $derived((view ? result?.collections[view.collection] || [] : []).map(path => inventory.documents.find(d => d.path === path)).filter((d): d is AppDocument => !!d));

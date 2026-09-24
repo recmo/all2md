@@ -483,6 +483,30 @@ fn validate_with_baseline(
             }),
         }
     }
+    // App edits execute collection queries over the proposed inventory. Actions
+    // require an event and are checked when invoked, never with fabricated events.
+    let mut app_paths: Vec<_> = parsed.iter()
+        .filter(|(path, page)| page.frontmatter["mdstore"] == "app"
+            && baseline.as_ref().is_none_or(|base| base.pages.get(*path) != pages.get(*path)))
+        .map(|(path, _)| path).collect();
+    app_paths.sort();
+    if !app_paths.is_empty() {
+        let mut paths: Vec<_> = parsed.keys().filter(|path|
+            !crate::template::is_template(path) && parsed[*path].frontmatter["mdstore"] != "app"
+        ).collect();
+        paths.sort();
+        let documents: Vec<_> = paths.into_iter().map(|path| {
+            let page = &parsed[path];
+            serde_json::json!({"path": path,
+                "title": page.headings.iter().find(|h| h.level == 1).map(|h| h.text.as_str()).unwrap_or(path.rsplit('/').next().unwrap_or(path)),
+                "frontmatter": page.frontmatter, "template": templates.template_path(path), "text": pages[path]})
+        }).collect();
+        for path in app_paths {
+            if let Err(error) = crate::apps::validate_definition(path, &pages[path], documents.clone()) {
+                findings.push(Finding { source: None, path: path.clone(), message: format!("invalid app: {error}"), line: None });
+            }
+        }
+    }
     let resolver = TargetResolver::new(pages.keys());
     let mut resolved_links: HashMap<String, Vec<ResolvedLink>> = HashMap::new();
     for (path, page) in &parsed {

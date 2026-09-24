@@ -5,12 +5,16 @@ _actions = {}
 def collection(name, query):
     if name in _collections:
         fail("duplicate collection: " + name)
+    if type(query) != "function":
+        fail("collection query must be a function")
     _collections[name] = query
     return name
 
 def action(name, callback):
     if name in _actions:
         fail("duplicate action: " + name)
+    if type(callback) != "function":
+        fail("action callback must be a function")
     _actions[name] = callback
     return name
 

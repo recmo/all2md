@@ -183,6 +183,10 @@ impl Templates {
             .map_or(&self.default, |(_, entry)| &entry.template)
     }
 
+    pub(crate) fn template_path(&self, path: &str) -> Option<String> {
+        self.applicable(path).map(|(path, _)| format!("/{path}"))
+    }
+
     pub(crate) fn discovery(&self, path: &str) -> Option<serde_json::Value> {
         self.applicable(path).map(|(path, entry)| {
             serde_json::json!({
@@ -199,9 +203,6 @@ impl Templates {
         findings: &mut Vec<Finding>,
     ) {
         if page.frontmatter["mdstore"] == "app" {
-            if let Err(error) = crate::apps::validate_definition(path, text) {
-                findings.push(Finding { source: None, path: path.into(), message: format!("invalid app: {error}"), line: None });
-            }
             return;
         }
         let Some((template_path, entry)) = self.applicable(path) else {

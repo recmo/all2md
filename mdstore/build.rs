@@ -33,10 +33,13 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../webui/build"));
     println!("cargo:rerun-if-changed={}", root.display());
-    assert!(
-        root.join("index.html").is_file(),
-        "Build the SvelteKit SPA first: cd webui && pnpm install --frozen-lockfile && pnpm build"
-    );
+    if !root.join("index.html").is_file() {
+        assert!(env::var_os("MDSTORE_WEB_DIST").is_none(),
+            "MDSTORE_WEB_DIST must contain a built index.html");
+        fs::write(Path::new(&env::var("OUT_DIR").unwrap()).join("web_assets.rs"),
+            r#"const WEB_ASSETS: &[(&str, &str, &[u8])] = &[("/", "text/html; charset=utf-8", b"<!doctype html><title>mdstore</title><h1>mdstore</h1><p>Frontend assets are not installed. Build webui or use its development server.</p>")];"#).unwrap();
+        return;
+    }
     let mut assets = Vec::new();
     collect(&root, &root, &mut assets);
     assets.sort();

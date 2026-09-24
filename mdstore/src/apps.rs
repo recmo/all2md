@@ -14,18 +14,18 @@ pub(crate) struct Input {
 }
 
 pub(crate) fn evaluate(input: Input) -> Result<Json> {
-    run(input, false)
+    run(input)
 }
 
 pub(crate) fn is_app(text: &str) -> bool {
     crate::markdown::parse_frontmatter(text).is_ok_and(|(value, _, _)| value["mdstore"] == "app")
 }
 
-pub(crate) fn validate_definition(path: &str, source: &str) -> Result<()> {
-    run(Input { path: path.into(), source: source.into(), documents: vec![], action: None, event: None }, true).map(|_| ())
+pub(crate) fn validate_definition(path: &str, source: &str, documents: Vec<Json>) -> Result<()> {
+    evaluate(Input { path: path.into(), source: source.into(), documents, action: None, event: None }).map(|_| ())
 }
 
-fn run(input: Input, check: bool) -> Result<Json> {
+fn run(input: Input) -> Result<Json> {
     let source = crate::template_script::extract(&input.path, &input.source)?;
     let inputs = Module::with_temp_heap(|module| {
         let heap = module.heap();
@@ -47,9 +47,9 @@ fn run(input: Input, check: bool) -> Result<Json> {
             let ast = AstModule::parse(path, text, &Dialect::Standard).map_err(|e| anyhow::anyhow!("{e}"))?;
             eval.eval_module(ast, &globals).map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        let runner = module.get(if check { "mdstore_app_check" } else { "mdstore_app_run" }).context("missing app runner")?;
+        let runner = module.get("mdstore_app_run").context("missing app runner")?;
         let args = [documents, input.action.as_ref().map_or(starlark::values::Value::new_none(), |v| heap.alloc(v)), input.event.as_ref().map_or(starlark::values::Value::new_none(), |v| heap.alloc(v))];
-        let result = eval.eval_function(runner, if check { &[] } else { &args }, &[])
+        let result = eval.eval_function(runner, &args, &[])
             .map_err(|e| anyhow::anyhow!("{e}"))?.to_json()?;
         if result.len() > 8 * 1024 * 1024 { bail!("app result exceeds 8 MiB"); }
         Ok(serde_json::from_str(&result)?)

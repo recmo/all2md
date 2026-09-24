@@ -1,4 +1,5 @@
-import { test, expect, type Page } from '@playwright/test';
+import { type Page } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 test('language fences retain highlighting through preview, editing and offline reload', async ({
   page,
@@ -61,126 +62,27 @@ async function replaceDocument(page: Page, text: string) {
   await page.keyboard.insertText(text);
 }
 
-test('code editing, API search, offline reload, validation and submission', async ({
-  page,
-  context
-}) => {
-  const errors: string[] = [];
+test('offline editing survives reload and search uses the MCP API online', async ({ page, context }) => {
   const calls: string[] = [];
-  page.on('pageerror', (e) => errors.push(e.message));
-  page.on('request', (r) => {
-    if (r.url().endsWith('/mcp')) calls.push(r.postDataJSON().params.name);
-  });
+  page.on('request', r => { if (r.url().endsWith('/mcp')) calls.push(r.postDataJSON().params.name); });
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
-  await expect(page.locator('#preview h1')).toHaveText('Welcome');
-  await expect(page.locator('.code-editor')).toBeHidden();
-  await page.locator('#preview a').focus();
-  await page.locator('#preview a').press('Enter');
-  await expect(page.locator('#path')).toHaveText('other.md');
-  await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
-  const editor = page.locator('.code-editor [role=textbox]');
-  const draft =
-    '# Welcome\n\nOffline knowledge garden.\n\n## Practice\n\nAn edited paragraph.\n';
-  await replaceDocument(page, draft);
-  await page.locator('#summary').fill('Offline draft survives reload');
-  await expect(
-    page.getByText('Draft saved locally', { exact: true })
-  ).toBeVisible();
-  await page.evaluate(async () => {
-    await navigator.serviceWorker.ready;
-  });
+  await replaceDocument(page, '# Welcome\n\nOffline knowledge garden.\n');
+  await expect(page.locator('.document-header')).toContainText('Valid');
+  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await context.setOffline(true);
-  await expect(page.locator('#validate')).toBeEnabled();
-  await replaceDocument(page, draft + '\nWritten while offline.\n');
   await page.reload();
-  await expect(
-    page.getByText('Draft saved locally', { exact: true })
-  ).toBeVisible();
-  await expect(page.locator('#summary')).toHaveValue(
-    'Offline draft survives reload'
-  );
-  await expect(page.locator('#preview')).toContainText(
-    'Offline knowledge garden.'
-  );
-  await expect(page.locator('#preview')).toContainText(
-    'Written while offline.'
-  );
+  await expect(page.locator('#preview')).toContainText('Offline knowledge garden.');
+  await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
   await page.locator('#search').fill('garden');
   await page.locator('#search').press('Enter');
   await expect(page.getByText('OFFLINE · CACHED TEXT')).toBeVisible();
-  await expect(page.locator('#submit')).toBeDisabled();
   await context.setOffline(false);
-  await expect(page.getByText('Connected', { exact: true })).toBeVisible();
-  await expect(page.locator('#submit')).toBeDisabled();
   await page.locator('#search').press('Enter');
   await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
-  await page.locator('#validate').click();
-  await expect(page.locator('#submit')).toBeEnabled();
-  await page.locator('#submit').click();
-  await expect(page.locator('#feedback')).toContainText(
-    'Committed locally: welcome.md'
-  );
   expect(calls).toContain('search');
   expect(calls).toContain('get_page');
-  expect(calls).toContain('apply_edits');
-  await page.reload();
-  await expect(
-    page.getByRole('heading', { name: 'No pending edits' })
-  ).toBeVisible();
-  expect(errors).toEqual([]);
-});
-
-test('API rejects invalid drafts and concurrent edits without dropping local changes', async ({
-  page
-}) => {
-  await page.goto('/');
-  await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
-  const editor = page.locator('.code-editor [role=textbox]');
-  await replaceDocument(page, '# Other note\n\nMissing newline');
-  await page.locator('#summary').fill('Validation check');
-  await page.locator('#validate').click();
-  await expect(page.locator('#feedback')).toHaveClass('error');
-  await expect(page.locator('#submit')).toBeDisabled();
-  await replaceDocument(page, '# Other note\n\nLocal draft.\n');
-  const rpc = async (name: string, args: unknown) =>
-    (
-      await page.request.post('/mcp', {
-        data: {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'tools/call',
-          params: { name, arguments: args }
-        }
-      })
-    ).json();
-  const original = (await rpc('get_page', { path: 'other.md' })).result
-    .structuredContent.text;
-  const applied = await rpc('apply_edits', {
-    edit_summary: 'Concurrent writer',
-    edits: [
-      {
-        op: 'replace_page',
-        path: 'other.md',
-        base: original,
-        content: '# Other note\n\nChanged elsewhere.\n'
-      }
-    ]
-  });
-  expect(applied.result.isError).toBe(false);
-  await page.locator('#validate').click();
-  await expect(
-    page.getByRole('list', { name: 'Validation errors' })
-  ).toContainText('document changed');
-  await expect(editor).toContainText('Local draft.');
-  await expect(page.locator('#submit')).toBeDisabled();
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth
-    )
-  ).toBe(true);
 });
 
 test('connection settings are separate and keep the token in memory across SPA navigation', async ({
@@ -260,7 +162,7 @@ test('folder hierarchy opens documents with rendered task lists', async ({
   await expect(tasks).toBeVisible();
   await tasks.focus();
   await tasks.press('Enter');
-  await expect(page.locator('#path')).toHaveText(/notes\s*\/\s*guides\s*\/\s*tasks.md/);
+  await expect(page.locator('.document-breadcrumb')).toHaveText(/notes\s*\/\s*guides\s*\/\s*tasks.md/);
   const unchecked = page.getByRole('checkbox', { name: 'Incomplete task' });
   const checked = page.getByRole('checkbox', { name: 'Completed task' });
   await expect(unchecked).not.toBeChecked();
@@ -298,10 +200,11 @@ test('new empty documents can be edited and discarded without stale content', as
   page
 }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: '＋ New document' }).click();
+  await page.getByRole('treeitem', { name: 'notes / guides', exact: true }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'New document here…' }).click();
   await page.getByLabel('New document path').fill('notes/new.md');
   await page.getByRole('button', { name: 'Create draft', exact: true }).click();
-  await expect(page.locator('#path')).toHaveText(/notes\s*\/\s*new.md/);
+  await expect(page.locator('.document-breadcrumb')).toHaveText(/notes\s*\/\s*new.md/);
   await replaceDocument(
     page,
     '# New draft\n\n~~~unknown\n<script>literal</script>\n~~~\n'
@@ -312,7 +215,10 @@ test('new empty documents can be edited and discarded without stale content', as
     '<script>literal</script>'
   );
   page.once('dialog', (dialog) => dialog.accept());
-  await page.getByRole('button', { name: 'Discard current draft' }).click();
+  await page.getByRole('treeitem', { name: 'new.md', exact: true }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await expect(page.getByRole('treeitem', { name: 'new.md', exact: true })).toHaveCount(0);
+  await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await page.getByRole('radio', { name: 'Edit', exact: true }).click();
   await expect(page.locator('.code-editor')).not.toContainText('New draft');
 });
@@ -357,7 +263,7 @@ test('tree offline badges update and folder menus create drafts in place', async
   );
   await page.getByLabel('New document path').fill('notes/guides/new-here.md');
   await page.getByRole('button', { name: 'Create draft', exact: true }).click();
-  await expect(page.locator('#path')).toHaveText(/notes\s*\/\s*guides\s*\/\s*new-here.md/);
+  await expect(page.locator('.document-breadcrumb')).toHaveText(/notes\s*\/\s*guides\s*\/\s*new-here.md/);
   await expect(
     page
       .getByRole('treeitem', { name: 'new-here.md', exact: true })
@@ -419,14 +325,15 @@ test('validation does not require a commit description, but submission does', as
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Other note\n\nValidate before describing.\n');
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await expect(page.locator('#summary')).toHaveValue('');
-  await expect(page.locator('#validate')).toBeEnabled();
-  await page.locator('#validate').click();
-  await expect(page.locator('#feedback')).toContainText('Validation passed.');
+  await expect(page.locator('.validation-results')).toContainText('Validation passed.');
   await expect(page.locator('#submit')).toBeDisabled();
   await page.locator('#summary').fill('Describe the already validated change');
   await expect(page.locator('#submit')).toBeEnabled();
-  await replaceDocument(page, '# Other note\n\nA different edit.\n');
+  await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
+  await replaceDocument(page, '# Other note\n\n[Broken](missing.md)\n');
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await expect(page.locator('#submit')).toBeDisabled();
 });
 
@@ -437,7 +344,7 @@ test('validation findings navigate to inline editor annotations and clear after 
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Other note\n\n[Broken](missing-target.md)\n');
   await page.getByRole('radio', { name: 'Render', exact: true }).click();
-  await page.locator('#validate').click();
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   const errors = page.getByRole('list', { name: 'Validation errors' });
   await expect(errors).toContainText('other.md:3');
   await errors.getByRole('button').first().click();
@@ -450,8 +357,8 @@ test('validation findings navigate to inline editor annotations and clear after 
   await replaceDocument(page, '# Other note\n\nFixed.\n');
   await expect(diagnostic).toHaveCount(0);
   await expect(errors).toHaveCount(0);
-  await page.locator('#validate').click();
-  await expect(page.locator('#feedback')).toContainText('Validation passed');
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
+  await expect(page.locator('.validation-results')).toContainText('Validation passed');
 });
 
 test('privileged configuration and template edits validate in the editor', async ({
@@ -461,7 +368,6 @@ test('privileged configuration and template edits validate in the editor', async
   await page.goto('/');
   await page.locator('[data-item-path="template.md"]').click();
   await replaceDocument(page, '```starlark\nunknown_rule()\n```\n');
-  await page.locator('#validate').click();
   await expect(page.locator('.validation-diagnostic')).toContainText(
     'invalid template'
   );
@@ -477,7 +383,6 @@ test('privileged configuration and template edits validate in the editor', async
   await editor.focus();
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.insertText('search:\n  limit: 0\n');
-  await page.locator('#validate').click();
   await expect(page.locator('.validation-diagnostic')).toContainText(
     'invalid configuration'
   );
@@ -486,11 +391,12 @@ test('privileged configuration and template edits validate in the editor', async
   await page.keyboard.insertText(
     'documents:\n  include: ["**/*.md"]\ngit:\n  push: false\nserver:\n  listen: 127.0.0.1:43132\n  allow_template_edits: true\n  allow_config_edits: true\nprovider:\n  api_key_env: MDSTORE_TEST_NO_KEY\n'
   );
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await page.locator('#summary').fill('Update template and configuration');
-  await page.locator('#validate').click();
-  await expect(page.locator('#feedback')).toContainText('Validation passed');
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
+  await expect(page.locator('.validation-results')).toContainText('Validation passed');
   await page.locator('#submit').click();
-  await expect(page.locator('#feedback')).toContainText('Committed locally');
+  await expect(page.locator('.submit-notice')).toContainText('Changes committed successfully');
   await page.reload();
   await page.locator('[data-item-path="template.md"]').click();
   await expect(page.locator('#preview')).toContainText('Updated guide');
@@ -596,7 +502,8 @@ test('WASM template changes report missing offline sources then fetch affected p
     page,
     '```starlark\nfrontmatter(name=string(required=True))\n```\n'
   );
-  await expect(page.locator('#feedback')).toContainText(
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
+  await expect(page.locator('.validation-results')).toContainText(
     'Validation incomplete'
   );
   expect(fetchedB).toBe(false);

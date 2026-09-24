@@ -18,17 +18,20 @@ For development, run a daemon and `MDSTORE_URL=http://127.0.0.1:3131 pnpm dev`.
 The Vite development proxy forwards API calls to that daemon. `MDSTORE_URL` is a
 server-side development setting, not a browser-selectable destination.
 
-`pnpm test:browser` starts a disposable Git repository and the compiled debug
-daemon on port 43132. Install Playwright Chromium or set `CHROME_EXECUTABLE` to an
+`pnpm test:browser` starts a fresh disposable Git repository and compiled debug
+daemon for each test on port 43132. Install Playwright Chromium or set `CHROME_EXECUTABLE` to an
 installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 
 ## Data flow
 
 - Search, reads, and submissions call `/mcp` (`search`, `get_page`, `apply_edits`).
-- `/ui/documents` provides paths and a repository cache namespace.
-- `/ui/validate` accepts the same batch as `apply_edits`. Shared Rust validation
+- `/ui/documents` adapts public `Store::documents` for paths, permissions, and a
+  repository cache namespace.
+- `/ui/validate` adapts public `Store::validate_edits`, accepting the same batch
+  and using the same validation path as `apply_edits`. Shared Rust validation
   runs incrementally in a WASM worker while editing; the server validates again
-  before submission. `/ui/validation-snapshot` supplies validation metadata.
+  before submission. `/ui/validation-snapshot` adapts public
+  `Store::validation_snapshot` for validation metadata.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
   the editor stays mounted across view switches to preserve undo and selection.
   Markdown-it and DOMPurify render prose locally; Pierre File renders fenced and

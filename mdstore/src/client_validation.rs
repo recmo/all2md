@@ -196,9 +196,12 @@ fn check(input: ClientValidationInput) -> Result<ClientValidationResult, Vec<Fin
             ));
         }
     }
+    // App collection functions can inspect any document source. Request the
+    // baseline sources before evaluating an edited definition, even offline.
+    let app_changed = edited.iter().any(|path| after.get(path).is_some_and(|text| crate::apps::is_app(text)));
     let mut needs = Vec::new();
     for (path, doc) in &snapshot.documents {
-        if edited.contains(path) || templates.same_policy(&old_templates, path) {
+        if edited.contains(path) || (!app_changed && templates.same_policy(&old_templates, path)) {
             continue;
         }
         match input
@@ -285,14 +288,23 @@ mod tests {
     }
     #[test]
     fn app_definitions_beside_schema_are_validated_and_privileged() {
-        let (mut snapshot, _) = fixture();
+        let (mut snapshot, pages) = fixture();
         snapshot.files.insert("tasks/v1/template.md".into(), include_str!("../examples/tasks/v1/template.md").into());
         snapshot.files.insert("tasks/v1/rumdl.toml".into(), include_str!("../examples/tasks/v1/rumdl.toml").into());
         let source = include_str!("../examples/tasks/v1/app.md");
         let input = |snapshot, content: String| ClientValidationInput {
-            snapshot, sources: HashMap::new(),
+            snapshot, sources: pages.clone(),
             edits: vec![ClientEdit::CreatePage {path: "tasks/v1/planner.md".into(), content}],
         };
+        let mut incomplete = input(snapshot.clone(), source.into());
+        incomplete.sources.clear();
+        let incomplete = validate(incomplete);
+        assert!(!incomplete.valid);
+        assert_eq!(incomplete.needs.len(), 2);
+        let broken = "---\nmdstore: app\n---\n```starlark\ncollection('bad', lambda docs: [d.missing for d in docs])\n```\n";
+        let failure = validate(input(snapshot.clone(), broken.into()));
+        assert!(!failure.valid);
+        assert!(failure.findings.iter().any(|f| f.message.contains("missing")));
         let valid = validate(input(snapshot.clone(), source.into()));
         assert!(valid.valid, "{valid:?}");
         assert!(!validate(input(snapshot.clone(), source.replace("collection(\"tasks\", tasks)", "collection(\"other\", tasks)"))).valid);
