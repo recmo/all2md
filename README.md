@@ -18,6 +18,8 @@ Local-first tools that turn source material into auditable Markdown.
   durable Markdown with source metadata, assets, and synchronization safety.
 - [`mdstore`](mdstore/README.md) serves a Git-tracked Markdown corpus through
   schema-valid hashline edits and hybrid exact/vector/graph search.
+- [`webui`](webui/README.md) provides the offline-capable SvelteKit
+  workspace, editing, validation, and schema-driven app views for mdstore.
 
 Each project owns its runtime and dependencies. The repository shares only
 top-level build orchestration.

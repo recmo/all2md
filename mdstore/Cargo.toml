@@ -5,32 +5,56 @@ edition = "2024"
 license = "MIT"
 description = "Git-backed Markdown search and editing daemon"
 
+[features]
+default = ["server"]
+server = [
+    "dep:async-trait",
+    "dep:axum",
+    "dep:clap",
+    "dep:fs2",
+    "dep:fastrand",
+    "dep:parking_lot",
+    "dep:reqwest",
+    "dep:serde_cbor",
+    "dep:tempfile",
+    "dep:thiserror",
+    "dep:tokio",
+    "dep:tower-http",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+
+[[bin]]
+name = "mdstore"
+path = "src/main.rs"
+required-features = ["server"]
+
 [dependencies]
 toml = "1.1"
 rumdl = { version = "=0.2.75", default-features = false }
 anyhow = "1.0"
-async-trait = "0.1"
-axum = "0.8"
-clap = { version = "4.5", features = ["derive", "env"] }
-fs2 = "0.4"
-fastrand = "2.3"
+async-trait = { version = "0.1", optional = true }
+axum = { version = "0.8", optional = true }
+clap = { version = "4.5", features = ["derive", "env"], optional = true }
+fs2 = { version = "0.4", optional = true }
+fastrand = { version = "2.3", optional = true }
 globset = "0.4"
 jsonschema = { version = "0.33", default-features = false }
-parking_lot = "0.12"
+parking_lot = { version = "0.12", optional = true }
 pulldown-cmark = "0.13"
 regex = "1.11"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
-serde_cbor = "0.11"
+serde_cbor = { version = "0.11", optional = true }
 serde_json = "1.0"
 serde_yaml = "0.9"
 sha2 = "0.10"
-tempfile = "3.20"
-thiserror = "2.0"
-tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-tower-http = { version = "0.6", features = ["trace"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = { version = "3.20", optional = true }
+thiserror = { version = "2.0", optional = true }
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "signal", "sync", "time"], optional = true }
+tower-http = { version = "0.6", features = ["trace"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 starlark = "=0.14.2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 

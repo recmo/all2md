@@ -1378,14 +1378,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "mdstore-validation-wasm"
+name = "mdstore"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "getrandom 0.4.3",
  "globset",
  "jsonschema",
  "pulldown-cmark",
@@ -1397,6 +1394,16 @@ dependencies = [
  "sha2",
  "starlark",
  "toml",
+]
+
+[[package]]
+name = "mdstore-validation-wasm"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "mdstore",
  "wasm-bindgen",
 ]
 

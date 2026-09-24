@@ -1,5 +1,8 @@
 //! Embeds the prebuilt SvelteKit SPA in the daemon.
-use std::{env, fs, path::Path};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn collect(root: &Path, dir: &Path, output: &mut Vec<(String, String)>) {
     for entry in fs::read_dir(dir).expect("read built web assets") {
@@ -22,14 +25,20 @@ fn collect(root: &Path, dir: &Path, output: &mut Vec<(String, String)>) {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=web/build");
-    let root = Path::new("web/build");
+    if env::var_os("CARGO_FEATURE_SERVER").is_none() {
+        return;
+    }
+    println!("cargo:rerun-if-env-changed=MDSTORE_WEB_DIST");
+    let root = env::var_os("MDSTORE_WEB_DIST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../webui/build"));
+    println!("cargo:rerun-if-changed={}", root.display());
     assert!(
         root.join("index.html").is_file(),
-        "Build the SvelteKit SPA first: cd mdstore/web && pnpm install --frozen-lockfile && pnpm build"
+        "Build the SvelteKit SPA first: cd webui && pnpm install --frozen-lockfile && pnpm build"
     );
     let mut assets = Vec::new();
-    collect(root, root, &mut assets);
+    collect(&root, &root, &mut assets);
     assets.sort();
     let mut code = String::from("const WEB_ASSETS: &[(&str, &str, &[u8])] = &[\n");
     for (name, path) in assets {

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-const wasm = fileURLToPath(new URL('../../wasm/', import.meta.url));
+const wasm = fileURLToPath(new URL('../wasm/', import.meta.url));
 const out = fileURLToPath(new URL('../src/lib/wasm/', import.meta.url));
 execFileSync(
   'cargo',

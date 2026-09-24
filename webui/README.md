@@ -1,16 +1,17 @@
 # mdstore web workspace
 
 SvelteKit SPA with a static adapter, Pierre CodeView, markdown-it, and DOMPurify.
-The Rust daemon embeds the production build. There is no Node server in production.
+This sibling package owns the frontend source and tooling. Its `wasm/` crate links
+the `mdstore` library with server features disabled. The Rust daemon embeds this
+package's production build. There is no Node server in production.
 
 ```sh
 # Requires Rust with the wasm32-unknown-unknown target and wasm-bindgen-cli 0.2.121.
 pnpm install --frozen-lockfile
+pnpm build
 pnpm check
 pnpm test
-pnpm build
-cd ..
-cargo build
+cargo build --manifest-path ../mdstore/Cargo.toml
 ```
 
 For development, run a daemon and `MDSTORE_URL=http://127.0.0.1:3131 pnpm dev`.
@@ -61,3 +62,7 @@ remain visible together on mobile. See the daemon README for the app API.
 Submit shows diffs, validation, and reconciliation against server changes. A
 three-way merge automatically reconciles non-overlapping edits and presents
 conflicts for explicit resolution. Nothing is submitted automatically.
+
+The backend build reads `../webui/build` by default. Set
+`MDSTORE_WEB_DIST` to an absolute build directory when packaging separately; Nix
+passes the frontend derivation directly without copying it into the backend.

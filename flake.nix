@@ -218,16 +218,20 @@
         };
       mdstoreSourceFilter = path: type:
         nixpkgs.lib.cleanSourceFilter path type
-        && !(nixpkgs.lib.hasSuffix "/web/src/lib/wasm" (toString path))
+        && !(nixpkgs.lib.hasSuffix "/src/lib/wasm" (toString path))
         && !(builtins.elem (builtins.baseNameOf path) [ "target" "node_modules" ".svelte-kit" "build" "test-results" "playwright-report" ]);
       mkMdstoreWasm = mdSystem:
         let systemPkgs = nixpkgs.legacyPackages.${mdSystem};
         in systemPkgs.rustPlatform.buildRustPackage {
           pname = "mdstore-validation-wasm";
           version = "0.1.0";
-          src = nixpkgs.lib.cleanSourceWith { name = "source"; src = ./mdstore; filter = mdstoreSourceFilter; };
-          sourceRoot = "source/wasm";
-          cargoLock.lockFile = ./mdstore/wasm/Cargo.lock;
+          src = systemPkgs.runCommand "source" {} ''
+            mkdir -p $out/webui
+            cp -r ${nixpkgs.lib.cleanSourceWith { src = ./mdstore; filter = mdstoreSourceFilter; }} $out/mdstore
+            cp -r ${nixpkgs.lib.cleanSourceWith { src = ./webui/wasm; filter = mdstoreSourceFilter; }} $out/webui/wasm
+          '';
+          sourceRoot = "source/webui/wasm";
+          cargoLock.lockFile = ./webui/wasm/Cargo.lock;
           nativeBuildInputs = [ systemPkgs.wasm-bindgen-cli systemPkgs.llvmPackages.lld ];
           doCheck = false;
           buildPhase = ''
@@ -244,9 +248,9 @@
           systemPkgs = nixpkgs.legacyPackages.${mdSystem};
           pnpm = systemPkgs.pnpm_11;
         in systemPkgs.stdenvNoCC.mkDerivation (finalAttrs: {
-          pname = "mdstore-web";
+          pname = "webui";
           version = "0.1.0";
-          src = nixpkgs.lib.cleanSourceWith { src = ./mdstore/web; filter = mdstoreSourceFilter; };
+          src = nixpkgs.lib.cleanSourceWith { src = ./webui; filter = mdstoreSourceFilter; };
           pnpmDeps = systemPkgs.fetchPnpmDeps {
             inherit (finalAttrs) pname version src;
             inherit pnpm;
@@ -270,7 +274,7 @@
           pname = "mdstore";
           version = "0.1.0";
           src = nixpkgs.lib.cleanSourceWith { src = ./mdstore; filter = mdstoreSourceFilter; };
-          preBuild = "cp -r ${mkMdstoreWeb mdSystem} web/build";
+          MDSTORE_WEB_DIST = mkMdstoreWeb mdSystem;
           passthru.web = mkMdstoreWeb mdSystem;
           passthru.wasm = mkMdstoreWasm mdSystem;
           cargoLock.lockFile = ./mdstore/Cargo.lock;
@@ -306,7 +310,7 @@
             systemPkgs.pnpm_11
           ];
           shellHook = ''
-            echo "Run: pnpm --dir mdstore/web install --frozen-lockfile && pnpm --dir mdstore/web build && cargo test --manifest-path mdstore/Cargo.toml"
+            echo "Run: pnpm --dir webui install --frozen-lockfile && pnpm --dir webui build && cargo test --manifest-path mdstore/Cargo.toml"
           '';
         };
     in

@@ -42,9 +42,9 @@ writeFileSync(
 writeFileSync(join(root, 'reciprocal', 'a.md'), '[B](b.md)\n');
 writeFileSync(join(root, 'reciprocal', 'b.md'), '[A](a.md)\n');
 mkdirSync(join(root, 'tasks', 'v1', '2026', '09'), { recursive: true });
-writeFileSync(join(root, 'tasks/v1/app.md'), readFileSync(new URL('../../examples/tasks/v1/app.md', import.meta.url)));
-writeFileSync(join(root, 'tasks/v1/template.md'), readFileSync(new URL('../../examples/tasks/v1/template.md', import.meta.url)));
-writeFileSync(join(root, 'tasks/v1/rumdl.toml'), readFileSync(new URL('../../examples/tasks/v1/rumdl.toml', import.meta.url)));
+writeFileSync(join(root, 'tasks/v1/app.md'), readFileSync(new URL('../../mdstore/examples/tasks/v1/app.md', import.meta.url)));
+writeFileSync(join(root, 'tasks/v1/template.md'), readFileSync(new URL('../../mdstore/examples/tasks/v1/template.md', import.meta.url)));
+writeFileSync(join(root, 'tasks/v1/rumdl.toml'), readFileSync(new URL('../../mdstore/examples/tasks/v1/rumdl.toml', import.meta.url)));
 writeFileSync(join(root, 'tasks/v1/2026/09/23-001-plan.md'), '---\nstate: inbox\ntags: [demo]\nstart: 2026-09-23\nend: 2026-09-25\nassignee: Remco\neffort: 3\n---\n# Plan a project\n\n## Timeline\n\n- 2026-09-23T08:00:00Z — Captured.\n');
 writeFileSync(join(root, 'tasks/v1/2026/09/23-002-overlap.md'), '---\nstate: inbox\nstart: 2026-09-24\nend: 2026-09-26\ndepends_on: [tasks/v1/2026/09/23-001-plan.md]\nassignee: Remco\n---\n# Second overlapping task\n\n## Timeline\n\n- 2026-09-23T08:00:00Z — Captured.\n');
 for (const args of [
@@ -57,7 +57,7 @@ for (const args of [
 ])
   execFileSync('git', args, { cwd: root });
 const daemon = spawn(
-  fileURLToPath(new URL('../../target/debug/mdstore', import.meta.url)),
+  fileURLToPath(new URL('../../mdstore/target/debug/mdstore', import.meta.url)),
   ['--root', root, 'serve'],
   { stdio: 'inherit' }
 );

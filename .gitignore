@@ -11,12 +11,12 @@ result/
 !.mdstore/
 mdstore/target/
 
-mdstore/web/.svelte-kit/
-mdstore/web/build/
-mdstore/web/test-results/
-mdstore/web/playwright-report/
+webui/.svelte-kit/
+webui/build/
+webui/test-results/
+webui/playwright-report/
 
-mdstore/wasm/target/
-mdstore/web/src/lib/wasm/
+webui/wasm/target/
+webui/src/lib/wasm/
 
 .pnpm-store/

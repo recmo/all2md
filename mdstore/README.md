@@ -21,8 +21,8 @@ The daemon serves a SvelteKit SPA at its root URL. Build it before compiling Rus
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.121 --locked
-pnpm --dir mdstore/web install --frozen-lockfile
-pnpm --dir mdstore/web build
+pnpm --dir webui install --frozen-lockfile
+pnpm --dir webui build
 cargo build --manifest-path mdstore/Cargo.toml
 mdstore --root /path/to/brain serve
 ```
@@ -379,11 +379,11 @@ validation as the baseline.
 
 ### Client-side WASM validation
 
-The browser executes the same Rust validation source modules in a Web Worker,
+The browser executes the same Rust validation library in a Web Worker,
 including the Starlark interpreter, schema checks, Markdown rules, link resolution,
 and transition checks. `pnpm build` builds the WASM module and generated bindings
 before bundling the SPA; Nix builds it as a separate dependency. Generated binaries
-and bindings are not committed. Run `pnpm --dir mdstore/web build:wasm` before
+and bindings are not committed. Run `pnpm --dir webui build:wasm` before
 standalone frontend type checks in a fresh checkout.
 
 The authenticated `/ui/validation-snapshot` endpoint provides a versioned baseline

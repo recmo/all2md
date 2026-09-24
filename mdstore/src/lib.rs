@@ -1,26 +1,37 @@
 //! Git-backed Markdown storage, validation, indexing, and MCP services.
 
+#[cfg(feature = "server")]
 mod chunk;
 // Shared client entry points are exercised by WASM and native parity tests.
 #[allow(dead_code)]
 mod client_validation;
 mod config;
+#[cfg(feature = "server")]
 mod git;
+#[cfg(feature = "server")]
 mod hashline;
 mod markdown;
 mod markdown_lint;
+#[cfg(feature = "server")]
 mod mcp;
+#[cfg(feature = "server")]
 mod provider;
+#[cfg(feature = "server")]
 mod search;
+#[cfg(feature = "server")]
 mod sidecar;
+#[cfg(feature = "server")]
 mod store;
 mod structure;
 mod template;
 mod template_script;
+#[cfg(feature = "server")]
 mod web;
 
+#[cfg(feature = "server")]
 use std::path::Path;
 
+#[cfg(feature = "server")]
 use anyhow::Result;
 
 pub use config::{
@@ -28,20 +39,27 @@ pub use config::{
     RelationLinkSyntax, RelationRule, RelationSelector, SearchConfig, SectionListRule,
     ServerConfig,
 };
+#[cfg(feature = "server")]
 pub use git::PushState;
+#[cfg(feature = "server")]
 pub use hashline::{EditOperation, short_hash};
 pub use markdown::{Edge, Finding};
+#[cfg(feature = "server")]
 pub use mcp::{
     LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, serve, serve_listener, tool_names,
 };
+#[cfg(feature = "server")]
 pub use provider::{InputType, RerankResult, RetrievalProvider, ZeroEntropyProvider};
+#[cfg(feature = "server")]
 pub use search::{SearchResponse, SearchResult, VectorCoverage};
+#[cfg(feature = "server")]
 pub use store::{
     ApplyEditsRequest, ApplyEditsResponse, ApplyStatus, PageResponse, ReplicationStatus,
     StatusResponse, Store, ValidationError,
 };
 
 /// Loads and validates the configuration from the repository's committed `HEAD`.
+#[cfg(feature = "server")]
 pub fn load_repository_config(root: &Path) -> Result<Config> {
     let head = git::head(root)?;
     Config::from_yaml(&git::read_text(root, &head, "config.yaml")?)
@@ -49,3 +67,6 @@ pub fn load_repository_config(root: &Path) -> Result<Config> {
 
 #[allow(dead_code)] // Shared app evaluator is used by the WASM client and native parity tests.
 mod apps;
+
+/// Portable JSON entry points for browser and other library clients.
+pub mod client;
