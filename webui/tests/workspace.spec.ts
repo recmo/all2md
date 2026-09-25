@@ -96,7 +96,7 @@ test('connection settings are separate and keep the token in memory across SPA n
     page.getByRole('heading', { name: 'Settings', exact: true })
   ).toBeVisible();
   await page.getByLabel('Bearer token').fill('test-memory-token');
-  const listing = page.waitForRequest((r) => r.url().endsWith('/documents'));
+  const listing = page.waitForRequest((r) => r.url().endsWith('/mcp') && r.postDataJSON()?.params?.name === 'get_page' && r.postDataJSON()?.params?.arguments?.path === '/' && r.headers()['authorization'] === 'Bearer test-memory-token');
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Connected.' })).toBeVisible();
   expect((await listing).headers()['authorization']).toBe(
@@ -236,13 +236,13 @@ test('tree offline badges update and folder menus create drafts in place', async
     exact: true
   });
   await expect(
-    document.getByTitle('Not available offline — open or download to cache')
+    document.getByTitle('Available offline — cached copy, may differ from the server')
   ).toBeVisible();
   await expect(
     page
       .getByRole('treeitem', { name: 'notes / guides', exact: true })
       .getByTitle(
-        '0 of 1 documents available offline; 0 local drafts awaiting submission'
+        '1 of 1 documents available offline; 0 local drafts awaiting submission'
       )
   ).toBeVisible();
   await document.click();
@@ -464,6 +464,7 @@ test('WASM catches an unchanged document losing its reciprocal link without fetc
     await navigator.serviceWorker.ready;
   });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+  fetchedB = false; // Initial MCP traversal cached all published sources.
   await context.setOffline(true);
   await replaceDocument(page, '# Removed link\n');
   await expect
@@ -479,7 +480,7 @@ test('WASM catches an unchanged document losing its reciprocal link without fetc
   expect(fetchedB).toBe(false);
 });
 
-test('WASM template changes report missing offline sources then fetch affected pages', async ({
+test('WASM template changes validate the cached corpus offline', async ({
   page,
   context
 }) => {
@@ -500,21 +501,20 @@ test('WASM template changes report missing offline sources then fetch affected p
     await navigator.serviceWorker.ready;
   });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+  fetchedB = false; // Initial MCP traversal cached all published sources.
   await context.setOffline(true);
   await replaceDocument(
     page,
     '```starlark\nfrontmatter(name=string(required=True))\n```\n'
   );
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
-  await expect(page.locator('.validation-results')).toContainText(
-    'Validation incomplete'
-  );
+  await expect(page.locator('.validation-results')).toContainText('Validation failed');
   expect(fetchedB).toBe(false);
   await context.setOffline(false);
   await expect(
     page.getByRole('list', { name: 'Validation errors' })
   ).toContainText('reciprocal/b.md');
-  expect(fetchedB).toBe(true);
+  expect(fetchedB).toBe(false);
 });
 
 test('inline diagnostics remain visible until background validation replaces them', async ({
@@ -574,14 +574,14 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   const base = '# Other note\n\nKeep it simple.\n';
   const text = '# Other note\n\nKeep it simple.\n\n\nMore.\n';
-  const response = await page.request.post('/validate', {
-    data: {
-      edit_summary: 'Check rumdl',
-      edits: [{ op: 'replace_page', path: 'other.md', base, content: text }]
-    }
+  const response = await page.request.post('/mcp', {
+    data: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'apply_edits', arguments: {
+      edit_summary: 'Check rumdl', edits: [{ op: 'replace_page', path: 'other.md', base, content: text }]
+    } } }
   });
-  expect(response.status()).toBe(422);
-  const { findings } = await response.json();
+  const result = (await response.json()).result;
+  expect(result.isError).toBe(true);
+  const findings = result.structuredContent.validation_findings;
   expect(findings).toEqual([
     expect.objectContaining({
       path: 'other.md',
@@ -620,12 +620,6 @@ test('tree folders and moves persist offline and stage rewritten backlinks', asy
   });
   expect(staged.deletions['other.md']).toContain('# Other note');
   expect(staged.drafts['welcome.md'].text).toContain('(archive/other.md)');
-  const edits = [
-    ...Object.entries(staged.deletions).map(([path, base]) => ({ op: 'delete_page', path, base })),
-    ...Object.values(staged.drafts).map((d: any) => d.exists ? { op: 'replace_page', path: d.path, base: d.base, content: d.text } : { op: 'create_page', path: d.path, content: d.text })
-  ];
-  const validation = await page.request.post('/validate', { data: { edit_summary: 'Move with links', edits } });
-  expect(await validation.json()).toMatchObject({ valid: true });
   await expect(page.locator('.document-header')).toContainText('Valid');
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
@@ -752,9 +746,9 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   expect((await applied).postDataJSON().params.arguments.edits).toHaveLength(3);
   await expect(page.getByRole('status').filter({ hasText: 'Changes committed successfully.' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText('no staged changes');
-  const listing = await (await page.request.get('/documents')).json();
-  expect(listing.paths).toContain('welcome-submitted.md');
-  expect(listing.paths).not.toContain('welcome.md');
+  const listing = await directoryPaths(page, '/');
+  expect(listing).toContain('welcome-submitted.md');
+  expect(listing).not.toContain('welcome.md');
   const cache = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!)!));
   expect(cache.drafts).toEqual({});
   expect(cache.deletions).toEqual({});
@@ -807,8 +801,8 @@ test('file and folder deletion is staged, validated, undoable, and survives relo
   const cache = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!)!));
   expect(cache.deletions['notes/guides/tasks.md']).toContain('# Tasks');
   expect(cache.drafts['other.md'].text).toContain('Preserve this draft on undo.');
-  const listing = await (await page.request.get('/documents')).json();
-  expect(listing.paths).toContain('notes/guides/tasks.md');
+  const listing = await directoryPaths(page, 'notes/guides/');
+  expect(listing).toContain('notes/guides/tasks.md');
 });
 
 test('long tree names preserve badges and display validation and deletion states', async ({ page }) => {
@@ -1154,4 +1148,32 @@ test('Markdown frontmatter uses YAML highlighting without consuming later Markdo
   await expect(key).toBeVisible();
   await expect.poll(() => key.evaluate(el => getComputedStyle(el).color)).not.toBe(proseColor);
   await expect(starlark).toBeVisible();
+});
+
+async function directoryPaths(page: Page, path: string): Promise<string[]> {
+  const response = await page.request.post('/mcp', { data: {
+    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_page', arguments: { path } }
+  } });
+  const result = (await response.json()).result;
+  expect(result.isError).toBe(false);
+  return result.structuredContent.children.map((child: { path: string }) => child.path);
+}
+
+test('document selection changes remain incomplete locally but can be submitted', async ({ page }) => {
+  test.skip(!process.env.MDSTORE_TEST_ADMIN, 'Requires privileged test daemon');
+  await page.goto('/');
+  await page.locator('[data-item-path="config.yaml"]').click();
+  const source = await page.evaluate(() => {
+    const key = Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!;
+    return JSON.parse(localStorage.getItem(key)!).pages['config.yaml'].text as string;
+  });
+  // Adding an unused exclusion changes selection without changing the current corpus.
+  await replaceDocument(page, source.replace('documents:\n', 'documents:\n  exclude: ["unpublished/**"]\n'));
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
+  await expect(page.locator('.validation-results')).toContainText('Local validation incomplete');
+  await expect(page.locator('.validation-results')).not.toContainText('Validation passed');
+  await page.getByLabel('Description').fill('Exclude unpublished documents');
+  await expect(page.locator('#submit')).toBeEnabled();
+  await page.locator('#submit').click();
+  await expect(page.locator('.submit-notice')).toContainText('Changes committed successfully');
 });

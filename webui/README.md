@@ -28,13 +28,11 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 ## Data flow
 
 - Search, reads, and submissions call `/mcp` (`search`, `get_page`, `apply_edits`).
-- `/documents` adapts public `Store::documents` for paths, permissions, and a
-  repository cache namespace.
-- `/validate` adapts public `Store::validate_edits`, accepting the same batch
-  and using the same validation path as `apply_edits`. Shared Rust validation
-  runs incrementally in a WASM worker while editing; the server validates again
-  before submission. `/validation-snapshot` adapts public
-  `Store::validation_snapshot` for validation metadata.
+- `get_page` reads directories as well as files. Webui traverses `/`, reuses
+  cached sources with matching hashes, and retries if revisions change during
+  traversal. It builds its validation baseline locally in a WASM worker.
+- Shared Rust validation runs incrementally in WASM while editing. The server
+  independently validates every submission through `apply_edits`.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
   the editor stays mounted across view switches to preserve undo and selection.
   Markdown-it and DOMPurify render prose locally; Pierre File renders fenced and
@@ -42,7 +40,7 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
   Starlark uses Python coloring; Markdown frontmatter uses YAML coloring.
   Configuration and template editing follow the daemon permission settings.
   The service worker caches bundled language assets for offline rendering.
-- Visited documents, templates, draft bases, edits, and summaries are written to
+- Document sources, templates, draft bases, edits, and summaries are written to
   localStorage, scoped by origin and repository. “Make library available offline”
   caches every listed document. The service worker caches only the app shell.
 - Offline search is explicitly labelled cached-text search. Reconnecting refreshes
@@ -69,9 +67,8 @@ Submit shows diffs, validation, and reconciliation against server changes. A
 three-way merge automatically reconciles non-overlapping edits and presents
 conflicts for explicit resolution. Nothing is submitted automatically.
 
-For production, host `build/` with a static web server and reverse-proxy `/mcp`,
-`/documents`, `/validation-snapshot`, `/validate`, and `/health` to mdstore on the
-same origin. Keep authorization headers intact. Vite dev/preview provides that
+For production, host `build/` with a static web server and reverse-proxy `/mcp` and
+`/health` to mdstore on the same origin. Keep authorization headers intact. Vite dev/preview provides that
 proxy locally via `MDSTORE_URL`; preview is for local inspection.
 `nix build .#webui` produces static assets, independently of `.#mdstore`.
 
@@ -84,14 +81,14 @@ before bundling the SPA; Nix builds it as a separate dependency. Generated binar
 and bindings are not committed. Run `pnpm build:wasm` before
 standalone frontend type checks in a fresh checkout.
 
-The authenticated `/validation-snapshot` endpoint provides a versioned baseline
-with a Git revision, source hashes, parsed document facts, relation edges, and
-configuration/template sources. It does not include all document bodies. Ordinary
-edits validate against that baseline without fetching unchanged document source.
-Template changes request only affected missing sources and verify their hashes
-before using them. Offline results remain incomplete if those sources are absent.
-Changing document selection requires server validation because new globs can
-include tracked files absent from the client's inventory.
+Webui builds its own versioned baseline from ordinary `get_page` reads: source
+hashes, parsed document facts, relation edges, and configuration/template sources.
+The first connection downloads the published document inventory; subsequent
+refreshes reuse unchanged sources unless schema/configuration changes require
+refreshing template projections. Validation uses that cached baseline offline.
+When document-selection globs change, the current client marks local validation
+incomplete and permits submission for authoritative checks; it never labels
+those edits valid based on an incomplete inventory.
 
 The app caches the baseline, worker and WASM binary for offline use. Local results
 are advisory against the cached revision; submission always runs authoritative

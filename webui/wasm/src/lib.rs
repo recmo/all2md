@@ -1,4 +1,5 @@
 //! Browser-owned validation orchestration and Starlark app bindings.
+mod snapshot;
 mod client;
 mod client_validation;
 mod apps;
@@ -12,4 +13,9 @@ pub fn validate(input: &str) -> Result<String, JsValue> {
 #[wasm_bindgen]
 pub fn evaluate_app(input: &str) -> Result<String, JsValue> {
     client::evaluate_app(input).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn build_snapshot(input: &str) -> Result<String, JsValue> {
+    client::build_snapshot(input).map_err(|error| JsValue::from_str(&error.to_string()))
 }

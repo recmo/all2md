@@ -22,14 +22,6 @@ mod store;
 mod structure;
 mod template;
 mod template_script;
-#[cfg(feature = "server")]
-mod document_api;
-
-#[cfg(feature = "server")]
-use std::path::Path;
-
-#[cfg(feature = "server")]
-use anyhow::Result;
 
 pub use config::{
     ChunkConfig, Config, DateOrder, DocumentConfig, GitConfig, LinkConfig, ProviderConfig,
@@ -55,12 +47,5 @@ pub use store::{
     StatusResponse, Store, ValidationError,
 };
 
-/// Loads and validates the configuration from the repository's committed `HEAD`.
-#[cfg(feature = "server")]
-pub fn load_repository_config(root: &Path) -> Result<Config> {
-    let head = git::head(root)?;
-    Config::from_yaml(&git::read_text(root, &head, "config.yaml")?)
-}
-
-/// Reusable document parsing, schema validation, and snapshot types.
+/// Reusable document parsing and schema validation.
 pub mod validation;

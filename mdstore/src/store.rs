@@ -186,6 +186,10 @@ const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 #[derive(Debug, Clone, Serialize)]
 /// Hashline-rendered page or configuration resource.
 pub struct PageResponse {
+    /// Published Git revision shared by all fields in this response.
+    pub revision: String,
+    /// SHA-256 of exact source, absent for a missing page.
+    pub hash: Option<String>,
     /// Whether the requested file exists in the published tree.
     pub exists: bool,
     /// Applicable directory template, including guidance and hard rules.
@@ -375,40 +379,45 @@ impl Store {
             || config.server.bearer_token_env != self.startup_server.bearer_token_env
     }
 
-    /// Returns versioned baseline metadata for incremental validation clients.
-    pub fn validation_snapshot(&self) -> serde_json::Value {
+    /// Lists direct children of a directory in the published document tree.
+    /// Root is `/`; other directory paths must end with `/`.
+    pub fn get_directory(&self, path: &str) -> Result<serde_json::Value> {
+        let prefix = if path == "/" {
+            ""
+        } else {
+            let directory = path
+                .strip_suffix('/')
+                .context("directory path must end with /")?;
+            validate_repo_path(directory)?;
+            path
+        };
         let state = self.state.read();
-        serde_json::to_value(crate::validation::ValidationSnapshot {
-            version: crate::validation::SNAPSHOT_VERSION,
-            revision: state.head.clone(),
-            files: (*state.config_files).clone(),
-            documents: state
-                .pages
-                .iter()
-                .map(|(path, text)| {
-                    (
-                        path.clone(),
-                        crate::validation::SnapshotDocument {
-                            hash: crate::validation::source_hash(text),
-                            parsed: state.parsed[path].clone(),
-                        },
-                    )
-                })
-                .collect(),
-            edges: (*state.edges).clone(),
-        }).expect("validation snapshot is serializable")
-    }
-
-    /// Lists readable paths, repository identity, and edit permissions.
-    pub fn documents(&self) -> serde_json::Value {
-        let state = self.state.read();
-        let mut paths: Vec<_> = state
-            .pages
-            .keys()
-            .chain(state.config_files.keys())
-            .collect();
-        paths.sort();
-        serde_json::json!({"paths": paths, "allow_template_edits": state.config.server.allow_template_edits, "allow_config_edits": state.config.server.allow_config_edits, "restart_required": self.restart_required(&state.config), "repository": format!("{:x}", Sha256::digest(self.root.to_string_lossy().as_bytes()))})
+        let mut children = std::collections::BTreeMap::new();
+        for (file, text) in state.pages.iter().chain(state.config_files.iter()) {
+            let Some(relative) = file.strip_prefix(prefix) else {
+                continue;
+            };
+            if let Some((directory, _)) = relative.split_once('/') {
+                let child = format!("{prefix}{directory}/");
+                children.insert(
+                    child.clone(),
+                    serde_json::json!({"path": child, "kind": "directory"}),
+                );
+            } else {
+                children.insert(file.clone(), serde_json::json!({"path": file, "kind": "file", "hash": crate::validation::source_hash(text)}));
+            }
+        }
+        if !prefix.is_empty() && children.is_empty() {
+            bail!("directory not found: {path}");
+        }
+        Ok(serde_json::json!({
+            "path": path, "kind": "directory", "revision": state.head,
+            "repository": format!("{:x}", Sha256::digest(self.root.to_string_lossy().as_bytes())),
+            "children": children.into_values().collect::<Vec<_>>(),
+            "allow_template_edits": state.config.server.allow_template_edits,
+            "allow_config_edits": state.config.server.allow_config_edits,
+            "restart_required": self.restart_required(&state.config),
+        }))
     }
 
     /// Reads an exact page or configuration resource as hashlines.
@@ -418,6 +427,8 @@ impl Store {
         if let Some(text) = state.pages.get(path) {
             let page = state.parsed.get(path).context("page was not parsed")?;
             return Ok(PageResponse {
+                revision: state.head.clone(),
+                hash: Some(crate::validation::source_hash(text)),
                 exists: true,
                 template: state.templates.discovery(path),
                 path: path.into(),
@@ -436,6 +447,8 @@ impl Store {
             && let Some(text) = state.config_files.get(path)
         {
             return Ok(PageResponse {
+                revision: state.head.clone(),
+                hash: Some(crate::validation::source_hash(text)),
                 exists: true,
                 template: None,
                 path: path.into(),
@@ -453,6 +466,8 @@ impl Store {
                 ensure_paths_match_config(&state.config, [&path.to_owned()])?;
             }
             return Ok(PageResponse {
+                revision: state.head.clone(),
+                hash: None,
                 exists: false,
                 template: state.templates.discovery(path),
                 path: path.into(),
@@ -485,20 +500,7 @@ impl Store {
 
     /// Validates and commits one atomic hashline edit batch, then notifies replication.
     pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<ApplyEditsResponse> {
-        self.apply_inner(request, false)
-    }
-
-    /// Validates the same edit batch as apply_edits without committing it.
-    pub fn validate_edits(&self, request: &ApplyEditsRequest) -> Result<ApplyEditsResponse> {
-        self.apply_inner(request, true)
-    }
-
-    fn apply_inner(
-        &self,
-        request: &ApplyEditsRequest,
-        dry_run: bool,
-    ) -> Result<ApplyEditsResponse> {
-        if !dry_run && request.edit_summary.trim().is_empty() {
+        if request.edit_summary.trim().is_empty() {
             bail!("edit_summary must be non-empty");
         }
         if request.edits.is_empty() {
@@ -506,18 +508,12 @@ impl Store {
         }
         let digest = request_digest(request)?;
         let _lock = self.lock_repository()?;
-        if dry_run {
-            if git::head(&self.root)? != self.state.read().head {
-                bail!("repository changed; wait for synchronization before validating");
-            }
-        } else {
-            git::recover_worktree(&self.root)?;
-            self.refresh_external_commit()?;
-        }
-        if !dry_run && let Some(response) = self.read_receipt(&digest)? {
+        git::recover_worktree(&self.root)?;
+        self.refresh_external_commit()?;
+        if let Some(response) = self.read_receipt(&digest)? {
             return Ok(response);
         }
-        if !dry_run && let Some(response) = self.recover_pending(&digest)? {
+        if let Some(response) = self.recover_pending(&digest)? {
             return Ok(response);
         }
         if let Some(reason) = self.blocked.read().as_ref() {
@@ -668,15 +664,6 @@ impl Store {
                 .map_err(|findings| ValidationError { findings })?;
         }
         ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
-        if dry_run {
-            return Ok(ApplyEditsResponse {
-                status: ApplyStatus::Accepted,
-                restart_required: self.restart_required(&config),
-                push: self.current_push_state()?,
-                touched_paths: paths.into_iter().collect(),
-                fresh_hashlines: HashMap::new(),
-            });
-        }
         let provider = if config.provider != current.config.provider {
             let factory = self
                 .provider_factory

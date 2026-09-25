@@ -20,7 +20,7 @@ worker.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== worker.location.origin)
     return;
-  // Never cache API responses, authentication, or submit/validate operations.
+  // Never cache API responses, authentication, or submission operations.
   if (!ASSETS.includes(url.pathname)) return;
   event.respondWith(
     (async () => {

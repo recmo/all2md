@@ -1,8 +1,19 @@
 export type Page = {
   path: string;
+  revision?: string;
+  hash?: string | null;
   exists: boolean;
   text: string;
   template: { path: string; content: string; definition?: { frontmatter?: import("./markdown").PropertySchema } } | null;
+};
+export type Directory = {
+  path: string;
+  kind: 'directory';
+  revision: string;
+  repository: string;
+  children: { path: string; kind: 'file' | 'directory'; hash?: string }[];
+  allow_template_edits: boolean;
+  allow_config_edits: boolean;
 };
 export type Draft = Page & { base: string };
 export type EditRequest = {
@@ -100,17 +111,14 @@ export class Api {
   page(path: string) {
     return this.mcp<Page>('get_page', { path });
   }
+  directory(path = '/') {
+    return this.mcp<Directory>('get_page', { path });
+  }
   search(query: string, variants: string[]) {
     return this.mcp<{ results: SearchResult[]; degraded: string[] }>('search', {
       query,
       variants
     });
-  }
-  validate(request: EditRequest) {
-    return this.request<{ valid: boolean; restart_required?: boolean }>(
-      '/validate',
-      request
-    );
   }
   apply(request: EditRequest) {
     return this.mcp<{

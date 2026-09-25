@@ -1361,7 +1361,6 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
             "/mcp",
             serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
         ),
-        ("/cli", serde_json::json!({"command": "validate"})),
     ] {
         let response = client
             .post(format!("{base_url}{path}"))
@@ -1503,43 +1502,6 @@ async fn non_loopback_listener_requires_a_token() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("bearer token"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_status_uses_the_running_daemon() {
-    let repository = Repository::new();
-    let store = repository.store();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { serve_listener(listener, store, None).await.unwrap() });
-    fs::write(repository.root.join("alice.md"), "uncommitted local text\n").unwrap();
-    let root = repository.root.clone();
-    let output = tokio::task::spawn_blocking(move || {
-        Command::new(env!("CARGO_BIN_EXE_mdstore"))
-            .args([
-                "--root",
-                root.to_str().unwrap(),
-                "--daemon-url",
-                &format!("http://{address}"),
-                "status",
-            ])
-            .output()
-            .unwrap()
-    })
-    .await
-    .unwrap();
-    server.abort();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(status["pages"], 2);
-    assert_eq!(
-        fs::read_to_string(repository.root.join("alice.md")).unwrap(),
-        "uncommitted local text\n"
-    );
 }
 
 #[test]
@@ -3078,26 +3040,12 @@ fn nested_timeline_cannot_satisfy_the_task_transition_rule() {
 }
 
 #[tokio::test]
-async fn document_batches_validate_without_writes_and_submit_through_mcp() {
+async fn document_batches_validate_and_submit_through_mcp() {
     let repository = Repository::new();
     let store = repository.store();
     let (base_url, server) = start_daemon(store.clone(), None).await;
     let client = reqwest::Client::new();
     let initial_head = command(&repository.root, &["rev-parse", "HEAD"]);
-    let listing: serde_json::Value = client
-        .get(format!("{base_url}/documents"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(
-        listing["paths"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("alice.md"))
-    );
     let original = store.get_page("alice.md", None).unwrap().text.unwrap();
     assert_eq!(original, page("Alice"));
     assert!(
@@ -3111,14 +3059,6 @@ async fn document_batches_validate_without_writes_and_submit_through_mcp() {
     let batch = serde_json::json!({"edit_summary": "Web edit", "edits": [{"op": "replace_page", "path": "alice.md", "base": original, "content": changed}]});
     let mut without_summary = batch.clone();
     without_summary["edit_summary"] = serde_json::json!("");
-    let validation = client
-        .post(format!("{base_url}/validate"))
-        .header("origin", &base_url)
-        .json(&without_summary)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(validation.status(), StatusCode::OK);
     assert_eq!(
         command(&repository.root, &["rev-parse", "HEAD"]),
         initial_head
@@ -3145,14 +3085,9 @@ async fn document_batches_validate_without_writes_and_submit_through_mcp() {
         initial_head
     );
     let invalid = serde_json::json!({"edit_summary": "Invalid", "edits": [{"op": "replace_page", "path": "alice.md", "base": original, "content": "# Missing required name\n"}]});
-    let rejected = client
-        .post(format!("{base_url}/validate"))
-        .json(&invalid)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(rejected.json::<serde_json::Value>().await.unwrap()["findings"].is_array());
+    let invalid_request: ApplyEditsRequest = serde_json::from_value(invalid).unwrap();
+    let rejected = store.apply_edits(&invalid_request).unwrap_err();
+    assert!(rejected.downcast_ref::<mdstore::ValidationError>().is_some());
     let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "apply_edits", "arguments": batch}});
     for _ in 0..2 {
         let result: serde_json::Value = client
@@ -3177,16 +3112,6 @@ async fn document_batches_validate_without_writes_and_submit_through_mcp() {
     );
     let mut stale = batch;
     stale["edit_summary"] = serde_json::json!("Stale overwrite");
-    assert_eq!(
-        client
-            .post(format!("{base_url}/validate"))
-            .json(&stale)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
     let stale_call = serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"apply_edits", "arguments":stale}});
     let rejected: serde_json::Value = client
         .post(format!("{base_url}/mcp"))
@@ -3226,7 +3151,7 @@ async fn private_proxy_host_is_explicitly_allowed() {
     );
     let (base_url, server) = start_daemon(repository.store(), None).await;
     let client = reqwest::Client::new();
-    for path in ["/documents", "/validation-snapshot"] {
+    for path in ["/health"] {
         let response = client
             .get(format!("{base_url}{path}"))
             .header("host", "demo.example.ts.net")
@@ -3241,7 +3166,7 @@ async fn private_proxy_host_is_explicitly_allowed() {
         ("demo.example.ts.net", "https://evil.example"),
     ] {
         let response = client
-            .get(format!("{base_url}/documents"))
+            .get(format!("{base_url}/health"))
             .header("host", host)
             .header("origin", origin)
             .send()
@@ -3266,7 +3191,7 @@ async fn document_api_auth_and_origin_boundaries() {
     let client = reqwest::Client::new();
     let shell = client.get(format!("{base_url}/")).bearer_auth("secret").send().await.unwrap();
     assert_eq!(shell.status(), StatusCode::NOT_FOUND);
-    for path in ["/documents", "/validation-snapshot", "/health"] {
+    for path in ["/health"] {
         assert_eq!(
             client
                 .get(format!("{base_url}{path}"))
@@ -3299,7 +3224,7 @@ async fn document_api_auth_and_origin_boundaries() {
             StatusCode::FORBIDDEN
         );
     }
-    for path in ["/validate", "/mcp"] {
+    for path in ["/mcp"] {
         assert_eq!(
             client
                 .post(format!("{base_url}{path}"))
@@ -3317,7 +3242,7 @@ async fn document_api_auth_and_origin_boundaries() {
     let (base_url, server) = start_daemon(store, None).await;
     assert_eq!(
         client
-            .get(format!("{base_url}/documents"))
+            .get(format!("{base_url}/health"))
             .header("host", "evil.example")
             .send()
             .await
@@ -3327,7 +3252,7 @@ async fn document_api_auth_and_origin_boundaries() {
     );
     assert_eq!(
         client
-            .get(format!("{base_url}/documents"))
+            .get(format!("{base_url}/health"))
             .header("sec-fetch-site", "cross-site")
             .send()
             .await
@@ -3395,8 +3320,6 @@ async fn privileged_policy_edits_validate_before_publication() {
         &["commit", "-qm", "Enable policy editing"],
     );
     let store = repository.store();
-    let (url, server) = start_daemon(store.clone(), None).await;
-    let client = reqwest::Client::new();
     let initial_head = command(&repository.root, &["rev-parse", "HEAD"]);
     let template = profile_template().to_owned();
     let replace = |path: &str, base: &str, content: &str| EditOperation::ReplacePage {
@@ -3425,13 +3348,6 @@ async fn privileged_policy_edits_validate_before_publication() {
             edit_summary: "Invalid policy".into(),
             edits: vec![edit],
         };
-        let response = client
-            .post(format!("{url}/validate"))
-            .json(&request)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert!(store.apply_edits(&request).is_err());
         assert_eq!(
             command(&repository.root, &["rev-parse", "HEAD"]),
@@ -3468,13 +3384,6 @@ async fn privileged_policy_edits_validate_before_publication() {
             replace("config.yaml", &config, &config_next),
         ],
     };
-    let response = client
-        .post(format!("{url}/validate"))
-        .json(&request)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         command(&repository.root, &["rev-parse", "HEAD"]),
         initial_head
@@ -3499,7 +3408,6 @@ async fn privileged_policy_edits_validate_before_publication() {
         )],
     };
     assert!(store.apply_edits(&request).unwrap().restart_required);
-    server.abort();
 }
 
 #[test]
@@ -3577,4 +3485,36 @@ fn document_markers_do_not_bypass_schema_rules() {
         edits: vec![EditOperation::CreatePage { path: "tasks/v1/app.md".into(),
             content: "---\nmdstore: app\n---\n# An ordinary document\n".into() }] };
     assert!(store.apply_edits(&request).is_err());
+}
+
+#[tokio::test]
+async fn mcp_directory_reads_share_file_revisions_and_replace_auxiliary_routes() {
+    let repository = Repository::new();
+    fs::create_dir_all(repository.root.join("notes/nested")).unwrap();
+    fs::write(repository.root.join("notes/nested/carol.md"), page("Carol")).unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "Nested page"]);
+    let store = repository.store();
+    let (url, server) = start_daemon(store.clone(), None).await;
+    let client = reqwest::Client::new();
+    for path in ["/", "notes/", "notes/nested/"] {
+        let response: serde_json::Value = client.post(format!("{url}/mcp"))
+            .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"get_page", "arguments":{"path":path}}}))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let directory = &response["result"]["structuredContent"];
+        assert_eq!(directory["kind"], "directory");
+        assert_eq!(directory["revision"], store.get_page("alice.md", None).unwrap().revision);
+        let expected = match path { "/" => "notes/", "notes/" => "notes/nested/", _ => "notes/nested/carol.md" };
+        assert!(directory["children"].as_array().unwrap().iter().any(|entry| entry["path"] == expected));
+        if path == "notes/nested/" {
+            assert_eq!(directory["children"][0]["hash"], store.get_page(expected, None).unwrap().hash.unwrap());
+        }
+    }
+    for path in ["../", "/notes/", "missing/"] { assert!(store.get_directory(path).is_err()); }
+    for path in ["/documents", "/validation-snapshot", "/validate", "/cli"] {
+        assert_eq!(client.post(format!("{url}{path}")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(client.get(format!("{url}{path}")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    }
+    server.abort();
 }

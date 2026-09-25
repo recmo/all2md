@@ -19,7 +19,7 @@ let nextId = 0;
 const pending = new Map<
   number,
   {
-    resolve: (result: LocalValidationResult) => void;
+    resolve: (result: unknown) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }
@@ -40,6 +40,19 @@ export function validateLocally(
   request: EditRequest,
   sources: Record<string, string>
 ): Promise<LocalValidationResult> {
+  return runWorker<LocalValidationResult>('validate', {
+    snapshot,
+    edits: request.edits,
+    sources
+  });
+}
+export function buildSnapshot(
+  revision: string,
+  sources: Record<string, string>
+) {
+  return runWorker<ValidationSnapshot>('build_snapshot', { revision, sources });
+}
+function runWorker<T>(operation: string, input: unknown): Promise<T> {
   if (!worker) {
     worker = new Worker(new URL('./validation.worker.ts', import.meta.url), {
       type: 'module'
@@ -55,14 +68,19 @@ export function validateLocally(
     worker.onerror = () => disposeValidation();
   }
   const id = ++nextId;
-  return new Promise((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => disposeValidation(), 15000);
-    pending.set(id, { resolve, reject, timer });
+    pending.set(id, {
+      resolve: (result) => resolve(result as T),
+      reject,
+      timer
+    });
     try {
       worker!.postMessage({
         id,
         wasmUrl,
-        input: { snapshot, edits: request.edits, sources }
+        operation,
+        input
       });
     } catch (error) {
       clearTimeout(timer);

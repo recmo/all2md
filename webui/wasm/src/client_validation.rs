@@ -1,6 +1,7 @@
 //! Portable validation of edits over a server-validated, source-light baseline.
 use mdstore::validation::{self as markdown, Config, Finding, Templates,
-     ValidationSnapshot, SNAPSHOT_VERSION, source_hash};
+     source_hash};
+use crate::snapshot::{ValidationSnapshot, SNAPSHOT_VERSION};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -249,7 +250,7 @@ fn check(input: ClientValidationInput) -> Result<ClientValidationResult, Vec<Fin
 
 #[cfg(test)]
 mod tests {
-    use mdstore::validation::SnapshotDocument;
+    use crate::snapshot::SnapshotDocument;
     use super::*;
     fn fixture() -> (ValidationSnapshot, HashMap<String, String>) {
         let files = HashMap::from([

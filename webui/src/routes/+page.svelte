@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { readInventory } from "$lib/inventory";
+  import { buildSnapshot } from "$lib/localValidation";
   import { onMount, tick } from 'svelte';
   import { navigationDrawer } from '$lib/navigationDrawer';
   let mobile = $state(false);
@@ -51,8 +53,7 @@
   } from '$lib/cache';
   import {
     validateLocally,
-    disposeValidation,
-    type ValidationSnapshot
+    disposeValidation
   } from '$lib/localValidation';
   import { markdownView } from '$lib/markdownView';
   import CodeEditor from '$lib/CodeEditor.svelte';
@@ -111,6 +112,7 @@
     validationVersion++;
     validating = false;
     validated = '';
+    submissionOnly = '';
     if (!ready) return;
     message('Changes saved locally. Waiting to validate…');
     const scheduledVersion = validationVersion;
@@ -175,11 +177,18 @@
       );
     }
   }
+  let baselineVersion = 0;
   async function refreshValidationSnapshot() {
-    const snapshot = await api.request<ValidationSnapshot>(
-      '/validation-snapshot'
-    );
-    cache = { ...cache, validationSnapshot: snapshot };
+    const version = ++baselineVersion;
+    const inventory = await readInventory(api, cache.pages);
+    if (inventory.root.repository !== cache.repository) throw Error('Repository changed. Reconnect before validating.');
+    const snapshot = cache.validationSnapshot?.revision === inventory.root.revision
+      ? cache.validationSnapshot
+      : await buildSnapshot(inventory.root.revision, Object.fromEntries(Object.entries(inventory.pages).map(([path, page]) => [path, page.text])));
+    if (version !== baselineVersion || inventory.root.repository !== cache.repository) return;
+    allowTemplateEdits = inventory.root.allow_template_edits;
+    allowConfigEdits = inventory.root.allow_config_edits;
+    cache = { ...cache, allowTemplateEdits, allowConfigEdits, paths: inventory.paths, pages: inventory.pages, validationSnapshot: snapshot };
     persist();
   }
   let reconciling = $state(false);
@@ -248,12 +257,7 @@
     } finally { busy = false; }
   }
   async function refresh() {
-    const listing = await api.request<{
-      repository: string;
-      paths: string[];
-      allow_template_edits?: boolean;
-      allow_config_edits?: boolean;
-    }>('/documents');
+    const listing = await api.directory();
     allowTemplateEdits = listing.allow_template_edits === true;
     allowConfigEdits = listing.allow_config_edits === true;
     const changed = cache.repository !== listing.repository;
@@ -264,7 +268,6 @@
     }
     cache = {
       ...cache,
-      paths: listing.paths,
       allowTemplateEdits,
       allowConfigEdits
     };
@@ -389,6 +392,7 @@
     const version = ++validationVersion;
     const checkedSignature = signature;
     validated = '';
+    submissionOnly = '';
     // Keep the last completed diagnostics until this run has a replacement.
     validating = true;
     message('Validating locally…');
@@ -397,11 +401,8 @@
       const snapshot = cache.validationSnapshot;
       let validation: { valid: boolean; restart_required?: boolean };
       if (!snapshot) {
-        if (!online) {
-          message('Connect once to download the validation baseline.');
-          return;
-        }
-        validation = await api.validate(request);
+        message('Connect once to build the local validation baseline.');
+        return;
       } else {
         const sources = Object.fromEntries(
           Object.entries(cache.pages).map(([path, page]) => [path, page.text])
@@ -433,11 +434,10 @@
           return;
         }
         if (result.server_required) {
-          if (!online) {
-            message(`Validation incomplete: ${result.server_required}`);
-            return;
-          }
-          validation = await api.validate(request);
+          findings = result.findings;
+          submissionOnly = checkedSignature;
+          message(`Local validation incomplete: ${result.server_required} Submission will run all server checks.`);
+          return;
         } else {
           if (result.findings.length)
             throw new ApiError('Validation failed.', 422, result.findings);
@@ -468,6 +468,7 @@
   }
   let submitNotice = $state('');
   let submitError = $state('');
+  let submissionOnly = $state('');
   const canSubmit = $derived(
     draftCount > 0 &&
       !conflictPaths.length &&
@@ -477,7 +478,7 @@
       saved &&
       !busy &&
       !validating &&
-      validated === signature
+      (validated === signature || submissionOnly === signature)
   );
   function describe(summary: string) {
     cache = { ...cache, summary };

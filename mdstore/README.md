@@ -17,7 +17,7 @@ directory.
 ## Clients
 
 The daemon serves document APIs; it does not host a UI or interpret app definitions.
-Use the CLI/MCP directly or run the separate [web interface](../webui/README.md).
+Use MCP directly or run the separate [web interface](../webui/README.md).
 `cargo build --manifest-path mdstore/Cargo.toml` needs only Rust dependencies.
 
 
@@ -197,7 +197,7 @@ and every 30 seconds while healthy. Failures retry with exponential backoff from
 1 second to a 5-minute ceiling, even if no further edits arrive. The existing
 `git.push_timeout_seconds` bounds each network operation. Network failures are
 recorded in status and do not block local writes. `git.push: false` disables the
-worker. `mdstore push` explicitly attempts one synchronization immediately.
+worker.
 
 The worker fetches the configured branch into a private ref. A fast-forward
 candidate's complete tree, configuration, templates, and sidecar ignore rules
@@ -224,24 +224,20 @@ the resolved fetch URL, push URL, and destination branch. Changing the destinati
 invalidates the previous progress report; pending commits are reconstructed from
 destination-specific Git acknowledgements, never inferred from an old upstream. Replication metadata is private Git state.
 
-## CLI
-
-Run `serve` first. Every other command is an HTTP client of that daemon, using
-`server.listen` and `server.bearer_token_env` from the repository configuration.
-Use global `--daemon-url` or `MDSTORE_URL` when the daemon was started at an
-overridden address.
+## Running the daemon
 
 ```sh
-mdstore --root /path/to/brain validate
 mdstore --root /path/to/brain serve
-mdstore --root /path/to/brain search "query" --variant "caller expansion"
-mdstore --root /path/to/brain get people/alice.md
-mdstore --root /path/to/brain get config.yaml
-mdstore --root /path/to/brain apply --file edits.json
-mdstore --root /path/to/brain reindex
-mdstore --root /path/to/brain status
-mdstore --root /path/to/brain push
 ```
+
+The daemon exposes `/mcp` for document operations and `/health` for operational
+status. `get_page` accepts `/` or a directory path ending in `/` to list direct
+children of the published document tree. Directory reads include permissions,
+repository identity, and the Git revision; file reads include the same revision
+and an exact source hash. Empty directories are not persisted by Git.
+Clients can traverse directories and check revisions to obtain a consistent
+inventory. Client-specific caches, validation baselines, and previews are built
+by clients. `apply_edits` always validates changes before committing.
 
 An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
 32 hexadecimal characters (128 bits of SHA-256) and include trailing whitespace:
@@ -288,7 +284,7 @@ server:
 
 These permissions apply to every caller accepted by this server's bearer-token
 check (or local callers when authentication is disabled). The UI discovers them
-from `/documents`. Root configuration cannot be deleted. Template changes
+from root-directory `get_page` reads. Root configuration cannot be deleted. Template changes
 compile the proposed Starlark and validate the entire proposed corpus; documents
 can be updated in the same atomic batch to satisfy new rules. Transition checks
 from both the old and proposed templates remain enforced. Configuration changes
@@ -298,7 +294,7 @@ running listener and authentication remain active until the daemon is restarted.
 
 ### Incremental validation
 
-API validation and edit submission reuse the daemon's last validated snapshot.
+Edit submission reuses the daemon's last validated snapshot.
 Unchanged documents retain their parsed content and authored relation edges.
 Content and template checks run for edited documents and documents whose nearest
 template changed, including changes to template inheritance. Existing transition
@@ -314,13 +310,8 @@ validation as the baseline.
 ### Portable validation
 
 The `mdstore::validation` library API exposes parsing, compiled templates, full and
-incremental corpus validation, and versioned snapshot types without server features.
+incremental corpus validation without server features.
 Independent clients can link it with `default-features = false`.
-
-Authenticated `/documents` returns paths, repository identity, and edit permissions.
-`/validation-snapshot` returns the validated revision's parsed facts and schema
-resources. `/validate` accepts the same edit batch as MCP `apply_edits` and validates
-without committing. All endpoints use the same Store authority and authorization.
 
 Templates may declare `scope(exclude=["overview.md"])`. Patterns are relative to
 the template directory. Excluded documents inherit the nearest matching parent
