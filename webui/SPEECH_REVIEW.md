@@ -67,6 +67,40 @@ outputs are not disposable merely because they can theoretically be rebuilt.
 Persist published voiceprint artifacts needed by review as versioned LFS assets,
 associated with the same publication as their transcript.
 
+### Cross-meeting speaker references
+
+Workers may use published voiceprints from other authorized meetings to assist
+participant identification. Assign each job an immutable reference manifest
+containing artifact content hashes, embedding model/preprocessing versions, and
+the revision of the human-confirmed speaker-to-person assignments. Use stable
+person-document identities, not display names, to associate speakers across
+meetings. Only compare compatible embeddings. An unconfirmed automatic match
+must not become trusted reference evidence for later meetings; return uncertain
+matches as suggestions and allow an unknown speaker.
+
+Reference artifacts are additional declared job inputs. Extend the job's scoped
+read capability to its authorized reference set, without granting unrestricted
+repository access or requiring downloads of the other recordings. Workers can
+cache these immutable artifacts by content hash. Keep reference selection within
+the configured authorization boundary; cached bytes do not confer permission to
+use a reference in a different job.
+
+Record the exact reference manifest and matching recipe in provenance and in
+the identification-stage fingerprint. Freeze the reference set when dispatching
+an attempt so concurrent publications do not change its inputs mid-run. Exclude
+the current recording's derived outputs from its own reference set. Keep matching
+separate from expensive audio inference where possible: updated identities or
+reference voiceprints should allow rematching cached embeddings, not force
+retranscription. Validate confirmed assignments again before publishing an
+identification result if its reference evidence has been corrected or revoked.
+
+Adding a new meeting must not automatically regenerate every older meeting and
+create a feedback loop. Initially, use current references for new or explicitly
+requested identification jobs. Corrections to evidence used by an existing
+result should mark its identification stale and schedule only the affected
+matching work. Exact selection and matching policy belong to the speech recipe,
+not to mdstore's generic job scheduler.
+
 ## Derived documents are persistent, read-only store members
 
 Commit each successfully published derived Markdown document to ordinary Git.
