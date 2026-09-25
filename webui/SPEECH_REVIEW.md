@@ -5,7 +5,9 @@ Status: draft design; the integration described here is not implemented.
 Accepted decisions: use Git LFS for audio/video, commit published derived
 documents to Git, and enforce their read-only status in mdstore itself. Store
 authored review guidance in `recording.md` frontmatter, not a separate hint
-sidecar. Let the target schema exempt its documents from authored backlinks.
+sidecar. Modify speech2md to consume that format directly, without legacy hint
+file support or a translation layer. Let the target schema exempt its documents
+from authored backlinks.
 
 Bring speech-review into webui while keeping mdstore a client-agnostic document
 server. Recordings belong to the managed repository, transcripts are derived
@@ -16,6 +18,8 @@ run on an intermittently available MacBook without blocking browsing or edits.
 
 - `speech-review` writes adjacent `.hint.yaml` files, including speaker ranges,
   hotwords, metadata, and localized corrections. It does not edit transcripts.
+  Replace this sidecar format with recording-document frontmatter as part of the
+  integration; the existing format is not a backward-compatibility requirement.
 - `speech2md` already supports Meeting Capture manifests and multiple tracks,
   verifies source checksums, and uses MLX for MOSS on Apple Silicon.
 - Transcript timing comments and centisecond offsets are a playback contract.
@@ -203,11 +207,14 @@ person references. Source references must resolve to managed assets/manifests,
 not arbitrary worker filesystem paths. The example preserves existing hint
 range and correction semantics; precise field declarations belong in the schema.
 
-The worker adapter projects the relevant frontmatter into a temporary
-`.hint.yaml` for the existing speech2md pipeline. That sidecar is an execution
-detail, not a second authored source in mdstore. Preserve speech2md's standalone
-hint-file support. Import existing sidecars into recording documents without
-silently dropping fields; after import, the recording document is authoritative.
+Modify speech2md to read the recording Markdown document directly. Its
+frontmatter is the sole authored source of processing guidance, with the body
+reserved for human notes. Share the same loader between standalone speech2md and
+worker execution; do not generate intermediate `.hint.yaml` files. Remove legacy
+sidecar discovery, loading, CLI options, documentation, and tests rather than
+maintaining two input formats or fallback behavior. Update fixtures and examples
+to the recording-document format. Existing data conversion, if needed, is a
+separate one-time operation, not a compatibility path in the pipeline.
 
 Render a dedicated Svelte review component for transcript/recording metadata.
 Reuse webui navigation, staged changes, validation, submission, and permissions.
@@ -254,12 +261,14 @@ this one setting.
    ordinary write paths reject changes, including ownership-removal batches and
    backlink rewrites. Verify protection survives a clone and queue rebuild, and
    invalid worker results cannot replace a valid publication.
-3. Add a speech2md worker adapter. Exercise a small fixture end to end through
+3. Update speech2md to consume recording documents directly and add a worker
+   adapter. Exercise a small fixture end to end through
    upload, claim, transcription, validated publication, and hint regeneration.
    Test cache reuse and a MacBook worker disconnecting before completion.
 4. Port the review interface with playback and staged recording-frontmatter edits.
-   Test timing, multi-track selection, correction persistence, sidecar import,
-   worker hint projection, and mobile playback. Verify that editing human notes
+   Test timing, multi-track selection, correction persistence, direct recording
+   document loading in standalone and worker execution, and mobile playback.
+   Verify that editing human notes
    or changing YAML formatting does not enqueue transcription, while changing
    consumed guidance does. Test target backlink exemptions and incoming-edge
    revalidation in both server and WASM paths.
