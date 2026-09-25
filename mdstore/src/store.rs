@@ -31,6 +31,7 @@ use crate::{
 /// Daemon-owned coherent view of one Git-backed Markdown repository.
 pub struct Store {
     root: PathBuf,
+    startup_server: crate::config::ServerConfig,
     state: RwLock<Arc<StoreState>>,
     provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     reindex_lock: tokio::sync::Mutex<()>,
@@ -104,6 +105,8 @@ pub struct ApplyEditsResponse {
     pub touched_paths: Vec<String>,
     /// Current hashline windows for changed regions.
     pub fresh_hashlines: HashMap<String, String>,
+    /// Listener or authentication changes take effect after restarting the daemon.
+    pub restart_required: bool,
 }
 
 #[derive(Debug)]
@@ -183,6 +186,10 @@ const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 #[derive(Debug, Clone, Serialize)]
 /// Hashline-rendered page or configuration resource.
 pub struct PageResponse {
+    /// Published Git revision shared by all fields in this response.
+    pub revision: String,
+    /// SHA-256 of exact source, absent for a missing page.
+    pub hash: Option<String>,
     /// Whether the requested file exists in the published tree.
     pub exists: bool,
     /// Applicable directory template, including guidance and hard rules.
@@ -191,6 +198,9 @@ pub struct PageResponse {
     pub path: String,
     /// Raw Markdown or configuration text with hashline prefixes.
     pub content: String,
+    /// Exact source text for full-page reads, absent for line windows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     /// Repository-configured projected frontmatter metadata.
     pub metadata: serde_json::Value,
     /// Typed relations authored by this page.
@@ -333,6 +343,7 @@ impl Store {
         };
         Ok(Arc::new(Self {
             root,
+            startup_server: snapshot.config.server.clone(),
             state: RwLock::new(Arc::new(snapshot)),
             provider_factory,
             reindex_lock: tokio::sync::Mutex::new(()),
@@ -363,6 +374,52 @@ impl Store {
         validate_corpus(&state.pages, &state.templates).map(|_| ())
     }
 
+    fn restart_required(&self, config: &Config) -> bool {
+        config.server.listen != self.startup_server.listen
+            || config.server.bearer_token_env != self.startup_server.bearer_token_env
+    }
+
+    /// Lists direct children of a directory in the published document tree.
+    /// Root is `/`; other directory paths must end with `/`.
+    pub fn get_directory(&self, path: &str) -> Result<serde_json::Value> {
+        let prefix = if path == "/" {
+            ""
+        } else {
+            let directory = path
+                .strip_suffix('/')
+                .context("directory path must end with /")?;
+            validate_repo_path(directory)?;
+            path
+        };
+        let state = self.state.read();
+        let mut children = std::collections::BTreeMap::new();
+        for (file, text) in state.pages.iter().chain(state.config_files.iter()) {
+            let Some(relative) = file.strip_prefix(prefix) else {
+                continue;
+            };
+            if let Some((directory, _)) = relative.split_once('/') {
+                let child = format!("{prefix}{directory}/");
+                children.insert(
+                    child.clone(),
+                    serde_json::json!({"path": child, "kind": "directory"}),
+                );
+            } else {
+                children.insert(file.clone(), serde_json::json!({"path": file, "kind": "file", "hash": crate::validation::source_hash(text)}));
+            }
+        }
+        if !prefix.is_empty() && children.is_empty() {
+            bail!("directory not found: {path}");
+        }
+        Ok(serde_json::json!({
+            "path": path, "kind": "directory", "revision": state.head,
+            "repository": format!("{:x}", Sha256::digest(self.root.to_string_lossy().as_bytes())),
+            "children": children.into_values().collect::<Vec<_>>(),
+            "allow_template_edits": state.config.server.allow_template_edits,
+            "allow_config_edits": state.config.server.allow_config_edits,
+            "restart_required": self.restart_required(&state.config),
+        }))
+    }
+
     /// Reads an exact page or configuration resource as hashlines.
     pub fn get_page(&self, path: &str, window: Option<(usize, usize)>) -> Result<PageResponse> {
         validate_repo_path(path)?;
@@ -370,10 +427,13 @@ impl Store {
         if let Some(text) = state.pages.get(path) {
             let page = state.parsed.get(path).context("page was not parsed")?;
             return Ok(PageResponse {
+                revision: state.head.clone(),
+                hash: Some(crate::validation::source_hash(text)),
                 exists: true,
                 template: state.templates.discovery(path),
                 path: path.into(),
                 content: render(text, window),
+                text: window.is_none().then(|| text.clone()),
                 metadata: page.metadata.clone(),
                 relations: state
                     .edges
@@ -387,21 +447,32 @@ impl Store {
             && let Some(text) = state.config_files.get(path)
         {
             return Ok(PageResponse {
+                revision: state.head.clone(),
+                hash: Some(crate::validation::source_hash(text)),
                 exists: true,
                 template: None,
                 path: path.into(),
                 content: render(text, window),
+                text: window.is_none().then(|| text.clone()),
                 metadata: serde_json::json!({}),
                 relations: Vec::new(),
             });
         }
-        if path.ends_with(".md") && !crate::template::is_template(path) {
-            ensure_paths_match_config(&state.config, [&path.to_owned()])?;
+        if (path.ends_with(".md")
+            || (crate::config::is_lint_config(path) && state.config.server.allow_config_edits))
+            && (!crate::template::is_template(path) || state.config.server.allow_template_edits)
+        {
+            if !crate::template::is_template(path) && !crate::config::is_lint_config(path) {
+                ensure_paths_match_config(&state.config, [&path.to_owned()])?;
+            }
             return Ok(PageResponse {
+                revision: state.head.clone(),
+                hash: None,
                 exists: false,
                 template: state.templates.discovery(path),
                 path: path.into(),
                 content: String::new(),
+                text: Some(String::new()),
                 metadata: serde_json::json!({}),
                 relations: Vec::new(),
             });
@@ -472,21 +543,34 @@ impl Store {
         for edit in &edits {
             let path = edit.path();
             validate_repo_path(path)?;
-            if !path.ends_with(".md") || crate::template::is_template(path) {
-                bail!(
-                    "apply_edits may edit Markdown only; configuration and templates are read-only"
-                );
+            let allowed = if is_config_resource_path(path) {
+                current.config.server.allow_config_edits
+            } else if crate::template::is_template(path) {
+                current.config.server.allow_template_edits
+            } else {
+                path.ends_with(".md")
+            };
+            if !allowed {
+                bail!("path is read-only for this server: {path}");
             }
             paths.insert(path.to_owned());
         }
 
         let mut base_head = current.head.clone();
-        ensure_paths_match_config(&current.config, paths.iter())?;
+        ensure_paths_match_config(
+            &current.config,
+            paths.iter().filter(|path| {
+                !crate::template::is_template(path) && !is_config_resource_path(path)
+            }),
+        )?;
 
         let mut originals = HashMap::new();
         for path in &paths {
             ensure_repository_path_safe(&self.root, path)?;
-            let original = current.pages.get(path);
+            let original = current
+                .pages
+                .get(path)
+                .or_else(|| current.config_files.get(path));
             if let Some(original) = original {
                 originals.insert(path.clone(), original.clone());
             }
@@ -499,27 +583,95 @@ impl Store {
         let applied = apply_operations_with_ranges(&originals, &edits)?;
         let changes = &applied.changes;
         let mut pages = (*current.pages).clone();
-        let extra = current.config_files.clone();
+        let mut extra = (*current.config_files).clone();
         for (path, content) in changes {
+            let destination = if crate::template::is_template(path) || is_config_resource_path(path)
+            {
+                &mut extra
+            } else {
+                &mut pages
+            };
             match content {
                 Some(text) => {
-                    pages.insert(path.clone(), text.clone());
+                    destination.insert(path.clone(), text.clone());
                 }
                 None => {
-                    pages.remove(path);
+                    destination.remove(path);
                 }
             }
         }
-        let config = current.config.clone();
+        let config = Config::from_yaml(
+            extra
+                .get("config.yaml")
+                .context("config.yaml cannot be removed")?,
+        )
+        .map_err(|error| ValidationError {
+            findings: vec![crate::markdown::Finding { source: None,
+                path: "config.yaml".into(),
+                line: None,
+                message: format!("invalid configuration: {error:#}"),
+            }],
+        })?;
+        if paths.contains("config.yaml") {
+            // Re-select the complete tracked corpus under the proposed configuration.
+            pages = load_pages(&self.root, &current.head, &config)?;
+            for (path, content) in changes.iter().filter(|(path, _)| {
+                !crate::template::is_template(path) && !is_config_resource_path(path)
+            }) {
+                match content {
+                    Some(text) => {
+                        pages.insert(path.clone(), text.clone());
+                    }
+                    None => {
+                        pages.remove(path);
+                    }
+                }
+            }
+        }
         ensure_pages_match_config(&config, &pages)?;
-        let (parsed, edges) = validate_corpus(&pages, &current.templates)
-            .map_err(|findings| ValidationError { findings })?;
+        if config.provider != current.config.provider && self.provider_factory.is_none() {
+            bail!("provider changes require a daemon with a configurable provider");
+        }
+        let templates_changed = paths
+            .iter()
+            .any(|path| crate::template::is_template(path) || crate::config::is_lint_config(path));
+        let templates = if templates_changed {
+            Arc::new(
+                crate::template::Templates::compile(&extra)
+                    .map_err(|findings| ValidationError { findings })?,
+            )
+        } else {
+            Arc::clone(&current.templates)
+        };
+        let (parsed, edges) = crate::markdown::validate_incremental(
+            &pages,
+            &templates,
+            crate::markdown::ValidationBaseline {
+                pages: &current.pages,
+                parsed: &current.parsed,
+                edges: &current.edges,
+                templates: &current.templates,
+            },
+        )
+        .map_err(|findings| ValidationError { findings })?;
         current
             .templates
             .validate_changes(&current.pages, &pages)
             .map_err(|findings| ValidationError { findings })?;
+        if templates_changed {
+            templates
+                .validate_changes(&current.pages, &pages)
+                .map_err(|findings| ValidationError { findings })?;
+        }
         ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
-        let provider = current.provider.clone();
+        let provider = if config.provider != current.config.provider {
+            let factory = self
+                .provider_factory
+                .context("provider changes require a daemon with a configurable provider")?;
+            factory(config.provider.clone())
+        } else {
+            current.provider.clone()
+        };
 
         let ordered: Vec<(String, Option<String>)> = paths
             .iter()
@@ -588,9 +740,13 @@ impl Store {
         );
         *self.state.write() = Arc::new(StoreState {
             head: base_head,
-            templates: Arc::clone(&current.templates),
+            templates,
             config,
-            config_files: extra,
+            config_files: if extra == *current.config_files {
+                Arc::clone(&current.config_files)
+            } else {
+                Arc::new(extra)
+            },
             pages: Arc::new(pages),
             parsed: Arc::new(parsed),
             edges: Arc::new(edges),
@@ -600,6 +756,7 @@ impl Store {
         });
         let push = self.current_push_state()?;
         let response = ApplyEditsResponse {
+            restart_required: self.restart_required(&self.state.read().config),
             status: if committed {
                 ApplyStatus::Accepted
             } else {
@@ -991,6 +1148,7 @@ impl Store {
         }
         let fresh_hashlines = self.current_hashlines(&stored.touched_paths);
         Ok(Some(ApplyEditsResponse {
+            restart_required: self.restart_required(&self.state.read().config),
             status: ApplyStatus::AlreadyApplied,
             push: self.current_push_state()?,
             touched_paths: stored.touched_paths,
@@ -1049,6 +1207,7 @@ impl Store {
         }
         let push = self.current_push_state()?;
         let response = ApplyEditsResponse {
+            restart_required: self.restart_required(&self.state.read().config),
             status: ApplyStatus::AlreadyApplied,
             push,
             fresh_hashlines: self.current_hashlines(&pending.touched_paths),

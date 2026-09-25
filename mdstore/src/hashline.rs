@@ -41,6 +41,13 @@ pub(crate) enum HashlineError {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 /// A hashline-anchored page edit.
 pub enum EditOperation {
+    /// Deletes a whole page only if the exact original text still matches.
+    DeletePage {
+        /// Repository-relative path.
+        path: String,
+        /// Exact original text.
+        base: String,
+    },
     /// Replaces an anchored line or inclusive range.
     Replace {
         /// Repository-relative target path.
@@ -48,6 +55,15 @@ pub enum EditOperation {
         /// Hashline line or range anchor.
         anchor: String,
         /// Replacement text.
+        content: String,
+    },
+    /// Replaces an entire page only when its exact original text still matches.
+    ReplacePage {
+        /// Repository-relative existing page path.
+        path: String,
+        /// Exact original text, including line endings.
+        base: String,
+        /// Complete replacement text, including line endings.
         content: String,
     },
     /// Inserts text before an anchored line or range.
@@ -96,7 +112,9 @@ impl EditOperation {
     #[must_use]
     pub fn path(&self) -> &str {
         match self {
-            Self::Replace { path, .. }
+            Self::DeletePage { path, .. }
+            | Self::Replace { path, .. }
+            | Self::ReplacePage { path, .. }
             | Self::InsertBefore { path, .. }
             | Self::InsertAfter { path, .. }
             | Self::Delete { path, .. }
@@ -212,6 +230,43 @@ pub(crate) fn apply_operations_with_ranges(
         let Some(text) = original.get(path) else {
             return Err(HashlineError::Incompatible(path.into()));
         };
+        if let [(.., EditOperation::DeletePage { base, .. })] = ops.as_slice() {
+            if text != base {
+                return Err(HashlineError::Incompatible(format!(
+                    "{path}: document changed; reload and reconcile your draft"
+                )));
+            }
+            output.insert(path.into(), None);
+            continue;
+        }
+        if ops
+            .iter()
+            .any(|(_, op)| matches!(op, EditOperation::DeletePage { .. }))
+        {
+            return Err(HashlineError::Incompatible(path.into()));
+        }
+        if let [(.., EditOperation::ReplacePage { base, content, .. })] = ops.as_slice() {
+            if text != base {
+                return Err(HashlineError::Incompatible(format!(
+                    "{path}: document changed; reload and reconcile your draft"
+                )));
+            }
+            output.insert(path.into(), Some(content.clone()));
+            changed_ranges.insert(
+                path.into(),
+                vec![ChangedRange {
+                    start_line: 1,
+                    end_line: content.lines().count().max(1),
+                }],
+            );
+            continue;
+        }
+        if ops
+            .iter()
+            .any(|(_, op)| matches!(op, EditOperation::ReplacePage { .. }))
+        {
+            return Err(HashlineError::Incompatible(path.into()));
+        }
         if ops
             .iter()
             .any(|(_, op)| matches!(op, EditOperation::CreatePage { .. }))
@@ -282,7 +337,10 @@ pub(crate) fn apply_operations_with_ranges(
                         kind: ResolvedKind::Insert(content.clone()),
                     }
                 }
-                EditOperation::CreatePage { .. } | EditOperation::RemovePage { .. } => {
+                EditOperation::CreatePage { .. }
+                | EditOperation::DeletePage { .. }
+                | EditOperation::RemovePage { .. }
+                | EditOperation::ReplacePage { .. } => {
                     unreachable!()
                 }
             };
@@ -487,6 +545,26 @@ fn resolve_line(anchor: &str, lines: &[String]) -> Result<usize, HashlineError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_page_deletion_stages_atomic_move_and_rejects_stale_base() {
+        let original = HashMap::from([("old.md".into(), "original\n".into())]);
+        let operations = vec![
+            EditOperation::DeletePage {
+                path: "old.md".into(),
+                base: "original\n".into(),
+            },
+            EditOperation::CreatePage {
+                path: "new.md".into(),
+                content: "modified\n".into(),
+            },
+        ];
+        let changes = apply_operations(&original, &operations).unwrap();
+        assert_eq!(changes["old.md"], None);
+        assert_eq!(changes["new.md"].as_deref(), Some("modified\n"));
+        let stale = HashMap::from([("old.md".into(), "server edit\n".into())]);
+        assert!(apply_operations(&stale, &operations).is_err());
+    }
 
     #[test]
     fn render_and_edit_with_shifted_anchor() {

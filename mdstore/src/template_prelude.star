@@ -9,11 +9,14 @@ def _declare(name, value):
         fail(name + " is already declared")
     _definition[name] = value
 
+def scope(exclude=[]):
+    _declare("exclude", exclude)
+
 def metadata(**pointers):
     _declare("metadata", pointers)
 
-def markdown(**rules):
-    _declare("markdown", rules)
+def markdown(config):
+    _declare("markdown", config)
 
 def links(markdown=True, wiki=[]):
     _declare("links", {"markdown": markdown, "wiki": wiki})

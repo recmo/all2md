@@ -3,14 +3,14 @@ use std::{collections::HashMap, ops::Range, path::Path};
 use anyhow::{Context, Result};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{RelationLinkSyntax, RelationSelector};
 use crate::template::{Template, Templates};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parsed structural and authored-link information for one page.
-pub(crate) struct ParsedPage {
+pub struct ParsedPage {
     /// Metadata projected using the page's directory template.
     pub metadata: serde_json::Value,
     /// YAML frontmatter converted to JSON.
@@ -20,11 +20,11 @@ pub(crate) struct ParsedPage {
     /// Parsed headings in source order.
     pub headings: Vec<Heading>,
     #[serde(skip)]
-    pub events: Vec<(Event<'static>, Range<usize>)>,
+    pub(crate) events: Vec<(Event<'static>, Range<usize>)>,
     #[serde(skip)]
-    pub section_headings: Vec<(u8, String, usize, usize)>,
+    pub(crate) section_headings: Vec<(u8, String, usize, usize)>,
     #[serde(skip)]
-    pub list_entries: Vec<ListEntry>,
+    pub(crate) list_entries: Vec<ListEntry>,
     /// Fenced and indented code block ranges.
     pub code_blocks: Vec<SourceRange>,
     /// Source lines that begin or end structural blocks.
@@ -41,18 +41,18 @@ pub(crate) struct ListEntry {
     pub text_start: usize,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 /// Inclusive one-based source line range.
-pub(crate) struct SourceRange {
+pub struct SourceRange {
     /// First line.
     pub start_line: usize,
     /// Last line.
     pub end_line: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// A parsed Markdown heading.
-pub(crate) struct Heading {
+pub struct Heading {
     /// Heading depth from one through six.
     pub level: u8,
     /// Plain heading text.
@@ -61,11 +61,14 @@ pub(crate) struct Heading {
     pub line: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// An authored link before corpus target resolution.
-pub(crate) struct RawLink {
+pub struct RawLink {
     /// Raw authored target.
     pub target: String,
+    /// Byte range of a configured wiki target in the complete document source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_range: Option<Range<usize>>,
     /// One-based source line.
     pub line: usize,
     /// Syntax that produced the link.
@@ -74,10 +77,10 @@ pub(crate) struct RawLink {
     pub sections: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 /// Supported authored link syntax.
-pub(crate) enum LinkSyntax {
+pub enum LinkSyntax {
     /// Standard Markdown link.
     Markdown,
     /// Repository-configured wiki link.
@@ -99,7 +102,7 @@ struct ResolvedLink {
     sections: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 /// A resolved, typed relation edge between pages.
 pub struct Edge {
     /// Source page path.
@@ -110,9 +113,12 @@ pub struct Edge {
     pub target: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// A structured corpus validation finding.
 pub struct Finding {
+    /// Schema source responsible for this finding, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<FindingSource>,
     /// Page or configuration resource path.
     pub path: String,
     /// Human-readable validation message.
@@ -122,8 +128,15 @@ pub struct Finding {
     pub line: Option<usize>,
 }
 
+/// A one-based source location in a schema document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingSource {
+    pub path: String,
+    pub line: usize,
+}
+
 /// Parses one Markdown page according to configured link syntaxes.
-pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
+pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
     let (frontmatter, body_start_line, body) = parse_frontmatter(text)?;
     let mut headings = Vec::new();
     let mut events = Vec::new();
@@ -244,6 +257,7 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
                 markdown_links.push((
                     RawLink {
                         target: dest_url.to_string(),
+                        target_range: None,
                         line,
                         syntax: LinkSyntax::Markdown,
                         sections: heading_stack.clone(),
@@ -259,7 +273,14 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
             _ => {}
         }
     }
-    let wiki_links = scan_wiki_links(body, body_start_line, &headings, &wiki, &wiki_exclusions);
+    let mut wiki_links = scan_wiki_links(body, body_start_line, &headings, &wiki, &wiki_exclusions);
+    let body_offset = text.len() - body.len();
+    for (link, _) in &mut wiki_links {
+        if let Some(range) = &mut link.target_range {
+            range.start += body_offset;
+            range.end += body_offset;
+        }
+    }
     let wiki_ranges: Vec<Range<usize>> =
         wiki_links.iter().map(|(_, range)| range.clone()).collect();
     let mut links: Vec<RawLink> = markdown_links
@@ -316,15 +337,22 @@ fn scan_wiki_links(
                     .bytes()
                     .filter(|byte| *byte == b'\n')
                     .count();
-            matches.push((range, target.as_str().trim().to_owned(), line));
+            let trimmed = target.as_str().trim();
+            let start = target.start() + target.as_str().len() - target.as_str().trim_start().len();
+            matches.push((
+                range,
+                trimmed.to_owned(),
+                line,
+                start..start + trimmed.len(),
+            ));
         }
     }
-    matches.sort_by_key(|(range, _, _)| range.start);
+    matches.sort_by_key(|(range, _, _, _)| range.start);
     let mut heading_index = 0;
     let mut heading_stack = Vec::new();
     matches
         .into_iter()
-        .map(|(range, target, line)| {
+        .map(|(range, target, line, target_range)| {
             while let Some(heading) = headings.get(heading_index)
                 && heading.line < line
             {
@@ -335,6 +363,7 @@ fn scan_wiki_links(
             (
                 RawLink {
                     target,
+                    target_range: Some(target_range),
                     line,
                     syntax: LinkSyntax::Wiki,
                     sections: heading_stack.clone(),
@@ -366,7 +395,8 @@ fn heading_level(level: HeadingLevel) -> u8 {
     }
 }
 
-fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
+/// Parses YAML frontmatter and returns its value, one-based body line, and body source.
+pub fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
     if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
         return Ok((serde_json::json!({}), 1, text));
     }
@@ -392,28 +422,89 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
     anyhow::bail!("unterminated YAML frontmatter")
 }
 
+#[cfg(test)]
+thread_local! {
+    static VALIDATED_PAGES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Successful parsed corpus and relation graph, or all validation findings.
-pub(crate) type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
+pub type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
 
 /// Parses and validates the complete corpus and its configured resources.
-pub(crate) fn validate_corpus(
+pub fn validate_corpus(pages: &HashMap<String, String>, templates: &Templates) -> CorpusValidation {
+    validate_with_baseline(pages, templates, None)
+}
+
+/// A successfully validated baseline; never constructed from unvalidated client input.
+#[derive(Debug)]
+pub struct ValidationBaseline<'a> {
+    /// Original source (or opaque identity markers for unchanged documents).
+    pub pages: &'a HashMap<String, String>,
+    /// Previously validated parsed facts.
+    pub parsed: &'a HashMap<String, ParsedPage>,
+    /// Previously validated relation edges.
+    pub edges: &'a [Edge],
+    /// Templates used for the baseline.
+    pub templates: &'a Templates,
+}
+
+/// Validates a proposed corpus while reusing unchanged baseline facts.
+pub fn validate_incremental(
     pages: &HashMap<String, String>,
     templates: &Templates,
+    baseline: ValidationBaseline<'_>,
+) -> CorpusValidation {
+    validate_with_baseline(pages, templates, Some(baseline))
+}
+
+fn validate_with_baseline(
+    pages: &HashMap<String, String>,
+    templates: &Templates,
+    baseline: Option<ValidationBaseline<'_>>,
 ) -> CorpusValidation {
     let mut findings = Vec::new();
     let mut parsed = HashMap::new();
     let mut policies = HashMap::new();
+    let mut affected = std::collections::HashSet::new();
+    // Adding a path can make a previously unique short-name target ambiguous.
+    // Inventory changes therefore re-resolve all authored targets, without reparsing.
+    let inventory_changed = baseline.as_ref().is_none_or(|base| {
+        base.pages.len() != pages.len() || base.pages.keys().any(|path| !pages.contains_key(path))
+    });
     for (path, text) in pages {
         let config = templates.policy(path);
         policies.insert(path.clone(), config);
+        if let Some(base) = &baseline
+            && base.pages.get(path) == Some(text)
+            && templates.same_policy(base.templates, path)
+            && let Some(page) = base.parsed.get(path)
+        {
+            parsed.insert(path.clone(), page.clone());
+            if inventory_changed {
+                affected.insert(path.clone());
+            }
+            continue;
+        }
+        affected.insert(path.clone());
+        #[cfg(test)]
+        VALIDATED_PAGES.with_borrow_mut(|paths| paths.push(path.clone()));
         match parse_page(text, &config.links) {
             Ok(mut page) => {
                 page.metadata = project_metadata(config, &page.frontmatter);
+                if page.metadata.get("title").is_none() {
+                    let title = page
+                        .headings
+                        .iter()
+                        .find(|heading| heading.level == 1)
+                        .map(|heading| heading.text.as_str())
+                        .unwrap_or(path);
+                    page.metadata["title"] = serde_json::json!(title);
+                }
                 templates.validate_page(path, text, &page, &mut findings);
-                crate::markdown_style::validate(&config.markdown, path, text, &page, &mut findings);
                 parsed.insert(path.clone(), page);
             }
             Err(error) => findings.push(Finding {
+                source: None,
                 path: path.clone(),
                 message: error.to_string(),
                 line: None,
@@ -423,6 +514,9 @@ pub(crate) fn validate_corpus(
     let resolver = TargetResolver::new(pages.keys());
     let mut resolved_links: HashMap<String, Vec<ResolvedLink>> = HashMap::new();
     for (path, page) in &parsed {
+        if !affected.contains(path) {
+            continue;
+        }
         for link in &page.links {
             match resolver.resolve(path, &link.target, link.syntax) {
                 Ok(Some(target)) => {
@@ -437,6 +531,7 @@ pub(crate) fn validate_corpus(
                 }
                 Ok(None) => {}
                 Err(message) => findings.push(Finding {
+                    source: None,
                     path: path.clone(),
                     message,
                     line: Some(link.line),
@@ -444,8 +539,17 @@ pub(crate) fn validate_corpus(
             }
         }
     }
-    let mut edges = Vec::new();
+    let mut edges: Vec<Edge> = baseline.as_ref().map_or_else(Vec::new, |base| {
+        base.edges
+            .iter()
+            .filter(|edge| pages.contains_key(&edge.source) && !affected.contains(&edge.source))
+            .cloned()
+            .collect()
+    });
     for (source, config) in &policies {
+        if !affected.contains(source) {
+            continue;
+        }
         for rule in &config.relations {
             match &rule.selector {
                 RelationSelector::MarkdownLinks {
@@ -501,6 +605,7 @@ pub(crate) fn validate_corpus(
                                 item.pointer(target_pointer).and_then(|v| v.as_str())
                             else {
                                 findings.push(Finding {
+                                    source: None,
                                     path: source.clone(),
                                     message: format!(
                                         "relation {} target at {target_pointer} must be a string",
@@ -518,6 +623,7 @@ pub(crate) fn validate_corpus(
                                 }),
                                 Ok(None) => unreachable!(),
                                 Err(message) => findings.push(Finding {
+                                    source: None,
                                     path: source.clone(),
                                     message,
                                     line: None,
@@ -560,6 +666,7 @@ fn validate_reciprocals(
         };
         if !set.contains(&reverse) {
             findings.push(Finding {
+                source: None,
                 path: edge.source.clone(),
                 message: format!(
                     "missing reciprocal {reciprocal} edge from {} to {} for {} edge",
@@ -836,11 +943,11 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
     fn directory_templates_select_heterogeneous_page_types() {
         let templates = Templates::compile(&HashMap::from([
             (
-                "people/template.md".into(),
+                "people/schema.md".into(),
                 "```starlark\nstructure(additional_sections=False)\nsection(\"Biography\", required=True, level=1)\n```\n".into(),
             ),
             (
-                "tasks/template.md".into(),
+                "tasks/schema.md".into(),
                 "```starlark\nstructure(additional_sections=False)\nsection(\"Status\", required=True, level=1)\n```\n".into(),
             ),
         ]))
@@ -959,7 +1066,7 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
                 .err()
                 .unwrap();
         assert_eq!(invalid.len(), 1);
-        assert_eq!(invalid[0].path, "template.md");
+        assert_eq!(invalid[0].path, "schema.md");
         let templates =
             test_templates("```starlark\nfrontmatter(fields={\"required\": field({}, required=True)}, allow_extra=True)\n```\n").unwrap();
         let pages = HashMap::from([
@@ -971,4 +1078,273 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
         assert!(findings.iter().any(|finding| finding.path == "one.md"));
         assert!(findings.iter().any(|finding| finding.path == "two.md"));
     }
+    #[test]
+    fn incremental_validation_matches_full_validation() {
+        let rules = "```starlark\nrelation('mentions', selector={'kind': 'markdown_links'}, reciprocal='mentions')\n```\n";
+        let templates = test_templates(rules).unwrap();
+        let before = HashMap::from([
+            ("a.md".into(), "[B](b.md)\n".into()),
+            ("b.md".into(), "[A](a.md)\n".into()),
+            ("notes/unique.md".into(), "# Unique\n".into()),
+            ("unrelated.md".into(), "# Unrelated\n".into()),
+        ]);
+        let (parsed, edges) = validate_corpus(&before, &templates).unwrap();
+        let compare = |after: &HashMap<String, String>, next_templates: &Templates| {
+            let incremental = validate_incremental(
+                after,
+                next_templates,
+                ValidationBaseline {
+                    pages: &before,
+                    parsed: &parsed,
+                    edges: &edges,
+                    templates: &templates,
+                },
+            );
+            let full = validate_corpus(after, next_templates);
+            match (incremental, full) {
+                (Ok((left, mut left_edges)), Ok((right, mut right_edges))) => {
+                    assert_eq!(
+                        serde_json::to_value(left).unwrap(),
+                        serde_json::to_value(right).unwrap()
+                    );
+                    left_edges.sort_by_key(|edge| {
+                        (
+                            edge.source.clone(),
+                            edge.relation.clone(),
+                            edge.target.clone(),
+                        )
+                    });
+                    right_edges.sort_by_key(|edge| {
+                        (
+                            edge.source.clone(),
+                            edge.relation.clone(),
+                            edge.target.clone(),
+                        )
+                    });
+                    assert_eq!(left_edges, right_edges);
+                }
+                (Err(left), Err(right)) => {
+                    let normalize = |findings: Vec<Finding>| {
+                        let mut result: Vec<_> = findings
+                            .into_iter()
+                            .map(|finding| (finding.path, finding.line, finding.message))
+                            .collect();
+                        result.sort();
+                        result
+                    };
+                    assert_eq!(normalize(left), normalize(right));
+                }
+                _ => panic!("incremental and full validation disagree"),
+            }
+        };
+        compare(&before, &templates);
+        for replacement in [
+            "# No backlink\n",
+            "[Missing](missing.md)\n",
+            "[B](b.md)\nMore prose.\n",
+        ] {
+            let mut after = before.clone();
+            after.insert("a.md".into(), replacement.into());
+            compare(&after, &templates);
+        }
+        let mut after = before.clone();
+        after.remove("b.md");
+        compare(&after, &templates);
+        after.remove("a.md");
+        compare(&after, &templates);
+        let tighter = test_templates(&format!(
+            "{rules}\n```starlark\nfrontmatter(name=string(required=True))\n```\n"
+        ))
+        .unwrap();
+        compare(&before, &tighter);
+        let nested = Templates::compile(&HashMap::from([
+            ("schema.md".into(), rules.into()),
+            (
+                "notes/schema.md".into(),
+                "```starlark\nfrontmatter(name=string(required=True))\n```\n".into(),
+            ),
+        ]))
+        .unwrap();
+        compare(&before, &nested);
+        let relaxed = Templates::compile(&HashMap::new()).unwrap();
+        compare(&before, &relaxed);
+    }
+
+    #[test]
+    fn incremental_inventory_changes_recheck_short_name_ambiguity() {
+        let templates = Templates::compile(&HashMap::new()).unwrap();
+        let before = HashMap::from([
+            ("a.md".into(), "[Unique](unique)\n".into()),
+            ("notes/unique.md".into(), "# Unique\n".into()),
+        ]);
+        let (parsed, edges) = validate_corpus(&before, &templates).unwrap();
+        let mut after = before.clone();
+        after.insert("other/unique.md".into(), "# Another\n".into());
+        let errors = validate_incremental(
+            &after,
+            &templates,
+            ValidationBaseline {
+                pages: &before,
+                parsed: &parsed,
+                edges: &edges,
+                templates: &templates,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.path == "a.md" && error.message.contains("ambiguous"))
+        );
+    }
+    #[test]
+    fn incremental_validation_executes_only_changed_document_policies() {
+        let templates = Templates::compile(&HashMap::new()).unwrap();
+        let before: HashMap<String, String> = (0..128)
+            .map(|index| (format!("notes/{index}.md"), "# A note\n".into()))
+            .collect();
+        let (parsed, edges) = validate_corpus(&before, &templates).unwrap();
+        let mut after = before.clone();
+        after.insert("notes/7.md".into(), "# Updated note\n".into());
+        VALIDATED_PAGES.with_borrow_mut(Vec::clear);
+        validate_incremental(
+            &after,
+            &templates,
+            ValidationBaseline {
+                pages: &before,
+                parsed: &parsed,
+                edges: &edges,
+                templates: &templates,
+            },
+        )
+        .unwrap();
+        VALIDATED_PAGES.with_borrow(|paths| assert_eq!(paths, &["notes/7.md"]));
+        let nested = Templates::compile(&HashMap::from([
+            (
+                "notes/schema.md".into(),
+                "```starlark\nmarkdown('rumdl.toml')\n```\n".into(),
+            ),
+            (
+                "notes/rumdl.toml".into(),
+                "[global]\nenable = [\"MD047\"]\n".into(),
+            ),
+            ("unused/schema.md".into(), "# Unrelated policy\n".into()),
+        ]))
+        .unwrap();
+        VALIDATED_PAGES.with_borrow_mut(Vec::clear);
+        validate_incremental(
+            &before,
+            &nested,
+            ValidationBaseline {
+                pages: &before,
+                parsed: &parsed,
+                edges: &edges,
+                templates: &templates,
+            },
+        )
+        .unwrap();
+        VALIDATED_PAGES.with_borrow(|paths| assert_eq!(paths.len(), 128));
+        let unused = Templates::compile(&HashMap::from([(
+            "unused/schema.md".into(),
+            "# Unrelated policy\n".into(),
+        )]))
+        .unwrap();
+        VALIDATED_PAGES.with_borrow_mut(Vec::clear);
+        validate_incremental(
+            &before,
+            &unused,
+            ValidationBaseline {
+                pages: &before,
+                parsed: &parsed,
+                edges: &edges,
+                templates: &templates,
+            },
+        )
+        .unwrap();
+        VALIDATED_PAGES.with_borrow(|paths| assert!(paths.is_empty()));
+    }
+}
+
+/// A resolved schema-defined reference with an editable source location.
+#[derive(Debug, Serialize)]
+pub struct DocumentReference {
+    /// Resolved repository-relative target.
+    pub target: String,
+    /// Authored target, including any fragment or query.
+    pub raw: String,
+    /// Byte range for a wiki-link target, excluding its delimiters and label.
+    pub range: Option<Range<usize>>,
+    /// JSON pointer for a frontmatter relation target.
+    pub pointer: Option<String>,
+}
+
+/// Resolves configured wiki and frontmatter references using validation policies.
+/// Standard Markdown destinations remain available through the Markdown parser.
+pub fn document_references(
+    sources: &HashMap<String, String>,
+    templates: &Templates,
+) -> Result<HashMap<String, Vec<DocumentReference>>> {
+    let resolver = TargetResolver::new(
+        sources
+            .keys()
+            .filter(|path| path.ends_with(".md") && !crate::template::is_template(path)),
+    );
+    let mut references = HashMap::new();
+    for (path, text) in sources.iter().filter(|(path, _)| path.ends_with(".md")) {
+        let policy = templates.policy(path);
+        let page = parse_page(text, &policy.links)?;
+        let mut found = Vec::new();
+        let mut add = |raw: &str, range, pointer| -> Result<()> {
+            if let Some(target) = resolver
+                .resolve(path, raw, LinkSyntax::Wiki)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| format!("{path}: cannot resolve reference"))?
+            {
+                found.push(DocumentReference {
+                    target,
+                    raw: raw.into(),
+                    range,
+                    pointer,
+                });
+            }
+            Ok(())
+        };
+        for link in &page.links {
+            if let Some(range) = &link.target_range {
+                add(&link.target, Some(range.clone()), None)?;
+            }
+        }
+        for rule in &policy.relations {
+            if let RelationSelector::Frontmatter {
+                array_pointer,
+                target_pointer,
+                type_pointer,
+                type_value,
+            } = &rule.selector
+            {
+                if let Some(items) = page
+                    .frontmatter
+                    .pointer(array_pointer)
+                    .and_then(|v| v.as_array())
+                {
+                    for (index, item) in items.iter().enumerate() {
+                        if let (Some(pointer), Some(expected)) = (type_pointer, type_value) {
+                            if item.pointer(pointer) != Some(expected) {
+                                continue;
+                            }
+                        }
+                        if let Some(raw) = item.pointer(target_pointer).and_then(|v| v.as_str()) {
+                            add(
+                                raw,
+                                None,
+                                Some(format!("{array_pointer}/{index}{target_pointer}")),
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        references.insert(path.clone(), found);
+    }
+    Ok(references)
 }

@@ -10,3 +10,13 @@ result/
 *.mdstore
 !.mdstore/
 mdstore/target/
+
+webui/.svelte-kit/
+webui/build/
+webui/test-results/
+webui/playwright-report/
+
+webui/wasm/target/
+webui/src/lib/wasm/
+
+.pnpm-store/

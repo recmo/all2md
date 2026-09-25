@@ -35,7 +35,6 @@ fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
-        .route("/cli", post(cli))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -94,44 +93,9 @@ async fn health(State(state): State<AppState>) -> Response {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
-enum CliCommand {
-    Validate,
-    Reindex,
-    Push,
-}
-
-async fn cli(State(state): State<AppState>, Json(command): Json<CliCommand>) -> Response {
-    match command {
-        CliCommand::Validate => {
-            let store = state.store.clone();
-            match run_blocking(move || Ok(store.validate())).await {
-                Ok(Ok(())) => Json(json!({"valid": true})).into_response(),
-                Ok(Err(findings)) => {
-                    Json(json!({"valid": false, "findings": findings})).into_response()
-                }
-                Err(error) => internal_error(&error),
-            }
-        }
-        CliCommand::Reindex => match state.store.reindex().await {
-            Ok(()) => match run_blocking(move || state.store.status()).await {
-                Ok(status) => Json(json!(status)).into_response(),
-                Err(error) => internal_error(&error),
-            },
-            Err(error) => internal_error(&error),
-        },
-        CliCommand::Push => {
-            let store = state.store.clone();
-            match run_blocking(move || store.push()).await {
-                Ok(push) => Json(json!(push)).into_response(),
-                Err(error) => internal_error(&error),
-            }
-        }
-    }
-}
-
-async fn run_blocking<T>(operation: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
+async fn run_blocking<T>(
+    operation: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T>
 where
     T: Send + 'static,
 {
@@ -140,19 +104,48 @@ where
         .context("blocking daemon operation failed")?
 }
 
-fn internal_error(error: &anyhow::Error) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": error.to_string()})),
-    )
-        .into_response()
-}
-
 async fn authorize(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    if request.headers().contains_key(ORIGIN) {
+    // With no credential, reject DNS-rebinding hosts as well as cross-site fetches.
+    if state.bearer_token.is_none() {
+        let host = request
+            .headers()
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<axum::http::uri::Authority>().ok());
+        let allowed = host.as_ref().is_some_and(|host| {
+            let name = host.host().trim_matches(['[', ']']);
+            state
+                .store
+                .config()
+                .server
+                .allowed_hosts
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(allowed))
+                || name == "localhost"
+                || name
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !allowed {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "This hostname is not allowed. Configure server.allowed_hosts for the private reverse proxy."}))).into_response();
+        }
+    }
+    let same_origin = request
+        .headers()
+        .get(ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .zip(request.headers().get("host").and_then(|v| v.to_str().ok()))
+        .is_some_and(|(origin, host)| {
+            origin == format!("http://{host}") || origin == format!("https://{host}")
+        });
+    let cross_site = request
+        .headers()
+        .get("sec-fetch-site")
+        .is_some_and(|v| v == "cross-site");
+    if cross_site || (request.headers().contains_key(ORIGIN) && !same_origin) {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": "browser origins are not allowed"})),
+            Json(json!({"error": "cross-origin requests are not allowed"})),
         )
             .into_response();
     }
@@ -263,7 +256,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read Markdown, template.md, or root config.yaml with hashline anchors. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration and templates are read-only.",
+            "description": "Read a file or directory from the published document tree. Use / for the root or a relative path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return that revision, source hash, hashline anchors and exact source text for full-page reads. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -277,7 +270,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "apply_edits",
-            "description": "Atomically validate and locally commit a hashline-anchored edit batch. Templates are read-only. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
+            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener and authentication changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -296,7 +289,7 @@ fn tools() -> Vec<Value> {
 }
 
 fn edit_operation_schemas() -> Vec<Value> {
-    [
+    let mut schemas: Vec<Value> = [
         ("replace", true, true),
         ("insert_before", true, true),
         ("insert_after", true, true),
@@ -326,7 +319,18 @@ fn edit_operation_schemas() -> Vec<Value> {
             "additionalProperties": false
         })
     })
-    .collect()
+    .collect();
+    schemas.push(json!({
+        "type": "object",
+        "properties": {"op": {"const": "replace_page"}, "path": {"type": "string"}, "base": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["op", "path", "base", "content"], "additionalProperties": false
+    }));
+    schemas.push(json!({
+        "type": "object",
+        "properties": {"op": {"const": "delete_page"}, "path": {"type": "string"}, "base": {"type": "string"}},
+        "required": ["op", "path", "base"], "additionalProperties": false
+    }));
+    schemas
 }
 
 #[derive(Deserialize)]
@@ -369,9 +373,16 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                 let window = arguments
                     .start_line
                     .map(|start| (start, arguments.end_line.unwrap_or(start)));
-                store
-                    .get_page(&arguments.path, window)
-                    .and_then(|value| serde_json::to_value(value).map_err(Into::into))
+                if arguments.path.ends_with('/') {
+                    if arguments.start_line.is_some() || arguments.end_line.is_some() {
+                        Err(anyhow::anyhow!("line windows are only supported for files"))
+                    } else {
+                        store.get_directory(&arguments.path)
+                    }
+                } else {
+                    store.get_page(&arguments.path, window)
+                        .and_then(|value| serde_json::to_value(value).map_err(Into::into))
+                }
             }
             Err(error) => Err(error.into()),
         },

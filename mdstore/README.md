@@ -5,7 +5,7 @@ validates repository-defined schemas, exposes hashline-safe atomic edits, keeps
 adjacent binary embedding sidecars, and serves exact, vector, graph-assisted,
 and reranked search over MCP.
 
-Markdown, root `config.yaml`, and directory `template.md` files are canonical.
+Markdown, root `config.yaml`, and directory `schema.md` files are canonical.
 Adjacent `*.mdstore` embedding files are disposable and ignored by Git. No
 repository `.mdstore/` directory is needed; daemon state lives in Git's private
 directory.
@@ -13,6 +13,13 @@ directory.
 ```gitignore
 *.mdstore
 ```
+
+## Clients
+
+The daemon serves document APIs; it does not host a UI or interpret app definitions.
+Use MCP directly or run the separate [web interface](../webui/README.md).
+`cargo build --manifest-path mdstore/Cargo.toml` needs only Rust dependencies.
+
 
 ## Repository configuration
 
@@ -47,29 +54,64 @@ server:
   listen: 127.0.0.1:3131
 ```
 
+For a private reverse proxy such as Tailscale Serve, keep the listener on loopback
+and explicitly list its hostname in `server.allowed_hosts`. For example:
+
+```yaml
+server:
+  listen: 127.0.0.1:3131
+  allowed_hosts: ["my-machine.example.ts.net"]
+```
+
+Only exact hostnames are allowed; cross-origin requests remain blocked. The proxy
+must restrict access to trusted clients. Public deployments should use bearer authentication.
+
 ### Markdown validation
 
-The `markdown` checks in a directory template are independently configurable and disabled when
-omitted. They impose no required frontmatter, section names, or initial heading
-level. `heading_increment` rejects jumps such as H2 to H4; decreasing levels is
-allowed. `fence_language` requires a nonempty info string, not a fixed language
-list. `nonempty_links` checks parsed Markdown link destinations.
+Markdown style validation uses [rumdl](https://github.com/rvben/rumdl). A template
+references a tracked config file, resolved relative to the template directory:
 
-Whitespace and line-length checks cover the body, excluding fenced and indented
-code blocks. Exactly two trailing spaces on a nonblank line are allowed for
-Markdown hard breaks. Line length counts Unicode characters, not bytes; CRLF
-and LF endings are accepted. `final_newline` covers the entire nonempty file.
+```starlark
+markdown("rumdl.toml")
+```
 
-Failures include the rule name, page path, and one-based source line. Checks run
-at startup, on `validate`, and against the complete proposed tree before an edit
-is committed. Incoming template changes are validated against every selected page before activation. Invalid batches change nothing; there is no auto-formatting.
-These are explicit checks on CommonMark parsing, not a guarantee that every
-typo is rejected: unmatched emphasis and undefined reference syntax can still
-be ordinary text, and link fragments are not checked against headings.
+The file uses rumdl's native TOML configuration:
+
+```toml
+[global]
+enable = ["MD012", "MD009", "MD047"]
+
+[MD012]
+maximum = 1
+```
+
+Without an `enable` list, rumdl's default rule set applies. Use native global
+settings, rule sections, Markdown flavor, exclusions and per-file ignores.
+Patterns are relative to the config file's directory. Both `rumdl.toml` and
+`.rumdl.toml` are supported, including shared references such as
+`markdown("../rumdl.toml")`. A leading slash, as in
+`markdown("/rumdl.toml")`, resolves from the repository root. Paths cannot escape
+the repository or access the host filesystem.
+
+Config files are included in the validation snapshot. Editing one uses
+`allow_config_edits` and revalidates every document governed by a template that
+references it. Offline validation requests any affected source not yet cached.
+The same in-memory TOML configuration is used on the server and in WASM; it does
+not discover files from the host filesystem. `extends`, `.editorconfig`, and
+external code-block tools are unsupported and rejected. Keep referenced config
+files self-contained.
+
+Diagnostics include the rule ID, document path and one-based line number. Checks
+run at startup and on changed documents or documents affected by a template
+change. Invalid batches change nothing; there is no automatic formatting.
+MD057 (filesystem link existence) is excluded from the default set and cannot be
+enabled: mdstore checks cross-document links against the proposed repository
+snapshot, identically online and offline. Structural, schema, relationship and
+Starlark callback validation remain separate from Markdown linting.
 
 ### Directory templates
 
-Place `template.md` beside the documents it governs. The nearest ancestor
+Place `schema.md` beside the documents it governs. The nearest ancestor
 template applies recursively and replaces its parent. Use directories such as
 `tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
 Templates are readable through `get_page`, protected from `apply_edits`, and
@@ -77,7 +119,9 @@ excluded from search and embeddings.
 
 Markdown supplies instructions and examples. Only top-level fences labelled
 exactly `starlark` execute; their contents form one module in document order.
-See the complete [task template](examples/tasks/v1/template.md).
+See the complete [task template](examples/tasks/v1/schema.md). Tasks use their first H1 as the title, without a duplicate frontmatter field. Callbacks can read `doc.title` (empty if no H1 exists). Search metadata defaults to the first H1, then the path, unless an explicit title projection supplies a value.
+
+The web preview renders frontmatter below the H1 as document properties. Compiled template enums become badges; state/status and tags have sensible fallback formatting. Empty values and duplicate titles are hidden, other properties can be expanded, and invalid YAML stays visible as source with an error. Editing always preserves the original YAML.
 
 Declarations register rules checked by Rust:
 
@@ -89,8 +133,9 @@ Declarations register rules checked by Rust:
 | `section(heading, ...)` | Require or constrain a section. Defaults to H2; `parent=[...]` addresses previously declared parent sections. |
 | `dated_list(order="ascending", min_items=1, allow_equal_timestamps=True)` | Unordered entries starting with RFC3339 timestamps and explanations, ordered by instant. |
 | `filename(pattern, serial_scope=[])` | Match the complete repository-relative path; named regex captures define serial scopes. |
+| `scope(exclude=[])` | Exclude paths relative to this template directory, falling back to the parent schema. |
 | `metadata(**pointers)` | Project frontmatter fields through JSON pointers. |
-| `markdown(**rules)` | Set style checks, such as `final_newline`, `closed_fences`, and `max_line_length`. |
+| `markdown(config)` | Reference a tracked `rumdl.toml`, relative to the template. |
 | `links(markdown=True, wiki=[])` | Select link syntax; wiki regexes require a named `target` capture. |
 | `relation(name, selector, reciprocal=None)` | Select authored links or frontmatter arrays; reciprocal facts must be authored in the same batch. |
 | `structure(level=None, order="unrestricted", additional_sections=True)` | Set root heading policy before declaring sections. |
@@ -152,7 +197,7 @@ and every 30 seconds while healthy. Failures retry with exponential backoff from
 1 second to a 5-minute ceiling, even if no further edits arrive. The existing
 `git.push_timeout_seconds` bounds each network operation. Network failures are
 recorded in status and do not block local writes. `git.push: false` disables the
-worker. `mdstore push` explicitly attempts one synchronization immediately.
+worker.
 
 The worker fetches the configured branch into a private ref. A fast-forward
 candidate's complete tree, configuration, templates, and sidecar ignore rules
@@ -179,24 +224,20 @@ the resolved fetch URL, push URL, and destination branch. Changing the destinati
 invalidates the previous progress report; pending commits are reconstructed from
 destination-specific Git acknowledgements, never inferred from an old upstream. Replication metadata is private Git state.
 
-## CLI
-
-Run `serve` first. Every other command is an HTTP client of that daemon, using
-`server.listen` and `server.bearer_token_env` from the repository configuration.
-Use global `--daemon-url` or `MDSTORE_URL` when the daemon was started at an
-overridden address.
+## Running the daemon
 
 ```sh
-mdstore --root /path/to/brain validate
 mdstore --root /path/to/brain serve
-mdstore --root /path/to/brain search "query" --variant "caller expansion"
-mdstore --root /path/to/brain get people/alice.md
-mdstore --root /path/to/brain get config.yaml
-mdstore --root /path/to/brain apply --file edits.json
-mdstore --root /path/to/brain reindex
-mdstore --root /path/to/brain status
-mdstore --root /path/to/brain push
 ```
+
+The daemon exposes `/mcp` for document operations and `/health` for operational
+status. `get_page` accepts `/` or a directory path ending in `/` to list direct
+children of the published document tree. Directory reads include permissions,
+repository identity, and the Git revision; file reads include the same revision
+and an exact source hash. Empty directories are not persisted by Git.
+Clients can traverse directories and check revisions to obtain a consistent
+inventory. Client-specific caches, validation baselines, and previews are built
+by clients. `apply_edits` always validates changes before committing.
 
 An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
 32 hexadecimal characters (128 bits of SHA-256) and include trailing whitespace:
@@ -225,7 +266,53 @@ All anchors in a request resolve against the same pre-edit snapshot. Stale,
 ambiguous, or overlapping edits fail before any worktree file changes.
 
 The MCP endpoint is `/mcp`; health and indexing coverage are available from
-`/health`. A configured bearer token protects both endpoints, and listening
+`/health`. A configured bearer token protects all data endpoints, and listening
 beyond loopback is refused without one. Startup reuses valid sidecars and
 rebuilds only missing or stale vectors; the explicit `reindex` command forces a
 complete rebuild.
+
+### Editing templates and configuration through the API
+
+Both are read-only by default. Enable the corresponding capabilities in the
+repository's `config.yaml` and restart the daemon:
+
+```yaml
+server:
+  allow_template_edits: true
+  allow_config_edits: true
+```
+
+These permissions apply to every caller accepted by this server's bearer-token
+check (or local callers when authentication is disabled). The UI discovers them
+from root-directory `get_page` reads. Root configuration cannot be deleted. Template changes
+compile the proposed Starlark and validate the entire proposed corpus; documents
+can be updated in the same atomic batch to satisfy new rules. Transition checks
+from both the old and proposed templates remain enforced. Configuration changes
+must parse and pass configuration and corpus validation before publication.
+Listener and bearer-token source changes return `restart_required: true`; the
+running listener and authentication remain active until the daemon is restarted.
+
+### Incremental validation
+
+Edit submission reuses the daemon's last validated snapshot.
+Unchanged documents retain their parsed content and authored relation edges.
+Content and template checks run for edited documents and documents whose nearest
+template changed, including changes to template inheritance. Existing transition
+checks still run against before/after content, and reciprocity is checked on the
+resulting graph so removing a backlink can invalidate an unchanged document.
+
+Adding or removing document paths re-resolves authored targets across the graph:
+even adding a document can make an existing short-name target ambiguous. This
+reuses cached parsing and does not rerun unchanged document policies. Startup,
+external snapshot activation, and explicit full validation retain complete
+validation as the baseline.
+
+### Portable validation
+
+The `mdstore::validation` library API exposes parsing, compiled templates, full and
+incremental corpus validation without server features.
+Independent clients can link it with `default-features = false`.
+
+Templates may declare `scope(exclude=["overview.md"])`. Patterns are relative to
+the template directory. Excluded documents inherit the nearest matching parent
+schema; they do not bypass ordinary Markdown parsing or link validation.

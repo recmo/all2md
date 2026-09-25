@@ -11,6 +11,31 @@ use starlark::{
 
 use crate::markdown::{Finding, ParsedPage};
 
+#[derive(Debug)]
+struct ScriptError {
+    message: String,
+    source: Option<crate::markdown::FindingSource>,
+}
+impl std::fmt::Display for ScriptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
+}
+impl std::error::Error for ScriptError {}
+
+fn script_error(error: starlark::Error) -> anyhow::Error {
+    // require() fails inside the built-in prelude: use its closest user caller.
+    let location = error.span().into_iter()
+        .chain(error.call_stack().frames.iter().rev().filter_map(|frame| frame.location.as_ref()))
+        .find(|span| !span.filename().starts_with('<'));
+    let source = location.map(|span| crate::markdown::FindingSource {
+        path: span.filename().into(), line: span.file.resolve_span(span.span).begin.line + 1,
+    });
+    let message = match error.kind() {
+        starlark::ErrorKind::Fail(message) => message.to_string(),
+        _ => error.without_diagnostic().to_string(),
+    };
+    ScriptError {message, source}.into()
+}
+
 pub(crate) struct Script {
     module: FrozenModule,
     locations: Json,
@@ -52,7 +77,7 @@ fn check_limits(eval: &Evaluator<'_, '_, '_>) -> Result<()> {
 
 /// Extract only top-level fences with the exact info string `starlark`.
 /// Blank lines retain the Markdown source positions; examples remain inert.
-fn extract(path: &str, text: &str) -> Result<String> {
+pub fn extract(path: &str, text: &str) -> Result<String> {
     if text.len() > 1024 * 1024 {
         bail!("template exceeds 1 MiB");
     }
@@ -108,24 +133,24 @@ impl Script {
             include_str!("template_prelude.star").into(),
             &Dialect::Standard,
         )
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        .map_err(script_error)?;
         let ast = AstModule::parse(path, source, &Dialect::Standard)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            .map_err(script_error)?;
         Module::with_temp_heap(|module| {
             let definition;
             {
                 let mut eval = Evaluator::new(&module);
                 limits(&mut eval)?;
                 eval.eval_module(prelude, &GlobalsBuilder::standard().with(builtins).build())
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    .map_err(script_error)?;
                 eval.eval_module(ast, &GlobalsBuilder::standard().with(builtins).build())
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    .map_err(script_error)?;
                 let schema = module
                     .get("mdstore_schema")
                     .context("missing template declaration state")?;
                 definition = eval
                     .eval_function(schema, &[], &[])
-                    .map_err(|error| anyhow::anyhow!("{error}"))?
+                    .map_err(script_error)?
                     .to_json()?;
                 check_limits(&eval)?;
             }
@@ -219,7 +244,7 @@ impl Script {
             let mut eval = Evaluator::new(&module);
             limits(&mut eval)?;
             eval.eval_function(callback, &args, &[])
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                .map_err(script_error)?;
             check_limits(&eval)
         })
     }
@@ -322,6 +347,7 @@ fn alloc_document<'v>(heap: Heap<'v>, doc: &Document<'_>) -> Value<'v> {
     heap.alloc(AllocStruct([
         ("path", heap.alloc(doc.path)),
         ("text", heap.alloc(doc.text)),
+        ("title", heap.alloc(page.headings.iter().find(|heading| heading.level == 1).map(|heading| heading.text.as_str()).unwrap_or(""))),
         ("frontmatter", heap.alloc(&page.frontmatter)),
         ("sections", sections),
         ("links", links),
@@ -329,7 +355,7 @@ fn alloc_document<'v>(heap: Heap<'v>, doc: &Document<'_>) -> Value<'v> {
     ]))
 }
 
-pub(crate) fn finding(path: &str, text: &str, template: &str, error: &anyhow::Error) -> Finding {
+pub(crate) fn finding(path: &str, text: &str, _template: &str, error: &anyhow::Error) -> Finding {
     let message = error.to_string();
     let line = message
         .split("[mdstore-line:")
@@ -344,9 +370,17 @@ pub(crate) fn finding(path: &str, text: &str, template: &str, error: &anyhow::Er
                 .map(|field| field_line(text, field))
         });
     Finding {
+        source: error.downcast_ref::<ScriptError>().and_then(|error| error.source.clone()),
         path: path.to_owned(),
         line,
-        message: format!("{template}: {message}"),
+        message: {
+            let mut clean = message.trim();
+            while clean.starts_with("[mdstore-line:") || clean.starts_with("[mdstore-field:") {
+                let Some((_, rest)) = clean.split_once(']') else { break; };
+                clean = rest.trim_start();
+            }
+            clean.to_owned()
+        },
     }
 }
 
@@ -394,7 +428,7 @@ section("Timeline", required=True, content=dated_list())
 
     fn templates(source: &str) -> Templates {
         Templates::compile(&HashMap::from([(
-            "tasks/template.md".into(),
+            "tasks/schema.md".into(),
             source.into(),
         )]))
         .unwrap()
@@ -439,13 +473,10 @@ section("Timeline", required=True, content=dated_list())
             .is_empty()
         );
         let findings = check(TEMPLATE, &page("waiting"));
-        assert!(findings[0].message.contains("tasks/template.md"));
-        assert!(findings[0].message.contains("Explain the dependency"));
-        assert!(
-            findings[0].message.contains("tasks/template.md:"),
-            "{}",
-            findings[0].message
-        );
+        assert_eq!(findings[0].message, "Explain the dependency");
+        let source = findings[0].source.as_ref().unwrap();
+        assert_eq!(source.path, "tasks/schema.md");
+        assert!(TEMPLATE.lines().nth(source.line - 1).unwrap().contains("require("));
         let schema_error = check(TEMPLATE, &page("unknown"));
         assert_eq!(schema_error[0].line, Some(3));
     }
@@ -465,9 +496,23 @@ validate_change(check)
         let after = HashMap::from([("tasks/a.md".into(), page("ready"))]);
         let same_state = HashMap::from([("tasks/a.md".into(), format!("{}\n", page("inbox")))]);
         assert!(templates.validate_changes(&before, &after).is_ok());
-        assert!(templates.validate_changes(&before, &same_state).is_err());
+        let findings = templates.validate_changes(&before, &same_state).unwrap_err();
+        assert_eq!(findings[0].message, "Change state");
+        assert_eq!(findings[0].source.as_ref().unwrap().line, 4);
         assert!(templates.validate_changes(&HashMap::new(), &before).is_ok());
         assert!(templates.validate_changes(&before, &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn direct_fail_and_runtime_errors_have_clean_messages_and_source() {
+        for (expression, message) in [("fail('Computed ' + str(42))", "Computed 42"), ("1 // 0", "division")] {
+            let source = format!("```starlark\ndef check(doc):\n    {expression}\nvalidate(check)\n```\n");
+            let findings = check(&source, &page("inbox"));
+            assert_eq!(findings.len(), 1);
+            assert!(findings[0].message.to_lowercase().contains(&message.to_lowercase()), "{:?}", findings);
+            assert!(!findings[0].message.contains("Traceback"));
+            assert_eq!(findings[0].source.as_ref().unwrap().line, 3);
+        }
     }
 
     #[test]
@@ -486,7 +531,7 @@ validate_change(check)
             "```starlark schema\nx = 1\n```\n",
             "```starlark\nload('file.star', 'x')\n```\n",
         ] {
-            assert!(Script::compile("tasks/template.md", source).is_err());
+            assert!(Script::compile("tasks/schema.md", source).is_err());
         }
     }
 
@@ -505,7 +550,7 @@ validate_change(check)
             "```starlark\nvalidate_change('not a function')\n```\n",
         ] {
             assert!(
-                Templates::compile(&HashMap::from([("template.md".into(), source.into())]))
+                Templates::compile(&HashMap::from([("schema.md".into(), source.into())]))
                     .is_err()
             );
         }

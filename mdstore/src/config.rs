@@ -87,30 +87,6 @@ pub struct Config {
     pub server: ServerConfig,
 }
 
-/// Repository-selected Markdown checks. All checks are disabled by default.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct MarkdownConfig {
-    /// Reject fenced code blocks without a closing fence.
-    pub closed_fences: bool,
-    /// Require a nonempty language/info string on fenced code blocks.
-    pub fence_language: bool,
-    /// Reject headings without visible text.
-    pub nonempty_headings: bool,
-    /// Reject increases of more than one heading level; the first level is unrestricted.
-    pub heading_increment: bool,
-    /// Reject Markdown links with empty destinations.
-    pub nonempty_links: bool,
-    /// Reject trailing spaces/tabs outside code, except two-space hard breaks.
-    pub no_trailing_whitespace: bool,
-    /// Reject tabs outside code blocks.
-    pub no_tabs: bool,
-    /// Maximum Unicode character count per body line, excluding code blocks.
-    pub max_line_length: Option<usize>,
-    /// Require a terminating newline on nonempty documents.
-    pub final_newline: bool,
-}
-
 impl Config {
     /// Parses and validates root config.yaml.
     pub fn from_yaml(text: &str) -> Result<Self> {
@@ -199,7 +175,7 @@ pub(crate) fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
 }
 
 /// Validates a repository-relative path without accessing the filesystem.
-pub(crate) fn validate_repo_path(path: &str) -> Result<()> {
+pub fn validate_repo_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
     if path.is_empty() || candidate.is_absolute() {
         bail!("path must stay within the repository: {path}");
@@ -215,8 +191,13 @@ pub(crate) fn validate_repo_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_config_resource_path(path: &str) -> bool {
-    path == "config.yaml"
+/// Whether a path names a configuration or lint resource.
+pub fn is_config_resource_path(path: &str) -> bool {
+    path == "config.yaml" || is_lint_config(path)
+}
+
+pub(crate) fn is_lint_config(path: &str) -> bool {
+    matches!(path.rsplit('/').next(), Some("rumdl.toml" | ".rumdl.toml"))
 }
 
 /// Rejects repository paths whose existing ancestors contain symlinks.
@@ -519,6 +500,15 @@ pub struct ServerConfig {
     #[serde(default)]
     /// Optional environment variable containing the bearer token.
     pub bearer_token_env: Option<String>,
+    /// Additional exact hostnames accepted without a bearer token, e.g. a private reverse proxy.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// Allow authenticated API callers (or local callers without auth) to edit templates.
+    #[serde(default)]
+    pub allow_template_edits: bool,
+    /// Allow API callers to edit root config.yaml.
+    #[serde(default)]
+    pub allow_config_edits: bool,
 }
 
 impl Default for ServerConfig {
@@ -526,6 +516,9 @@ impl Default for ServerConfig {
         Self {
             listen: default_listen(),
             bearer_token_env: None,
+            allowed_hosts: Vec::new(),
+            allow_template_edits: false,
+            allow_config_edits: false,
         }
     }
 }
