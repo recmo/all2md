@@ -249,6 +249,7 @@
           pnpm = systemPkgs.pnpm_11;
         in systemPkgs.stdenvNoCC.mkDerivation (finalAttrs: {
           pname = "webui";
+          passthru.wasm = mkMdstoreWasm mdSystem;
           version = "0.1.0";
           src = nixpkgs.lib.cleanSourceWith { src = ./webui; filter = mdstoreSourceFilter; };
           pnpmDeps = systemPkgs.fetchPnpmDeps {
@@ -274,9 +275,6 @@
           pname = "mdstore";
           version = "0.1.0";
           src = nixpkgs.lib.cleanSourceWith { src = ./mdstore; filter = mdstoreSourceFilter; };
-          MDSTORE_WEB_DIST = mkMdstoreWeb mdSystem;
-          passthru.web = mkMdstoreWeb mdSystem;
-          passthru.wasm = mkMdstoreWasm mdSystem;
           cargoLock.lockFile = ./mdstore/Cargo.lock;
           nativeCheckInputs = [ systemPkgs.git ];
           nativeBuildInputs = [ systemPkgs.makeWrapper ];
@@ -304,21 +302,29 @@
             systemPkgs.clippy
             systemPkgs.git
             systemPkgs.rustc
-            systemPkgs.wasm-bindgen-cli
             systemPkgs.rustfmt
-            systemPkgs.nodejs
-            systemPkgs.pnpm_11
           ];
           shellHook = ''
-            echo "Run: pnpm --dir webui install --frozen-lockfile && pnpm --dir webui build && cargo test --manifest-path mdstore/Cargo.toml"
+            echo "Run: cargo test --manifest-path mdstore/Cargo.toml"
           '';
         };
+      mkWebuiShell = mdSystem:
+        let systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+        in systemPkgs.mkShell {
+          inputsFrom = [ (mkMdstoreShell mdSystem) ];
+          packages = [ systemPkgs.nodejs systemPkgs.pnpm_11 systemPkgs.wasm-bindgen-cli ];
+          shellHook = ''
+            echo "Run: pnpm --dir webui install --frozen-lockfile && pnpm --dir webui build"
+          '';
+        };
+
     in
     {
       packages =
         forDocSystems (docSystem: {
           doc2md = mkDoc2md docSystem;
           mdstore = mkMdstore docSystem;
+          webui = mkMdstoreWeb docSystem;
         })
         // {
           ${system} = {
@@ -331,6 +337,7 @@
               ;
             doc2md = mkDoc2md system;
             mdstore = mkMdstore system;
+            webui = mkMdstoreWeb system;
           };
         };
 
@@ -491,6 +498,7 @@
         forDocSystems (docSystem: {
           doc2md = mkDocShell docSystem;
           mdstore = mkMdstoreShell docSystem;
+          webui = mkWebuiShell docSystem;
         })
         // {
           ${system} = rec {
@@ -541,6 +549,7 @@
 
             doc2md = mkDocShell system;
             mdstore = mkMdstoreShell system;
+            webui = mkWebuiShell system;
             default = pages2md;
           };
         };

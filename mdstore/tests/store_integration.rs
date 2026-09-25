@@ -3078,14 +3078,14 @@ fn nested_timeline_cannot_satisfy_the_task_transition_rule() {
 }
 
 #[tokio::test]
-async fn web_drafts_validate_without_writes_and_submit_through_mcp() {
+async fn document_batches_validate_without_writes_and_submit_through_mcp() {
     let repository = Repository::new();
     let store = repository.store();
     let (base_url, server) = start_daemon(store.clone(), None).await;
     let client = reqwest::Client::new();
     let initial_head = command(&repository.root, &["rev-parse", "HEAD"]);
     let listing: serde_json::Value = client
-        .get(format!("{base_url}/ui/documents"))
+        .get(format!("{base_url}/documents"))
         .send()
         .await
         .unwrap()
@@ -3112,7 +3112,7 @@ async fn web_drafts_validate_without_writes_and_submit_through_mcp() {
     let mut without_summary = batch.clone();
     without_summary["edit_summary"] = serde_json::json!("");
     let validation = client
-        .post(format!("{base_url}/ui/validate"))
+        .post(format!("{base_url}/validate"))
         .header("origin", &base_url)
         .json(&without_summary)
         .send()
@@ -3146,7 +3146,7 @@ async fn web_drafts_validate_without_writes_and_submit_through_mcp() {
     );
     let invalid = serde_json::json!({"edit_summary": "Invalid", "edits": [{"op": "replace_page", "path": "alice.md", "base": original, "content": "# Missing required name\n"}]});
     let rejected = client
-        .post(format!("{base_url}/ui/validate"))
+        .post(format!("{base_url}/validate"))
         .json(&invalid)
         .send()
         .await
@@ -3179,7 +3179,7 @@ async fn web_drafts_validate_without_writes_and_submit_through_mcp() {
     stale["edit_summary"] = serde_json::json!("Stale overwrite");
     assert_eq!(
         client
-            .post(format!("{base_url}/ui/validate"))
+            .post(format!("{base_url}/validate"))
             .json(&stale)
             .send()
             .await
@@ -3226,7 +3226,7 @@ async fn private_proxy_host_is_explicitly_allowed() {
     );
     let (base_url, server) = start_daemon(repository.store(), None).await;
     let client = reqwest::Client::new();
-    for path in ["/ui/documents", "/ui/validation-snapshot"] {
+    for path in ["/documents", "/validation-snapshot"] {
         let response = client
             .get(format!("{base_url}{path}"))
             .header("host", "demo.example.ts.net")
@@ -3241,7 +3241,7 @@ async fn private_proxy_host_is_explicitly_allowed() {
         ("demo.example.ts.net", "https://evil.example"),
     ] {
         let response = client
-            .get(format!("{base_url}/ui/documents"))
+            .get(format!("{base_url}/documents"))
             .header("host", host)
             .header("origin", origin)
             .send()
@@ -3259,15 +3259,14 @@ async fn private_proxy_host_is_explicitly_allowed() {
 }
 
 #[tokio::test]
-async fn web_auth_and_origin_boundaries() {
+async fn document_api_auth_and_origin_boundaries() {
     let repository = Repository::new();
     let store = repository.store();
     let (base_url, server) = start_daemon(store.clone(), Some("secret".into())).await;
     let client = reqwest::Client::new();
-    let shell = client.get(format!("{base_url}/")).send().await.unwrap();
-    assert_eq!(shell.status(), StatusCode::OK);
-    assert!(shell.headers().contains_key("content-security-policy"));
-    for path in ["/ui/documents", "/ui/validation-snapshot", "/health"] {
+    let shell = client.get(format!("{base_url}/")).bearer_auth("secret").send().await.unwrap();
+    assert_eq!(shell.status(), StatusCode::NOT_FOUND);
+    for path in ["/documents", "/validation-snapshot", "/health"] {
         assert_eq!(
             client
                 .get(format!("{base_url}{path}"))
@@ -3300,7 +3299,7 @@ async fn web_auth_and_origin_boundaries() {
             StatusCode::FORBIDDEN
         );
     }
-    for path in ["/ui/validate", "/mcp"] {
+    for path in ["/validate", "/mcp"] {
         assert_eq!(
             client
                 .post(format!("{base_url}{path}"))
@@ -3318,7 +3317,7 @@ async fn web_auth_and_origin_boundaries() {
     let (base_url, server) = start_daemon(store, None).await;
     assert_eq!(
         client
-            .get(format!("{base_url}/ui/documents"))
+            .get(format!("{base_url}/documents"))
             .header("host", "evil.example")
             .send()
             .await
@@ -3328,7 +3327,7 @@ async fn web_auth_and_origin_boundaries() {
     );
     assert_eq!(
         client
-            .get(format!("{base_url}/ui/documents"))
+            .get(format!("{base_url}/documents"))
             .header("sec-fetch-site", "cross-site")
             .send()
             .await
@@ -3427,7 +3426,7 @@ async fn privileged_policy_edits_validate_before_publication() {
             edits: vec![edit],
         };
         let response = client
-            .post(format!("{url}/ui/validate"))
+            .post(format!("{url}/validate"))
             .json(&request)
             .send()
             .await
@@ -3470,7 +3469,7 @@ async fn privileged_policy_edits_validate_before_publication() {
         ],
     };
     let response = client
-        .post(format!("{url}/ui/validate"))
+        .post(format!("{url}/validate"))
         .json(&request)
         .send()
         .await
@@ -3571,28 +3570,11 @@ fn referenced_rumdl_config_edits_are_validated_atomically() {
 }
 
 #[test]
-fn colocated_app_definitions_validate_without_task_record_rules() {
+fn document_markers_do_not_bypass_schema_rules() {
     let repository = task_repository();
-    let source = include_str!("../examples/tasks/v1/app.md");
-    let request = |content: &str| ApplyEditsRequest {
-        edit_summary: "Create task planner".into(),
-        edits: vec![EditOperation::CreatePage {path: "tasks/v1/planner.md".into(), content: content.into()}],
-    };
-    {
-        let store = repository.store();
-        assert!(store.apply_edits(&request(source)).unwrap_err().to_string().contains("read-only"));
-    }
-    fs::write(repository.root.join("config.yaml"), config_yaml().replace("server:\n", "server:\n  allow_template_edits: true\n")).unwrap();
-    command(&repository.root, &["add", "config.yaml"]);
-    command(&repository.root, &["commit", "-qm", "Allow app definitions"]);
     let store = repository.store();
-    assert!(store.apply_edits(&request(&source.replace("collection(\"tasks\", tasks)", "collection(\"missing\", tasks)"))).is_err());
-    let broken = "---\nmdstore: app\n---\n```starlark\ncollection('bad', lambda docs: [d.missing for d in docs])\n```\n";
-    store.apply_edits(&task_create("existing-record")).unwrap();
-    assert!(store.validate_edits(&request(broken)).unwrap_err().to_string().contains("missing"));
-    assert!(store.apply_edits(&request(broken)).is_err());
-    assert!(!repository.root.join("tasks/v1/planner.md").exists());
-    store.apply_edits(&request(source)).unwrap();
-    assert_eq!(store.get_page("tasks/v1/planner.md", None).unwrap().text.unwrap(), source);
-    store.apply_edits(&task_create("normal-record")).unwrap();
+    let request = ApplyEditsRequest { edit_summary: "Ordinary marked document".into(),
+        edits: vec![EditOperation::CreatePage { path: "tasks/v1/app.md".into(),
+            content: "---\nmdstore: app\n---\n# An ordinary document\n".into() }] };
+    assert!(store.apply_edits(&request).is_err());
 }

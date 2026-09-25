@@ -378,8 +378,8 @@ impl Store {
     /// Returns versioned baseline metadata for incremental validation clients.
     pub fn validation_snapshot(&self) -> serde_json::Value {
         let state = self.state.read();
-        serde_json::to_value(crate::client_validation::ValidationSnapshot {
-            version: crate::client_validation::SNAPSHOT_VERSION,
+        serde_json::to_value(crate::validation::ValidationSnapshot {
+            version: crate::validation::SNAPSHOT_VERSION,
             revision: state.head.clone(),
             files: (*state.config_files).clone(),
             documents: state
@@ -388,8 +388,8 @@ impl Store {
                 .map(|(path, text)| {
                     (
                         path.clone(),
-                        crate::client_validation::SnapshotDocument {
-                            hash: crate::client_validation::source_hash(text),
+                        crate::validation::SnapshotDocument {
+                            hash: crate::validation::source_hash(text),
                             parsed: state.parsed[path].clone(),
                         },
                     )
@@ -586,14 +586,6 @@ impl Store {
         }
         let applied = apply_operations_with_ranges(&originals, &edits)?;
         let changes = &applied.changes;
-        if !current.config.server.allow_template_edits {
-            for (path, content) in changes {
-                if originals.get(path).is_some_and(|text| crate::apps::is_app(text))
-                    || content.as_ref().is_some_and(|text| crate::apps::is_app(text)) {
-                    bail!("app definition is read-only with the current server permissions: {path}");
-                }
-            }
-        }
         let mut pages = (*current.pages).clone();
         let mut extra = (*current.config_files).clone();
         for (path, content) in changes {

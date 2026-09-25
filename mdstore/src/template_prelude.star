@@ -9,6 +9,9 @@ def _declare(name, value):
         fail(name + " is already declared")
     _definition[name] = value
 
+def scope(exclude=[]):
+    _declare("exclude", exclude)
+
 def metadata(**pointers):
     _declare("metadata", pointers)
 

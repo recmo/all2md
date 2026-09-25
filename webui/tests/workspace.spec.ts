@@ -79,6 +79,9 @@ test('offline editing survives reload and search uses the MCP API online', async
   await page.locator('#search').press('Enter');
   await expect(page.getByText('OFFLINE · CACHED TEXT')).toBeVisible();
   await context.setOffline(false);
+  await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: /^Connected$/ })).toBeVisible();
+  await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
   await page.locator('#search').press('Enter');
   await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
   expect(calls).toContain('search');
@@ -93,7 +96,7 @@ test('connection settings are separate and keep the token in memory across SPA n
     page.getByRole('heading', { name: 'Settings', exact: true })
   ).toBeVisible();
   await page.getByLabel('Bearer token').fill('test-memory-token');
-  const listing = page.waitForRequest((r) => r.url().endsWith('/ui/documents'));
+  const listing = page.waitForRequest((r) => r.url().endsWith('/documents'));
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Connected.' })).toBeVisible();
   expect((await listing).headers()['authorization']).toBe(
@@ -389,7 +392,7 @@ test('privileged configuration and template edits validate in the editor', async
   await editor.focus();
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.insertText(
-    'documents:\n  include: ["**/*.md"]\ngit:\n  push: false\nserver:\n  listen: 127.0.0.1:43132\n  allow_template_edits: true\n  allow_config_edits: true\nprovider:\n  api_key_env: MDSTORE_TEST_NO_KEY\n'
+    'documents:\n  include: ["**/*.md"]\ngit:\n  push: false\nserver:\n  listen: 127.0.0.1:43133\n  allow_template_edits: true\n  allow_config_edits: true\nprovider:\n  api_key_env: MDSTORE_TEST_NO_KEY\n'
   );
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await page.locator('#summary').fill('Update template and configuration');
@@ -407,7 +410,7 @@ test('WASM validates offline without fetching unchanged document source or calli
   context
 }) => {
   let serverValidations = 0;
-  await page.route('**/ui/validate', async (route) => {
+  await page.route('**/validate', async (route) => {
     serverValidations++;
     await route.abort();
   });
@@ -571,7 +574,7 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   const base = '# Other note\n\nKeep it simple.\n';
   const text = '# Other note\n\nKeep it simple.\n\n\nMore.\n';
-  const response = await page.request.post('/ui/validate', {
+  const response = await page.request.post('/validate', {
     data: {
       edit_summary: 'Check rumdl',
       edits: [{ op: 'replace_page', path: 'other.md', base, content: text }]
@@ -621,7 +624,7 @@ test('tree folders and moves persist offline and stage rewritten backlinks', asy
     ...Object.entries(staged.deletions).map(([path, base]) => ({ op: 'delete_page', path, base })),
     ...Object.values(staged.drafts).map((d: any) => d.exists ? { op: 'replace_page', path: d.path, base: d.base, content: d.text } : { op: 'create_page', path: d.path, content: d.text })
   ];
-  const validation = await page.request.post('/ui/validate', { data: { edit_summary: 'Move with links', edits } });
+  const validation = await page.request.post('/validate', { data: { edit_summary: 'Move with links', edits } });
   expect(await validation.json()).toMatchObject({ valid: true });
   await expect(page.locator('.document-header')).toContainText('Valid');
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
@@ -749,7 +752,7 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   expect((await applied).postDataJSON().params.arguments.edits).toHaveLength(3);
   await expect(page.getByRole('status').filter({ hasText: 'Changes committed successfully.' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText('no staged changes');
-  const listing = await (await page.request.get('/ui/documents')).json();
+  const listing = await (await page.request.get('/documents')).json();
   expect(listing.paths).toContain('welcome-submitted.md');
   expect(listing.paths).not.toContain('welcome.md');
   const cache = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!)!));
@@ -804,7 +807,7 @@ test('file and folder deletion is staged, validated, undoable, and survives relo
   const cache = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!)!));
   expect(cache.deletions['notes/guides/tasks.md']).toContain('# Tasks');
   expect(cache.drafts['other.md'].text).toContain('Preserve this draft on undo.');
-  const listing = await (await page.request.get('/ui/documents')).json();
+  const listing = await (await page.request.get('/documents')).json();
   expect(listing.paths).toContain('notes/guides/tasks.md');
 });
 
@@ -1011,6 +1014,7 @@ test('Starlark apps render SVAR views and stage validated actions offline', asyn
   await context.setOffline(true);
   await page.getByLabel('Move Plan a project').selectOption('cancelled');
   await expect(page.getByLabel('Move Plan a project')).toHaveValue('cancelled');
+  await expect(page.getByRole('status').filter({ hasText: 'Changes staged.' })).toBeVisible();
   await expect(page.locator('.apps-page')).toContainText('Offline');
   await page.reload();
   await expect(page.getByRole('button', { name: 'Board', exact: true })).toBeVisible();

@@ -14,84 +14,12 @@ directory.
 *.mdstore
 ```
 
-## Web workspace
+## Clients
 
-The daemon serves a SvelteKit SPA at its root URL. Build it before compiling Rust
-to embed the UI:
+The daemon serves document APIs; it does not host a UI or interpret app definitions.
+Use the CLI/MCP directly or run the separate [web interface](../webui/README.md).
+`cargo build --manifest-path mdstore/Cargo.toml` needs only Rust dependencies.
 
-```sh
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.121 --locked
-pnpm --dir webui install --frozen-lockfile
-pnpm --dir webui build
-cargo build --manifest-path mdstore/Cargo.toml
-mdstore --root /path/to/brain serve
-```
-
-Open the configured daemon address (default `http://127.0.0.1:3131/`). Nix builds
-and embeds the frontend automatically; production still needs only the Rust binary.
-See [frontend development and tests](../webui/README.md).
-
-A plain Cargo build/test does not require Node or frontend assets. Without a built
-UI, the daemon serves a setup page and the API remains available. Packaging can
-set `MDSTORE_WEB_DIST` to a built asset directory; an invalid explicit path fails.
-
-Browse documents and templates, or search using the MCP `search` tool,
-including optional query variants and degradation reporting. Reads and submissions
-use MCP `get_page` and `apply_edits`. Pierre CodeView edits source in Code view;
-Rendered view shows local Markdown with Pierre-highlighted code blocks.
-Switching views preserves the editor's undo history and selection. Connection credentials are configured on the Settings page.
-Raw HTML is escaped, rendered output is sanitized, and images display descriptions
-without external requests. Relative document links open within the workspace.
-
-Documents visited, template instructions, original draft bases, edits, and commit
-summaries persist in localStorage, separated by repository. “Make library available
-offline” caches all listed documents; the service worker caches the application
-shell for offline reloads on localhost or HTTPS. Offline search covers cached text.
-Tokens stay in memory. The local-cache control can erase cached documents and drafts;
-cache failures are reported and drafts can be exported.
-
-Drafts for multiple documents form one atomic change set. Add a summary, validate
-using the API, then submit. Reconnection never submits automatically. Submission
-rechecks the complete corpus, transitions, and original source under the repository
-lock; local commit success is separate from Git replication.
-
-Full `get_page` reads additionally return exact source in `text`; line-window reads
-keep the existing hashline content. `replace_page` accepts `path`, `base` (the exact
-original source), and `content` (the full replacement). Concurrent changes reject the
-edit instead of overwriting them; line endings and final newlines are preserved.
-New documents use `create_page`. The UI uses explicit paths.
-
-Authenticated `/ui/documents` supplies paths and the cache namespace. `/ui/validate`
-accepts the same request as `apply_edits` and runs preparation and validation without
-writing documents or commits. There is no rendering endpoint. The MCP tool allowlist
-remains unchanged.
-
-When bearer authentication is configured, the shell asks for the token. Data
-endpoints require it; previously cached documents remain available offline.
-Same-origin browser requests are allowed and cross-origin requests rejected.
-Without a token, only localhost/loopback Host headers are accepted.
-
-The document tree context menu provides **New folder here**, **Rename**, and
-**Move**, and **Delete**. Deleting a folder stages removal of its descendants.
-Deletions are reviewed and validated in Submit before committing; Undo deletion
-restores the last deletion until another staged edit is made or the page reloads.
-Drag files or folders onto another folder to move them; double-click
-a tree item to rename it in place (Enter to save, Escape to cancel). Right-click empty tree space to create a document or folder at the root.
-The virtual Search, Settings, and Submit rows open workspace pages in the right pane;
-Settings contains the connection and offline-cache controls.
-Submit contains the saved change description, per-file diffs, validation findings,
-and the submit action. Submission requires a description, current successful
-validation, and a connection; the server validates and commits the batch atomically.
-Rejected submissions preserve the local changes. Staged deletions remain in the tree
-with struck-through names; selecting one opens Submit. Tree badges reserve space
-beside truncated names and show cache/sync status separately from validation:
-green ● for valid, red × for invalid, and ? for pending or unavailable validation. Moves and
-renames are staged locally, including updates to incoming Markdown links and
-relative links in moved documents. Existing drafts are preserved. The client
-loads uncached documents before moving; offline moves require those sources to
-be cached. Empty folders persist in browser storage and enter Git when populated.
-Validation checks the complete staged operation before submission.
 
 ## Repository configuration
 
@@ -165,7 +93,7 @@ Patterns are relative to the config file's directory. Both `rumdl.toml` and
 `markdown("/rumdl.toml")`, resolves from the repository root. Paths cannot escape
 the repository or access the host filesystem.
 
-Config files are included in the browser validation snapshot. Editing one uses
+Config files are included in the validation snapshot. Editing one uses
 `allow_config_edits` and revalidates every document governed by a template that
 references it. Offline validation requests any affected source not yet cached.
 The same in-memory TOML configuration is used on the server and in WASM; it does
@@ -205,6 +133,7 @@ Declarations register rules checked by Rust:
 | `section(heading, ...)` | Require or constrain a section. Defaults to H2; `parent=[...]` addresses previously declared parent sections. |
 | `dated_list(order="ascending", min_items=1, allow_equal_timestamps=True)` | Unordered entries starting with RFC3339 timestamps and explanations, ordered by instant. |
 | `filename(pattern, serial_scope=[])` | Match the complete repository-relative path; named regex captures define serial scopes. |
+| `scope(exclude=[])` | Exclude paths relative to this template directory, falling back to the parent schema. |
 | `metadata(**pointers)` | Project frontmatter fields through JSON pointers. |
 | `markdown(config)` | Reference a tracked `rumdl.toml`, relative to the template. |
 | `links(markdown=True, wiki=[])` | Select link syntax; wiki regexes require a named `target` capture. |
@@ -359,7 +288,7 @@ server:
 
 These permissions apply to every caller accepted by this server's bearer-token
 check (or local callers when authentication is disabled). The UI discovers them
-from `/ui/documents`. Root configuration cannot be deleted. Template changes
+from `/documents`. Root configuration cannot be deleted. Template changes
 compile the proposed Starlark and validate the entire proposed corpus; documents
 can be updated in the same atomic batch to satisfy new rules. Transition checks
 from both the old and proposed templates remain enforced. Configuration changes
@@ -382,104 +311,17 @@ reuses cached parsing and does not rerun unchanged document policies. Startup,
 external snapshot activation, and explicit full validation retain complete
 validation as the baseline.
 
-### Client-side WASM validation
+### Portable validation
 
-The browser executes the same Rust validation library in a Web Worker,
-including the Starlark interpreter, schema checks, Markdown rules, link resolution,
-and transition checks. `pnpm build` builds the WASM module and generated bindings
-before bundling the SPA; Nix builds it as a separate dependency. Generated binaries
-and bindings are not committed. Run `pnpm --dir webui build:wasm` before
-standalone frontend type checks in a fresh checkout.
+The `mdstore::validation` library API exposes parsing, compiled templates, full and
+incremental corpus validation, and versioned snapshot types without server features.
+Independent clients can link it with `default-features = false`.
 
-The authenticated `/ui/validation-snapshot` endpoint provides a versioned baseline
-with a Git revision, source hashes, parsed document facts, relation edges, and
-configuration/template sources. It does not include all document bodies. Ordinary
-edits validate against that baseline without fetching unchanged document source.
-Template changes request only affected missing sources and verify their hashes
-before using them. Offline results remain incomplete if those sources are absent.
-Changing document selection requires server validation because new globs can
-include tracked files absent from the client's inventory.
+Authenticated `/documents` returns paths, repository identity, and edit permissions.
+`/validation-snapshot` returns the validated revision's parsed facts and schema
+resources. `/validate` accepts the same edit batch as MCP `apply_edits` and validates
+without committing. All endpoints use the same Store authority and authorization.
 
-The app caches the baseline, worker and WASM binary for offline use. Local results
-are advisory against the cached revision; submission always runs authoritative
-server validation, permissions and optimistic concurrency checks again. Revalidate
-refreshes the baseline when online. The worker preserves Starlark's execution
-limits and is terminated if a request exceeds 15 seconds.
-
-
-### Reconciling browser drafts
-
-Opening a staged document, visiting Submit, reconnecting, or checking server
-changes fetches current source and performs a client-side three-way merge against
-the draft's original base. Disjoint edits merge automatically. Conflicts preserve
-both versions and the original base in local storage; the tree marks them and
-Submit offers passage-by-passage Yours, Server, and manual resolutions using
-Pierre diffs. Manual resolutions are saved locally and can be completed offline.
-Resolving updates the exact base and triggers validation again.
-
-Delete/modify, remote deletion, and colliding new files require explicit choices.
-Moves remain staged as source deletion and destination creation; a remotely
-modified source is therefore a deletion conflict, and keeping the source leaves
-the destination staged as a copy. No remote rename is inferred from filenames.
-Submission checks current sources again, and the server still validates and
-compares bases atomically. Changes that arrive during submission are reconciled
-for another review instead of silently overwriting either version.
-
-### Starlark apps and collections
-
-A Markdown file with `mdstore: app` in YAML frontmatter defines an app using
-top-level Starlark fences. Open the file to render its views; Edit shows its source.
-App files can sit beside their schema and are excluded from collection records
-and the surrounding record schema. Their Starlark declarations are validated, and
-editing app definitions requires template-edit permission. See
-[the task planner](examples/tasks/v1/app.md) for a complete example.
-
-`collection(name, query)` registers a plain function over an in-memory list of
-immutable document records. Records expose `path`, `title` (first H1, filename
-fallback), `template` (root-relative path with leading slash), `frontmatter`, and
-`text` (nullable for metadata-only records). Template and app definition files are
-not collection records. Queries can use comprehensions, sorting and dictionaries;
-there is no query DSL, database or index. Local drafts replace baseline records;
-staged deletions disappear. Missing metadata and offline freshness are displayed
-explicitly. Evaluation runs in a bounded WASM worker without filesystem, network,
-loaders or implicit clock access.
-
-Views bind roles to frontmatter JSON pointers, or `title`/`path`:
-
-- `table(name, collection, columns=[...])`: sortable SVAR DataGrid.
-- `kanban(name, collection, group="/state", columns=[...], on_move="action")`:
-  SVAR Kanban with drag moves and a keyboard/touch-accessible move selector.
-- `gantt(name, collection, start="/start", end="/end", group=None, dependencies=None)`: interactive
-  SVAR Gantt with a custom task-template extension. With no group, each document gets its own row;
-  `group="/assignee"` places tasks in resource rows and stacks overlaps. Dates
-  include their final day. Missing assignments appear as Unassigned; missing or
-  invalid dates remain listed below the chart. `dependencies="/depends_on"` binds
-  a list of predecessor document paths, relative to the repository root (an
-  optional leading slash is accepted). Finish-to-start arrows connect individual
-  tasks in both views. Drag a task to move its dates or either edge to resize;
-  arrow keys adjust a day (Shift: a week), and Escape cancels a drag. Changes use
-  the bound frontmatter fields, stage locally, and undergo automatic validation.
-  Moves preserve duration; resizes retain at least one day. Resource assignments
-  and dependency links are edited in Markdown. Missing or unscheduled targets are reported below the chart.
-
-The MIT editions of `@svar-ui/svelte-grid`, `@svar-ui/svelte-kanban`, and
-`@svar-ui/svelte-gantt` provide the complex views. Their private component state is
-not a second store of record. Paid scheduling features are not used. The Gantt
-extension packs overlapping bars into lanes, uses uniform resource row heights,
-and draws dependency arrows; SVAR owns the grid, date axis, and scrolling. A
-small version-pinned pnpm patch adds an optional `compact` override so narrow
-screens can retain both grid and chart rather than switching to grid-only mode.
-
-`action(name, callback)` registers a function `(documents, event) -> edits`.
-`update(doc, fields={...}, timeline=None)` produces one proposed edit. Field keys
-are top-level YAML keys; timeline optionally appends a single-line entry to an
-existing H2 Timeline. Kanban events contain `path`, `value` and an explicit UTC
-`timestamp`. All action edits are staged together, preserving YAML comments and
-body content, and pass through ordinary local validation, reconciliation and
-atomic server submission. Invalid transitions remain visible drafts for review;
-action execution does not bypass template validation or commit automatically.
-
-App definition validation executes collection queries against the proposed document
-inventory and checks view/action references. Action callbacks execute only when
-invoked with a real event; their proposed edits go through ordinary validation.
-Offline validation of an edited app requires the collection source documents.
+Templates may declare `scope(exclude=["overview.md"])`. Patterns are relative to
+the template directory. Excluded documents inherit the nearest matching parent
+schema; they do not bypass ordinary Markdown parsing or link validation.

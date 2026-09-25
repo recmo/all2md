@@ -177,7 +177,7 @@
   }
   async function refreshValidationSnapshot() {
     const snapshot = await api.request<ValidationSnapshot>(
-      '/ui/validation-snapshot'
+      '/validation-snapshot'
     );
     cache = { ...cache, validationSnapshot: snapshot };
     persist();
@@ -253,7 +253,7 @@
       paths: string[];
       allow_template_edits?: boolean;
       allow_config_edits?: boolean;
-    }>('/ui/documents');
+    }>('/documents');
     allowTemplateEdits = listing.allow_template_edits === true;
     allowConfigEdits = listing.allow_config_edits === true;
     const changed = cache.repository !== listing.repository;
@@ -323,7 +323,7 @@
   function edit(text: string) {
     if (
       !current ||
-      (readonly(current.path, allowTemplateEdits, allowConfigEdits) || (isApp(current.text) && !allowTemplateEdits)) ||
+      readonly(current.path, allowTemplateEdits, allowConfigEdits) ||
       busy
     )
       return;
@@ -1205,7 +1205,7 @@
                       : 'Unchecked'}</span
                 >
               {/if}
-              {#if (readonly(current.path, allowTemplateEdits, allowConfigEdits) || (isApp(current.text) && !allowTemplateEdits))}<span
+              {#if readonly(current.path, allowTemplateEdits, allowConfigEdits)}<span
                   class="status-muted">Read only</span
                 >{/if}
             </div>
@@ -1271,7 +1271,7 @@
                   current.path,
                   allowTemplateEdits,
                   allowConfigEdits
-                ) || (isApp(current.text) && !allowTemplateEdits)}
+                )}
                 disabled={busy}
                 onchange={edit}
               />

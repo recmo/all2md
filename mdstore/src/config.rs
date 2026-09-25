@@ -175,7 +175,7 @@ pub(crate) fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
 }
 
 /// Validates a repository-relative path without accessing the filesystem.
-pub(crate) fn validate_repo_path(path: &str) -> Result<()> {
+pub fn validate_repo_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
     if path.is_empty() || candidate.is_absolute() {
         bail!("path must stay within the repository: {path}");
@@ -191,7 +191,8 @@ pub(crate) fn validate_repo_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_config_resource_path(path: &str) -> bool {
+/// Whether a path names a configuration or lint resource.
+pub fn is_config_resource_path(path: &str) -> bool {
     path == "config.yaml" || is_lint_config(path)
 }
 

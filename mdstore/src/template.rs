@@ -15,6 +15,7 @@ use crate::{SectionListRule, markdown::Finding};
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Template {
+    exclude: Vec<String>,
     frontmatter: Option<serde_json::Value>,
     filename: Option<FilenameRule>,
     markdown: Option<String>,
@@ -103,18 +104,21 @@ struct DatedList {
     allow_equal_timestamps: bool,
 }
 
-pub(crate) fn is_template(path: &str) -> bool {
+/// Whether a path names a directory schema.
+pub fn is_template(path: &str) -> bool {
     Path::new(path)
         .file_name()
         .is_some_and(|name| name == "template.md")
 }
 
-pub(crate) struct Templates {
+/// Compiled directory schemas and their validation policies.
+pub struct Templates {
     entries: HashMap<String, CompiledTemplate>,
     default: Template,
 }
 
 struct CompiledTemplate {
+    excluded: globset::GlobSet,
     template: Template,
     schema: Option<jsonschema::Validator>,
     markdown: Option<crate::markdown_lint::MarkdownLint>,
@@ -123,8 +127,15 @@ struct CompiledTemplate {
     markdown_source: String,
 }
 
+impl std::fmt::Debug for Templates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Templates").field("paths", &self.entries.keys()).finish_non_exhaustive()
+    }
+}
+
 impl Templates {
-    pub(crate) fn compile(files: &HashMap<String, String>) -> Result<Self, Vec<Finding>> {
+    /// Compiles the template and configuration resources.
+    pub fn compile(files: &HashMap<String, String>) -> Result<Self, Vec<Finding>> {
         let mut entries = HashMap::new();
         let mut findings = Vec::new();
         for (path, text) in files.iter().filter(|(path, _)| is_template(path)) {
@@ -159,13 +170,17 @@ impl Templates {
         loop {
             let candidate = directory.join("template.md").to_string_lossy().into_owned();
             if let Some(template) = self.entries.get(&candidate) {
-                return Some((candidate, template));
+                let relative = Path::new(path).strip_prefix(directory).ok()?;
+                if !template.excluded.is_match(relative) {
+                    return Some((candidate, template));
+                }
             }
             directory = directory.parent()?;
         }
     }
 
-    pub(crate) fn same_policy(&self, other: &Self, path: &str) -> bool {
+    /// Whether two schema inventories govern this path identically.
+    pub fn same_policy(&self, other: &Self, path: &str) -> bool {
         match (self.applicable(path), other.applicable(path)) {
             (None, None) => true,
             (Some((a, left)), Some((b, right))) => {
@@ -183,7 +198,8 @@ impl Templates {
             .map_or(&self.default, |(_, entry)| &entry.template)
     }
 
-    pub(crate) fn template_path(&self, path: &str) -> Option<String> {
+    /// Returns the governing template as a repository-rooted path.
+    pub fn template_path(&self, path: &str) -> Option<String> {
         self.applicable(path).map(|(path, _)| format!("/{path}"))
     }
 
@@ -202,9 +218,6 @@ impl Templates {
         page: &crate::markdown::ParsedPage,
         findings: &mut Vec<Finding>,
     ) {
-        if page.frontmatter["mdstore"] == "app" {
-            return;
-        }
         let Some((template_path, entry)) = self.applicable(path) else {
             return;
         };
@@ -226,7 +239,8 @@ impl Templates {
         }
     }
 
-    pub(crate) fn validate_changes(
+    /// Validates transition callbacks for changed documents.
+    pub fn validate_changes(
         &self,
         before: &HashMap<String, String>,
         after: &HashMap<String, String>,
@@ -252,8 +266,8 @@ impl Templates {
                     .transpose()
             };
             let result = (|| {
-                let old = parse(before)?.filter(|page| page.frontmatter["mdstore"] != "app");
-                let new = parse(after)?.filter(|page| page.frontmatter["mdstore"] != "app");
+                let old = parse(before)?;
+                let new = parse(after)?;
                 if old.is_none() && new.is_none() { return Ok(()); }
                 let old = old
                     .as_ref()
@@ -442,7 +456,12 @@ fn compile_definition(
                 .map_err(|error| anyhow::anyhow!("{error}"))
         })
         .transpose()?;
+    let mut excluded = globset::GlobSetBuilder::new();
+    for pattern in &template.exclude {
+        excluded.add(globset::Glob::new(pattern).context("invalid scope exclusion")?);
+    }
     Ok(CompiledTemplate {
+        excluded: excluded.build()?,
         template,
         schema,
         markdown,
@@ -1015,4 +1034,22 @@ section("Summary", required=True, content="paragraphs", paragraphs={"minimum": 1
             .is_empty()
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn scope_exclusions_inherit_parent_validation() {
+    let files = HashMap::from([
+        ("template.md".into(), "```starlark\nfrontmatter(parent=string(required=True))\n```\n".into()),
+        ("records/template.md".into(), "```starlark\nscope(exclude=['overview.md'])\nfrontmatter(record=string(required=True))\n```\n".into()),
+    ]);
+    let templates = Templates::compile(&files).unwrap();
+    assert_eq!(templates.template_path("records/overview.md").as_deref(), Some("/template.md"));
+    assert_eq!(templates.template_path("records/task.md").as_deref(), Some("/records/template.md"));
+    let mut pages = HashMap::from([("records/overview.md".into(), "# Missing parent field\n".into())]);
+    assert!(crate::markdown::validate_corpus(&pages, &templates).is_err());
+    pages.insert("records/overview.md".into(), "---\nparent: value\n---\n# Overview\n".into());
+    assert!(crate::markdown::validate_corpus(&pages, &templates).is_ok());
+    let invalid = HashMap::from([("template.md".into(), "```starlark\nscope(exclude=['['])\n```\n".into())]);
+    assert!(Templates::compile(&invalid).is_err());
 }

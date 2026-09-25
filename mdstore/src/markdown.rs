@@ -10,7 +10,7 @@ use crate::template::{Template, Templates};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parsed structural and authored-link information for one page.
-pub(crate) struct ParsedPage {
+pub struct ParsedPage {
     /// Metadata projected using the page's directory template.
     pub metadata: serde_json::Value,
     /// YAML frontmatter converted to JSON.
@@ -20,11 +20,11 @@ pub(crate) struct ParsedPage {
     /// Parsed headings in source order.
     pub headings: Vec<Heading>,
     #[serde(skip)]
-    pub events: Vec<(Event<'static>, Range<usize>)>,
+    pub(crate) events: Vec<(Event<'static>, Range<usize>)>,
     #[serde(skip)]
-    pub section_headings: Vec<(u8, String, usize, usize)>,
+    pub(crate) section_headings: Vec<(u8, String, usize, usize)>,
     #[serde(skip)]
-    pub list_entries: Vec<ListEntry>,
+    pub(crate) list_entries: Vec<ListEntry>,
     /// Fenced and indented code block ranges.
     pub code_blocks: Vec<SourceRange>,
     /// Source lines that begin or end structural blocks.
@@ -43,7 +43,7 @@ pub(crate) struct ListEntry {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 /// Inclusive one-based source line range.
-pub(crate) struct SourceRange {
+pub struct SourceRange {
     /// First line.
     pub start_line: usize,
     /// Last line.
@@ -52,7 +52,7 @@ pub(crate) struct SourceRange {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// A parsed Markdown heading.
-pub(crate) struct Heading {
+pub struct Heading {
     /// Heading depth from one through six.
     pub level: u8,
     /// Plain heading text.
@@ -63,7 +63,7 @@ pub(crate) struct Heading {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// An authored link before corpus target resolution.
-pub(crate) struct RawLink {
+pub struct RawLink {
     /// Raw authored target.
     pub target: String,
     /// One-based source line.
@@ -77,7 +77,7 @@ pub(crate) struct RawLink {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 /// Supported authored link syntax.
-pub(crate) enum LinkSyntax {
+pub enum LinkSyntax {
     /// Standard Markdown link.
     Markdown,
     /// Repository-configured wiki link.
@@ -133,7 +133,7 @@ pub struct FindingSource {
 }
 
 /// Parses one Markdown page according to configured link syntaxes.
-pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
+pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
     let (frontmatter, body_start_line, body) = parse_frontmatter(text)?;
     let mut headings = Vec::new();
     let mut events = Vec::new();
@@ -376,7 +376,8 @@ fn heading_level(level: HeadingLevel) -> u8 {
     }
 }
 
-pub(crate) fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
+/// Parses YAML frontmatter and returns its value, one-based body line, and body source.
+pub fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
     if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
         return Ok((serde_json::json!({}), 1, text));
     }
@@ -408,10 +409,10 @@ thread_local! {
 }
 
 /// Successful parsed corpus and relation graph, or all validation findings.
-pub(crate) type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
+pub type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
 
 /// Parses and validates the complete corpus and its configured resources.
-pub(crate) fn validate_corpus(
+pub fn validate_corpus(
     pages: &HashMap<String, String>,
     templates: &Templates,
 ) -> CorpusValidation {
@@ -419,14 +420,20 @@ pub(crate) fn validate_corpus(
 }
 
 /// A successfully validated baseline; never constructed from unvalidated client input.
-pub(crate) struct ValidationBaseline<'a> {
+#[derive(Debug)]
+pub struct ValidationBaseline<'a> {
+    /// Original source (or opaque identity markers for unchanged documents).
     pub pages: &'a HashMap<String, String>,
+    /// Previously validated parsed facts.
     pub parsed: &'a HashMap<String, ParsedPage>,
+    /// Previously validated relation edges.
     pub edges: &'a [Edge],
+    /// Templates used for the baseline.
     pub templates: &'a Templates,
 }
 
-pub(crate) fn validate_incremental(
+/// Validates a proposed corpus while reusing unchanged baseline facts.
+pub fn validate_incremental(
     pages: &HashMap<String, String>,
     templates: &Templates,
     baseline: ValidationBaseline<'_>,
@@ -481,30 +488,6 @@ fn validate_with_baseline(
                 message: error.to_string(),
                 line: None,
             }),
-        }
-    }
-    // App edits execute collection queries over the proposed inventory. Actions
-    // require an event and are checked when invoked, never with fabricated events.
-    let mut app_paths: Vec<_> = parsed.iter()
-        .filter(|(path, page)| page.frontmatter["mdstore"] == "app"
-            && baseline.as_ref().is_none_or(|base| base.pages.get(*path) != pages.get(*path)))
-        .map(|(path, _)| path).collect();
-    app_paths.sort();
-    if !app_paths.is_empty() {
-        let mut paths: Vec<_> = parsed.keys().filter(|path|
-            !crate::template::is_template(path) && parsed[*path].frontmatter["mdstore"] != "app"
-        ).collect();
-        paths.sort();
-        let documents: Vec<_> = paths.into_iter().map(|path| {
-            let page = &parsed[path];
-            serde_json::json!({"path": path,
-                "title": page.headings.iter().find(|h| h.level == 1).map(|h| h.text.as_str()).unwrap_or(path.rsplit('/').next().unwrap_or(path)),
-                "frontmatter": page.frontmatter, "template": templates.template_path(path), "text": pages[path]})
-        }).collect();
-        for path in app_paths {
-            if let Err(error) = crate::apps::validate_definition(path, &pages[path], documents.clone()) {
-                findings.push(Finding { source: None, path: path.clone(), message: format!("invalid app: {error}"), line: None });
-            }
         }
     }
     let resolver = TargetResolver::new(pages.keys());

@@ -77,7 +77,7 @@ fn check_limits(eval: &Evaluator<'_, '_, '_>) -> Result<()> {
 
 /// Extract only top-level fences with the exact info string `starlark`.
 /// Blank lines retain the Markdown source positions; examples remain inert.
-pub(crate) fn extract(path: &str, text: &str) -> Result<String> {
+pub fn extract(path: &str, text: &str) -> Result<String> {
     if text.len() > 1024 * 1024 {
         bail!("template exceeds 1 MiB");
     }

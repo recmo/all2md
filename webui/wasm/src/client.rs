@@ -1,4 +1,4 @@
-//! Portable entry points shared by the daemon library and browser bindings.
+//! JSON entry points for the web UI workers.
 
 use anyhow::{Result, anyhow};
 

@@ -33,12 +33,11 @@ fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
         bearer_token,
     };
     Router::new()
-        .merge(crate::web::api_router())
+        .merge(crate::document_api::api_router())
         .route("/health", get(health))
         .route("/mcp", post(mcp))
         .route("/cli", post(cli))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
-        .merge(crate::web::assets())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

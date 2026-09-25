@@ -108,7 +108,7 @@ export class Api {
   }
   validate(request: EditRequest) {
     return this.request<{ valid: boolean; restart_required?: boolean }>(
-      '/ui/validate',
+      '/validate',
       request
     );
   }

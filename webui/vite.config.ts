@@ -4,7 +4,7 @@ export default defineConfig({
   plugins: [sveltekit()],
   server: {
     proxy: Object.fromEntries(
-      ['/mcp', '/ui', '/health'].map((path) => [
+      ['/mcp', '/documents', '/validation-snapshot', '/validate', '/health'].map((path) => [
         path,
         {
           target: process.env.MDSTORE_URL || 'http://127.0.0.1:3131',

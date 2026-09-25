@@ -12,7 +12,7 @@ export const test = base.extend<{ daemon: void }>({
     try {
       await expect.poll(async () => {
         if (child.exitCode !== null) throw Error(errors || 'Test daemon exited');
-        return fetch('http://127.0.0.1:43132/ui/documents').then(r => r.ok).catch(() => false);
+        return fetch('http://127.0.0.1:43132/documents').then(r => r.ok).catch(() => false);
       }, { timeout: 15000 }).toBe(true);
       await use();
     } finally {

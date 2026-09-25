@@ -18,7 +18,7 @@ pub(crate) fn evaluate(input: Input) -> Result<Json> {
 }
 
 pub(crate) fn is_app(text: &str) -> bool {
-    crate::markdown::parse_frontmatter(text).is_ok_and(|(value, _, _)| value["mdstore"] == "app")
+    mdstore::validation::parse_frontmatter(text).is_ok_and(|(value, _, _)| value["mdstore"] == "app")
 }
 
 pub(crate) fn validate_definition(path: &str, source: &str, documents: Vec<Json>) -> Result<()> {
@@ -26,7 +26,7 @@ pub(crate) fn validate_definition(path: &str, source: &str, documents: Vec<Json>
 }
 
 fn run(input: Input) -> Result<Json> {
-    let source = crate::template_script::extract(&input.path, &input.source)?;
+    let source = mdstore::validation::extract_starlark(&input.path, &input.source)?;
     let inputs = Module::with_temp_heap(|module| {
         let heap = module.heap();
         let documents = heap.alloc(AllocList(input.documents.iter().map(|doc| {
@@ -92,7 +92,7 @@ mod tests {
     }
     #[test]
     fn task_example_runs_and_action_returns_proposed_edits() {
-        let mut input = Input { path: "tasks/v1/app.md".into(), source: include_str!("../examples/tasks/v1/app.md").into(), documents: vec![serde_json::json!({"path":"tasks/v1/a.md", "title":"A", "template":"/tasks/v1/template.md", "frontmatter":{"state":"inbox"}, "text":null})], action: None, event: None };
+        let mut input = Input { path: "tasks/v1/app.md".into(), source: include_str!("../../examples/tasks/v1/app.md").into(), documents: vec![serde_json::json!({"path":"tasks/v1/a.md", "title":"A", "template":"/tasks/v1/template.md", "frontmatter":{"state":"inbox"}, "text":null})], action: None, event: None };
         assert_eq!(evaluate(Input { path: input.path.clone(), source: input.source.clone(), documents: input.documents.clone(), action: None, event: None }).unwrap()["views"].as_array().unwrap().len(), 4);
         input.action = Some("change-state".into());
         input.event = Some(serde_json::json!({"path":"tasks/v1/a.md","value":"ready","timestamp":"2026-09-23T10:00:00Z"}));

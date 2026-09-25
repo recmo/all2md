@@ -2,9 +2,6 @@
 
 #[cfg(feature = "server")]
 mod chunk;
-// Shared client entry points are exercised by WASM and native parity tests.
-#[allow(dead_code)]
-mod client_validation;
 mod config;
 #[cfg(feature = "server")]
 mod git;
@@ -26,7 +23,7 @@ mod structure;
 mod template;
 mod template_script;
 #[cfg(feature = "server")]
-mod web;
+mod document_api;
 
 #[cfg(feature = "server")]
 use std::path::Path;
@@ -65,8 +62,5 @@ pub fn load_repository_config(root: &Path) -> Result<Config> {
     Config::from_yaml(&git::read_text(root, &head, "config.yaml")?)
 }
 
-#[allow(dead_code)] // Shared app evaluator is used by the WASM client and native parity tests.
-mod apps;
-
-/// Portable JSON entry points for browser and other library clients.
-pub mod client;
+/// Reusable document parsing, schema validation, and snapshot types.
+pub mod validation;
