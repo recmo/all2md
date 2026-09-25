@@ -25,18 +25,35 @@ pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 struct AppState {
     store: Arc<Store>,
     bearer_token: Option<String>,
+    worker_token: Option<String>,
+    media_tickets: Arc<parking_lot::Mutex<std::collections::BTreeMap<String, (String, u64)>>>,
 }
+
+mod artifacts;
 
 fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
     let state = AppState {
         store,
         bearer_token,
+        worker_token: std::env::var("MDSTORE_WORKER_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        media_tickets: Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new())),
     };
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
+        .merge(artifacts::routes())
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &Request| {
+            // Tickets and worker attempts are capabilities, not diagnostic fields.
+            let path = if request.uri().path().starts_with("/playback/") {
+                "/playback/<ticket>"
+            } else {
+                request.uri().path()
+            };
+            tracing::debug_span!("http-request", method = %request.method(), path)
+        }))
         .with_state(state)
 }
 
@@ -105,6 +122,16 @@ where
 }
 
 async fn authorize(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if request.uri().path().starts_with("/worker/") {
+        let actual = request.headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        if state.worker_token.as_deref().is_none() || actual != state.worker_token.as_deref() {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        return next.run(request).await;
+    }
     // With no credential, reject DNS-rebinding hosts as well as cross-site fetches.
     if state.bearer_token.is_none() {
         let host = request
@@ -149,7 +176,9 @@ async fn authorize(State(state): State<AppState>, request: Request, next: Next) 
         )
             .into_response();
     }
-    if let Some(expected) = &state.bearer_token {
+    let playback = request.uri().path().strip_prefix("/playback/")
+        .is_some_and(|ticket| artifacts::playback_path(&state, ticket).is_some());
+    if let Some(expected) = &state.bearer_token && !playback {
         let actual = request
             .headers()
             .get("authorization")

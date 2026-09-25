@@ -71,8 +71,9 @@ Submit shows diffs, validation, and reconciliation against server changes. A
 three-way merge automatically reconciles non-overlapping edits and presents
 conflicts for explicit resolution. Nothing is submitted automatically.
 
-For production, host `build/` with a static web server and reverse-proxy `/mcp` and
-`/health` to mdstore on the same origin. Keep authorization headers intact. Vite dev/preview provides that
+For production, host `build/` with a static web server and reverse-proxy `/mcp`, `/health`, `/assets`, `/artifacts`, `/derivations`,
+`/jobs`, `/vectors`, and `/playback` to mdstore on the same origin. Expose
+`/worker` for remote workers and `/lfs` for Git LFS clients as needed. Keep authorization headers intact. Vite dev/preview provides that
 proxy locally via `MDSTORE_URL`; preview is for local inspection.
 `nix build .#webui` produces static assets, independently of `.#mdstore`.
 
@@ -190,3 +191,9 @@ so both local and server validation reject dangling dependencies. Rewriting uses
 the portable Rust resolver, preserves wiki labels/fragments and YAML comments,
 and stages all affected documents together. A move is rejected if its new names
 cannot preserve references under the governing schema.
+
+## Recording review
+
+Documents marked `mdstore: recording` open the integrated recording review view.
+See [recording review](SPEECH_REVIEW.md) for setup, storage, worker operation,
+voiceprint references, and current limitations.

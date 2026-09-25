@@ -650,6 +650,11 @@ fn validate_reciprocals(
 ) {
     let set: std::collections::HashSet<_> = edges.iter().cloned().collect();
     for edge in edges {
+        if policies.get(&edge.target).is_some_and(|policy| {
+            policy.backlinks.as_ref().is_some_and(|rule| !rule.required)
+        }) {
+            continue;
+        }
         let config = &policies[&edge.source];
         let reciprocal = config
             .relations
@@ -1078,6 +1083,34 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
         assert!(findings.iter().any(|finding| finding.path == "one.md"));
         assert!(findings.iter().any(|finding| finding.path == "two.md"));
     }
+    #[test]
+    fn recording_example_schema_accepts_guidance_and_transcripts() {
+        let templates = test_templates(include_str!("../examples/meetings/schema.md")).unwrap();
+        let pages = HashMap::from([
+            ("recording.md".into(), include_str!("../examples/meetings/example/recording.md").into()),
+            ("transcript.md".into(), "---\nspeech2md_version: fixture\nattendees: []\n---\n# Transcript\n".into()),
+        ]);
+        validate_corpus(&pages, &templates).unwrap();
+        let mut invalid = pages;
+        invalid.insert("recording.md".into(), "---\nmdstore: recording\naudio: audio.m4a\nattendees: [{handle: Alice, identity: '', ranges: [{start: 4, end: 2}]}]\n---\n# Recording\n".into());
+        assert!(validate_corpus(&invalid, &templates).is_err());
+    }
+
+    #[test]
+    fn target_schema_can_waive_backlinks_and_policy_changes_recheck_incoming_edges() {
+        let root = "```starlark\nrelation('mentions', selector={'kind': 'markdown_links'}, reciprocal='mentions')\n```\n";
+        let exempt = "```starlark\nbacklinks(required=False)\n```\n";
+        let templates = Templates::compile(&HashMap::from([("schema.md".into(), root.into()), ("meetings/schema.md".into(), exempt.into())])).unwrap();
+        let pages = HashMap::from([("note.md".into(), "[Transcript](meetings/transcript.md)\n".into()), ("meetings/transcript.md".into(), "# Transcript\n".into())]);
+        let (parsed, edges) = validate_corpus(&pages, &templates).unwrap();
+        assert_eq!(edges.len(), 1);
+        let required = Templates::compile(&HashMap::from([("schema.md".into(), root.into()), ("meetings/schema.md".into(), "```starlark\nbacklinks(required=True)\n```\n".into())])).unwrap();
+        let findings = validate_incremental(&pages, &required, ValidationBaseline { pages: &pages, parsed: &parsed, edges: &edges, templates: &templates }).unwrap_err();
+        assert!(findings.iter().any(|f| f.path == "note.md" && f.message.contains("missing reciprocal")));
+        let mut broken = pages; broken.insert("note.md".into(), "[Missing](meetings/missing.md)\n".into());
+        assert!(validate_corpus(&broken, &templates).is_err());
+    }
+
     #[test]
     fn incremental_validation_matches_full_validation() {
         let rules = "```starlark\nrelation('mentions', selector={'kind': 'markdown_links'}, reciprocal='mentions')\n```\n";

@@ -669,16 +669,16 @@ def aggregate_voiceprints(
     )
 
 
-def write_voiceprints(profiles: dict[str, SpeakerProfile], path: Path) -> None:
-    try:
-        import numpy as np
-    except ImportError as error:
-        raise RuntimeError("NumPy is unavailable in the speech2md environment") from error
+def write_voiceprints(profiles: dict[str, SpeakerProfile], path: Path, *, identities: dict[str, str] | None = None) -> None:
+    import json
     handles, embeddings = aggregate_voiceprints(profiles)
     temporary = path.with_suffix(path.suffix + ".part")
     try:
-        with temporary.open("wb") as output:
-            np.savez_compressed(output, handles=handles, embeddings=embeddings)
+        temporary.write_text(json.dumps({
+            "space": {"namespace": "speakers", "recipe": f"{REDIMNET2_CHECKPOINT_SHA256}:{REDIMNET2_REVISION}:aggregate-v1", "dimensions": REDIMNET2_DIMENSION},
+            "records": [{"id": str(handle), "vector": vector.tolist(), "metadata": {"speaker": str(handle), "identity": (identities or {}).get(str(handle), ""), "confirmed": bool((identities or {}).get(str(handle)))}}
+                        for handle, vector in zip(handles, embeddings)],
+        }, allow_nan=False), encoding="utf-8")
         temporary.replace(path)
         path.chmod(0o600)
     finally:

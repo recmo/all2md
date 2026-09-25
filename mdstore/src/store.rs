@@ -28,6 +28,8 @@ use crate::{
     sidecar::{self, Sidecar},
 };
 
+pub(crate) mod artifacts;
+
 /// Daemon-owned coherent view of one Git-backed Markdown repository.
 pub struct Store {
     root: PathBuf,
@@ -72,6 +74,7 @@ impl fmt::Display for WriteBlock {
 
 #[derive(Clone)]
 struct StoreState {
+    artifacts: Arc<artifacts::Manifest>,
     head: String,
     templates: Arc<crate::template::Templates>,
     config: Config,
@@ -186,6 +189,11 @@ const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 #[derive(Debug, Clone, Serialize)]
 /// Hashline-rendered page or configuration resource.
 pub struct PageResponse {
+    /// Server-enforced ownership prevents ordinary edits of generated documents.
+    pub readonly: bool,
+    /// Binary asset metadata. Bytes are fetched separately through the asset route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset: Option<serde_json::Value>,
     /// Published Git revision shared by all fields in this response.
     pub revision: String,
     /// SHA-256 of exact source, absent for a missing page.
@@ -407,6 +415,17 @@ impl Store {
                 children.insert(file.clone(), serde_json::json!({"path": file, "kind": "file", "hash": crate::validation::source_hash(text)}));
             }
         }
+        for (file, asset) in &state.artifacts.assets {
+            let Some(relative) = file.strip_prefix(prefix) else {
+                continue;
+            };
+            if let Some((directory, _)) = relative.split_once('/') {
+                let child = format!("{prefix}{directory}/");
+                children.insert(child.clone(), serde_json::json!({"path": child, "kind": "directory"}));
+            } else {
+                children.insert(file.clone(), serde_json::json!({"path": file, "kind": "file", "hash": asset.oid, "asset": asset}));
+            }
+        }
         if !prefix.is_empty() && children.is_empty() {
             bail!("directory not found: {path}");
         }
@@ -424,9 +443,26 @@ impl Store {
     pub fn get_page(&self, path: &str, window: Option<(usize, usize)>) -> Result<PageResponse> {
         validate_repo_path(path)?;
         let state = self.state.read();
+        if let Some(asset) = state.artifacts.assets.get(path) {
+            return Ok(PageResponse {
+                readonly: true,
+                asset: Some(serde_json::to_value(asset)?),
+                revision: state.head.clone(),
+                hash: Some(asset.oid.clone()),
+                exists: true,
+                template: None,
+                path: path.into(),
+                content: String::new(),
+                text: Some(String::new()),
+                metadata: serde_json::json!({}),
+                relations: vec![],
+            });
+        }
         if let Some(text) = state.pages.get(path) {
             let page = state.parsed.get(path).context("page was not parsed")?;
             return Ok(PageResponse {
+                asset: None,
+                readonly: state.artifacts.owned(path),
                 revision: state.head.clone(),
                 hash: Some(crate::validation::source_hash(text)),
                 exists: true,
@@ -447,6 +483,8 @@ impl Store {
             && let Some(text) = state.config_files.get(path)
         {
             return Ok(PageResponse {
+                asset: None,
+                readonly: false,
                 revision: state.head.clone(),
                 hash: Some(crate::validation::source_hash(text)),
                 exists: true,
@@ -466,6 +504,8 @@ impl Store {
                 ensure_paths_match_config(&state.config, [&path.to_owned()])?;
             }
             return Ok(PageResponse {
+                asset: None,
+                readonly: state.artifacts.owned(path),
                 revision: state.head.clone(),
                 hash: None,
                 exists: false,
@@ -582,6 +622,7 @@ impl Store {
         }
         let applied = apply_operations_with_ranges(&originals, &edits)?;
         let changes = &applied.changes;
+        current.artifacts.check_edits(changes)?;
         let mut pages = (*current.pages).clone();
         let mut extra = (*current.config_files).clone();
         for (path, content) in changes {
@@ -629,6 +670,7 @@ impl Store {
             }
         }
         ensure_pages_match_config(&config, &pages)?;
+        current.artifacts.check_pages(&pages)?;
         if config.provider != current.config.provider && self.provider_factory.is_none() {
             bail!("provider changes require a daemon with a configurable provider");
         }
@@ -739,6 +781,7 @@ impl Store {
             provider.as_ref(),
         );
         *self.state.write() = Arc::new(StoreState {
+            artifacts: Arc::clone(&current.artifacts),
             head: base_head,
             templates,
             config,
@@ -1319,7 +1362,9 @@ fn load_snapshot(
     provider: Arc<dyn RetrievalProvider>,
     generation: u64,
 ) -> Result<StoreState> {
+    let artifacts = artifacts::load_manifest(root, &head)?;
     let pages = load_pages(root, &head, &config)?;
+    artifacts.check_pages(&pages)?;
     let config_files = load_config_files(root, &head)?;
     let templates = crate::template::Templates::compile(&config_files)
         .map_err(|findings| ValidationError { findings })?;
@@ -1336,6 +1381,7 @@ fn load_snapshot(
     git::ensure_ignored_at(root, &head, sidecars.iter().map(String::as_str))?;
     let index = build_index(root, &config, &pages, &parsed, &edges, provider.as_ref());
     Ok(StoreState {
+        artifacts: Arc::new(artifacts),
         head,
         config,
         provider,

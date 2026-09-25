@@ -42,7 +42,6 @@
       pkgs = nixpkgs.legacyPackages.${system};
       pagesProject = ./pages2md;
       speechProject = ./speech2md;
-      reviewProject = ./speech-review;
       docProject = ./doc2md;
       pagesVersion =
         if self ? rev then
@@ -100,10 +99,6 @@
         name = "speech2md";
         project = speechProject;
       };
-      reviewEnvironment = mkPythonEnvironment {
-        name = "speech-review";
-        project = reviewProject;
-      };
       pagesTestEnvironment = mkPythonEnvironment {
         name = "pages2md";
         project = pagesProject;
@@ -136,11 +131,15 @@
           exec ${speechEnvironment}/bin/speech2md "$@"
         '';
       };
-      speech-review = pkgs.writeShellApplication {
-        name = "speech-review";
-        runtimeInputs = [ speech2md ];
+      speech2md-worker = pkgs.writeShellApplication {
+        name = "speech2md-worker";
+        runtimeInputs = [ pkgs.ffmpeg ];
         text = ''
-          exec ${reviewEnvironment}/bin/speech-review "$@"
+          export SPEECH2MD_VERSION=${pagesVersion}
+          cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/speech2md"
+          mkdir -p "$cache_root/torch"
+          export TORCH_HOME="$cache_root/torch"
+          exec ${speechEnvironment}/bin/speech2md-worker "$@"
         '';
       };
       meeting-capture = pkgs.callPackage ./meeting-capture/package.nix { };
@@ -332,7 +331,7 @@
             inherit
               meeting-capture
               pages2md
-              speech-review
+              speech2md-worker
               speech2md
               ;
             doc2md = mkDoc2md system;
@@ -356,9 +355,9 @@
               type = "app";
               program = "${speech2md}/bin/speech2md";
             };
-            speech-review = {
+            speech2md-worker = {
               type = "app";
-              program = "${speech-review}/bin/speech-review";
+              program = "${speech2md-worker}/bin/speech2md-worker";
             };
             doc2md = mkDocApp system;
             mdstore = mkMdstoreApp system;
@@ -430,33 +429,6 @@
                   pytest -q ${speechProject}/tests
                   touch "$out"
                 '';
-            speech-review-source =
-              pkgs.runCommand "speech-review-source-check"
-                {
-                  nativeBuildInputs = [ pkgs.python3 ];
-                }
-                ''
-                  export PYTHONPYCACHEPREFIX="$out/pycache"
-                  python -m compileall -q ${reviewProject}/src
-                  touch "$out/passed"
-                '';
-            speech-review-tests =
-              pkgs.runCommand "speech-review-tests"
-                {
-                  nativeBuildInputs = [
-                    (pkgs.python3.withPackages (ps: [
-                      ps.numpy
-                      ps.pytest
-                      ps.pyyaml
-                    ]))
-                  ];
-                }
-                ''
-                  export PYTHONPATH=${reviewProject}/src
-                  export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-                  pytest -q ${reviewProject}/tests
-                  touch "$out"
-                '';
             packaged-clis =
               pkgs.runCommand "packaged-clis"
                 {
@@ -464,7 +436,7 @@
                     pages2md
                     pkgs.darwin.cctools
                     speech2md
-                    speech-review
+                    speech2md-worker
                   ];
                 }
                 ''
@@ -476,8 +448,7 @@
                   ${pagesEnvironment}/bin/python -c 'from mlx_vlm import load'
                   speech2md --help > /dev/null
                   speech2md --version | grep -Eq '^speech2md [0-9a-f]{40,64}$'
-                  speech-review --help > /dev/null
-                  ${reviewEnvironment}/bin/python -c 'from speech_review.server import STATIC; assert (STATIC / "index.html").is_file()'
+                  speech2md-worker --help > /dev/null
                   for extension in \
                     ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
                     ${speechEnvironment}/lib/python*/site-packages/mlx/core*.so; do
@@ -537,15 +508,7 @@
               '';
             };
 
-            speech-review = pkgs.mkShell {
-              packages = [
-                pkgs.python3
-                pkgs.uv
-              ];
-              shellHook = ''
-                echo "Run: uv sync --project speech-review --extra dev"
-              '';
-            };
+
 
             doc2md = mkDocShell system;
             mdstore = mkMdstoreShell system;

@@ -36,6 +36,9 @@
     return () => media.removeEventListener('change', update);
   });
   import AppViews from '$lib/apps/AppViews.svelte';
+  import SpeechReview from '$lib/speech/SpeechReview.svelte';
+  import AssetView from '$lib/speech/AssetView.svelte';
+  import { isRecording } from '$lib/speech/recording';
   import { isApp, applyAppEdit, type AppEdit } from '$lib/apps/apps';
   import ConflictResolver from '$lib/workspace/ConflictResolver.svelte';
   import {
@@ -60,7 +63,7 @@
     api,
     ApiError,
     editRequest,
-    readonly,
+    readonly as documentReadonly,
     type Page,
     type Draft,
     type ValidationFinding,
@@ -323,6 +326,15 @@
       conflicts: { ...cache.conflicts, [path]: { ...conflict, choices } }
     };
     persist();
+  }
+  function readonly(
+    path: string,
+    templates: boolean,
+    config: boolean
+  ): boolean {
+    return (
+      !!cache.pages[path]?.readonly || documentReadonly(path, templates, config)
+    );
   }
   async function stageAppAction(edits: AppEdit[]) {
     if (busy) throw Error('Another operation is in progress');
@@ -1442,52 +1454,64 @@
         </form>{/if}
       {#if current}
         {#key current.path}
-          <div class="document-views">
-            <div
-              class="code-layer"
-              class:inactive={mode !== 'code' && !sourceOnly(current.path)}
-              inert={mode !== 'code' && !sourceOnly(current.path)}
-              aria-hidden={mode !== 'code' && !sourceOnly(current.path)}
-            >
-              <CodeEditor
-                bind:this={codeEditor}
-                onsource={(path, line) =>
-                  void run(() => openSchemaSource(path, line))}
-                findings={currentFindings}
-                value={current.text}
-                path={current.path}
-                readonly={readonly(
-                  current.path,
-                  allowTemplateEdits,
-                  allowConfigEdits
-                )}
-                disabled={busy}
-                onchange={edit}
-              />
-            </div>
-            {#if mode === 'rendered' && !sourceOnly(current.path)}
-              {#if isApp(current.text)}
-                <AppViews
+          {#if current.asset}
+            <AssetView page={current} {api} />
+          {:else}
+            <div class="document-views">
+              <div
+                class="code-layer"
+                class:inactive={mode !== 'code' && !sourceOnly(current.path)}
+                inert={mode !== 'code' && !sourceOnly(current.path)}
+                aria-hidden={mode !== 'code' && !sourceOnly(current.path)}
+              >
+                <CodeEditor
+                  bind:this={codeEditor}
+                  onsource={(path, line) =>
+                    void run(() => openSchemaSource(path, line))}
+                  findings={currentFindings}
+                  value={current.text}
                   path={current.path}
-                  {cache}
-                  {online}
-                  {busy}
-                  onopen={(path) => void run(() => openPage(path))}
-                  onstage={stageAppAction}
+                  readonly={readonly(
+                    current.path,
+                    allowTemplateEdits,
+                    allowConfigEdits
+                  )}
+                  disabled={busy}
+                  onchange={edit}
                 />
-              {:else}
-                <article
-                  id="preview"
-                  class="markdown"
-                  use:renderedLinks
-                  use:markdownView={{
-                    text: current.text,
-                    schema: current.template?.definition?.frontmatter
-                  }}
-                ></article>
+              </div>
+              {#if mode === 'rendered' && !sourceOnly(current.path)}
+                {#if isRecording(current.text)}
+                  <SpeechReview
+                    page={current}
+                    {api}
+                    dirty={!!cache.drafts[current.path]}
+                    onstage={stageAppAction}
+                    onopen={(path) => void run(() => openPage(path))}
+                  />
+                {:else if isApp(current.text)}
+                  <AppViews
+                    path={current.path}
+                    {cache}
+                    {online}
+                    {busy}
+                    onopen={(path) => void run(() => openPage(path))}
+                    onstage={stageAppAction}
+                  />
+                {:else}
+                  <article
+                    id="preview"
+                    class="markdown"
+                    use:renderedLinks
+                    use:markdownView={{
+                      text: current.text,
+                      schema: current.template?.definition?.frontmatter
+                    }}
+                  ></article>
+                {/if}
               {/if}
-            {/if}
-          </div>
+            </div>
+          {/if}
         {/key}
       {:else}<div class="empty">
           <span>▧</span>

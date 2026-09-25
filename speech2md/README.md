@@ -19,21 +19,25 @@ packages at runtime; only model weights and checkpoints populate user caches.
 ```sh
 uv sync --project speech2md --extra dev
 uv run --project speech2md pytest speech2md/tests
-uv run --project speech2md speech2md meeting.mp4
+uv run --project speech2md speech2md recording.md
 ```
 
-The input may be an ordinary audio/video file or a Meeting Capture manifest.
+The input is an authored Markdown recording document. Its frontmatter references
+an audio/video file with `audio`, or a Meeting Capture manifest with `manifest`.
 Both legacy v1 per-file tracks and v2 Matroska containers are accepted. For v2,
 each role is read from its declared audio stream in the shared container.
 Manifest checksums are verified before inference. Canonical audio is never
 changed.
 
 MOSS always receives the canonical English timestamp-and-speaker prompt.
-Optional hotwords and manually identified speaker ranges come from an adjacent
-hint file. For `meeting.mp4`, `speech2md` reads `meeting.hint.yaml` when it
-exists:
+Optional hotwords, attendees, and localized corrections live in the recording
+document frontmatter. No sidecar discovery or legacy input fallback is performed.
+For example, `recording.md` contains:
 
-```yaml
+```markdown
+---
+mdstore: recording
+audio: audio.m4a
 hotwords:
   - ProveKit
   - F2Z
@@ -45,13 +49,17 @@ attendees:
       - track: mixed
         start: 754.0
         end: 762.0
+---
+# Meeting
+
+Human notes go here.
 ```
 
 Both fields are optional, as are `ranges` on each attendee. Unknown fields, invalid tracks,
 out-of-bounds ranges, and identities that cannot be separated at a MOSS turn
 boundary stop processing. A track may be omitted for single-track media and is
 required for multi-track captures. Hotwords are trimmed, deduplicated
-case-insensitively, and capped at 40. The hint file is never rewritten.
+case-insensitively, and capped at 40. The authored recording document is never rewritten.
 Raw generations are retained in an adjacent cache as described below.
 
 Long recordings use one deliberately fixed policy. `speech2md` chooses the
@@ -98,9 +106,9 @@ Audio overlap remains only for transcript boundary trimming and deduplication.
 Successful transcription publishes three derived files:
 
 ```text
-meeting.md
-meeting.moss.npz
-meeting.voiceprints.npz
+transcript.md
+transcript.moss.npz
+transcript.voiceprints.json
 ```
 
 The MOSS cache stores replayable raw generations and is accepted only when its
@@ -121,11 +129,11 @@ are ignored. The cache contains string arrays only and is loaded with
 `allow_pickle=False`.
 
 Markdown is the readable derived output. Its flat YAML front matter contains
-the source hash, speech2md source commit, optional hint-file hash, authoritative
+the source hash, speech2md source commit, recording-guidance hash, authoritative
 meeting start/end times when supplied by Meeting Capture, an optional
 calendar-event link, and the attendee roster. `handle` is the editable
-human-readable name; `identity` is reserved for a future unique person-document
-path and is currently empty. The roster has no positional association with
+human-readable name; `identity` is an optional stable person-document path, used only after human
+confirmation for cross-meeting matching. The roster has no positional association with
 transcript speakers. Every transcript run starts with a handle declared in this
 roster. Identified turns use the human handle directly; unidentified turns use
 a declared processing-local `speaker-N` handle. Those anonymous entries
@@ -184,3 +192,25 @@ populate the PyTorch model cache (`$XDG_CACHE_HOME/speech2md/torch` through the
 Nix wrapper). A load, checksum or inference failure stops processing clearly;
 canonical audio remains unchanged. Existing derived artifacts require `--force`
 to replace.
+
+
+## mdstore worker
+
+Run the daemon with `MDSTORE_WORKER_TOKEN` set to a separate worker credential.
+Run an available Apple Silicon worker with the same credential in its environment:
+
+```sh
+speech2md-worker --server https://your-mdstore-host --cache ~/.cache/speech2md/worker
+```
+
+`--once` claims at most one job. Workers pull `speech2md-v1` jobs, heartbeat leases,
+verify input digests and manifest paths, and submit only assigned outputs. The
+server validates and commits publications; the worker never edits its repository.
+Keep the recipe identifier fixed for a deployment; use a new `--recipe` identifier
+and matching derivation definition for incompatible pipeline changes.
+
+The local cache retains original inputs and MOSS intermediates across attempts.
+Published speaker vectors use JSON with a versioned embedding-space identity,
+normalized vectors, and confirmed person associations. Only confirmed references
+are used for cross-meeting suggestions; suggestions do not become confirmed
+identities automatically. GPU inference is unchanged and is not run by tests.

@@ -86,7 +86,10 @@ for (const args of [
 const daemon = spawn(
   fileURLToPath(new URL('../../mdstore/target/debug/mdstore', import.meta.url)),
   ['--root', root, 'serve'],
-  { stdio: 'inherit' }
+  {
+    stdio: 'inherit',
+    env: { ...process.env, MDSTORE_WORKER_TOKEN: 'browser-test-worker' }
+  }
 );
 process.env.MDSTORE_URL = 'http://127.0.0.1:43133';
 const ui = await preview({

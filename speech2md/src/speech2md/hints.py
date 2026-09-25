@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import math
 from pathlib import Path
 
-import yaml
 
-from .model import AudioSource, ResolvedInput, Segment, SpeakerHint, TranscriptEdit
+from .model import AudioSource, Segment, SpeakerHint, TranscriptEdit
+from .recording import frontmatter
 from .moss import normalize_hotwords
 
 
@@ -34,27 +35,18 @@ class SpeechHints:
         return tuple(value for attendee in self.attendees for value in attendee.ranges)
 
 
-def hint_path(resolved: ResolvedInput) -> Path:
-    return resolved.markdown_path.with_suffix(".hint.yaml")
-
-
 def load_hints(path: Path) -> SpeechHints:
-    if not path.exists():
-        return SpeechHints()
-    if not path.is_file():
-        raise ValueError(f"hint sidecar is not a file: {path}")
-    raw = path.read_bytes()
-    try:
-        value = yaml.safe_load(raw.decode("utf-8"))
-    except yaml.YAMLError as error:
-        raise ValueError(f"invalid hint YAML: {error}") from error
-    if value is None:
-        value = {}
-    mapping = _mapping(value, "hint sidecar")
+    return parse_hints(frontmatter(path))
+
+
+def parse_hints(value: dict) -> SpeechHints:
+    mapping = dict(value)
+    for key in ("audio", "manifest", "mdstore"):
+        mapping.pop(key, None)
     _only(
         mapping,
         {"attendees", "calendar_event", "edits", "ended_at", "hotwords", "started_at", "title"},
-        "hint sidecar",
+        "recording frontmatter",
     )
     title = _optional_single_line(mapping.get("title"), "hint title")
     started_at = _optional_single_line(mapping.get("started_at"), "hint started_at")
@@ -129,7 +121,7 @@ def load_hints(path: Path) -> SpeechHints:
         started_at=started_at,
         ended_at=ended_at,
         calendar_event=calendar_event,
-        sha256=hashlib.sha256(raw).hexdigest(),
+        sha256=hashlib.sha256(json.dumps(mapping, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
     )
 
 

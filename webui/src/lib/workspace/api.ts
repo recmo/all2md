@@ -1,4 +1,6 @@
 export type Page = {
+  readonly?: boolean;
+  asset?: { oid: string; size: number };
   path: string;
   revision?: string;
   hash?: string | null;
@@ -55,6 +57,19 @@ export class ApiError extends Error {
 }
 export class Api {
   token = '';
+  async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const response = await fetch(path, {
+      ...init,
+      headers: {
+        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+        ...init.headers
+      }
+    });
+    const value = await response.json();
+    if (!response.ok)
+      throw new ApiError(value.error || response.statusText, response.status);
+    return value as T;
+  }
   private async mcp<T>(name: string, args: unknown): Promise<T> {
     let response: Response;
     try {

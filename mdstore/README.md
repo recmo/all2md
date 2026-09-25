@@ -316,3 +316,54 @@ Independent clients can link it with `default-features = false`.
 Templates may declare `scope(exclude=["overview.md"])`. Patterns are relative to
 the template directory. Excluded documents inherit the nearest matching parent
 schema; they do not bypass ordinary Markdown parsing or link validation.
+
+## Assets and derived documents
+
+mdstore supports immutable content-addressed assets and generic leased derivations.
+Speech-specific guidance and execution live in webui and speech2md; the server
+stores input/output declarations and validates published Markdown normally.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /artifacts` | Committed assets, derivation definitions, and provenance |
+| `PUT /assets?path=…` | Upload an immutable asset and commit its LFS pointer |
+| `GET /assets?path=…` | Authenticated streaming download with byte ranges |
+| `POST /assets/ticket?path=…` | One-hour playback URL for native browser media |
+| `POST /derivations` | Register source, recipe, selected fields, input assets, outputs |
+| `PATCH /derivations/{id}` | Replace the explicit `inputs` asset list |
+| `DELETE /derivations/{id}` | Remove a definition and its outputs with normal validation |
+| `GET /jobs` | Reconcile and read durable job status |
+| `POST /jobs/{id}/retry` | Retry or explicitly regenerate |
+| `POST /vectors/search` | Exact cosine search in an explicit embedding space |
+| `POST /worker/claim` | Claim work for supported recipe names |
+| `GET /worker/inputs` | Download an input authorized by job and attempt |
+| `PUT /worker/outputs` | Upload a leased output object |
+| `POST /worker/jobs/{id}/heartbeat` | Renew lease, report progress or failure |
+| `POST /worker/jobs/{id}/complete` | Validate and atomically publish assigned outputs |
+| `POST /worker/vectors/search` | Search only frozen reference artifacts |
+| `POST /lfs/objects/batch` | Git LFS basic transfer discovery |
+| `GET/PUT /lfs/objects/{oid}` | Authenticated LFS object transfer |
+
+Worker routes require a separate `MDSTORE_WORKER_TOKEN`; it grants no ordinary
+repository editing access. Ordinary routes retain the daemon's configured bearer
+authentication. Playback URLs are short-lived bearer capabilities; avoid logging
+them. Transfer limits are 16 GiB for source assets and 64 MiB for worker outputs.
+`get_page` and directory inventory include asset metadata and effective read-only
+status without downloading binary contents.
+
+Set `MDSTORE_PUBLIC_URL` to the daemon's externally reachable HTTP(S) origin to
+use its LFS basic transfer API. Configure Git clients' LFS URL to that origin plus
+`/lfs`, with the daemon's ordinary bearer authorization. Source uploads and worker
+publication do not require a local git-lfs executable. They explicitly write
+standard pointers and LFS objects without executing Git filters. A Git push alone
+does not transfer objects: use LFS transfer or back up `.git/lfs/objects` separately.
+No object garbage collection is performed, preserving retained history.
+
+Published output ownership resides in committed `.mdstore-artifacts.json`, not
+editable document frontmatter. Ordinary writes cannot modify owned paths or hide
+published Markdown and derivation sources through document-selection settings.
+The target schema declaration `backlinks(required=False)` permits incoming links
+without an authored reciprocal link; targets and anchors are still validated.
+
+See [the recording integration](../webui/SPEECH_REVIEW.md) for the first client,
+including examples and operational limitations.

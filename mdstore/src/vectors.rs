@@ -44,7 +44,7 @@ pub struct EmbeddingSpace {
 }
 
 /// A vector and the provenance needed to interpret and authorize its use.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorRecord<M> {
     /// Stable, unique identifier within this collection.
     pub id: String,
