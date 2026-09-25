@@ -2,6 +2,9 @@
 
 Status: draft design; the integration described here is not implemented.
 
+Accepted decisions: use Git LFS for audio/video, commit published derived
+documents to Git, and enforce their read-only status in mdstore itself.
+
 Bring speech-review into webui while keeping mdstore a client-agnostic document
 server. Recordings belong to the managed repository, transcripts are derived
 documents, and human review guidance remains versioned source data. A worker can
@@ -51,10 +54,56 @@ Webui should cache document metadata and text normally. Audio downloads are
 on demand, with an explicit offline-download option; corpus synchronization must
 not download the entire recording archive.
 
-Keep model downloads, scratch files, MOSS caches, and voiceprint artifacts out of
-Git history. Store reusable derived artifacts by input fingerprint, retaining
-the currently published voiceprints for review. They can be rebuilt from source;
-human hints cannot. Use existing cache compatibility checks inside speech2md.
+Keep model downloads, scratch files, and MOSS inference caches out of Git
+history. Use existing cache compatibility checks inside speech2md. Distinguish
+these disposable intermediates from published derived documents: expensive
+outputs are not disposable merely because they can theoretically be rebuilt.
+Persist published voiceprint artifacts needed by review as versioned LFS assets,
+associated with the same publication as their transcript.
+
+## Derived documents are persistent, read-only store members
+
+Commit each successfully published derived Markdown document to ordinary Git.
+Other published derived documents follow the same rule, using LFS for large
+binary payloads. This preserves costly results, their exact historical bytes,
+diffs, and rollback even when the original model or worker is unavailable.
+Re-running a pinned model is not assumed to reproduce identical bytes.
+
+Derived documents participate in normal inventory, reads, search/indexing,
+schema and link validation, history, and offline text caching. Read-only is a
+write policy, not an exclusion from the store. Existing access controls still
+apply. Input changes mark a published result stale without removing it; staleness
+and validation validity are separate properties.
+
+Enforce ownership in mdstore using committed derivation metadata, including the
+output paths, recipe and version, input fingerprint, and published content hashes.
+This metadata must survive cloning and rebuilding operational state. Its exact
+representation is an implementation detail; protection cannot depend only on a
+frontmatter flag inside an editable output or on the operational job database.
+Ordinary edits cannot remove or rewrite the ownership record to bypass protection.
+
+Reject ordinary mutations of owned output paths, including replacement, deletion,
+rename/move, and indirect writes such as automatic backlink rewriting. Check
+ownership against the current committed state and the complete proposed batch;
+a batch cannot first remove ownership and then edit an output. Expose the
+effective read-only permission and derivation status through the existing API so
+all clients can explain why editing is unavailable. Broad document write access
+does not grant permission to overwrite derived outputs.
+
+Only the authorized result-publication path can create or replace owned outputs.
+Workers submit candidates, not arbitrary Git commits. Validate candidate outputs
+and their affected dependents against the current repository using the normal
+validation rules before atomically committing outputs and provenance. Failed
+validation leaves the previous publication intact and exposes diagnostics.
+Output ownership and lease checks are additional to validation, not exemptions
+from it. Commit publications, never progress events or failed attempts.
+
+Corrections belong in authored inputs such as review hints. A separately named
+authored copy may be edited normally but is no longer the derivation's output.
+Removing a derivation and its outputs requires an explicit lifecycle operation;
+ordinary deletion must not implicitly disable protection. Direct filesystem or
+Git writes bypass mdstore's API boundary and must be detected as provenance
+mismatches, not silently overwritten by the next job.
 
 ## Desired outputs and durable jobs
 
@@ -110,8 +159,8 @@ voiceprint suggestions, and localized corrections from speech-review.
 
 Review edits stage `.hint.yaml` changes through the existing changeset. Preserve
 the current timing and hint formats. Generated transcripts remain read-only in
-ordinary editing unless the user explicitly detaches a copy from regeneration;
-never silently overwrite hand-edited prose. Unexpected external output changes
+ordinary editing, enforced by mdstore as well as reflected in the UI. An authored
+copy uses a distinct path outside the derivation's ownership. Unexpected external output changes
 produce a conflict instead of being treated as an invitation to overwrite.
 
 Show processing status and the last successful transcript together. A worker
@@ -124,6 +173,10 @@ locally is independent of publishing and scheduling their regeneration.
    uploads, authorization, byte ranges, and text-only offline synchronization.
 2. Add desired-output records and durable leases. Test restart recovery,
    coalescing, duplicate completion, expired leases, and stale input/output races.
+   Verify that owned outputs remain readable, indexed, and validated while all
+   ordinary write paths reject changes, including ownership-removal batches and
+   backlink rewrites. Verify protection survives a clone and queue rebuild, and
+   invalid worker results cannot replace a valid publication.
 3. Add a speech2md worker adapter. Exercise a small fixture end to end through
    upload, claim, transcription, validated publication, and hint regeneration.
    Test cache reuse and a MacBook worker disconnecting before completion.
