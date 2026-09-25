@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { isApp, appDocuments, applyAppEdit, field, evaluateApp } from './apps';
-import { emptyCache } from './cache';
+import { emptyCache } from '../workspace/cache';
 it('collections include local drafts and omit staged deletions with explicit missing metadata', () => {
   const cache = emptyCache('repo');
   cache.paths = ['tasks/template.md', 'tasks/a.md', 'missing.md', 'deleted.md'];

@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import init, { validate, build_snapshot } from './wasm/validator';
+import init, { validate, build_snapshot } from '../wasm/validator';
 let ready: ReturnType<typeof init> | undefined;
 self.onmessage = async ({ data }) => {
   try {

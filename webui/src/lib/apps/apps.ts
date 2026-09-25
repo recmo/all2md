@@ -1,7 +1,7 @@
 import MarkdownIt from 'markdown-it';
 import { parseDocument, Document } from 'yaml';
-import type { Cache } from './cache';
-import wasmUrl from './wasm/validator_bg.wasm?url';
+import type { Cache } from '../workspace/cache';
+import wasmUrl from '../wasm/validator_bg.wasm?url';
 const markdown = new MarkdownIt();
 export type AppDocument = { path: string; title: string; template: string | null; frontmatter: Record<string, unknown>; text: string | null };
 export type AppView = { kind: 'table' | 'kanban' | 'gantt'; name: string; collection: string; bindings: { columns?: string[]; group?: string; on_move?: string; start?: string; end?: string; dependencies?: string } };

@@ -1,4 +1,4 @@
-import type { ValidationSnapshot } from './localValidation';
+import type { ValidationSnapshot } from '../validation/localValidation';
 import type { Draft, Page, SearchResult } from './api';
 export type Cache = {
   version: 1;

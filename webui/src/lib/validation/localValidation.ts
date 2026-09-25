@@ -1,5 +1,5 @@
-import wasmUrl from './wasm/validator_bg.wasm?url';
-import type { EditRequest, ValidationFinding } from './api';
+import wasmUrl from '../wasm/validator_bg.wasm?url';
+import type { EditRequest, ValidationFinding } from '../workspace/api';
 export type ValidationSnapshot = {
   version: number;
   revision: string;

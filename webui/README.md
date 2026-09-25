@@ -5,6 +5,8 @@ This package owns the frontend, offline-validation orchestration, and Starlark a
 runtime. Its `wasm/` crate links mdstore's generic validation library. The document
 server has no dependency on this package and does not host the UI.
 
+Frontend modules are grouped by feature; see [the source layout](src/lib/README.md).
+
 ```sh
 # Requires Rust with the wasm32-unknown-unknown target and wasm-bindgen-cli 0.2.121.
 pnpm install --frozen-lockfile

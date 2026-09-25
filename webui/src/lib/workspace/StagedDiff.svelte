@@ -1,5 +1,5 @@
 <script lang="ts">
-  import './pierre';
+  import '../documents/pierre';
   import { onMount } from 'svelte';
   import { FileDiff } from '@pierre/diffs';
   let {

@@ -2,7 +2,7 @@
   import AppTable from './AppTable.svelte';
   import AppKanban from './AppKanban.svelte';
   import AppGantt from './AppGantt.svelte';
-  import type { Cache } from './cache';
+  import type { Cache } from '../workspace/cache';
   import { appDocuments, evaluateApp, field, display, type AppResult, type AppDocument, type AppEdit } from './apps';
   let { path, cache, online, busy, onopen, onstage }: { path: string; cache: Cache; online: boolean; busy: boolean; onopen: (path: string) => void; onstage: (edits: AppEdit[]) => Promise<void> } = $props();
   let tab = $state(''), result = $state<AppResult>(), error = $state(''), loading = $state(false), acting = $state(false), notice = $state('');

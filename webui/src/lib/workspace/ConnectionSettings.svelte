@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api } from '$lib/api';
+  import { api } from '$lib/workspace/api';
   let { onconnect }: { onconnect: () => Promise<void> } = $props();
   let token = $state('');
   let busy = $state(false);

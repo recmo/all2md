@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import init, { evaluate_app } from './wasm/validator';
+import init, { evaluate_app } from '../wasm/validator';
 self.onmessage = async ({ data }) => {
   try {
     await init({ module_or_path: data.wasmUrl });

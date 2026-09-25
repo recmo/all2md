@@ -2,7 +2,7 @@
   import './pierre';
   import { onMount } from 'svelte';
   import { CodeView } from '@pierre/diffs';
-  import type { ValidationFinding } from './api';
+  import type { ValidationFinding } from '../workspace/api';
   import { Editor } from '@pierre/diffs/edit';
 
   let {

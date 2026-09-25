@@ -4,7 +4,7 @@ export type Page = {
   hash?: string | null;
   exists: boolean;
   text: string;
-  template: { path: string; content: string; definition?: { frontmatter?: import("./markdown").PropertySchema } } | null;
+  template: { path: string; content: string; definition?: { frontmatter?: import("../documents/markdown").PropertySchema } } | null;
 };
 export type Directory = {
   path: string;

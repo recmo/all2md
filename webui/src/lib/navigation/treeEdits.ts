@@ -1,5 +1,5 @@
-import type { Cache } from './cache';
-import { readonly, type Page } from './api';
+import type { Cache } from '../workspace/cache';
+import { readonly, type Page } from '../workspace/api';
 import { rewriteLinks } from './rewriteLinks';
 
 export function treePaths(cache: Cache): string[] {

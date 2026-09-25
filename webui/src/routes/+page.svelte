@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { readInventory } from "$lib/inventory";
-  import { buildSnapshot } from "$lib/localValidation";
+  import { readInventory } from "$lib/workspace/inventory";
+  import { buildSnapshot } from "$lib/validation/localValidation";
   import { onMount, tick } from 'svelte';
-  import { navigationDrawer } from '$lib/navigationDrawer';
+  import { navigationDrawer } from '$lib/navigation/navigationDrawer';
   let mobile = $state(false);
   let drawerOpen = $state(false);
   function closeDrawer() {
@@ -17,13 +17,13 @@
     media.addEventListener('change', update);
     return () => media.removeEventListener('change', update);
   });
-  import AppViews from '$lib/AppViews.svelte';
-  import { isApp, applyAppEdit, type AppEdit } from '$lib/apps';
-  import ConflictResolver from '$lib/ConflictResolver.svelte';
-  import { reconcilePage, resolvePage, localVersion, type Conflict } from '$lib/reconcile';
-  import StagedDiff from '$lib/StagedDiff.svelte';
-  import ConnectionSettings from '$lib/ConnectionSettings.svelte';
-  import WorkspaceNavigation from '$lib/WorkspaceNavigation.svelte';
+  import AppViews from '$lib/apps/AppViews.svelte';
+  import { isApp, applyAppEdit, type AppEdit } from '$lib/apps/apps';
+  import ConflictResolver from '$lib/workspace/ConflictResolver.svelte';
+  import { reconcilePage, resolvePage, localVersion, type Conflict } from '$lib/workspace/reconcile';
+  import StagedDiff from '$lib/workspace/StagedDiff.svelte';
+  import ConnectionSettings from '$lib/workspace/ConnectionSettings.svelte';
+  import WorkspaceNavigation from '$lib/navigation/WorkspaceNavigation.svelte';
   let view = $state<'document' | 'search' | 'settings' | 'submit'>('document');
   function navigate(next: 'search' | 'settings' | 'submit') {
     closeDrawer();
@@ -42,7 +42,7 @@
     type Draft,
     type ValidationFinding,
     type SearchResult
-  } from '$lib/api';
+  } from '$lib/workspace/api';
   import {
     loadCache,
     saveCache,
@@ -50,19 +50,19 @@
     cachedSearch,
     emptyCache,
     type Cache
-  } from '$lib/cache';
+  } from '$lib/workspace/cache';
   import {
     validateLocally,
     disposeValidation
-  } from '$lib/localValidation';
-  import { markdownView } from '$lib/markdownView';
-  import CodeEditor from '$lib/CodeEditor.svelte';
+  } from '$lib/validation/localValidation';
+  import { markdownView } from '$lib/documents/markdownView';
+  import CodeEditor from '$lib/documents/CodeEditor.svelte';
   let findings = $state<ValidationFinding[]>([]);
   let allowConfigEdits = $state(false);
   let allowTemplateEdits = $state(false);
   let mode = $state<'rendered' | 'code'>('rendered');
-  import { treePaths, addFolder, moveTree, deleteTree } from '$lib/treeEdits';
-  import DocumentTree from '$lib/DocumentTree.svelte';
+  import { treePaths, addFolder, moveTree, deleteTree } from '$lib/navigation/treeEdits';
+  import DocumentTree from '$lib/navigation/DocumentTree.svelte';
   let cache = $state.raw<Cache>(emptyCache(''));
   let current = $state.raw<Page | Draft | null>(null);
   let online = $state(false),

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { emptyCache } from './cache';
+import { emptyCache } from '../workspace/cache';
 import { addFolder, moveTree, treePaths } from './treeEdits';
 import { rewriteLinks } from './rewriteLinks';
-import { editRequest } from './api';
+import { editRequest } from '../workspace/api';
 
 function fixture() {
   const cache = emptyCache('test');
