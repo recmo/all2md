@@ -49,16 +49,21 @@ export class ApiError extends Error {
 }
 export class Api {
   token = '';
-  async request<T>(path: string, body?: unknown): Promise<T> {
+  private async mcp<T>(name: string, args: unknown): Promise<T> {
     let response: Response;
     try {
-      response = await fetch(path, {
-        method: body === undefined ? 'GET' : 'POST',
+      response = await fetch('/mcp', {
+        method: 'POST',
         headers: {
-          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          'Content-Type': 'application/json',
           ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
         },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: crypto.randomUUID(),
+          method: 'tools/call',
+          params: { name, arguments: args }
+        }),
         signal: AbortSignal.timeout(15000)
       });
     } catch {
@@ -68,45 +73,28 @@ export class Api {
     }
     if (response.status === 401)
       throw new ApiError('Enter your bearer token to connect.', 401);
-    const value = await response.json().catch(() => ({ error: `Request failed: HTTP ${response.status} ${response.statusText}` }));
-    if (!response.ok)
-      throw new ApiError(
-        value.findings?.length
-          ? 'Validation failed.'
-          : value.error || response.statusText,
-        response.status,
-        value.findings || []
-      );
-    return value;
-  }
-  async mcp<T>(name: string, args: unknown): Promise<T> {
-    const response = await this.request<{
-      error?: { message: string };
-      result: {
-        isError: boolean;
-        content: { text: string }[];
-        structuredContent: T;
-      };
-    }>('/mcp', {
-      jsonrpc: '2.0',
-      id: crypto.randomUUID(),
-      method: 'tools/call',
-      params: { name, arguments: args }
+    const value = await response.json().catch(() => {
+      throw new ApiError(`Request failed: HTTP ${response.status} ${response.statusText}`, response.status);
     });
-    if (response.error) throw new ApiError(response.error.message, 400);
-    if (response.result.isError)
+    if (!response.ok)
+      throw new ApiError(value.error || response.statusText, response.status);
+    if (value.error) throw new ApiError(value.error.message, 400);
+    const result: {
+      isError: boolean;
+      content: { text: string }[];
+      structuredContent: T;
+    } = value.result;
+    if (result.isError)
       throw new ApiError(
-        response.result.content.map((c) => c.text).join('\n') +
-          '\n' +
-          JSON.stringify(response.result.structuredContent || '', null, 2),
+        result.content.map((c) => c.text).join('\n'),
         422,
         (
-          response.result.structuredContent as {
+          result.structuredContent as {
             validation_findings?: ValidationFinding[];
           }
         )?.validation_findings || []
       );
-    return response.result.structuredContent;
+    return result.structuredContent;
   }
   page(path: string) {
     return this.mcp<Page>('get_page', { path });

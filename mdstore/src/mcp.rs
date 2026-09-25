@@ -22,8 +22,8 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
 #[derive(Clone)]
-pub(crate) struct AppState {
-    pub(crate) store: Arc<Store>,
+struct AppState {
+    store: Arc<Store>,
     bearer_token: Option<String>,
 }
 
@@ -93,7 +93,7 @@ async fn health(State(state): State<AppState>) -> Response {
     }
 }
 
-pub(crate) async fn run_blocking<T>(
+async fn run_blocking<T>(
     operation: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T>
 where

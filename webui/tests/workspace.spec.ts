@@ -690,8 +690,7 @@ test('sidebar contains only trees with Search and Settings pages', async ({ page
   await mcp;
   await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
   await expect(page.getByLabel('Bearer token')).toBeVisible();
-  await page.getByRole('button', { name: /Make library available offline/ }).click();
-  await expect(page.getByRole('button', { name: /Make library available offline/ })).toBeEnabled();
+  await expect(page.locator('.cache-settings summary')).toContainText('cached');
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await context.setOffline(true);

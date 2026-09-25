@@ -273,8 +273,6 @@
     };
     online = true;
     await syncDrafts();
-    await refreshValidationSnapshot();
-    persist();
     if (view === 'document' && !current && cache.selected)
       await openPage(cache.selected);
   }
@@ -399,59 +397,53 @@
     const request = batch;
     try {
       const snapshot = cache.validationSnapshot;
-      let validation: { valid: boolean; restart_required?: boolean };
       if (!snapshot) {
         message('Connect once to build the local validation baseline.');
         return;
-      } else {
-        const sources = Object.fromEntries(
-          Object.entries(cache.pages).map(([path, page]) => [path, page.text])
+      }
+      const sources = Object.fromEntries(
+        Object.entries(cache.pages).map(([path, page]) => [path, page.text])
+      );
+      let result = await validateLocally(snapshot, request, sources);
+      if (version !== validationVersion || checkedSignature !== signature)
+        return;
+      if (result.needs.length && online) {
+        const fetched = await Promise.all(
+          result.needs.map((path) => api.page(path))
         );
-        let result = await validateLocally(snapshot, request, sources);
         if (version !== validationVersion || checkedSignature !== signature)
           return;
-        if (result.needs.length && online) {
-          const fetched = await Promise.all(
-            result.needs.map((path) => api.page(path))
-          );
-          if (version !== validationVersion || checkedSignature !== signature)
-            return;
-          const pages = { ...cache.pages };
-          for (const page of fetched) {
-            sources[page.path] = page.text;
-            pages[page.path] = page;
-          }
-          cache = { ...cache, pages };
-          persist();
-          result = await validateLocally(snapshot, request, sources);
+        const pages = { ...cache.pages };
+        for (const page of fetched) {
+          sources[page.path] = page.text;
+          pages[page.path] = page;
         }
-        if (version !== validationVersion || checkedSignature !== signature)
-          return;
-        if (result.needs.length) {
-          message(
-            `Validation incomplete: ${result.needs.length} affected document(s) need current source. ${online ? 'Reconnect to refresh the baseline.' : 'Reconnect to fetch them.'}`
-          );
-          return;
-        }
-        if (result.server_required) {
-          findings = result.findings;
-          submissionOnly = checkedSignature;
-          message(`Local validation incomplete: ${result.server_required} Submission will run all server checks.`);
-          return;
-        } else {
-          if (result.findings.length)
-            throw new ApiError('Validation failed.', 422, result.findings);
-          validation = result;
-        }
+        cache = { ...cache, pages };
+        persist();
+        result = await validateLocally(snapshot, request, sources);
       }
       if (version !== validationVersion || checkedSignature !== signature)
         return;
-      if (!validation.valid)
+      if (result.needs.length) {
+        message(
+          `Validation incomplete: ${result.needs.length} affected document(s) need current source. ${online ? 'Reconnect to refresh the baseline.' : 'Reconnect to fetch them.'}`
+        );
+        return;
+      }
+      if (result.findings.length)
+        throw new ApiError('Validation failed.', 422, result.findings);
+      if (result.server_required) {
+        findings = [];
+        submissionOnly = checkedSignature;
+        message(`Local validation incomplete: ${result.server_required} Submission will run all server checks.`);
+        return;
+      }
+      if (!result.valid)
         throw Error('Validation did not complete successfully.');
       findings = [];
       validated = checkedSignature;
       message(
-        validation.restart_required
+        result.restart_required
           ? 'Validation passed. Listener or authentication changes require a daemon restart after submission.'
           : !online
             ? 'Validation passed offline against the cached baseline. Reconnect to submit.'
@@ -557,26 +549,6 @@
       validated = '';
       failure(e);
     } finally {
-      busy = false;
-    }
-  }
-  async function cacheLibrary() {
-    busy = true;
-    try {
-      for (const [i, path] of cache.paths.entries()) {
-        fetching = [path];
-        const page = await api.page(path);
-        cache = { ...cache, pages: { ...cache.pages, [path]: page } };
-        persist();
-        message(`Caching documents: ${i + 1} / ${cache.paths.length}`);
-        if (!saved) break;
-      }
-      if (saved)
-        message(
-          'Library available offline. Drafts still require API validation before submission.'
-        );
-    } finally {
-      fetching = [];
       busy = false;
     }
   }
@@ -1053,12 +1025,6 @@
       <ConnectionSettings onconnect={refresh} />
       <section class="review">
         <h2>Offline storage</h2>
-        <button
-          class="cache-button"
-          disabled={!online || busy}
-          onclick={() => run(cacheLibrary)}
-          >↓ Make library available offline</button
-        >
         <p role="status">{online ? 'Connected' : 'Offline · local cache'}</p>
         <p class:error>{feedback}</p>
         <details class="cache-settings">

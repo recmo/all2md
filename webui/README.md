@@ -41,8 +41,8 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
   Configuration and template editing follow the daemon permission settings.
   The service worker caches bundled language assets for offline rendering.
 - Document sources, templates, draft bases, edits, and summaries are written to
-  localStorage, scoped by origin and repository. “Make library available offline”
-  caches every listed document. The service worker caches only the app shell.
+  localStorage, scoped by origin and repository. Connecting automatically caches
+  the published corpus. The service worker caches only the app shell.
 - Offline search is explicitly labelled cached-text search. Reconnecting refreshes
   the listing; it never auto-submits and requires fresh validation. Exact original
   source is retained for concurrency checks, including across browser reloads.
