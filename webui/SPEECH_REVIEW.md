@@ -3,7 +3,9 @@
 Status: draft design; the integration described here is not implemented.
 
 Accepted decisions: use Git LFS for audio/video, commit published derived
-documents to Git, and enforce their read-only status in mdstore itself.
+documents to Git, and enforce their read-only status in mdstore itself. Store
+authored review guidance in `recording.md` frontmatter, not a separate hint
+sidecar. Let the target schema exempt its documents from authored backlinks.
 
 Bring speech-review into webui while keeping mdstore a client-agnostic document
 server. Recordings belong to the managed repository, transcripts are derived
@@ -112,9 +114,12 @@ or shell commands supplied by documents. Keep scheduling infrastructure generic;
 speech-specific formats and execution remain in speech2md and its adapter.
 
 A desired-output fingerprint includes every actual track's content hash, the
-capture manifest, hints (including absence), processing configuration, and the
-selected pipeline/model revisions. Hashing only a manifest or file timestamps
-is insufficient. The desired recipe version is server configuration: installing
+capture manifest's processing inputs, the recording frontmatter fields consumed
+by transcription (including absent values), processing configuration, and the
+selected pipeline/model revisions. Use a deterministic, versioned projection of
+these inputs: editing human notes or YAML formatting must not trigger inference.
+Hashing only a manifest or file timestamps is insufficient. Record source
+revisions separately for provenance. The desired recipe version is server configuration: installing
 a newer worker must not silently retranscribe the whole archive.
 
 On committed input changes, discover affected outputs and upsert durable jobs.
@@ -152,13 +157,66 @@ may remain reusable without publishing stale Markdown.
 
 ## Review interface
 
+Use an authored Markdown document for each recording, alongside its source
+assets and derived transcript. For example:
+
+```text
+meetings/2026-09-25/
+  recording.md
+  audio.m4a
+  transcript.md
+```
+
+The recording document's YAML frontmatter holds source references, metadata,
+hotwords, attendees, speaker ranges, and localized corrections. Its Markdown
+body holds optional human-authored notes. For multi-track recordings, reference
+the capture manifest rather than flattening its tracks into a single audio file.
+Recording discovery and classification should use schema/metadata, not require
+this illustrative directory name or a particular recording date layout.
+
+```yaml
+---
+audio: audio.m4a
+hotwords: [ProveKit, F2Z]
+attendees:
+  - handle: Alice
+    identity: /people/alice.md
+    ranges:
+      - track: participants
+        start: 1122
+        end: 1148
+edits:
+  - track: participants
+    start: 1122
+    end: 1148
+    before: F two Z
+    after: F2Z
+---
+# Weekly check-in
+
+Optional human-authored notes.
+```
+
+Validate the structured guidance through the recording schema. Reuse normal
+document staging, concurrency checks, submission, and frontmatter relations for
+person references. Source references must resolve to managed assets/manifests,
+not arbitrary worker filesystem paths. The example preserves existing hint
+range and correction semantics; precise field declarations belong in the schema.
+
+The worker adapter projects the relevant frontmatter into a temporary
+`.hint.yaml` for the existing speech2md pipeline. That sidecar is an execution
+detail, not a second authored source in mdstore. Preserve speech2md's standalone
+hint-file support. Import existing sidecars into recording documents without
+silently dropping fields; after import, the recording document is authoritative.
+
 Render a dedicated Svelte review component for transcript/recording metadata.
 Reuse webui navigation, staged changes, validation, submission, and permissions.
 Port track playback, seeking, speaker lanes, assignments, range splitting,
 voiceprint suggestions, and localized corrections from speech-review.
 
-Review edits stage `.hint.yaml` changes through the existing changeset. Preserve
-the current timing and hint formats. Generated transcripts remain read-only in
+Review edits stage `recording.md` frontmatter changes through the existing
+changeset, preserving unrelated frontmatter and the human-authored body. Preserve
+the current transcript timing and review-guidance semantics. Generated transcripts remain read-only in
 ordinary editing, enforced by mdstore as well as reflected in the UI. An authored
 copy uses a distinct path outside the derivation's ownership. Unexpected external output changes
 produce a conflict instead of being treated as an invitation to overwrite.
@@ -166,6 +224,25 @@ produce a conflict instead of being treated as an invitation to overwrite.
 Show processing status and the last successful transcript together. A worker
 being offline must not make existing transcripts unavailable. Previewing hints
 locally is independent of publishing and scheduling their regeneration.
+
+## Target-side backlink policy
+
+Reciprocity considers both endpoint schemas. The source declares a reciprocal
+relationship; the target schema can waive its obligation to author the reverse
+edge. The meetings schema can therefore exempt its documents without exceptions
+in every linking schema. Proposed declaration: `backlinks(required=False)`.
+
+This exemption does not disable target/anchor validation or remove graph edges.
+Computed incoming links remain available independently of authored backlinks.
+Read-only status does not itself confer an exemption. Without a target exemption,
+the source's reciprocal requirement continues to apply.
+
+Changing the target policy must revalidate affected incoming relationships,
+including sources outside the target directory, identically in server and WASM
+validation. Resolve the policy using the existing effective-schema rules:
+nearest schemas replace parents, so a nested replacement schema must explicitly
+declare an exemption if it needs one. Do not introduce implicit inheritance for
+this one setting.
 
 ## Implementation sequence and acceptance checks
 
@@ -180,8 +257,12 @@ locally is independent of publishing and scheduling their regeneration.
 3. Add a speech2md worker adapter. Exercise a small fixture end to end through
    upload, claim, transcription, validated publication, and hint regeneration.
    Test cache reuse and a MacBook worker disconnecting before completion.
-4. Port the review interface with playback and staged hint edits. Test timing,
-   multi-track selection, correction persistence, and mobile playback.
+4. Port the review interface with playback and staged recording-frontmatter edits.
+   Test timing, multi-track selection, correction persistence, sidecar import,
+   worker hint projection, and mobile playback. Verify that editing human notes
+   or changing YAML formatting does not enqueue transcription, while changing
+   consumed guidance does. Test target backlink exemptions and incoming-edge
+   revalidation in both server and WASM paths.
 5. Remove the standalone speech-review server and its process-local queue after
    the replacement covers the existing review behavior. Keep speech2md usable
    independently of webui.
