@@ -49,3 +49,6 @@ pub use store::{
 
 /// Reusable document parsing and schema validation.
 pub mod validation;
+
+#[cfg(feature = "server")]
+pub mod vectors;

@@ -9,6 +9,7 @@ use crate::{
     config::Config,
     markdown::{Edge, ParsedPage},
     provider::{InputType, RetrievalProvider, validate_rerank_results, validate_vectors},
+    vectors::cosine,
 };
 
 #[derive(Debug, Clone)]
@@ -437,25 +438,6 @@ fn tokenize(text: &str) -> Vec<String> {
         .filter(|term| term.len() > 1)
         .map(str::to_lowercase)
         .collect()
-}
-
-fn cosine(left: &[f32], right: &[f32]) -> f64 {
-    if left.len() != right.len() || left.is_empty() {
-        return f64::NEG_INFINITY;
-    }
-    let (mut dot, mut left_norm, mut right_norm) = (0.0_f64, 0.0_f64, 0.0_f64);
-    for (left, right) in left.iter().zip(right) {
-        let left = f64::from(*left);
-        let right = f64::from(*right);
-        dot = left.mul_add(right, dot);
-        left_norm = left.mul_add(left, left_norm);
-        right_norm = right.mul_add(right, right_norm);
-    }
-    if left_norm == 0.0 || right_norm == 0.0 {
-        0.0
-    } else {
-        dot / left_norm.sqrt() / right_norm.sqrt()
-    }
 }
 
 #[cfg(test)]

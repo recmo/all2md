@@ -1,6 +1,9 @@
 # Speech review integration proposal
 
-Status: draft design; the integration described here is not implemented.
+Status: integration in progress. The first implementation provides a reusable
+exact vector collection in `mdstore::vectors`, sharing cosine scoring with text
+search. Asset ingestion, voiceprint loading, worker transport, and the review UI
+remain unimplemented; the following sections describe their intended design.
 
 Accepted decisions: use Git LFS for audio/video, commit published derived
 documents to Git, and enforce their read-only status in mdstore itself. Store
@@ -68,6 +71,19 @@ Persist published voiceprint artifacts needed by review as versioned LFS assets,
 associated with the same publication as their transcript.
 
 ### Cross-meeting speaker references
+
+Use separate embedding spaces for document and speaker vectors, identified by
+namespace, full embedding recipe version, and dimensions. Reuse mdstore's exact
+cosine search without a new database. Direct vector queries bypass text embedding,
+graph expansion, and reranking, preserving reference provenance in each result.
+Apply the trusted job's reference filter before selecting the best matches. The
+index is rebuildable from published artifacts and is not another source of truth.
+
+The initial Rust library collection validates dimensions, finite/nonzero vectors,
+and unique record IDs, and rejects queries from incompatible embedding spaces.
+Metadata is caller-owned so mdstore's search primitive stays independent of
+speech schemas. The future worker endpoint must authenticate requests and supply
+the reference filter; the library itself is not an authorization service.
 
 Workers may use published voiceprints from other authorized meetings to assist
 participant identification. Assign each job an immutable reference manifest
