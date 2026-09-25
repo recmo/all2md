@@ -182,3 +182,11 @@ the destination staged as a copy. No remote rename is inferred from filenames.
 Submission checks current sources again, and the server still validates and
 compares bases atomically. Changes that arrive during submission are reconciled
 for another review instead of silently overwriting either version.
+
+
+Schema-aware moves rewrite configured wiki targets and frontmatter relations in
+addition to Markdown links. Task `depends_on` fields are declared as relations,
+so both local and server validation reject dangling dependencies. Rewriting uses
+the portable Rust resolver, preserves wiki labels/fragments and YAML comments,
+and stages all affected documents together. A move is rejected if its new names
+cannot preserve references under the governing schema.

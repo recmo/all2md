@@ -101,3 +101,64 @@ mod tests {
         );
     }
 }
+
+/// Projects schema references and converts byte offsets for JavaScript strings.
+pub fn document_references(input: &str) -> Result<String> {
+    let sources: std::collections::HashMap<String, String> = serde_json::from_str(input)?;
+    let templates = mdstore::validation::Templates::compile(&sources)
+        .map_err(|e| anyhow!("Invalid schemas: {e:?}"))?;
+    let mut references = mdstore::validation::document_references(&sources, &templates)?;
+    for (path, refs) in &mut references {
+        for reference in refs {
+            if let Some(range) = &mut reference.range {
+                let text = &sources[path];
+                range.start = text[..range.start].encode_utf16().count();
+                range.end = text[..range.end].encode_utf16().count();
+            }
+        }
+    }
+    Ok(serde_json::to_string(&references)?)
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+    #[test]
+    fn references_follow_schema_scope_and_preserve_precise_locations() {
+        let source = "---\nrefs:\n  - target: target#part\n    kind: task\n  - target: ignored\n    kind: other\n---\n# 😀 Note\n\n[[ target#part | label ]] and `[[target]]` and \\[[target]].\n\n```\n[[target]]\n```\n";
+        let schema = "```starlark\nlinks(wiki=[r'\\[\\[(?P<target>[^|\\]]+)(?:\\|[^\\]]*)?\\]\\]'])\nrelation('references', selector={'kind':'frontmatter','array_pointer':'/refs','target_pointer':'/target','type_pointer':'/kind','type_value':'task'})\n```\n";
+        let sources = serde_json::json!({"schema.md":schema,"notes/source.md":source,"target.md":"# Target\n"});
+        let refs: serde_json::Value =
+            serde_json::from_str(&document_references(&sources.to_string()).unwrap()).unwrap();
+        let refs = refs["notes/source.md"].as_array().unwrap();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0]["target"], "target.md");
+        assert_eq!(refs[0]["raw"], "target#part");
+        let start = refs[0]["range"]["start"].as_u64().unwrap() as usize;
+        let end = refs[0]["range"]["end"].as_u64().unwrap() as usize;
+        assert_eq!(
+            String::from_utf16(&source.encode_utf16().collect::<Vec<_>>()[start..end]).unwrap(),
+            "target#part"
+        );
+        assert_eq!(refs[1]["pointer"], "/refs/0/target");
+    }
+    #[test]
+    fn task_dependencies_are_validated_as_document_relations() {
+        let schema = include_str!("../../../mdstore/examples/tasks/v1/schema.md");
+        let sources = std::collections::HashMap::from([
+            ("tasks/v1/schema.md".into(), schema.into()),
+            (
+                "tasks/v1/rumdl.toml".into(),
+                include_str!("../../../mdstore/examples/tasks/v1/rumdl.toml").into(),
+            ),
+        ]);
+        let templates = mdstore::validation::Templates::compile(&sources).unwrap();
+        let pages = std::collections::HashMap::from([("tasks/v1/2026/09/23-001-test.md".into(), "---\nstate: inbox\ndepends_on: [missing.md]\n---\n# Test\n\n## Timeline\n\n- 2026-09-23T09:00:00Z — Created.\n".into())]);
+        let errors = mdstore::validation::validate_corpus(&pages, &templates).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|finding| finding.message.contains("dangling internal target"))
+        );
+    }
+}

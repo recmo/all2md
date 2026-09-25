@@ -1813,3 +1813,135 @@ async function cachedDocument(page: Page, repository: string, path: string) {
     { repository, path }
   );
 }
+
+test('task renames rewrite dependency paths offline and preserve workload arrows after submission', async ({
+  page,
+  context
+}) => {
+  const old = 'tasks/v1/2026/09/23-001-plan.md';
+  const renamed = 'tasks/v1/2026/09/23-001-renamed.md';
+  const originalResponse = await page.request.post('/mcp', {
+    data: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'get_page', arguments: { path: old } }
+    }
+  });
+  const original = (await originalResponse.json()).result.structuredContent
+    .text;
+  const unsafeResponse = await page.request.post('/mcp', {
+    data: {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'apply_edits',
+        arguments: {
+          edit_summary: 'Reject dangling dependency',
+          edits: [
+            { op: 'delete_page', path: old, base: original },
+            { op: 'create_page', path: renamed, content: original }
+          ]
+        }
+      }
+    }
+  });
+  const unsafe = (await unsafeResponse.json()).result;
+  expect(unsafe.isError).toBe(true);
+  expect(JSON.stringify(unsafe)).toContain('dangling internal target');
+  await page.goto('/#' + encodeURIComponent(old));
+  await expect(page.locator('#preview')).toContainText('Plan a project');
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
+  await context.setOffline(true);
+  await page.locator(`[data-item-path="${old}"]`).dblclick();
+  const rename = page.getByRole('textbox', {
+    name: 'Rename 23-001-plan.md',
+    exact: true
+  });
+  await rename.fill('23-001-renamed.md');
+  await rename.press('Enter');
+  await expect(page.locator(`[data-item-path="${renamed}"]`)).toBeVisible();
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
+  await page.getByLabel('Description').fill('Rename dependency target');
+  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText(
+    'depends_on: [ tasks/v1/2026/09/23-001-renamed.md ]'
+  );
+  await context.setOffline(false);
+  await expect(page.locator('#submit')).toBeEnabled();
+  await page.locator('#submit').click();
+  await expect(page.locator('.submit-notice')).toContainText(
+    'Changes committed successfully'
+  );
+  await page.locator('[data-item-path="tasks/v1/app.md"]').click();
+  await page.getByRole('button', { name: 'Workload', exact: true }).click();
+  await expect(
+    page
+      .getByRole('region', { name: 'Collection schedule' })
+      .locator('g[data-source]')
+  ).toHaveCount(1);
+});
+
+test('configured wiki targets rewrite with labels and code examples preserved', async ({
+  page
+}) => {
+  test.skip(!process.env.MDSTORE_TEST_ADMIN, 'Requires schema creation');
+  const schema =
+    "```starlark\nlinks(wiki=[r'\\[\\[(?P<target>[^|#\\]]+)(?:#[^|\\]]+)?(?:\\|[^\\]]+)?\\]\\]'])\n```\n";
+  const response = await page.request.post('/mcp', {
+    data: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'apply_edits',
+        arguments: {
+          edit_summary: 'Create wiki fixture',
+          edits: [
+            { op: 'create_page', path: 'wiki/schema.md', content: schema },
+            {
+              op: 'create_page',
+              path: 'wiki/target.md',
+              content: '# Target\n'
+            },
+            {
+              op: 'create_page',
+              path: 'wiki/source.md',
+              content:
+                '# 😀 Source\n\n[[target#part|Label]] and `[[target]]`.\n'
+            }
+          ]
+        }
+      }
+    }
+  });
+  expect((await response.json()).result.isError).not.toBe(true);
+  await page.goto('/#wiki%2Ftarget.md');
+  await expect(page.locator('#preview')).toContainText('Target');
+  await page.locator('[data-item-path="wiki/target.md"]').dblclick();
+  const rename = page.getByRole('textbox', {
+    name: 'Rename target.md',
+    exact: true
+  });
+  await rename.fill('renamed.md');
+  await rename.press('Enter');
+  await expect(
+    page.locator('[data-item-path="wiki/renamed.md"]')
+  ).toBeVisible();
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
+  await page.getByLabel('Description').fill('Preserve wiki backlinks');
+  await expect(page.locator('#submit')).toBeEnabled();
+  const staged = await page.evaluate(() => {
+    const key = Object.keys(localStorage).find((k) =>
+      k.startsWith('mdstore:workspace:')
+    )!;
+    return JSON.parse(localStorage.getItem(key)!).drafts['wiki/source.md'].text;
+  });
+  expect(staged).toContain('[[wiki/renamed.md#part|Label]] and `[[target]]`.');
+  await page.locator('#submit').click();
+  await expect(page.locator('.submit-notice')).toContainText(
+    'Changes committed successfully'
+  );
+});

@@ -22,6 +22,7 @@ frontmatter(
     depends_on=list_of(string(min_length=1), unique=True),
 )
 
+relation("depends_on", selector={"kind": "frontmatter", "array_pointer": "/depends_on", "target_pointer": ""})
 metadata(state="/state", tags="/tags")
 markdown("rumdl.toml")
 

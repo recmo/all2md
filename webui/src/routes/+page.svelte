@@ -4,6 +4,11 @@
     saveDocuments,
     clearDocuments
   } from '$lib/workspace/documentCache';
+  import {
+    rewriteSchemaReferences,
+    assertReferencesPreserved
+  } from '$lib/navigation/schemaReferences';
+  import { documentReferences } from '$lib/validation/localValidation';
   import { readInventory } from '$lib/workspace/inventory';
   import { buildSnapshot } from '$lib/validation/localValidation';
   import { onMount, tick } from 'svelte';
@@ -768,6 +773,7 @@
   async function stageMoves(
     moves: { from: string; to: string; directory: boolean }[]
   ) {
+    const original = cache;
     const sources = { ...cache.pages };
     // Incoming links can occur anywhere. Keep the operation atomic if any
     // source is unavailable, rather than silently leaving stale backlinks.
@@ -782,6 +788,31 @@
     }
     let next = { ...cache, pages: sources };
     for (const move of moves) {
+      if (move.from === move.to) continue;
+      const paths = treePaths(next).filter((path) => !path.endsWith('/'));
+      const mapping = new Map(
+        paths
+          .filter(
+            (path) =>
+              path === move.from ||
+              (move.directory && path.startsWith(move.from + '/'))
+          )
+          .map((path) => [path, move.to + path.slice(move.from.length)])
+      );
+      const texts = Object.fromEntries(
+        paths.map((path) => [
+          path,
+          (next.drafts[path] || next.pages[path]).text
+        ])
+      );
+      const references = await documentReferences(texts);
+      next = rewriteSchemaReferences(
+        next,
+        references,
+        mapping,
+        allowTemplateEdits,
+        allowConfigEdits
+      );
       next = moveTree(
         next,
         move.from,
@@ -791,7 +822,19 @@
         allowTemplateEdits,
         allowConfigEdits
       );
+      const afterSources = Object.fromEntries(
+        treePaths(next)
+          .filter((path) => !path.endsWith('/'))
+          .map((path) => [path, (next.drafts[path] || next.pages[path]).text])
+      );
+      assertReferencesPreserved(
+        references,
+        await documentReferences(afterSources),
+        mapping
+      );
     }
+    if (cache !== original)
+      throw Error('Workspace changed while preparing the move. Try again.');
     cache = next;
     if (current) {
       history.replaceState(null, '', `#${encodeURIComponent(cache.selected)}`);

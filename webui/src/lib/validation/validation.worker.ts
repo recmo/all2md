@@ -1,5 +1,9 @@
 /// <reference lib="webworker" />
-import init, { validate, build_snapshot } from '../wasm/validator';
+import init, {
+  validate,
+  build_snapshot,
+  document_references
+} from '../wasm/validator';
 let ready: ReturnType<typeof init> | undefined;
 self.onmessage = async ({ data }) => {
   try {
@@ -8,9 +12,10 @@ self.onmessage = async ({ data }) => {
     self.postMessage({
       id: data.id,
       result: JSON.parse(
-        (data.operation === 'build_snapshot' ? build_snapshot : validate)(
-          JSON.stringify(data.input)
-        )
+        { build_snapshot, validate, document_references }[
+          data.operation as
+            'build_snapshot' | 'validate' | 'document_references'
+        ](JSON.stringify(data.input))
       )
     });
   } catch (error) {

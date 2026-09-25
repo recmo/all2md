@@ -89,3 +89,10 @@ function runWorker<T>(operation: string, input: unknown): Promise<T> {
     }
   });
 }
+
+export function documentReferences(sources: Record<string, string>) {
+  return runWorker<import('../navigation/schemaReferences').SchemaReferences>(
+    'document_references',
+    sources
+  );
+}

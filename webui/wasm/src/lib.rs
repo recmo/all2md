@@ -20,3 +20,8 @@ pub fn evaluate_app(input: &str) -> Result<String, JsValue> {
 pub fn build_snapshot(input: &str) -> Result<String, JsValue> {
     client::build_snapshot(input).map_err(|error| JsValue::from_str(&error.to_string()))
 }
+
+#[wasm_bindgen]
+pub fn document_references(input: &str) -> Result<String, JsValue> {
+    client::document_references(input).map_err(|error| JsValue::from_str(&error.to_string()))
+}
