@@ -118,7 +118,9 @@ export function treeStatuses(
     }
   }
   for (const [path, badge] of badges) {
-    if (conflicts.some(item => item === path || item.startsWith(path + '/'))) {
+    if (
+      conflicts.some((item) => item === path || item.startsWith(path + '/'))
+    ) {
       badge.text += ' ⚠';
       badge.title += '; Merge conflict — resolve in Submit';
       badge.parts?.push({ text: ' ⚠', color: '#b43434' });

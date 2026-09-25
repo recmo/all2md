@@ -1,7 +1,6 @@
 //! Portable validation of edits over a server-validated, source-light baseline.
-use mdstore::validation::{self as markdown, Config, Finding, Templates,
-     source_hash};
-use crate::snapshot::{ValidationSnapshot, SNAPSHOT_VERSION};
+use crate::snapshot::{SNAPSHOT_VERSION, ValidationSnapshot};
+use mdstore::validation::{self as markdown, Config, Finding, Templates, source_hash};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -50,7 +49,8 @@ pub(crate) fn validate(input: ClientValidationInput) -> ClientValidationResult {
     }
 }
 fn finding(path: &str, message: impl Into<String>) -> Vec<Finding> {
-    vec![Finding { source: None,
+    vec![Finding {
+        source: None,
         path: path.into(),
         line: None,
         message: message.into(),
@@ -102,9 +102,10 @@ fn check(input: ClientValidationInput) -> Result<ClientValidationResult, Vec<Fin
         if !edited.insert(path.clone()) {
             return Err(finding(path, "Multiple edits for the same document"));
         }
-        let resource =
-            mdstore::validation::is_config_resource_path(path) || mdstore::validation::is_template(path);
-        if (mdstore::validation::is_config_resource_path(path) && !old_config.server.allow_config_edits)
+        let resource = mdstore::validation::is_config_resource_path(path)
+            || mdstore::validation::is_template(path);
+        if (mdstore::validation::is_config_resource_path(path)
+            && !old_config.server.allow_config_edits)
             || (mdstore::validation::is_template(path) && !old_config.server.allow_template_edits)
             || (!resource && !path.ends_with(".md"))
         {
@@ -172,7 +173,11 @@ fn check(input: ClientValidationInput) -> Result<ClientValidationResult, Vec<Fin
     }
     // App collection functions can inspect any document source. Request the
     // baseline sources before evaluating an edited definition, even offline.
-    let app_changed = edited.iter().any(|path| after.get(path).is_some_and(|text| crate::apps::is_app(text)));
+    let app_changed = edited.iter().any(|path| {
+        after
+            .get(path)
+            .is_some_and(|text| crate::apps::is_app(text))
+    });
     let mut needs = Vec::new();
     for (path, doc) in &snapshot.documents {
         if edited.contains(path) || (!app_changed && templates.same_policy(&old_templates, path)) {
@@ -215,29 +220,43 @@ fn check(input: ClientValidationInput) -> Result<ClientValidationResult, Vec<Fin
     // App edits execute collection queries over the proposed inventory. Actions
     // require an event and are checked when invoked, never with fabricated events.
     let mut findings = Vec::new();
-    let mut app_paths: Vec<_> = proposed.iter()
-        .filter(|(path, page)| page.frontmatter["mdstore"] == "app"
-            && edited.contains(*path))
-        .map(|(path, _)| path).collect();
+    let mut app_paths: Vec<_> = proposed
+        .iter()
+        .filter(|(path, page)| page.frontmatter["mdstore"] == "app" && edited.contains(*path))
+        .map(|(path, _)| path)
+        .collect();
     app_paths.sort();
     if !app_paths.is_empty() {
-        let mut paths: Vec<_> = proposed.keys().filter(|path|
-            !mdstore::validation::is_template(path) && proposed[*path].frontmatter["mdstore"] != "app"
-        ).collect();
+        let mut paths: Vec<_> = proposed
+            .keys()
+            .filter(|path| {
+                !mdstore::validation::is_template(path)
+                    && proposed[*path].frontmatter["mdstore"] != "app"
+            })
+            .collect();
         paths.sort();
-        let documents: Vec<_> = paths.into_iter().map(|path| {
-            let page = &proposed[path];
-            serde_json::json!({"path": path,
-                "title": page.headings.iter().find(|h| h.level == 1).map(|h| h.text.as_str()).unwrap_or(path.rsplit('/').next().unwrap_or(path)),
-                "frontmatter": page.frontmatter, "template": templates.template_path(path), "text": after[path]})
-        }).collect();
+        let documents: Vec<_> = paths
+            .into_iter()
+            .map(|path| {
+                crate::app_documents::document(path, &after[path], &proposed[path], &templates)
+            })
+            .collect();
         for path in app_paths {
-            if let Err(error) = crate::apps::validate_definition(path, &after[path], documents.clone()) {
-                findings.push(Finding { source: None, path: path.clone(), message: format!("invalid app: {error}"), line: None });
+            if let Err(error) =
+                crate::apps::validate_definition(path, &after[path], documents.clone())
+            {
+                findings.push(Finding {
+                    source: None,
+                    path: path.clone(),
+                    message: format!("invalid app: {error}"),
+                    line: None,
+                });
             }
         }
     }
-    if !findings.is_empty() { return Err(findings); }
+    if !findings.is_empty() {
+        return Err(findings);
+    }
     old_templates.validate_changes(&before, &after)?;
     templates.validate_changes(&before, &after)?;
     Ok(ClientValidationResult {
@@ -250,12 +269,12 @@ fn check(input: ClientValidationInput) -> Result<ClientValidationResult, Vec<Fin
 
 #[cfg(test)]
 mod tests {
-    use crate::snapshot::SnapshotDocument;
     use super::*;
+    use crate::snapshot::SnapshotDocument;
     fn fixture() -> (ValidationSnapshot, HashMap<String, String>) {
         let files = HashMap::from([
             ("config.yaml".into(), "documents:\n  include: [\"**/*.md\"]\nserver:\n  allow_template_edits: true\n".into()),
-            ("template.md".into(), "```starlark\nrelation('mentions', selector={'kind': 'markdown_links'}, reciprocal='mentions')\n```\n".into()),
+            ("schema.md".into(), "```starlark\nrelation('mentions', selector={'kind': 'markdown_links'}, reciprocal='mentions')\n```\n".into()),
         ]);
         let pages: HashMap<String, String> = HashMap::from([
             ("a.md".into(), "[B](b.md)\n".into()),
@@ -290,12 +309,23 @@ mod tests {
     #[test]
     fn app_definitions_are_validated_by_the_client() {
         let (mut snapshot, pages) = fixture();
-        snapshot.files.insert("tasks/v1/template.md".into(), include_str!("../../../mdstore/examples/tasks/v1/template.md").to_owned() + "\n```starlark\nscope(exclude=[\"planner.md\"])\n```\n");
-        snapshot.files.insert("tasks/v1/rumdl.toml".into(), include_str!("../../../mdstore/examples/tasks/v1/rumdl.toml").into());
+        snapshot.files.insert(
+            "tasks/v1/schema.md".into(),
+            include_str!("../../../mdstore/examples/tasks/v1/schema.md").to_owned()
+                + "\n```starlark\nscope(exclude=[\"planner.md\"])\n```\n",
+        );
+        snapshot.files.insert(
+            "tasks/v1/rumdl.toml".into(),
+            include_str!("../../../mdstore/examples/tasks/v1/rumdl.toml").into(),
+        );
         let source = include_str!("../../examples/tasks/v1/app.md");
         let input = |snapshot, content: String| ClientValidationInput {
-            snapshot, sources: pages.clone(),
-            edits: vec![ClientEdit::CreatePage {path: "tasks/v1/planner.md".into(), content}],
+            snapshot,
+            sources: pages.clone(),
+            edits: vec![ClientEdit::CreatePage {
+                path: "tasks/v1/planner.md".into(),
+                content,
+            }],
         };
         let mut incomplete = input(snapshot.clone(), source.into());
         incomplete.sources.clear();
@@ -305,12 +335,33 @@ mod tests {
         let broken = "---\nmdstore: app\n---\n```starlark\ncollection('bad', lambda docs: [d.missing for d in docs])\n```\n";
         let failure = validate(input(snapshot.clone(), broken.into()));
         assert!(!failure.valid);
-        assert!(failure.findings.iter().any(|f| f.message.contains("missing")));
+        assert!(
+            failure
+                .findings
+                .iter()
+                .any(|f| f.message.contains("missing"))
+        );
         let valid = validate(input(snapshot.clone(), source.into()));
         assert!(valid.valid, "{valid:?}");
-        assert!(!validate(input(snapshot.clone(), source.replace("collection(\"tasks\", tasks)", "collection(\"other\", tasks)"))).valid);
-        assert!(validate(input(snapshot.clone(), source.replace("mdstore: app", "mdstore: ordinary"))).valid);
-        *snapshot.files.get_mut("config.yaml").unwrap() = "documents:\n  include: [\"**/*.md\"]\nserver:\n  allow_template_edits: false\n".into();
+        assert!(
+            !validate(input(
+                snapshot.clone(),
+                source.replace(
+                    "collection(\"tasks\", tasks)",
+                    "collection(\"other\", tasks)"
+                )
+            ))
+            .valid
+        );
+        assert!(
+            validate(input(
+                snapshot.clone(),
+                source.replace("mdstore: app", "mdstore: ordinary")
+            ))
+            .valid
+        );
+        *snapshot.files.get_mut("config.yaml").unwrap() =
+            "documents:\n  include: [\"**/*.md\"]\nserver:\n  allow_template_edits: false\n".into();
         assert!(validate(input(snapshot, source.into())).valid);
     }
 
@@ -352,7 +403,7 @@ mod tests {
             .push_str("  allow_config_edits: true\n");
         snapshot
             .files
-            .get_mut("template.md")
+            .get_mut("schema.md")
             .unwrap()
             .push_str("\n```starlark\nmarkdown('rumdl.toml')\n```\n");
         snapshot
@@ -417,8 +468,8 @@ mod tests {
         let input = |sources| ClientValidationInput {
             snapshot: snapshot.clone(),
             edits: vec![ClientEdit::ReplacePage {
-                path: "template.md".into(),
-                base: snapshot.files["template.md"].clone(),
+                path: "schema.md".into(),
+                base: snapshot.files["schema.md"].clone(),
                 content: content.into(),
             }],
             sources,
@@ -445,8 +496,8 @@ mod tests {
         assert!(result.findings[0].message.contains("document changed"));
         let result = validate(ClientValidationInput {
             edits: vec![ClientEdit::ReplacePage {
-                path: "template.md".into(),
-                base: snapshot.files["template.md"].clone(),
+                path: "schema.md".into(),
+                base: snapshot.files["schema.md"].clone(),
                 content: "```starlark\nmissing_function()\n```\n".into(),
             }],
             snapshot,

@@ -23,7 +23,7 @@ export async function readInventory(api: Api, cached: Record<string, Page>) {
       // Schema/config changes also change the template projection on unchanged pages.
       const policy = (path: string) =>
         path === 'config.yaml' ||
-        /(^|\/)(template\.md|\.?rumdl\.toml)$/.test(path);
+        /(^|\/)(schema\.md|\.?rumdl\.toml)$/.test(path);
       const policies = files.filter((file) => policy(file.path));
       const policyChanged =
         policies.some((file) => cached[file.path]?.hash !== file.hash) ||

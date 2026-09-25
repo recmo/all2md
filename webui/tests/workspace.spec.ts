@@ -62,25 +62,36 @@ async function replaceDocument(page: Page, text: string) {
   await page.keyboard.insertText(text);
 }
 
-test('offline editing survives reload and search uses the MCP API online', async ({ page, context }) => {
+test('offline editing survives reload and search uses the MCP API online', async ({
+  page,
+  context
+}) => {
   const calls: string[] = [];
-  page.on('request', r => { if (r.url().endsWith('/mcp')) calls.push(r.postDataJSON().params.name); });
+  page.on('request', (r) => {
+    if (r.url().endsWith('/mcp')) calls.push(r.postDataJSON().params.name);
+  });
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
   await replaceDocument(page, '# Welcome\n\nOffline knowledge garden.\n');
   await expect(page.locator('.document-header')).toContainText('Valid');
-  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await context.setOffline(true);
   await page.reload();
-  await expect(page.locator('#preview')).toContainText('Offline knowledge garden.');
+  await expect(page.locator('#preview')).toContainText(
+    'Offline knowledge garden.'
+  );
   await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
   await page.locator('#search').fill('garden');
   await page.locator('#search').press('Enter');
   await expect(page.getByText('OFFLINE · CACHED TEXT')).toBeVisible();
   await context.setOffline(false);
   await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: /^Connected$/ })).toBeVisible();
+  await expect(
+    page.getByRole('status').filter({ hasText: /^Connected$/ })
+  ).toBeVisible();
   await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
   await page.locator('#search').press('Enter');
   await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
@@ -96,9 +107,17 @@ test('connection settings are separate and keep the token in memory across SPA n
     page.getByRole('heading', { name: 'Settings', exact: true })
   ).toBeVisible();
   await page.getByLabel('Bearer token').fill('test-memory-token');
-  const listing = page.waitForRequest((r) => r.url().endsWith('/mcp') && r.postDataJSON()?.params?.name === 'get_page' && r.postDataJSON()?.params?.arguments?.path === '/' && r.headers()['authorization'] === 'Bearer test-memory-token');
+  const listing = page.waitForRequest(
+    (r) =>
+      r.url().endsWith('/mcp') &&
+      r.postDataJSON()?.params?.name === 'get_page' &&
+      r.postDataJSON()?.params?.arguments?.path === '/' &&
+      r.headers()['authorization'] === 'Bearer test-memory-token'
+  );
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Connected.' })).toBeVisible();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Connected.' })
+  ).toBeVisible();
   expect((await listing).headers()['authorization']).toBe(
     'Bearer test-memory-token'
   );
@@ -131,7 +150,7 @@ test('configuration is read-only YAML and template fences are highlighted', asyn
   await expect(page.locator('.code-editor [contenteditable=true]')).toHaveCount(
     0
   );
-  await page.locator('[data-item-path="template.md"]').click();
+  await page.locator('[data-item-path="schema.md"]').click();
   await expect(
     page
       .locator('#preview .markdown-code span')
@@ -139,7 +158,7 @@ test('configuration is read-only YAML and template fences are highlighted', asyn
       .first()
   ).toContainText('rumdl.toml');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
-  await page.getByRole('link', { name: 'template.md', exact: true }).click();
+  await page.getByRole('link', { name: 'schema.md', exact: true }).click();
   await expect(
     page
       .locator('#preview .markdown-code span')
@@ -165,7 +184,9 @@ test('folder hierarchy opens documents with rendered task lists', async ({
   await expect(tasks).toBeVisible();
   await tasks.focus();
   await tasks.press('Enter');
-  await expect(page.locator('.document-breadcrumb')).toHaveText(/notes\s*\/\s*guides\s*\/\s*tasks.md/);
+  await expect(page.locator('.document-breadcrumb')).toHaveText(
+    /notes\s*\/\s*guides\s*\/\s*tasks.md/
+  );
   const unchecked = page.getByRole('checkbox', { name: 'Incomplete task' });
   const checked = page.getByRole('checkbox', { name: 'Completed task' });
   await expect(unchecked).not.toBeChecked();
@@ -203,11 +224,15 @@ test('new empty documents can be edited and discarded without stale content', as
   page
 }) => {
   await page.goto('/');
-  await page.getByRole('treeitem', { name: 'notes / guides', exact: true }).click({ button: 'right' });
+  await page
+    .getByRole('treeitem', { name: 'notes / guides', exact: true })
+    .click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'New document here…' }).click();
   await page.getByLabel('New document path').fill('notes/new.md');
   await page.getByRole('button', { name: 'Create draft', exact: true }).click();
-  await expect(page.locator('.document-breadcrumb')).toHaveText(/notes\s*\/\s*new.md/);
+  await expect(page.locator('.document-breadcrumb')).toHaveText(
+    /notes\s*\/\s*new.md/
+  );
   await replaceDocument(
     page,
     '# New draft\n\n~~~unknown\n<script>literal</script>\n~~~\n'
@@ -218,9 +243,13 @@ test('new empty documents can be edited and discarded without stale content', as
     '<script>literal</script>'
   );
   page.once('dialog', (dialog) => dialog.accept());
-  await page.getByRole('treeitem', { name: 'new.md', exact: true }).click({ button: 'right' });
+  await page
+    .getByRole('treeitem', { name: 'new.md', exact: true })
+    .click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
-  await expect(page.getByRole('treeitem', { name: 'new.md', exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole('treeitem', { name: 'new.md', exact: true })
+  ).toHaveCount(0);
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await page.getByRole('radio', { name: 'Edit', exact: true }).click();
   await expect(page.locator('.code-editor')).not.toContainText('New draft');
@@ -236,7 +265,9 @@ test('tree offline badges update and folder menus create drafts in place', async
     exact: true
   });
   await expect(
-    document.getByTitle('Available offline — cached copy, may differ from the server')
+    document.getByTitle(
+      'Available offline — cached copy, may differ from the server'
+    )
   ).toBeVisible();
   await expect(
     page
@@ -266,7 +297,9 @@ test('tree offline badges update and folder menus create drafts in place', async
   );
   await page.getByLabel('New document path').fill('notes/guides/new-here.md');
   await page.getByRole('button', { name: 'Create draft', exact: true }).click();
-  await expect(page.locator('.document-breadcrumb')).toHaveText(/notes\s*\/\s*guides\s*\/\s*new-here.md/);
+  await expect(page.locator('.document-breadcrumb')).toHaveText(
+    /notes\s*\/\s*guides\s*\/\s*new-here.md/
+  );
   await expect(
     page
       .getByRole('treeitem', { name: 'new-here.md', exact: true })
@@ -330,7 +363,9 @@ test('validation does not require a commit description, but submission does', as
   await replaceDocument(page, '# Other note\n\nValidate before describing.\n');
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await expect(page.locator('#summary')).toHaveValue('');
-  await expect(page.locator('.validation-results')).toContainText('Validation passed.');
+  await expect(page.locator('.validation-results')).toContainText(
+    'Validation passed.'
+  );
   await expect(page.locator('#submit')).toBeDisabled();
   await page.locator('#summary').fill('Describe the already validated change');
   await expect(page.locator('#submit')).toBeEnabled();
@@ -361,7 +396,9 @@ test('validation findings navigate to inline editor annotations and clear after 
   await expect(diagnostic).toHaveCount(0);
   await expect(errors).toHaveCount(0);
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
-  await expect(page.locator('.validation-results')).toContainText('Validation passed');
+  await expect(page.locator('.validation-results')).toContainText(
+    'Validation passed'
+  );
 });
 
 test('privileged configuration and template edits validate in the editor', async ({
@@ -369,7 +406,7 @@ test('privileged configuration and template edits validate in the editor', async
 }) => {
   test.skip(!process.env.MDSTORE_TEST_ADMIN, 'Requires privileged test daemon');
   await page.goto('/');
-  await page.locator('[data-item-path="template.md"]').click();
+  await page.locator('[data-item-path="schema.md"]').click();
   await replaceDocument(page, '```starlark\nunknown_rule()\n```\n');
   await expect(page.locator('.validation-diagnostic')).toContainText(
     'invalid template'
@@ -397,11 +434,15 @@ test('privileged configuration and template edits validate in the editor', async
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await page.locator('#summary').fill('Update template and configuration');
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
-  await expect(page.locator('.validation-results')).toContainText('Validation passed');
+  await expect(page.locator('.validation-results')).toContainText(
+    'Validation passed'
+  );
   await page.locator('#submit').click();
-  await expect(page.locator('.submit-notice')).toContainText('Changes committed successfully');
+  await expect(page.locator('.submit-notice')).toContainText(
+    'Changes committed successfully'
+  );
   await page.reload();
-  await page.locator('[data-item-path="template.md"]').click();
+  await page.locator('[data-item-path="schema.md"]').click();
   await expect(page.locator('#preview')).toContainText('Updated guide');
 });
 
@@ -496,7 +537,7 @@ test('WASM template changes validate the cached corpus offline', async ({
     await route.continue();
   });
   await page.goto('/');
-  await page.locator('[data-item-path="reciprocal/template.md"]').click();
+  await page.locator('[data-item-path="reciprocal/schema.md"]').click();
   await page.evaluate(async () => {
     await navigator.serviceWorker.ready;
   });
@@ -508,7 +549,9 @@ test('WASM template changes validate the cached corpus offline', async ({
     '```starlark\nfrontmatter(name=string(required=True))\n```\n'
   );
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
-  await expect(page.locator('.validation-results')).toContainText('Validation failed');
+  await expect(page.locator('.validation-results')).toContainText(
+    'Validation failed'
+  );
   expect(fetchedB).toBe(false);
   await context.setOffline(false);
   await expect(
@@ -575,9 +618,18 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
   const base = '# Other note\n\nKeep it simple.\n';
   const text = '# Other note\n\nKeep it simple.\n\n\nMore.\n';
   const response = await page.request.post('/mcp', {
-    data: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'apply_edits', arguments: {
-      edit_summary: 'Check rumdl', edits: [{ op: 'replace_page', path: 'other.md', base, content: text }]
-    } } }
+    data: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'apply_edits',
+        arguments: {
+          edit_summary: 'Check rumdl',
+          edits: [{ op: 'replace_page', path: 'other.md', base, content: text }]
+        }
+      }
+    }
   });
   const result = (await response.json()).result;
   expect(result.isError).toBe(true);
@@ -600,240 +652,475 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
   await expect(page.locator('.document-status')).toContainText('Valid');
 });
 
-test('tree folders and moves persist offline and stage rewritten backlinks', async ({ page, context }) => {
+test('tree folders and moves persist offline and stage rewritten backlinks', async ({
+  page,
+  context
+}) => {
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
-  await page.locator('.document-tree-host').click({ button: 'right', position: { x: 200, y: 700 } });
-  await page.getByRole('menuitem', { name: 'New folder here…', exact: true }).click();
+  await page
+    .locator('.document-tree-host')
+    .click({ button: 'right', position: { x: 200, y: 700 } });
+  await page
+    .getByRole('menuitem', { name: 'New folder here…', exact: true })
+    .click();
   await page.getByLabel('Name', { exact: true }).fill('archive');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.getByRole('treeitem', { name: 'archive', exact: true })).toBeVisible();
-  await page.getByRole('treeitem', { name: 'other.md', exact: true }).click({ button: 'right' });
+  await expect(
+    page.getByRole('treeitem', { name: 'archive', exact: true })
+  ).toBeVisible();
+  await page
+    .getByRole('treeitem', { name: 'other.md', exact: true })
+    .click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
   await page.getByLabel('Destination path').fill('archive/other.md');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('dialog')).not.toBeVisible();
-  await expect(page.locator('[data-item-path="archive/other.md"]')).toBeVisible();
+  await expect(
+    page.locator('[data-item-path="archive/other.md"]')
+  ).toBeVisible();
   const staged = await page.evaluate(() => {
-    const key = Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!;
+    const key = Object.keys(localStorage).find((key) =>
+      key.startsWith('mdstore:workspace:')
+    )!;
     return JSON.parse(localStorage.getItem(key)!);
   });
   expect(staged.deletions['other.md']).toContain('# Other note');
   expect(staged.drafts['welcome.md'].text).toContain('(archive/other.md)');
   await expect(page.locator('.document-header')).toContainText('Valid');
-  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await context.setOffline(true);
   await page.reload();
-  await page.locator('[data-item-path="archive/other.md"]').click({ button: 'right' });
+  await page
+    .locator('[data-item-path="archive/other.md"]')
+    .click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Rename…', exact: true }).click();
-  await page.getByRole('textbox', { name: 'Rename other.md', exact: true }).fill('renamed.md');
-  await page.getByRole('textbox', { name: 'Rename other.md', exact: true }).press('Enter');
-  await expect(page.locator('[data-item-path="archive/renamed.md"]')).toBeVisible();
+  await page
+    .getByRole('textbox', { name: 'Rename other.md', exact: true })
+    .fill('renamed.md');
+  await page
+    .getByRole('textbox', { name: 'Rename other.md', exact: true })
+    .press('Enter');
+  await expect(
+    page.locator('[data-item-path="archive/renamed.md"]')
+  ).toBeVisible();
   await expect(page.locator('.document-header')).toContainText('Valid');
   await page.reload();
-  await expect(page.locator('[data-item-path="archive/renamed.md"]')).toBeVisible();
+  await expect(
+    page.locator('[data-item-path="archive/renamed.md"]')
+  ).toBeVisible();
 });
 
-test('drag moves and double-click renames stage backlink updates', async ({ page }) => {
+test('drag moves and double-click renames stage backlink updates', async ({
+  page
+}) => {
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
-  await page.locator('.document-tree-host').click({ button: 'right', position: { x: 200, y: 700 } });
-  await page.getByRole('menuitem', { name: 'New folder here…', exact: true }).click();
+  await page
+    .locator('.document-tree-host')
+    .click({ button: 'right', position: { x: 200, y: 700 } });
+  await page
+    .getByRole('menuitem', { name: 'New folder here…', exact: true })
+    .click();
   await page.getByLabel('Name', { exact: true }).fill('archive');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.getByRole('treeitem', { name: 'archive', exact: true }).dblclick();
-  await page.getByRole('textbox', { name: 'Rename archive', exact: true }).fill('cancelled');
-  await page.getByRole('textbox', { name: 'Rename archive', exact: true }).press('Escape');
-  await expect(page.getByRole('treeitem', { name: 'archive', exact: true })).toBeVisible();
-  await page.getByRole('treeitem', { name: 'other.md', exact: true }).dragTo(page.getByRole('treeitem', { name: 'archive', exact: true }));
-  await expect(page.locator('[data-item-path="archive/other.md"]')).toBeVisible();
+  await page
+    .getByRole('textbox', { name: 'Rename archive', exact: true })
+    .fill('cancelled');
+  await page
+    .getByRole('textbox', { name: 'Rename archive', exact: true })
+    .press('Escape');
+  await expect(
+    page.getByRole('treeitem', { name: 'archive', exact: true })
+  ).toBeVisible();
+  await page
+    .getByRole('treeitem', { name: 'other.md', exact: true })
+    .dragTo(page.getByRole('treeitem', { name: 'archive', exact: true }));
+  await expect(
+    page.locator('[data-item-path="archive/other.md"]')
+  ).toBeVisible();
   await page.locator('[data-item-path="archive/other.md"]').dblclick();
   await expect(page.getByRole('dialog')).not.toBeVisible();
-  await page.getByRole('textbox', { name: 'Rename other.md', exact: true }).fill('renamed.md');
-  await page.getByRole('textbox', { name: 'Rename other.md', exact: true }).press('Enter');
-  await expect(page.locator('[data-item-path="archive/renamed.md"]')).toBeVisible();
+  await page
+    .getByRole('textbox', { name: 'Rename other.md', exact: true })
+    .fill('renamed.md');
+  await page
+    .getByRole('textbox', { name: 'Rename other.md', exact: true })
+    .press('Enter');
+  await expect(
+    page.locator('[data-item-path="archive/renamed.md"]')
+  ).toBeVisible();
   await expect(page.locator('.document-header')).toContainText('Valid');
-  const staged = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!)!));
+  const staged = await page.evaluate(() =>
+    JSON.parse(
+      localStorage.getItem(
+        Object.keys(localStorage).find((key) =>
+          key.startsWith('mdstore:workspace:')
+        )!
+      )!
+    )
+  );
   expect(staged.drafts['welcome.md'].text).toContain('(archive/renamed.md)');
   expect(staged.deletions['other.md']).toContain('# Other note');
   // Protected files must be restored after the tree's optimistic drop.
-  await page.getByRole('treeitem', { name: 'config.yaml', exact: true }).dragTo(page.getByRole('treeitem', { name: 'archive', exact: true }));
+  await page
+    .getByRole('treeitem', { name: 'config.yaml', exact: true })
+    .dragTo(page.getByRole('treeitem', { name: 'archive', exact: true }));
   await expect(page.getByRole('alert')).toContainText('not permitted');
   await expect(page.locator('[data-item-path="config.yaml"]')).toBeVisible();
-  await expect(page.locator('[data-item-path="archive/config.yaml"]')).toHaveCount(0);
+  await expect(
+    page.locator('[data-item-path="archive/config.yaml"]')
+  ).toHaveCount(0);
   await page.reload();
-  await expect(page.locator('[data-item-path="archive/renamed.md"]')).toBeVisible();
-  await page.locator('.document-tree-host').click({ button: 'right', position: { x: 200, y: 700 } });
-  await page.getByRole('menuitem', { name: 'New folder here…', exact: true }).click();
+  await expect(
+    page.locator('[data-item-path="archive/renamed.md"]')
+  ).toBeVisible();
+  await page
+    .locator('.document-tree-host')
+    .click({ button: 'right', position: { x: 200, y: 700 } });
+  await page
+    .getByRole('menuitem', { name: 'New folder here…', exact: true })
+    .click();
   await page.getByLabel('Name', { exact: true }).fill('box');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await page.getByRole('treeitem', { name: 'archive', exact: true }).dragTo(page.getByRole('treeitem', { name: 'box', exact: true }));
-  await expect(page.locator('[data-item-path="box/archive/renamed.md"]')).toBeVisible();
+  await page
+    .getByRole('treeitem', { name: 'archive', exact: true })
+    .dragTo(page.getByRole('treeitem', { name: 'box', exact: true }));
+  await expect(
+    page.locator('[data-item-path="box/archive/renamed.md"]')
+  ).toBeVisible();
   await expect(page.locator('.document-header')).toContainText('Valid');
-  const movedFolder = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!)!));
-  expect(movedFolder.drafts['welcome.md'].text).toContain('(box/archive/renamed.md)');
-
+  const movedFolder = await page.evaluate(() =>
+    JSON.parse(
+      localStorage.getItem(
+        Object.keys(localStorage).find((key) =>
+          key.startsWith('mdstore:workspace:')
+        )!
+      )!
+    )
+  );
+  expect(movedFolder.drafts['welcome.md'].text).toContain(
+    '(box/archive/renamed.md)'
+  );
 });
 
-test('sidebar contains only trees with Search and Settings pages', async ({ page, context }) => {
+test('sidebar contains only trees with Search and Settings pages', async ({
+  page,
+  context
+}) => {
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await expect(page.locator('aside input')).toHaveCount(0);
   await expect(page.locator('aside footer')).toHaveCount(0);
   await expect(page.locator('aside')).not.toContainText('YOUR KNOWLEDGE');
   await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Search', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Search', exact: true })
+  ).toBeVisible();
   await page.locator('#search').fill('garden');
-  const mcp = page.waitForRequest(request => request.url().endsWith('/mcp') && request.postDataJSON()?.params?.name === 'search');
+  const mcp = page.waitForRequest(
+    (request) =>
+      request.url().endsWith('/mcp') &&
+      request.postDataJSON()?.params?.name === 'search'
+  );
   await page.locator('#search').press('Enter');
   await mcp;
   await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
   await expect(page.getByLabel('Bearer token')).toBeVisible();
   await expect(page.locator('.cache-settings summary')).toContainText('cached');
-  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await context.setOffline(true);
   await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
   await page.locator('#search').fill('garden');
   await page.locator('#search').press('Enter');
   await expect(page.locator('.search-results')).toContainText('welcome.md');
-  await expect(page.getByRole('treeitem', { name: 'other.md', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('treeitem', { name: 'other.md', exact: true })
+  ).toBeVisible();
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Search', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Search', exact: true })
+  ).toBeVisible();
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await expect(page.locator('#preview')).toContainText('Other note');
   const navigation = await page.locator('.workspace-navigation').boundingBox();
   for (const name of ['Search', 'Settings', 'Submit']) {
-    const row = await page.getByRole('treeitem', { name, exact: true }).boundingBox();
+    const row = await page
+      .getByRole('treeitem', { name, exact: true })
+      .boundingBox();
     expect(row!.y).toBeGreaterThanOrEqual(navigation!.y);
-    expect(row!.y + row!.height).toBeLessThanOrEqual(navigation!.y + navigation!.height);
+    expect(row!.y + row!.height).toBeLessThanOrEqual(
+      navigation!.y + navigation!.height
+    );
   }
   await page.screenshot({ path: '/tmp/mdstore-tree-sidebar.png' });
 });
 
-test('submit pane reviews validation and diffs, then commits the full staged batch', async ({ page, context }) => {
+test('submit pane reviews validation and diffs, then commits the full staged batch', async ({
+  page,
+  context
+}) => {
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
-  await replaceDocument(page, '# Other note\n\n[Missing](missing-submit-target.md)\n');
+  await replaceDocument(
+    page,
+    '# Other note\n\n[Missing](missing-submit-target.md)\n'
+  );
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Submit', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Submit', exact: true })
+  ).toBeVisible();
   await page.getByLabel('Description').fill('Review and reorganize notes');
-  await expect(page.getByRole('list', { name: 'Validation errors' })).toContainText('missing-submit-target');
+  await expect(
+    page.getByRole('list', { name: 'Validation errors' })
+  ).toContainText('missing-submit-target');
   await expect(page.locator('#submit')).toBeDisabled();
-  await page.getByRole('list', { name: 'Validation errors' }).getByRole('button').first().click();
+  await page
+    .getByRole('list', { name: 'Validation errors' })
+    .getByRole('button')
+    .first()
+    .click();
   await replaceDocument(page, '# Other note\n\nReviewed in the submit pane.\n');
-  await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).dblclick();
-  await page.getByRole('textbox', { name: 'Rename welcome.md', exact: true }).fill('welcome-submitted.md');
-  await page.getByRole('textbox', { name: 'Rename welcome.md', exact: true }).press('Enter');
-  await expect(page.getByRole('treeitem', { name: 'welcome-submitted.md', exact: true })).toBeVisible();
+  await page
+    .getByRole('treeitem', { name: 'welcome.md', exact: true })
+    .dblclick();
+  await page
+    .getByRole('textbox', { name: 'Rename welcome.md', exact: true })
+    .fill('welcome-submitted.md');
+  await page
+    .getByRole('textbox', { name: 'Rename welcome.md', exact: true })
+    .press('Enter');
+  await expect(
+    page.getByRole('treeitem', { name: 'welcome-submitted.md', exact: true })
+  ).toBeVisible();
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await expect(page.locator('#submit')).toBeEnabled();
-  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText('Added');
-  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText('Deleted');
+  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText(
+    'Added'
+  );
+  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText(
+    'Deleted'
+  );
   await expect(page.locator('.staged-diff').first()).toBeVisible();
-  await expect(page.locator('.staged-file').filter({ hasText: 'other.md' }).locator('[data-line]').filter({ hasText: 'Reviewed in the submit pane.' })).toBeVisible();
+  await expect(
+    page
+      .locator('.staged-file')
+      .filter({ hasText: 'other.md' })
+      .locator('[data-line]')
+      .filter({ hasText: 'Reviewed in the submit pane.' })
+  ).toBeVisible();
   await page.reload();
-  await expect(page.getByLabel('Description')).toHaveValue('Review and reorganize notes');
+  await expect(page.getByLabel('Description')).toHaveValue(
+    'Review and reorganize notes'
+  );
   await context.setOffline(true);
   await expect(page.locator('#submit')).toBeDisabled();
   await context.setOffline(false);
   await expect(page.locator('#submit')).toBeEnabled();
   await page.screenshot({ path: '/tmp/mdstore-submit-pane.png' });
-  const applied = page.waitForRequest(request => request.url().endsWith('/mcp') && request.postDataJSON()?.params?.name === 'apply_edits');
+  const applied = page.waitForRequest(
+    (request) =>
+      request.url().endsWith('/mcp') &&
+      request.postDataJSON()?.params?.name === 'apply_edits'
+  );
   await page.locator('#submit').click();
   expect((await applied).postDataJSON().params.arguments.edits).toHaveLength(3);
-  await expect(page.getByRole('status').filter({ hasText: 'Changes committed successfully.' })).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText('no staged changes');
+  await expect(
+    page
+      .getByRole('status')
+      .filter({ hasText: 'Changes committed successfully.' })
+  ).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText(
+    'no staged changes'
+  );
   const listing = await directoryPaths(page, '/');
   expect(listing).toContain('welcome-submitted.md');
   expect(listing).not.toContain('welcome.md');
-  const cache = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!)!));
+  const cache = await page.evaluate(() =>
+    JSON.parse(
+      localStorage.getItem(
+        Object.keys(localStorage).find((key) =>
+          key.startsWith('mdstore:workspace:')
+        )!
+      )!
+    )
+  );
   expect(cache.drafts).toEqual({});
   expect(cache.deletions).toEqual({});
-  expect(cache.pages['other.md'].text).toContain('Reviewed in the submit pane.');
+  expect(cache.pages).toEqual({});
+  await expect
+    .poll(() => cachedDocument(page, cache.repository, 'other.md'))
+    .toContain('Reviewed in the submit pane.');
   expect(cache.summary).toBe('');
 });
 
-test('server rejection preserves staged edits and description', async ({ page }) => {
+test('server rejection preserves staged edits and description', async ({
+  page
+}) => {
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Other note\n\nKeep this local draft.\n');
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await page.getByLabel('Description').fill('Preserve rejected submission');
   await expect(page.locator('#submit')).toBeEnabled();
-  await page.route('**/mcp', async route => {
+  await page.route('**/mcp', async (route) => {
     const body = route.request().postDataJSON();
     if (body?.params?.name !== 'apply_edits') return route.continue();
-    await route.fulfill({ json: { jsonrpc: '2.0', id: body.id, error: { code: -32000, message: 'The document changed on the server.' } } });
+    await route.fulfill({
+      json: {
+        jsonrpc: '2.0',
+        id: body.id,
+        error: { code: -32000, message: 'The document changed on the server.' }
+      }
+    });
   });
   await page.locator('#submit').click();
-  await expect(page.getByRole('alert')).toContainText('Your staged changes are preserved');
-  await expect(page.getByLabel('Description')).toHaveValue('Preserve rejected submission');
+  await expect(page.getByRole('alert')).toContainText(
+    'Your staged changes are preserved'
+  );
+  await expect(page.getByLabel('Description')).toHaveValue(
+    'Preserve rejected submission'
+  );
   await expect(page.locator('.staged-file')).toContainText('other.md');
   await page.reload();
-  await expect(page.getByLabel('Description')).toHaveValue('Preserve rejected submission');
+  await expect(page.getByLabel('Description')).toHaveValue(
+    'Preserve rejected submission'
+  );
   await expect(page.locator('.staged-file')).toContainText('other.md');
 });
 
-test('file and folder deletion is staged, validated, undoable, and survives reload', async ({ page }) => {
+test('file and folder deletion is staged, validated, undoable, and survives reload', async ({
+  page
+}) => {
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Other note\n\nPreserve this draft on undo.\n');
-  await page.getByRole('treeitem', { name: 'other.md', exact: true }).click({ button: 'right' });
+  await page
+    .getByRole('treeitem', { name: 'other.md', exact: true })
+    .click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Submit', exact: true })).toBeVisible();
-  await expect(page.locator('[data-item-path="other.md"] [data-item-section="content"]')).toHaveCSS('text-decoration-line', 'line-through');
-  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText('Deleted');
-  await expect(page.getByRole('list', { name: 'Validation errors' })).toContainText('dangling internal target');
-  await page.getByRole('button', { name: 'Undo deletion', exact: true }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Submit', exact: true })
+  ).toBeVisible();
+  await expect(
+    page.locator('[data-item-path="other.md"] [data-item-section="content"]')
+  ).toHaveCSS('text-decoration-line', 'line-through');
+  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText(
+    'Deleted'
+  );
+  await expect(
+    page.getByRole('list', { name: 'Validation errors' })
+  ).toContainText('dangling internal target');
+  await page
+    .getByRole('button', { name: 'Undo deletion', exact: true })
+    .click();
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
-  await expect(page.locator('.code-editor')).toContainText('Preserve this draft on undo.');
-  await page.getByRole('treeitem', { name: 'notes / guides', exact: true }).click({ button: 'right' });
+  await expect(page.locator('.code-editor')).toContainText(
+    'Preserve this draft on undo.'
+  );
+  await page
+    .getByRole('treeitem', { name: 'notes / guides', exact: true })
+    .click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
-  await expect(page.locator('[data-item-path="notes/guides/tasks.md"] [data-item-section="content"]')).toHaveCSS('text-decoration-line', 'line-through');
+  await expect(
+    page.locator(
+      '[data-item-path="notes/guides/tasks.md"] [data-item-section="content"]'
+    )
+  ).toHaveCSS('text-decoration-line', 'line-through');
   await page.getByLabel('Description').fill('Delete example folder');
   await expect(page.locator('#submit')).toBeEnabled();
   await page.reload();
-  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText('notes/guides/tasks.md');
-  await expect(page.locator('[data-item-path="notes/guides/tasks.md"] [data-item-section="content"]')).toHaveCSS('text-decoration-line', 'line-through');
-  const cache = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!)!));
+  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText(
+    'notes/guides/tasks.md'
+  );
+  await expect(
+    page.locator(
+      '[data-item-path="notes/guides/tasks.md"] [data-item-section="content"]'
+    )
+  ).toHaveCSS('text-decoration-line', 'line-through');
+  const cache = await page.evaluate(() =>
+    JSON.parse(
+      localStorage.getItem(
+        Object.keys(localStorage).find((key) =>
+          key.startsWith('mdstore:workspace:')
+        )!
+      )!
+    )
+  );
   expect(cache.deletions['notes/guides/tasks.md']).toContain('# Tasks');
-  expect(cache.drafts['other.md'].text).toContain('Preserve this draft on undo.');
+  expect(cache.drafts['other.md'].text).toContain(
+    'Preserve this draft on undo.'
+  );
   const listing = await directoryPaths(page, 'notes/guides/');
   expect(listing).toContain('notes/guides/tasks.md');
 });
 
-test('long tree names preserve badges and display validation and deletion states', async ({ page }) => {
+test('long tree names preserve badges and display validation and deletion states', async ({
+  page
+}) => {
   await page.goto('/');
-  const name = 'a-very-long-task-file-name-that-must-leave-room-for-validation-and-sync-status.md';
+  const name =
+    'a-very-long-task-file-name-that-must-leave-room-for-validation-and-sync-status.md';
   const path = 'notes/guides/' + name;
-  await page.getByRole('treeitem', { name: 'tasks.md', exact: true }).dblclick();
-  const input = page.getByRole('textbox', { name: 'Rename tasks.md', exact: true });
+  await page
+    .getByRole('treeitem', { name: 'tasks.md', exact: true })
+    .dblclick();
+  const input = page.getByRole('textbox', {
+    name: 'Rename tasks.md',
+    exact: true
+  });
   await input.fill(name);
   await input.press('Enter');
   const row = page.locator(`[data-item-path="${path}"]`);
-  await expect(row.locator('[data-item-section="decoration"] [title]')).toHaveAttribute('title', /; Valid$/);
+  await expect(
+    row.locator('[data-item-section="decoration"] [title]')
+  ).toHaveAttribute('title', /; Valid$/);
   const bounds = await row.boundingBox();
-  const badge = await row.locator('[data-item-section="decoration"]').boundingBox();
-  const content = await row.locator('[data-item-section="content"]').boundingBox();
+  const badge = await row
+    .locator('[data-item-section="decoration"]')
+    .boundingBox();
+  const content = await row
+    .locator('[data-item-section="content"]')
+    .boundingBox();
   expect(badge!.width).toBeGreaterThan(15);
-  expect(badge!.x + badge!.width).toBeLessThanOrEqual(bounds!.x + bounds!.width);
+  expect(badge!.x + badge!.width).toBeLessThanOrEqual(
+    bounds!.x + bounds!.width
+  );
   expect(content!.x + content!.width).toBeLessThanOrEqual(badge!.x);
-  await expect(page.locator('[data-item-path="notes/guides/tasks.md"] [data-item-section="content"]')).toHaveCSS('text-decoration-line', 'line-through');
+  await expect(
+    page.locator(
+      '[data-item-path="notes/guides/tasks.md"] [data-item-section="content"]'
+    )
+  ).toHaveCSS('text-decoration-line', 'line-through');
   await row.click();
   await replaceDocument(page, '# Task\n\n[Missing](missing-badge-target.md)\n');
-  await expect(row.locator('[data-item-section="decoration"] [title]')).toHaveAttribute('title', /Invalid/);
+  await expect(
+    row.locator('[data-item-section="decoration"] [title]')
+  ).toHaveAttribute('title', /Invalid/);
   await page.screenshot({ path: '/tmp/mdstore-tree-status.png' });
   await page.locator('[data-item-path="notes/guides/tasks.md"]').click();
-  await expect(page.getByRole('heading', { name: 'Submit', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Submit', exact: true })
+  ).toBeVisible();
 });
 
-test('mobile navigation overlays content, preserves the tree, and closes accessibly', async ({ page }) => {
+test('mobile navigation overlays content, preserves the tree, and closes accessibly', async ({
+  page
+}) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
   const drawer = page.locator('#navigation-sidebar');
-  const toggle = page.getByRole('button', { name: 'Open navigation', exact: true });
+  const toggle = page.getByRole('button', {
+    name: 'Open navigation',
+    exact: true
+  });
   await expect(drawer).not.toBeVisible();
   const content = await page.locator('main').boundingBox();
   expect(content!.x).toBe(0);
@@ -842,7 +1129,9 @@ test('mobile navigation overlays content, preserves the tree, and closes accessi
   await expect(drawer).toHaveAttribute('aria-modal', 'true');
   await expect(page.locator('main')).toHaveAttribute('inert', '');
   const tree = page.locator('#documents file-tree-container');
-  await expect.poll(async () => (await tree.boundingBox())!.height).toBeGreaterThan(400);
+  await expect
+    .poll(async () => (await tree.boundingBox())!.height)
+    .toBeGreaterThan(400);
   await page.screenshot({ path: '/tmp/mdstore-mobile-drawer.png' });
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await expect(page.locator('#preview')).toContainText('Other note');
@@ -850,24 +1139,44 @@ test('mobile navigation overlays content, preserves the tree, and closes accessi
   await expect(toggle).toBeFocused();
   await toggle.click();
   // The same native tree survives closing, including its expansion state.
-  await tree.evaluate(el => { el.setAttribute('data-preserved', 'yes'); });
+  await tree.evaluate((el) => {
+    el.setAttribute('data-preserved', 'yes');
+  });
   await page.keyboard.press('Escape');
   await expect(drawer).not.toBeVisible();
   await toggle.click();
   await expect(tree).toHaveAttribute('data-preserved', 'yes');
-  await expect(drawer.getByRole('button', { name: 'Close navigation', exact: true })).toBeFocused();
+  await expect(
+    drawer.getByRole('button', { name: 'Close navigation', exact: true })
+  ).toBeFocused();
   await page.keyboard.press('Shift+Tab');
-  expect(await drawer.evaluate(el => el.contains(document.activeElement))).toBe(true);
-  await page.locator('.drawer-backdrop').click({ position: { x: 380, y: 400 } });
+  expect(
+    await drawer.evaluate((el) => el.contains(document.activeElement))
+  ).toBe(true);
+  await page
+    .locator('.drawer-backdrop')
+    .click({ position: { x: 380, y: 400 } });
   await expect(drawer).not.toBeVisible();
   await toggle.click();
   await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
   await expect(drawer).not.toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Search', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Search', exact: true })
+  ).toBeVisible();
   await toggle.click();
-  await drawer.evaluate(el => {
-    const start = new Touch({ identifier: 1, target: el, clientX: 250, clientY: 100 });
-    const end = new Touch({ identifier: 1, target: el, clientX: 100, clientY: 110 });
+  await drawer.evaluate((el) => {
+    const start = new Touch({
+      identifier: 1,
+      target: el,
+      clientX: 250,
+      clientY: 100
+    });
+    const end = new Touch({
+      identifier: 1,
+      target: el,
+      clientX: 100,
+      clientY: 110
+    });
     el.dispatchEvent(new TouchEvent('touchstart', { touches: [start] }));
     el.dispatchEvent(new TouchEvent('touchend', { changedTouches: [end] }));
   });
@@ -882,15 +1191,24 @@ test('mobile navigation overlays content, preserves the tree, and closes accessi
   await expect(drawer).not.toBeVisible();
 });
 
-test('frontmatter renders compact properties on mobile and preserves YAML in edit mode', async ({ page }) => {
+test('frontmatter renders compact properties on mobile and preserves YAML in edit mode', async ({
+  page
+}) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Open navigation', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Open navigation', exact: true })
+    .click();
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
-  await replaceDocument(page, '---\ntitle: Other note\nstate: inbox\nwaiting_on: null\ntags: [demo, example]\nowner: Remco\n---\n\n# Other note\n\nBody.\n');
+  await replaceDocument(
+    page,
+    '---\ntitle: Other note\nstate: inbox\nwaiting_on: null\ntags: [demo, example]\nowner: Remco\n---\n\n# Other note\n\nBody.\n'
+  );
   await page.getByRole('radio', { name: 'Render', exact: true }).click();
   await expect(page.locator('#preview h1')).toHaveText('Other note');
-  await expect(page.locator('#preview .property-badges')).toContainText('inbox');
+  await expect(page.locator('#preview .property-badges')).toContainText(
+    'inbox'
+  );
   await expect(page.locator('#preview')).not.toContainText('waiting_on');
   await expect(page.locator('#preview .markdown-code')).toHaveCount(0);
   await page.locator('#preview summary').click();
@@ -899,58 +1217,109 @@ test('frontmatter renders compact properties on mobile and preserves YAML in edi
   await expect(page.locator('.code-editor')).toContainText('waiting_on: null');
 });
 
-async function remoteEdit(page: Page, path: string, content: string, base?: string) {
-  const response = await page.request.post('/mcp', { data: {
-    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'apply_edits', arguments: {
-      edit_summary: 'Concurrent client edit', edits: [base === undefined ? { op: 'create_page', path, content } : { op: 'replace_page', path, base, content }]
-    } }
-  } });
+async function remoteEdit(
+  page: Page,
+  path: string,
+  content: string,
+  base?: string
+) {
+  const response = await page.request.post('/mcp', {
+    data: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'apply_edits',
+        arguments: {
+          edit_summary: 'Concurrent client edit',
+          edits: [
+            base === undefined
+              ? { op: 'create_page', path, content }
+              : { op: 'replace_page', path, base, content }
+          ]
+        }
+      }
+    }
+  });
   const value = await response.json();
   expect(value.error).toBeUndefined();
   expect(value.result.isError).not.toBe(true);
 }
 
-test('reconciliation merges remote changes before validated submission', async ({ page }) => {
+test('reconciliation merges remote changes before validated submission', async ({
+  page
+}) => {
   const path = 'merge-clean.md';
   const base = '# Original\n\nShared paragraph.\n\nOriginal ending.\n';
   await remoteEdit(page, path, base);
   await page.goto('/#' + path);
   await expect(page.locator('#preview')).toContainText('Original ending.');
-  await replaceDocument(page, base.replace('Original ending.', 'Local ending.'));
-  await remoteEdit(page, path, base.replace('# Original', '# Remote heading'), base);
+  await replaceDocument(
+    page,
+    base.replace('Original ending.', 'Local ending.')
+  );
+  await remoteEdit(
+    page,
+    path,
+    base.replace('# Original', '# Remote heading'),
+    base
+  );
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await page.getByLabel('Description').fill('Merged changes');
   await expect(page.locator('#submit')).toBeEnabled();
   const staged = page.getByRole('region', { name: 'Staged diff' });
   await expect(staged).toContainText('Local ending.');
-  const applied = page.waitForRequest(r => r.url().endsWith('/mcp') && r.postDataJSON()?.params?.name === 'apply_edits');
+  const applied = page.waitForRequest(
+    (r) =>
+      r.url().endsWith('/mcp') &&
+      r.postDataJSON()?.params?.name === 'apply_edits'
+  );
   await page.locator('#submit').click();
   const edit = (await applied).postDataJSON().params.arguments.edits[0];
   expect(edit.base).toContain('# Remote heading');
   expect(edit.content).toContain('# Remote heading');
   expect(edit.content).toContain('Local ending.');
-  await expect(page.getByRole('status').filter({ hasText: 'Changes committed successfully.' })).toBeVisible();
+  await expect(
+    page
+      .getByRole('status')
+      .filter({ hasText: 'Changes committed successfully.' })
+  ).toBeVisible();
 });
 
-test('conflicts persist offline, resolve per passage, and detect another server edit', async ({ page, context }) => {
+test('conflicts persist offline, resolve per passage, and detect another server edit', async ({
+  page,
+  context
+}) => {
   const path = 'merge-conflict.md';
   const base = '# Conflict\n\nOriginal passage.\n\nShared ending.\n';
   const theirs = base.replace('Original passage.', 'Server passage.');
   await remoteEdit(page, path, base);
   await page.goto('/#' + path);
   await expect(page.locator('#preview')).toContainText('Original passage.');
-  await replaceDocument(page, base.replace('Original passage.', 'Local passage.').replace('Shared ending.', 'Local ending.'));
+  await replaceDocument(
+    page,
+    base
+      .replace('Original passage.', 'Local passage.')
+      .replace('Shared ending.', 'Local ending.')
+  );
   await remoteEdit(page, path, theirs, base);
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
-  const conflict = page.getByRole('region', { name: 'Conflict in ' + path, exact: true });
+  const conflict = page.getByRole('region', {
+    name: 'Conflict in ' + path,
+    exact: true
+  });
   await expect(conflict).toBeVisible();
   await expect(page.locator('#submit')).toBeDisabled();
-  await conflict.getByRole('button', { name: 'Edit manually', exact: true }).click();
+  await conflict
+    .getByRole('button', { name: 'Edit manually', exact: true })
+    .click();
   await conflict.getByLabel('Resolved passage').fill('Combined passage.\n');
   await page.reload();
   await expect(conflict).toContainText('Combined passage.');
   await context.setOffline(true);
-  await conflict.getByRole('button', { name: 'Apply resolution', exact: true }).click();
+  await conflict
+    .getByRole('button', { name: 'Apply resolution', exact: true })
+    .click();
   await expect(conflict).toHaveCount(0);
   await page.getByLabel('Description').fill('Resolve conflicting edits');
   await context.setOffline(false);
@@ -961,218 +1330,486 @@ test('conflicts persist offline, resolve per passage, and detect another server 
   await expect(conflict).toBeVisible();
   await expect(page.locator('#submit')).toBeDisabled();
   await conflict.getByRole('button', { name: 'Server', exact: true }).click();
-  await conflict.getByRole('button', { name: 'Apply resolution', exact: true }).click();
+  await conflict
+    .getByRole('button', { name: 'Apply resolution', exact: true })
+    .click();
   await expect(page.locator('#submit')).toBeEnabled();
   await page.locator('#submit').click();
-  await expect(page.getByRole('status').filter({ hasText: 'Changes committed successfully.' })).toBeVisible();
-  const cache = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!)!));
-  expect(cache.pages[path].text).toContain('Newer server passage.');
-  expect(cache.pages[path].text).toContain('Local ending.');
+  await expect(
+    page
+      .getByRole('status')
+      .filter({ hasText: 'Changes committed successfully.' })
+  ).toBeVisible();
+  const cache = await page.evaluate(() =>
+    JSON.parse(
+      localStorage.getItem(
+        Object.keys(localStorage).find((key) =>
+          key.startsWith('mdstore:workspace:')
+        )!
+      )!
+    )
+  );
+  await expect
+    .poll(() => cachedDocument(page, cache.repository, path))
+    .toContain('Newer server passage.');
+  await expect
+    .poll(() => cachedDocument(page, cache.repository, path))
+    .toContain('Local ending.');
 });
 
-test('Starlark apps render SVAR views and stage validated actions offline', async ({ page, context }) => {
+test('Starlark apps render SVAR views and stage validated actions offline', async ({
+  page,
+  context
+}) => {
   await page.goto('/#tasks%2Fv1%2Fapp.md');
-  await expect(page.getByRole('button', { name: 'Tasks', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Tasks', exact: true })
+  ).toBeVisible();
   await page.getByRole('radio', { name: 'Edit', exact: true }).click();
   await expect(page.locator('.apps-page')).toHaveCount(0);
   await page.getByRole('radio', { name: 'Render', exact: true }).click();
 
-  await expect(page.getByRole('button', { name: 'Plan a project', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Plan a project', exact: true })
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Schedule', exact: true }).click();
-  await expect(page.getByLabel('Collection schedule')).toContainText('Plan a project');
-  await expect(page.getByLabel('Collection schedule').locator('.wx-bar.resource')).toHaveCount(2);
-  await expect(page.getByLabel('Collection schedule').locator('g[data-source]')).toHaveCount(1);
+  await expect(page.getByLabel('Collection schedule')).toContainText(
+    'Plan a project'
+  );
+  await expect(
+    page.getByLabel('Collection schedule').locator('.wx-bar.resource')
+  ).toHaveCount(2);
+  await expect(
+    page.getByLabel('Collection schedule').locator('g[data-source]')
+  ).toHaveCount(1);
   await page.screenshot({ path: '/tmp/mdstore-app-gantt.png' });
   await page.getByRole('button', { name: 'Workload', exact: true }).click();
-  await expect(page.getByRole('region', {name:'Collection schedule'})).toContainText('Remco');
-  await expect(page.getByRole('region', {name:'Collection schedule'}).getByRole('button', {name:'Plan a project',exact:true})).toBeVisible();
+  await expect(
+    page.getByRole('region', { name: 'Collection schedule' })
+  ).toContainText('Remco');
+  await expect(
+    page
+      .getByRole('region', { name: 'Collection schedule' })
+      .getByRole('button', { name: 'Plan a project', exact: true })
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Board', exact: true }).click();
   await expect(page.getByLabel('Move Plan a project')).toHaveValue('inbox');
-  const card = await page.locator('[data-kanban-card-id]').first().boundingBox();
-  const target = await page.locator('.wx-column').filter({ has: page.getByRole('heading', { name: 'ready', exact: true }) }).locator('[data-kanban-column-cards]').boundingBox();
+  const card = await page
+    .locator('[data-kanban-card-id]')
+    .first()
+    .boundingBox();
+  const target = await page
+    .locator('.wx-column')
+    .filter({ has: page.getByRole('heading', { name: 'ready', exact: true }) })
+    .locator('[data-kanban-column-cards]')
+    .boundingBox();
   await page.mouse.move(card!.x + 30, card!.y + 10);
   await page.mouse.down();
   await page.mouse.move(target!.x + 40, target!.y + 50, { steps: 15 });
   await page.mouse.up();
   await expect(page.getByLabel('Move Plan a project')).toHaveValue('ready');
-  await expect(page.getByRole('status').filter({ hasText: 'Changes staged.' })).toBeVisible();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Changes staged.' })
+  ).toBeVisible();
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await page.getByLabel('Description').fill('Plan from the board');
   await expect(page.locator('#submit')).toBeEnabled();
-  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText('Changed state to ready.');
+  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText(
+    'Changed state to ready.'
+  );
   await page.getByRole('treeitem', { name: 'app.md', exact: true }).click();
   await page.getByRole('button', { name: 'Board', exact: true }).click();
-  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await context.setOffline(true);
   await page.getByLabel('Move Plan a project').selectOption('cancelled');
   await expect(page.getByLabel('Move Plan a project')).toHaveValue('cancelled');
-  await expect(page.getByRole('status').filter({ hasText: 'Changes staged.' })).toBeVisible();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Changes staged.' })
+  ).toBeVisible();
   await expect(page.locator('.apps-page')).toContainText('Offline');
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Board', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Board', exact: true })
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Board', exact: true }).click();
   await expect(page.getByLabel('Move Plan a project')).toHaveValue('cancelled');
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#navigation-sidebar').waitFor({ state: 'hidden' });
-  await page.locator('.app-card-content').getByRole('button', { name: 'Plan a project', exact: true }).scrollIntoViewIfNeeded();
+  await page
+    .locator('.app-card-content')
+    .getByRole('button', { name: 'Plan a project', exact: true })
+    .scrollIntoViewIfNeeded();
   await page.screenshot({ path: '/tmp/mdstore-app-board-mobile.png' });
-  await page.locator('.app-card-content').getByRole('button', { name: 'Plan a project', exact: true }).click();
+  await page
+    .locator('.app-card-content')
+    .getByRole('button', { name: 'Plan a project', exact: true })
+    .click();
   await expect(page.locator('#preview')).toContainText('Plan a project');
 });
 
-
-test('computed schema errors are concise and link to their template source', async ({ page }) => {
+test('computed schema errors are concise and link to their template source', async ({
+  page
+}) => {
   await page.goto('/#tasks%2Fv1%2F2026%2F09%2F23-001-plan.md');
   await expect(page.locator('#preview')).toContainText('Plan a project');
-  await replaceDocument(page, '---\nstate: completed\ntags: [demo]\nstart: 2026-09-23\nend: 2026-09-25\nassignee: Remco\neffort: 3\n---\n# Plan a project\n\n## Timeline\n\n- 2026-09-23T08:00:00Z — Captured.\n');
-  const note = page.locator('.validation-diagnostic').filter({hasText:'Transition inbox -> completed is not permitted'});
+  await replaceDocument(
+    page,
+    '---\nstate: completed\ntags: [demo]\nstart: 2026-09-23\nend: 2026-09-25\nassignee: Remco\neffort: 3\n---\n# Plan a project\n\n## Timeline\n\n- 2026-09-23T08:00:00Z — Captured.\n'
+  );
+  const note = page
+    .locator('.validation-diagnostic')
+    .filter({ hasText: 'Transition inbox -> completed is not permitted' });
   await expect(note).toBeVisible();
   await expect(note).not.toContainText('Traceback');
   await expect(note).not.toContainText('[mdstore-field:');
   const link = note.getByRole('link');
   const label = await link.innerText();
   const line = Number(label.split(':').at(-1));
-  expect(label).toMatch(/^tasks\/v1\/template.md:\d+$/);
+  expect(label).toMatch(/^tasks\/v1\/schema.md:\d+$/);
   await link.click();
-  await expect(page.getByRole('radio', {name:'Edit',exact:true})).toBeChecked();
-  await expect(page).toHaveURL(/#tasks%2Fv1%2Ftemplate.md$/);
-  await expect(page.locator(`.code-editor [data-line="${line}"]`).first()).toContainText('require(new in transitions[old]');
-  await expect(page.locator(`.code-editor [data-line="${line}"]`).first()).toBeInViewport();
+  await expect(
+    page.getByRole('radio', { name: 'Edit', exact: true })
+  ).toBeChecked();
+  await expect(page).toHaveURL(/#tasks%2Fv1%2Fschema.md$/);
+  await expect(
+    page.locator(`.code-editor [data-line="${line}"]`).first()
+  ).toContainText('require(new in transitions[old]');
+  await expect(
+    page.locator(`.code-editor [data-line="${line}"]`).first()
+  ).toBeInViewport();
 });
 
-
-test('resource timeline stacks overlapping tasks on the same resource row', async ({ page }) => {
+test('resource timeline stacks overlapping tasks on the same resource row', async ({
+  page
+}) => {
   await page.goto('/#tasks%2Fv1%2Fapp.md');
-  await page.getByRole('button', {name:'Workload',exact:true}).click();
-  const chart = page.getByRole('region', {name:'Collection schedule'});
+  await page.getByRole('button', { name: 'Workload', exact: true }).click();
+  const chart = page.getByRole('region', { name: 'Collection schedule' });
   await expect(chart.locator('.wx-bar.resource')).toHaveCount(1);
   await expect(chart).toContainText('Remco');
   await expect(chart.locator('g[data-source]')).toHaveCount(1);
-  const first = chart.getByRole('button', {name:'Plan a project',exact:true});
-  const second = chart.getByRole('button', {name:'Second overlapping task',exact:true});
+  const first = chart.getByRole('button', {
+    name: 'Plan a project',
+    exact: true
+  });
+  const second = chart.getByRole('button', {
+    name: 'Second overlapping task',
+    exact: true
+  });
   await expect(first).toBeVisible();
   await expect(second).toBeVisible();
-  await expect.poll(async () => {
-    const a = await first.boundingBox(), b = await second.boundingBox();
-    return !!a && !!b && (a.y + a.height <= b.y || b.y + b.height <= a.y);
-  }).toBe(true);
-  await page.setViewportSize({width:390,height:844});
-  await page.locator('#navigation-sidebar').waitFor({state:'hidden'});
+  await expect
+    .poll(async () => {
+      const a = await first.boundingBox(),
+        b = await second.boundingBox();
+      return !!a && !!b && (a.y + a.height <= b.y || b.y + b.height <= a.y);
+    })
+    .toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('#navigation-sidebar').waitFor({ state: 'hidden' });
   await expect(chart.locator('.wx-bar.resource')).toBeVisible();
-  await page.getByRole('button', {name:'Fit tasks',exact:true}).click();
-  await expect(chart.locator('g[data-source] path').first()).toHaveAttribute('d', /^M[0-9.]+,[0-9.]+ H/);
-  await page.screenshot({path:'/tmp/mdstore-resource-mobile.png'});
+  await page.getByRole('button', { name: 'Fit tasks', exact: true }).click();
+  await expect(chart.locator('g[data-source] path').first()).toHaveAttribute(
+    'd',
+    /^M[0-9.]+,[0-9.]+ H/
+  );
+  await page.screenshot({ path: '/tmp/mdstore-resource-mobile.png' });
   await first.click();
   await expect(page.locator('#preview')).toContainText('Plan a project');
 });
 
-test('Gantt gestures stage moves and edge resizing, cancel safely, and work offline', async ({page, context}) => {
+test('Gantt gestures stage moves and edge resizing, cancel safely, and work offline', async ({
+  page,
+  context
+}) => {
   await page.goto('/#tasks%2Fv1%2Fapp.md');
-  await page.getByRole('button',{name:'Schedule',exact:true}).click();
-  const chart = page.getByRole('region',{name:'Collection schedule'});
-  const task = chart.getByRole('button',{name:'Plan a project',exact:true});
+  await page.getByRole('button', { name: 'Schedule', exact: true }).click();
+  const chart = page.getByRole('region', { name: 'Collection schedule' });
+  const task = chart.getByRole('button', {
+    name: 'Plan a project',
+    exact: true
+  });
   const path = 'tasks/v1/2026/09/23-001-plan.md';
-  const draft = () => page.evaluate(path => {
-    const key = Object.keys(localStorage).find(k => k.startsWith('mdstore:workspace:'))!;
-    return JSON.parse(localStorage.getItem(key)!).drafts[path]?.text || '';
-  },path);
-  async function ready() { await expect(task).toHaveAttribute('aria-disabled','false'); }
-  async function gesture(handle: ReturnType<typeof chart.getByRole>, days: number, duration: number, cancel = false) {
+  const draft = () =>
+    page.evaluate((path) => {
+      const key = Object.keys(localStorage).find((k) =>
+        k.startsWith('mdstore:workspace:')
+      )!;
+      return JSON.parse(localStorage.getItem(key)!).drafts[path]?.text || '';
+    }, path);
+  async function ready() {
+    await expect(task).toHaveAttribute('aria-disabled', 'false');
+  }
+  async function gesture(
+    handle: ReturnType<typeof chart.getByRole>,
+    days: number,
+    duration: number,
+    cancel = false
+  ) {
     await ready();
-    const bar = await task.boundingBox(), box = await handle.boundingBox();
-    await page.mouse.move(box!.x+box!.width/2,box!.y+box!.height/2);
+    const bar = await task.boundingBox(),
+      box = await handle.boundingBox();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
     await page.mouse.down();
-    await page.mouse.move(box!.x+box!.width/2+days*bar!.width/duration,box!.y+box!.height/2,{steps:12});
+    await page.mouse.move(
+      box!.x + box!.width / 2 + (days * bar!.width) / duration,
+      box!.y + box!.height / 2,
+      { steps: 12 }
+    );
     if (cancel) await handle.press('Escape');
     await page.mouse.up();
   }
-  await gesture(task,1,3);
+  await gesture(task, 1, 3);
   await expect.poll(draft).toContain('start: 2026-09-24');
   await expect.poll(draft).toContain('end: 2026-09-26');
   await expect(page).toHaveURL(/app.md$/);
-  await gesture(chart.getByRole('button',{name:'Resize end of Plan a project',exact:true}),1,3);
+  await gesture(
+    chart.getByRole('button', {
+      name: 'Resize end of Plan a project',
+      exact: true
+    }),
+    1,
+    3
+  );
   await expect.poll(draft).toContain('end: 2026-09-27');
-  await gesture(chart.getByRole('button',{name:'Resize start of Plan a project',exact:true}),1,4);
+  await gesture(
+    chart.getByRole('button', {
+      name: 'Resize start of Plan a project',
+      exact: true
+    }),
+    1,
+    4
+  );
   await expect.poll(draft).toContain('start: 2026-09-25');
   const before = await draft();
-  await gesture(task,-1,3,true);
+  await gesture(task, -1, 3, true);
   expect(await draft()).toBe(before);
-  await page.getByRole('button',{name:'Workload',exact:true}).click();
+  await page.getByRole('button', { name: 'Workload', exact: true }).click();
   await ready();
-  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
   await context.setOffline(true);
   await task.press('ArrowRight');
   await expect.poll(draft).toContain('start: 2026-09-26');
   await expect.poll(draft).toContain('end: 2026-09-28');
   await page.reload();
-  await page.getByRole('button',{name:'Workload',exact:true}).click();
+  await page.getByRole('button', { name: 'Workload', exact: true }).click();
   await ready();
-  await expect(task.locator('..')).toHaveAttribute('title',/2026-09-26 – 2026-09-28/);
-  await page.setViewportSize({width:390,height:844});
-  await page.locator('#navigation-sidebar').waitFor({state:'hidden'});
-  await page.getByRole('button',{name:'Fit tasks',exact:true}).click();
+  await expect(task.locator('..')).toHaveAttribute(
+    'title',
+    /2026-09-26 – 2026-09-28/
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('#navigation-sidebar').waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: 'Fit tasks', exact: true }).click();
   await ready();
   const box = (await task.boundingBox())!;
   const touch = await context.newCDPSession(page);
-  const x = box.x + box.width/2, y = box.y + box.height/2;
-  await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y}]});
-  await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:x+box.width/3,y}]});
-  await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  const x = box.x + box.width / 2,
+    y = box.y + box.height / 2;
+  await touch.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [{ x, y }]
+  });
+  await touch.send('Input.dispatchTouchEvent', {
+    type: 'touchMove',
+    touchPoints: [{ x: x + box.width / 3, y }]
+  });
+  await touch.send('Input.dispatchTouchEvent', {
+    type: 'touchEnd',
+    touchPoints: []
+  });
   await expect.poll(draft).toContain('start: 2026-09-27');
   await expect.poll(draft).toContain('end: 2026-09-29');
   await touch.detach();
-  await page.setViewportSize({width:1440,height:1000});
+  await page.setViewportSize({ width: 1440, height: 1000 });
 
-  await page.getByRole('treeitem',{name:'Submit',exact:true}).click();
-  await expect(page.getByRole('region',{name:'Staged diff'})).toContainText('2026-09-29');
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText(
+    '2026-09-29'
+  );
 });
 
-test('Markdown frontmatter uses YAML highlighting without consuming later Markdown', async ({page, context}) => {
+test('Markdown frontmatter uses YAML highlighting without consuming later Markdown', async ({
+  page,
+  context
+}) => {
   await page.goto('/#other.md');
-  await replaceDocument(page, '---\nmdstore: example\ncount: 3\n---\n\n# Planner\n\n---\n\nmdstore: ordinary prose\n\n```starlark\nvalue = True\n```\n');
-  const key = page.locator('.code-editor [data-line="2"] span[style]').filter({hasText:'mdstore'}).first();
-  const heading = page.locator('.code-editor [data-line="6"] span[style]').filter({hasText:'Planner'}).first();
-  const starlark = page.locator('.code-editor [data-line="13"] span[style]').filter({hasText:'True'}).first();
+  await replaceDocument(
+    page,
+    '---\nmdstore: example\ncount: 3\n---\n\n# Planner\n\n---\n\nmdstore: ordinary prose\n\n```starlark\nvalue = True\n```\n'
+  );
+  const key = page
+    .locator('.code-editor [data-line="2"] span[style]')
+    .filter({ hasText: 'mdstore' })
+    .first();
+  const heading = page
+    .locator('.code-editor [data-line="6"] span[style]')
+    .filter({ hasText: 'Planner' })
+    .first();
+  const starlark = page
+    .locator('.code-editor [data-line="13"] span[style]')
+    .filter({ hasText: 'True' })
+    .first();
   await expect(key).toBeVisible();
   await expect(heading).toBeVisible();
   await expect(starlark).toBeVisible();
-  const proseColor = await page.locator('.code-editor [data-line="10"]').evaluate(el => getComputedStyle(el.querySelector('span') || el).color);
-  await expect.poll(() => key.evaluate(el => getComputedStyle(el).color)).not.toBe(proseColor);
-  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  const proseColor = await page
+    .locator('.code-editor [data-line="10"]')
+    .evaluate((el) => getComputedStyle(el.querySelector('span') || el).color);
+  await expect
+    .poll(() => key.evaluate((el) => getComputedStyle(el).color))
+    .not.toBe(proseColor);
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await context.setOffline(true);
   await page.reload();
-  await page.getByRole('radio',{name:'Edit',exact:true}).click();
+  await page.getByRole('radio', { name: 'Edit', exact: true }).click();
   await expect(key).toBeVisible();
-  await expect.poll(() => key.evaluate(el => getComputedStyle(el).color)).not.toBe(proseColor);
+  await expect
+    .poll(() => key.evaluate((el) => getComputedStyle(el).color))
+    .not.toBe(proseColor);
   await expect(starlark).toBeVisible();
 });
 
 async function directoryPaths(page: Page, path: string): Promise<string[]> {
-  const response = await page.request.post('/mcp', { data: {
-    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_page', arguments: { path } }
-  } });
+  const response = await page.request.post('/mcp', {
+    data: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'get_page', arguments: { path } }
+    }
+  });
   const result = (await response.json()).result;
   expect(result.isError).toBe(false);
-  return result.structuredContent.children.map((child: { path: string }) => child.path);
+  return result.structuredContent.children.map(
+    (child: { path: string }) => child.path
+  );
 }
 
-test('document selection changes remain incomplete locally but can be submitted', async ({ page }) => {
+test('document selection changes remain incomplete locally but can be submitted', async ({
+  page
+}) => {
   test.skip(!process.env.MDSTORE_TEST_ADMIN, 'Requires privileged test daemon');
   await page.goto('/');
   await page.locator('[data-item-path="config.yaml"]').click();
-  const source = await page.evaluate(() => {
-    const key = Object.keys(localStorage).find(key => key.startsWith('mdstore:workspace:'))!;
-    return JSON.parse(localStorage.getItem(key)!).pages['config.yaml'].text as string;
+  const response = await page.request.post('/mcp', {
+    data: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'get_page', arguments: { path: 'config.yaml' } }
+    }
   });
+  const source = (await response.json()).result.structuredContent
+    .text as string;
   // Adding an unused exclusion changes selection without changing the current corpus.
-  await replaceDocument(page, source.replace('documents:\n', 'documents:\n  exclude: ["unpublished/**"]\n'));
+  await replaceDocument(
+    page,
+    source.replace(
+      'documents:\n',
+      'documents:\n  exclude: ["unpublished/**"]\n'
+    )
+  );
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
-  await expect(page.locator('.validation-results')).toContainText('Local validation incomplete');
-  await expect(page.locator('.validation-results')).not.toContainText('Validation passed');
+  await expect(page.locator('.validation-results')).toContainText(
+    'Local validation incomplete'
+  );
+  await expect(page.locator('.validation-results')).not.toContainText(
+    'Validation passed'
+  );
   await page.getByLabel('Description').fill('Exclude unpublished documents');
   await expect(page.locator('#submit')).toBeEnabled();
   await page.locator('#submit').click();
-  await expect(page.locator('.submit-notice')).toContainText('Changes committed successfully');
+  await expect(page.locator('.submit-notice')).toContainText(
+    'Changes committed successfully'
+  );
 });
+
+test('reconnect updates the selected clean document and its next edit base', async ({
+  page
+}) => {
+  await page.goto('/#other.md');
+  await expect(page.locator('#preview')).toContainText('Keep it simple.');
+  const updated = '# Other note\n\nUpdated remotely.\n';
+  await remoteEdit(
+    page,
+    'other.md',
+    updated,
+    '# Other note\n\nKeep it simple.\n'
+  );
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('offline'));
+    window.dispatchEvent(new Event('online'));
+  });
+  await expect(page.locator('#preview')).toContainText('Updated remotely.');
+  await replaceDocument(page, updated + '\nLocal edit.\n');
+  const base = await page.evaluate(() => {
+    const key = Object.keys(localStorage).find((k) =>
+      k.startsWith('mdstore:workspace:')
+    )!;
+    return JSON.parse(localStorage.getItem(key)!).drafts['other.md'].base;
+  });
+  expect(base).toBe(updated);
+});
+
+test('unavailable offline document cache does not block saved drafts or submission', async ({
+  page
+}) => {
+  await page.addInitScript(() => {
+    indexedDB.open = () => {
+      throw new DOMException('Full', 'QuotaExceededError');
+    };
+  });
+  await page.goto('/#other.md');
+  await expect(page.locator('#preview')).toContainText('Keep it simple.');
+  await replaceDocument(
+    page,
+    '# Other note\n\nSaved without the corpus cache.\n'
+  );
+  await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
+  await page.getByLabel('Description').fill('Draft survives cache failure');
+  await expect(page.locator('#submit')).toBeEnabled();
+  await page.reload();
+  await expect(page.getByLabel('Description')).toHaveValue(
+    'Draft survives cache failure'
+  );
+  await expect(page.locator('#submit')).toBeEnabled();
+  await page.locator('#submit').click();
+  await expect(page.locator('.submit-notice')).toContainText(
+    'Changes committed successfully'
+  );
+});
+
+async function cachedDocument(page: Page, repository: string, path: string) {
+  return page.evaluate(
+    ({ repository, path }) =>
+      new Promise<string | undefined>((resolve, reject) => {
+        const open = indexedDB.open('mdstore-documents', 1);
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result;
+          const request = db
+            .transaction('documents', 'readonly')
+            .objectStore('documents')
+            .get([repository, path]);
+          request.onsuccess = () => {
+            resolve(request.result?.text);
+            db.close();
+          };
+          request.onerror = () => {
+            reject(request.error);
+            db.close();
+          };
+        };
+      }),
+    { repository, path }
+  );
+}

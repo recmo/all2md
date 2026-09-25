@@ -36,7 +36,9 @@
       if (pendingLine === undefined) return;
       for (const item of viewer?.getRenderedItems() || []) {
         const root = item.element.shadowRoot || item.element;
-        const line = root.querySelector<HTMLElement>(`[data-line="${pendingLine}"]`);
+        const line = root.querySelector<HTMLElement>(
+          `[data-line="${pendingLine}"]`
+        );
         if (line) {
           // The document pane owns scrolling; CodeView's own scroller is expanded.
           line.scrollIntoView({ block: 'center' });
@@ -64,12 +66,18 @@
         if (!finding) return note;
         note.textContent = finding.message;
         if (finding.source) {
-          const {path, line} = finding.source;
+          const { path, line } = finding.source;
           const link = document.createElement('a');
           link.textContent = `${path}:${line}`;
           link.href = `#${encodeURIComponent(path)}`;
-          link.style.cssText = 'display:block;color:inherit;text-decoration:underline';
-          link.onclick = (event) => { if (onsource) {event.preventDefault(); onsource(path, line);} };
+          link.style.cssText =
+            'display:block;color:inherit;text-decoration:underline';
+          link.onclick = (event) => {
+            if (onsource) {
+              event.preventDefault();
+              onsource(path, line);
+            }
+          };
           note.append(link);
         }
         note.style.cssText =
@@ -103,7 +111,10 @@
       }
     ]);
     viewer = view;
-    return () => { cancelAnimationFrame(revealFrame); view.cleanUp(); };
+    return () => {
+      cancelAnimationFrame(revealFrame);
+      view.cleanUp();
+    };
   });
 
   $effect(() => {

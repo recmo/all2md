@@ -2,7 +2,7 @@ import type { ValidationSnapshot } from '../validation/localValidation';
 import type { Draft, Page, SearchResult } from './api';
 export type Cache = {
   version: 1;
-  conflicts?: Record<string, import("./reconcile").Conflict>;
+  conflicts?: Record<string, import('./reconcile').Conflict>;
   validationSnapshot?: ValidationSnapshot;
   allowTemplateEdits?: boolean;
   allowConfigEdits?: boolean;
@@ -92,12 +92,23 @@ export function loadCache(
     )
       throw Error();
     if (parsed.conflicts) {
-      for (const [path, conflict] of Object.entries(parsed.conflicts) as [string, import('./reconcile').Conflict][]) {
-        if (!conflict || (conflict.base !== null && typeof conflict.base !== 'string') ||
-            (conflict.local !== null && typeof conflict.local !== 'string') ||
-            conflict.server?.path !== path || typeof conflict.server.text !== 'string' ||
-            typeof conflict.server.exists !== 'boolean' ||
-            (conflict.choices && Object.values(conflict.choices).some(value => typeof value !== 'string'))) throw Error();
+      for (const [path, conflict] of Object.entries(parsed.conflicts) as [
+        string,
+        import('./reconcile').Conflict
+      ][]) {
+        if (
+          !conflict ||
+          (conflict.base !== null && typeof conflict.base !== 'string') ||
+          (conflict.local !== null && typeof conflict.local !== 'string') ||
+          conflict.server?.path !== path ||
+          typeof conflict.server.text !== 'string' ||
+          typeof conflict.server.exists !== 'boolean' ||
+          (conflict.choices &&
+            Object.values(conflict.choices).some(
+              (value) => typeof value !== 'string'
+            ))
+        )
+          throw Error();
       }
     }
     return parsed;
@@ -115,7 +126,8 @@ export function saveCache(storage: Storage, cache: Cache) {
     throw Error(
       'Another tab changed this workspace. Export your drafts, then reload before editing further.'
     );
-  const encoded = JSON.stringify(cache);
+  const { pages, paths, validationSnapshot, ...journal } = cache;
+  const encoded = JSON.stringify({ ...journal, pages: {}, paths: [] });
   storage.setItem(key(cache.repository), encoded);
   observed(storage).set(cache.repository, encoded);
   storage.setItem(LAST, cache.repository);

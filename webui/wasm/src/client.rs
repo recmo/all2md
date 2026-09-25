@@ -14,9 +14,26 @@ pub fn validate(input: &str) -> Result<String> {
 
 /// Evaluates a Starlark app definition or action over a JSON document list.
 pub fn evaluate_app(input: &str) -> Result<String> {
-    let input =
-        serde_json::from_str(input).map_err(|error| anyhow!("Invalid app input: {error}"))?;
-    Ok(serde_json::to_string(&crate::apps::evaluate(input)?)?)
+    #[derive(serde::Deserialize)]
+    struct Input {
+        path: String,
+        source: String,
+        sources: std::collections::HashMap<String, String>,
+        action: Option<String>,
+        event: Option<serde_json::Value>,
+    }
+    let input: Input = serde_json::from_str(input)?;
+    let documents = crate::app_documents::project(&input.sources)?;
+    let result = crate::apps::evaluate(crate::apps::Input {
+        path: input.path,
+        source: input.source,
+        documents: documents.clone(),
+        action: input.action,
+        event: input.event,
+    })?;
+    Ok(serde_json::to_string(
+        &serde_json::json!({"result": result, "documents": documents}),
+    )?)
 }
 
 /// Builds the browser's validation baseline from ordinary document reads.
@@ -63,7 +80,7 @@ mod tests {
     fn ordinary_reads_build_a_usable_validation_baseline() {
         let input = serde_json::json!({"revision":"r1", "sources":{
             "config.yaml":"documents:\n  include: ['**/*.md']\n",
-            "template.md":"```starlark\n```\n",
+            "schema.md":"```starlark\n```\n",
             "a.md":"[B](b.md)\n", "b.md":"# B\n"
         }});
         let snapshot: serde_json::Value =

@@ -199,7 +199,7 @@ mod tests {
     fn files(config: &str) -> HashMap<String, String> {
         HashMap::from([
             (
-                "notes/template.md".into(),
+                "notes/schema.md".into(),
                 "```starlark\nmarkdown('../rumdl.toml')\n```\n".into(),
             ),
             ("rumdl.toml".into(), config.into()),
@@ -231,8 +231,8 @@ mod tests {
     fn root_relative_reference_uses_repository_config() {
         let mut configs = files("[global]\nenable=['MD012']\n");
         configs.insert("notes/rumdl.toml".into(), "[global]\nenable=[]\n".into());
-        let root = MarkdownLint::compile("notes/template.md", "/rumdl.toml", &configs).unwrap();
-        let relative = MarkdownLint::compile("notes/template.md", "rumdl.toml", &configs).unwrap();
+        let root = MarkdownLint::compile("notes/schema.md", "/rumdl.toml", &configs).unwrap();
+        let relative = MarkdownLint::compile("notes/schema.md", "rumdl.toml", &configs).unwrap();
         let mut findings = Vec::new();
         root.validate("notes/page.md", "A\n\n\nB\n", &mut findings);
         assert_eq!(findings.len(), 1);
@@ -256,7 +256,7 @@ mod tests {
         for reference in ["../../rumdl.toml", "/../rumdl.toml", "missing/rumdl.toml"] {
             let mut files = files("");
             files.insert(
-                "notes/template.md".into(),
+                "notes/schema.md".into(),
                 format!("```starlark\nmarkdown({reference:?})\n```\n"),
             );
             assert!(Templates::compile(&files).is_err(), "{reference}");

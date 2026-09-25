@@ -104,7 +104,7 @@ it('deletes whole folders atomically using original bases, including local-only 
   expect(next.selected).toBe('');
   expect(treePaths(next)).toEqual(['a.md']);
   expect(cache.drafts['notes/b.md'].text).toBe('Unsaved edit\n');
-  cache.paths.push('notes/template.md');
+  cache.paths.push('notes/schema.md');
   expect(() => deleteTree(cache, 'notes', true, {})).toThrow('not permitted');
   expect(cache.deletions).toBeUndefined();
 });

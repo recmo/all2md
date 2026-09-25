@@ -1,8 +1,9 @@
 //! Browser-owned validation orchestration and Starlark app bindings.
-mod snapshot;
+mod app_documents;
+mod apps;
 mod client;
 mod client_validation;
-mod apps;
+mod snapshot;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]

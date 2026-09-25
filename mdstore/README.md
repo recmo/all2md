@@ -5,7 +5,7 @@ validates repository-defined schemas, exposes hashline-safe atomic edits, keeps
 adjacent binary embedding sidecars, and serves exact, vector, graph-assisted,
 and reranked search over MCP.
 
-Markdown, root `config.yaml`, and directory `template.md` files are canonical.
+Markdown, root `config.yaml`, and directory `schema.md` files are canonical.
 Adjacent `*.mdstore` embedding files are disposable and ignored by Git. No
 repository `.mdstore/` directory is needed; daemon state lives in Git's private
 directory.
@@ -111,7 +111,7 @@ Starlark callback validation remain separate from Markdown linting.
 
 ### Directory templates
 
-Place `template.md` beside the documents it governs. The nearest ancestor
+Place `schema.md` beside the documents it governs. The nearest ancestor
 template applies recursively and replaces its parent. Use directories such as
 `tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
 Templates are readable through `get_page`, protected from `apply_edits`, and
@@ -119,7 +119,7 @@ excluded from search and embeddings.
 
 Markdown supplies instructions and examples. Only top-level fences labelled
 exactly `starlark` execute; their contents form one module in document order.
-See the complete [task template](examples/tasks/v1/template.md). Tasks use their first H1 as the title, without a duplicate frontmatter field. Callbacks can read `doc.title` (empty if no H1 exists). Search metadata defaults to the first H1, then the path, unless an explicit title projection supplies a value.
+See the complete [task template](examples/tasks/v1/schema.md). Tasks use their first H1 as the title, without a duplicate frontmatter field. Callbacks can read `doc.title` (empty if no H1 exists). Search metadata defaults to the first H1, then the path, unless an explicit title projection supplies a value.
 
 The web preview renders frontmatter below the H1 as document properties. Compiled template enums become badges; state/status and tags have sensible fallback formatting. Empty values and duplicate titles are hidden, other properties can be expanded, and invalid YAML stays visible as source with an error. Editing always preserves the original YAML.
 

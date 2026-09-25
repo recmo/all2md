@@ -108,7 +108,7 @@ struct DatedList {
 pub fn is_template(path: &str) -> bool {
     Path::new(path)
         .file_name()
-        .is_some_and(|name| name == "template.md")
+        .is_some_and(|name| name == "schema.md")
 }
 
 /// Compiled directory schemas and their validation policies.
@@ -168,7 +168,7 @@ impl Templates {
     fn applicable(&self, path: &str) -> Option<(String, &CompiledTemplate)> {
         let mut directory = Path::new(path).parent()?;
         loop {
-            let candidate = directory.join("template.md").to_string_lossy().into_owned();
+            let candidate = directory.join("schema.md").to_string_lossy().into_owned();
             if let Some(template) = self.entries.get(&candidate) {
                 let relative = Path::new(path).strip_prefix(directory).ok()?;
                 if !template.excluded.is_match(relative) {
@@ -863,7 +863,7 @@ fn validate_timestamps(
 
 #[cfg(test)]
 pub(crate) fn test_templates(text: &str) -> Result<Templates, Vec<Finding>> {
-    Templates::compile(&HashMap::from([("template.md".into(), text.into())]))
+    Templates::compile(&HashMap::from([("schema.md".into(), text.into())]))
 }
 
 #[cfg(test)]
@@ -931,15 +931,15 @@ section("Timeline", required=True, list={"minimum_items": 1, "date_order": "desc
     #[test]
     fn closest_template_replaces_parent_and_discovery_preserves_guidance() {
         let files = HashMap::from([
-            ("template.md".into(), PEOPLE.into()),
+            ("schema.md".into(), PEOPLE.into()),
             (
-                "people/template.md".into(),
+                "people/schema.md".into(),
                 "Different.\n\n```starlark\nstructure(additional_sections=True)\n```\n".into(),
             ),
         ]);
         let templates = Templates::compile(&files).unwrap();
         let discovery = templates.discovery("people/new.md").unwrap();
-        assert_eq!(discovery["path"], "people/template.md");
+        assert_eq!(discovery["path"], "people/schema.md");
         assert!(
             discovery["content"]
                 .as_str()
@@ -1040,16 +1040,16 @@ section("Summary", required=True, content="paragraphs", paragraphs={"minimum": 1
 #[test]
 fn scope_exclusions_inherit_parent_validation() {
     let files = HashMap::from([
-        ("template.md".into(), "```starlark\nfrontmatter(parent=string(required=True))\n```\n".into()),
-        ("records/template.md".into(), "```starlark\nscope(exclude=['overview.md'])\nfrontmatter(record=string(required=True))\n```\n".into()),
+        ("schema.md".into(), "```starlark\nfrontmatter(parent=string(required=True))\n```\n".into()),
+        ("records/schema.md".into(), "```starlark\nscope(exclude=['overview.md'])\nfrontmatter(record=string(required=True))\n```\n".into()),
     ]);
     let templates = Templates::compile(&files).unwrap();
-    assert_eq!(templates.template_path("records/overview.md").as_deref(), Some("/template.md"));
-    assert_eq!(templates.template_path("records/task.md").as_deref(), Some("/records/template.md"));
+    assert_eq!(templates.template_path("records/overview.md").as_deref(), Some("/schema.md"));
+    assert_eq!(templates.template_path("records/task.md").as_deref(), Some("/records/schema.md"));
     let mut pages = HashMap::from([("records/overview.md".into(), "# Missing parent field\n".into())]);
     assert!(crate::markdown::validate_corpus(&pages, &templates).is_err());
     pages.insert("records/overview.md".into(), "---\nparent: value\n---\n# Overview\n".into());
     assert!(crate::markdown::validate_corpus(&pages, &templates).is_ok());
-    let invalid = HashMap::from([("template.md".into(), "```starlark\nscope(exclude=['['])\n```\n".into())]);
+    let invalid = HashMap::from([("schema.md".into(), "```starlark\nscope(exclude=['['])\n```\n".into())]);
     assert!(Templates::compile(&invalid).is_err());
 }

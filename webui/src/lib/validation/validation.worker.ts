@@ -7,7 +7,11 @@ self.onmessage = async ({ data }) => {
     await ready;
     self.postMessage({
       id: data.id,
-      result: JSON.parse((data.operation === 'build_snapshot' ? build_snapshot : validate)(JSON.stringify(data.input)))
+      result: JSON.parse(
+        (data.operation === 'build_snapshot' ? build_snapshot : validate)(
+          JSON.stringify(data.input)
+        )
+      )
     });
   } catch (error) {
     self.postMessage({ id: data.id, error: String(error) });

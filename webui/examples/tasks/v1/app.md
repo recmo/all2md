@@ -10,7 +10,7 @@ are optional: unscheduled tasks remain visible in the timeline view.
 ```starlark
 def tasks(documents):
     return sorted(
-        [d for d in documents if d.template == "/tasks/v1/template.md"],
+        [d for d in documents if d.template == "/tasks/v1/schema.md"],
         key=lambda d: d.title,
     )
 

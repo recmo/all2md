@@ -33,14 +33,24 @@ registerCustomLanguage(
         grammar.name = 'mdstore-markdown';
         grammar.aliases = [];
         // Only the opening document block is frontmatter, never a later thematic break.
-        grammar = { ...grammar, patterns: [{
-          begin: '\\A---[ \\t]*$',
-          end: '^---[ \\t]*$',
-          beginCaptures: { 0: { name: 'punctuation.definition.frontmatter.markdown' } },
-          endCaptures: { 0: { name: 'punctuation.definition.frontmatter.markdown' } },
-          contentName: 'meta.embedded.block.yaml',
-          patterns: [{ include: 'source.yaml' }]
-        }, ...(grammar.patterns || [])] };
+        grammar = {
+          ...grammar,
+          patterns: [
+            {
+              begin: '\\A---[ \\t]*$',
+              end: '^---[ \\t]*$',
+              beginCaptures: {
+                0: { name: 'punctuation.definition.frontmatter.markdown' }
+              },
+              endCaptures: {
+                0: { name: 'punctuation.definition.frontmatter.markdown' }
+              },
+              contentName: 'meta.embedded.block.yaml',
+              patterns: [{ include: 'source.yaml' }]
+            },
+            ...(grammar.patterns || [])
+          ]
+        };
         const rule = grammar.repository?.fenced_code_block_python;
         if (typeof rule?.begin !== 'string' || !rule.begin.includes('python|'))
           throw new Error('Markdown Python fence rule is missing');

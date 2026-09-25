@@ -35,7 +35,10 @@ it('escapes code fences and preserves the language for Pierre rendering', () => 
 
 it('renders properties after the heading and uses schema enums', () => {
   const el = document.createElement('div');
-  el.innerHTML = renderMarkdown('---\nname: <test>\ntitle: Heading\nstate: inbox\nwaiting_on: null\npriority: high\ntags: [demo, example]\n---\n\n# Heading', { properties: { priority: { enum: ['high', 'low'] } } });
+  el.innerHTML = renderMarkdown(
+    '---\nname: <test>\ntitle: Heading\nstate: inbox\nwaiting_on: null\npriority: high\ntags: [demo, example]\n---\n\n# Heading',
+    { properties: { priority: { enum: ['high', 'low'] } } }
+  );
   expect(el.firstElementChild?.tagName).toBe('H1');
   expect(el.querySelectorAll('.property-badge')).toHaveLength(3);
   expect(el.querySelector('dl')?.textContent).toBe('Name<test>');
@@ -49,7 +52,9 @@ it('preserves malformed YAML as source and reports its error', () => {
   expect(html).toContain('language-yaml');
 });
 it('escapes nested and hostile metadata', () => {
-  const html = renderMarkdown('---\nlink: "javascript:alert(1)"\nextra: {nested: "<script>"}\n---\n# Heading');
+  const html = renderMarkdown(
+    '---\nlink: "javascript:alert(1)"\nextra: {nested: "<script>"}\n---\n# Heading'
+  );
   expect(html).not.toContain('<script>');
   expect(html).not.toContain('href="javascript:');
   expect(html).toContain('nested');

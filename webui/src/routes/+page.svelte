@@ -1,6 +1,11 @@
 <script lang="ts">
-  import { readInventory } from "$lib/workspace/inventory";
-  import { buildSnapshot } from "$lib/validation/localValidation";
+  import {
+    loadDocuments,
+    saveDocuments,
+    clearDocuments
+  } from '$lib/workspace/documentCache';
+  import { readInventory } from '$lib/workspace/inventory';
+  import { buildSnapshot } from '$lib/validation/localValidation';
   import { onMount, tick } from 'svelte';
   import { navigationDrawer } from '$lib/navigation/navigationDrawer';
   let mobile = $state(false);
@@ -8,11 +13,19 @@
   function closeDrawer() {
     if (!drawerOpen) return;
     drawerOpen = false;
-    void tick().then(() => { if (!drawerOpen && mobile) document.querySelector<HTMLButtonElement>('.sidebar-toggle')?.focus({ preventScroll: true }); });
+    void tick().then(() => {
+      if (!drawerOpen && mobile)
+        document
+          .querySelector<HTMLButtonElement>('.sidebar-toggle')
+          ?.focus({ preventScroll: true });
+    });
   }
   onMount(() => {
     const media = window.matchMedia('(max-width: 620px)');
-    const update = () => { mobile = media.matches; if (!mobile) drawerOpen = false; };
+    const update = () => {
+      mobile = media.matches;
+      if (!mobile) drawerOpen = false;
+    };
     update();
     media.addEventListener('change', update);
     return () => media.removeEventListener('change', update);
@@ -20,7 +33,12 @@
   import AppViews from '$lib/apps/AppViews.svelte';
   import { isApp, applyAppEdit, type AppEdit } from '$lib/apps/apps';
   import ConflictResolver from '$lib/workspace/ConflictResolver.svelte';
-  import { reconcilePage, resolvePage, localVersion, type Conflict } from '$lib/workspace/reconcile';
+  import {
+    reconcilePage,
+    resolvePage,
+    localVersion,
+    type Conflict
+  } from '$lib/workspace/reconcile';
   import StagedDiff from '$lib/workspace/StagedDiff.svelte';
   import ConnectionSettings from '$lib/workspace/ConnectionSettings.svelte';
   import WorkspaceNavigation from '$lib/navigation/WorkspaceNavigation.svelte';
@@ -61,10 +79,17 @@
   let allowConfigEdits = $state(false);
   let allowTemplateEdits = $state(false);
   let mode = $state<'rendered' | 'code'>('rendered');
-  import { treePaths, addFolder, moveTree, deleteTree } from '$lib/navigation/treeEdits';
+  import {
+    treePaths,
+    addFolder,
+    moveTree,
+    deleteTree
+  } from '$lib/navigation/treeEdits';
   import DocumentTree from '$lib/navigation/DocumentTree.svelte';
   let cache = $state.raw<Cache>(emptyCache(''));
-  let current = $state.raw<Page | Draft | null>(null);
+  const current = $derived(
+    cache.drafts[cache.selected] || cache.pages[cache.selected] || null
+  );
   let online = $state(false),
     busy = $state(false),
     saved = $state(true),
@@ -108,7 +133,12 @@
     const edits = signature;
     const snapshotRevision = cache.validationSnapshot?.revision;
     const connected = online;
-    const ready = !busy && !reconciling && !conflictPaths.length && draftCount > 0 && (connected || !!snapshotRevision);
+    const ready =
+      !busy &&
+      !reconciling &&
+      !conflictPaths.length &&
+      draftCount > 0 &&
+      (connected || !!snapshotRevision);
     validationVersion++;
     validating = false;
     validated = '';
@@ -163,16 +193,32 @@
       failure(e);
     }
   }
+  async function restoreCache(repository?: string) {
+    const journal = loadCache(localStorage, repository);
+    try {
+      return await loadDocuments(journal);
+    } catch {
+      return journal;
+    }
+  }
   function persist() {
     try {
       saveCache(localStorage, cache);
       saved = true;
+      const repository = cache.repository;
+      void saveDocuments(cache).catch(() => {
+        if (cache.repository === repository)
+          message(
+            'Drafts are saved. Offline document caching is unavailable; reconnect to load uncached documents.',
+            true
+          );
+      });
     } catch (e) {
       saved = false;
       message(
         e instanceof Error && e.message.startsWith('Another tab')
           ? e.message
-          : 'Local storage is full or unavailable. Your changes are still in this tab. Export drafts before closing it.',
+          : 'Local storage is full or unavailable. Your changes are still in this tab. Keep it open until they can be saved.',
         true
       );
     }
@@ -181,21 +227,45 @@
   async function refreshValidationSnapshot() {
     const version = ++baselineVersion;
     const inventory = await readInventory(api, cache.pages);
-    if (inventory.root.repository !== cache.repository) throw Error('Repository changed. Reconnect before validating.');
-    const snapshot = cache.validationSnapshot?.revision === inventory.root.revision
-      ? cache.validationSnapshot
-      : await buildSnapshot(inventory.root.revision, Object.fromEntries(Object.entries(inventory.pages).map(([path, page]) => [path, page.text])));
-    if (version !== baselineVersion || inventory.root.repository !== cache.repository) return;
+    if (inventory.root.repository !== cache.repository)
+      throw Error('Repository changed. Reconnect before validating.');
+    const snapshot =
+      cache.validationSnapshot?.revision === inventory.root.revision
+        ? cache.validationSnapshot
+        : await buildSnapshot(
+            inventory.root.revision,
+            Object.fromEntries(
+              Object.entries(inventory.pages).map(([path, page]) => [
+                path,
+                page.text
+              ])
+            )
+          );
+    if (
+      version !== baselineVersion ||
+      inventory.root.repository !== cache.repository
+    )
+      return;
     allowTemplateEdits = inventory.root.allow_template_edits;
     allowConfigEdits = inventory.root.allow_config_edits;
-    cache = { ...cache, allowTemplateEdits, allowConfigEdits, paths: inventory.paths, pages: inventory.pages, validationSnapshot: snapshot };
+    cache = {
+      ...cache,
+      allowTemplateEdits,
+      allowConfigEdits,
+      paths: inventory.paths,
+      pages: inventory.pages,
+      validationSnapshot: snapshot
+    };
     persist();
   }
   let reconciling = $state(false);
-  const conflictPaths = $derived(Object.keys(cache.conflicts || {}).filter(path => localVersion(cache, path) !== undefined));
+  const conflictPaths = $derived(
+    Object.keys(cache.conflicts || {}).filter(
+      (path) => localVersion(cache, path) !== undefined
+    )
+  );
   function acceptReconciliation(next: Cache) {
     cache = next;
-    if (current) current = cache.drafts[current.path] || cache.pages[current.path] || current;
     persist();
   }
   async function syncDrafts() {
@@ -203,20 +273,38 @@
     reconciling = true;
     const repository = cache.repository;
     try {
-      const paths = [...new Set([...Object.keys(cache.drafts), ...Object.keys(cache.deletions || {})])];
+      const paths = [
+        ...new Set([
+          ...Object.keys(cache.drafts),
+          ...Object.keys(cache.deletions || {})
+        ])
+      ];
       // Fetch the entire batch before changing any local bases.
-      const pages = await Promise.all(paths.map(path => api.page(path)));
+      const pages = await Promise.all(paths.map((path) => api.page(path)));
       if (cache.repository !== repository) return;
       let next = cache;
       for (const page of pages) next = reconcilePage(next, page);
       acceptReconciliation(next);
       await refreshValidationSnapshot();
-      if (Object.keys(next.conflicts || {}).length) message('Resolve overlapping server changes in Submit.', true);
-    } finally { reconciling = false; }
+      if (Object.keys(next.conflicts || {}).length)
+        message('Resolve overlapping server changes in Submit.', true);
+    } finally {
+      reconciling = false;
+    }
   }
-  function resolveConflict(path: string, conflict: Conflict, text: string | null) {
-    if (localVersion(cache, path) !== conflict.local || cache.conflicts?.[path] !== conflict) {
-      message('The draft changed while resolving. Check the updated conflict.', true);
+  function resolveConflict(
+    path: string,
+    conflict: Conflict,
+    text: string | null
+  ) {
+    if (
+      localVersion(cache, path) !== conflict.local ||
+      cache.conflicts?.[path] !== conflict
+    ) {
+      message(
+        'The draft changed while resolving. Check the updated conflict.',
+        true
+      );
       return;
     }
     acceptReconciliation(resolvePage(cache, conflict.server, text));
@@ -225,36 +313,66 @@
   function saveResolution(path: string, choices: Record<number, string>) {
     const conflict = cache.conflicts?.[path];
     if (!conflict) return;
-    cache = { ...cache, conflicts: { ...cache.conflicts, [path]: { ...conflict, choices } } };
+    cache = {
+      ...cache,
+      conflicts: { ...cache.conflicts, [path]: { ...conflict, choices } }
+    };
     persist();
   }
   async function stageAppAction(edits: AppEdit[]) {
     if (busy) throw Error('Another operation is in progress');
     busy = true;
     try {
-      const originalDrafts = cache.drafts, originalDeletions = cache.deletions, repository = cache.repository;
+      const originalDrafts = cache.drafts,
+        originalDeletions = cache.deletions,
+        repository = cache.repository;
       const paths = new Set<string>();
       const drafts = { ...cache.drafts };
       for (const change of edits) {
-        if (typeof change.path !== 'string' || paths.has(change.path)) throw Error('An action must edit each document at most once');
+        if (typeof change.path !== 'string' || paths.has(change.path))
+          throw Error('An action must edit each document at most once');
         paths.add(change.path);
-        if (!cache.paths.includes(change.path) && !cache.drafts[change.path]) throw Error('Actions may only edit existing workspace documents');
-        if (readonly(change.path, allowTemplateEdits, allowConfigEdits) || change.path in (cache.deletions || {}) || cache.conflicts?.[change.path]) throw Error('Resolve permissions, deletion or conflicts before editing ' + change.path);
-        let page: Page | undefined = cache.drafts[change.path] || cache.pages[change.path];
+        if (!cache.paths.includes(change.path) && !cache.drafts[change.path])
+          throw Error('Actions may only edit existing workspace documents');
+        if (
+          readonly(change.path, allowTemplateEdits, allowConfigEdits) ||
+          change.path in (cache.deletions || {}) ||
+          cache.conflicts?.[change.path]
+        )
+          throw Error(
+            'Resolve permissions, deletion or conflicts before editing ' +
+              change.path
+          );
+        let page: Page | undefined =
+          cache.drafts[change.path] || cache.pages[change.path];
         if (!page) {
-          if (!online) throw Error('Open or cache ' + change.path + ' before editing offline');
+          if (!online)
+            throw Error(
+              'Open or cache ' + change.path + ' before editing offline'
+            );
           page = await api.page(change.path);
         }
-        if (!page.exists && !cache.drafts[change.path]) throw Error('Document was deleted: ' + change.path);
+        if (!page.exists && !cache.drafts[change.path])
+          throw Error('Document was deleted: ' + change.path);
         const text = applyAppEdit(page.text, change);
-        drafts[change.path] = { ...page, text, base: cache.drafts[change.path]?.base ?? page.text };
+        drafts[change.path] = {
+          ...page,
+          text,
+          base: cache.drafts[change.path]?.base ?? page.text
+        };
       }
-      if (cache.drafts !== originalDrafts || cache.deletions !== originalDeletions || cache.repository !== repository) throw Error('Workspace changed while preparing the action. Try again.');
+      if (
+        cache.drafts !== originalDrafts ||
+        cache.deletions !== originalDeletions ||
+        cache.repository !== repository
+      )
+        throw Error('Workspace changed while preparing the action. Try again.');
       cache = { ...cache, drafts };
-      if (current && drafts[current.path]) current = drafts[current.path];
       validated = '';
       persist();
-    } finally { busy = false; }
+    } finally {
+      busy = false;
+    }
   }
   async function refresh() {
     const listing = await api.directory();
@@ -262,8 +380,8 @@
     allowConfigEdits = listing.allow_config_edits === true;
     const changed = cache.repository !== listing.repository;
     if (changed) {
-      cache = loadCache(localStorage, listing.repository);
-      current = null;
+      cache = await restoreCache(listing.repository);
+
       validated = '';
     }
     cache = {
@@ -278,7 +396,10 @@
   }
   async function openPage(path: string) {
     if (busy) return;
-    if (path in (cache.deletions || {})) { navigate('submit'); return; }
+    if (path in (cache.deletions || {})) {
+      navigate('submit');
+      return;
+    }
     const version = ++readVersion;
     const draft = cache.drafts[path];
     const cached = draft || cache.pages[path];
@@ -295,7 +416,11 @@
       const page = await api.page(path);
       if (version !== readVersion) return;
       acceptReconciliation(reconcilePage(cache, page));
-      if (cache.conflicts?.[path]) message('This document has overlapping server changes. Resolve them in Submit.', true);
+      if (cache.conflicts?.[path])
+        message(
+          'This document has overlapping server changes. Resolve them in Submit.',
+          true
+        );
       else if (!cache.drafts[path]) select(page);
     } catch (e) {
       if (!cached) throw e;
@@ -314,10 +439,18 @@
   function select(page: Page) {
     closeDrawer();
     view = 'document';
-    if ((sourceOnly(current?.path) || isApp(page.text)) && page.path !== current?.path)
+    if (
+      (sourceOnly(current?.path) || isApp(page.text)) &&
+      page.path !== current?.path
+    )
       mode = 'rendered';
-    current = page;
-    cache = { ...cache, selected: page.path };
+    cache = {
+      ...cache,
+      selected: page.path,
+      pages: cache.drafts[page.path]
+        ? cache.pages
+        : { ...cache.pages, [page.path]: page }
+    };
     persist();
     history.replaceState(null, '', `#${encodeURIComponent(page.path)}`);
   }
@@ -336,11 +469,9 @@
     const drafts = { ...cache.drafts };
     if (draft.exists && text === draft.base) delete drafts[draft.path];
     else drafts[draft.path] = draft;
-    current = draft;
     cache = { ...cache, drafts };
     if (cache.conflicts?.[draft.path]) {
       cache = reconcilePage(cache, cache.conflicts[draft.path].server);
-      current = cache.drafts[draft.path] || cache.pages[draft.path];
     }
     validated = '';
     persist();
@@ -435,7 +566,9 @@
       if (result.server_required) {
         findings = [];
         submissionOnly = checkedSignature;
-        message(`Local validation incomplete: ${result.server_required} Submission will run all server checks.`);
+        message(
+          `Local validation incomplete: ${result.server_required} Submission will run all server checks.`
+        );
         return;
       }
       if (!result.valid)
@@ -486,7 +619,9 @@
       await syncDrafts();
       await tick();
       if (conflictPaths.length || signature !== checkedSignature) {
-        submitNotice = conflictPaths.length ? 'Resolve conflicts before submitting.' : 'Server changes merged. Review the updated diff while validation runs, then submit again.';
+        submitNotice = conflictPaths.length
+          ? 'Resolve conflicts before submitting.'
+          : 'Server changes merged. Review the updated diff while validation runs, then submit again.';
         return;
       }
       const request = { ...batch, edit_summary: cache.summary.trim() };
@@ -519,7 +654,6 @@
         summary: '',
         validationSnapshot: undefined
       };
-      current = pages[cache.selected] || null;
       findings = [];
       validated = '';
       persist();
@@ -545,7 +679,11 @@
       }
     } catch (e) {
       submitError = e instanceof Error ? e.message : String(e);
-      try { await syncDrafts(); } catch { /* Preserve the original submit error. */ }
+      try {
+        await syncDrafts();
+      } catch {
+        /* Preserve the original submit error. */
+      }
       validated = '';
       failure(e);
     } finally {
@@ -608,7 +746,6 @@
       );
       cache = after;
       deletionUndo = { before, after, path };
-      if (!cache.selected) current = null;
       results = null;
       persist();
       navigate('submit');
@@ -625,8 +762,6 @@
       folders: deletionUndo.before.folders,
       selected: deletionUndo.before.selected
     };
-    current =
-      cache.drafts[cache.selected] || cache.pages[cache.selected] || null;
     deletionUndo = null;
     persist();
   }
@@ -659,8 +794,6 @@
     }
     cache = next;
     if (current) {
-      current =
-        cache.drafts[cache.selected] || cache.pages[cache.selected] || current;
       history.replaceState(null, '', `#${encodeURIComponent(cache.selected)}`);
     }
     results = null;
@@ -759,15 +892,6 @@
     return { destroy: () => node.removeEventListener('click', linkClick) };
   }
   onMount(() => {
-    try {
-      cache = loadCache(localStorage);
-      allowTemplateEdits = cache.allowTemplateEdits === true;
-      allowConfigEdits = cache.allowConfigEdits === true;
-      current =
-        cache.drafts[cache.selected] || cache.pages[cache.selected] || null;
-    } catch (e) {
-      failure(e);
-    }
     const offline = () => {
       online = false;
       validated = '';
@@ -798,8 +922,15 @@
     )
       view = requestedPath.slice(1) as 'search' | 'settings' | 'submit';
     void run(async () => {
-      await refresh();
-      const path = requestedPath;
+      cache = await restoreCache();
+      allowTemplateEdits = cache.allowTemplateEdits === true;
+      allowConfigEdits = cache.allowConfigEdits === true;
+      try {
+        await refresh();
+      } catch (e) {
+        failure(e);
+      }
+      const path = requestedPath || cache.selected;
       if (view === 'document' && path) await openPage(path);
     });
     return () => {
@@ -852,16 +983,49 @@
   </form>
 </dialog>
 {#snippet sidebarToggle()}
-  <button class="sidebar-toggle" aria-label="Open navigation" aria-expanded={drawerOpen} aria-controls="navigation-sidebar" onclick={() => drawerOpen = true}>
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+  <button
+    class="sidebar-toggle"
+    aria-label="Open navigation"
+    aria-expanded={drawerOpen}
+    aria-controls="navigation-sidebar"
+    onclick={() => (drawerOpen = true)}
+  >
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.6"
+      aria-hidden="true"
+      ><rect x="3" y="4" width="18" height="16" rx="2" /><path
+        d="M9 4v16"
+      /></svg
+    >
   </button>
 {/snippet}
-{#if mobile && drawerOpen}<button class="drawer-backdrop" aria-label="Close navigation" tabindex="-1" onclick={closeDrawer}></button>{/if}
-<aside id="navigation-sidebar" class="tree-sidebar" class:drawer-open={drawerOpen}
-  role={mobile ? 'dialog' : 'complementary'} aria-modal={mobile && drawerOpen ? true : undefined}
-  aria-label="Navigation" inert={mobile && !drawerOpen}
-  use:navigationDrawer={{ open: drawerOpen, mobile, close: closeDrawer }}>
-  <div class="drawer-heading"><span>Library</span><button aria-label="Close navigation" onclick={closeDrawer}>✕</button></div>
+{#if mobile && drawerOpen}<button
+    class="drawer-backdrop"
+    aria-label="Close navigation"
+    tabindex="-1"
+    onclick={closeDrawer}
+  ></button>{/if}
+<aside
+  id="navigation-sidebar"
+  class="tree-sidebar"
+  class:drawer-open={drawerOpen}
+  role={mobile ? 'dialog' : 'complementary'}
+  aria-modal={mobile && drawerOpen ? true : undefined}
+  aria-label="Navigation"
+  inert={mobile && !drawerOpen}
+  use:navigationDrawer={{ open: drawerOpen, mobile, close: closeDrawer }}
+>
+  <div class="drawer-heading">
+    <span>Library</span><button
+      aria-label="Close navigation"
+      onclick={closeDrawer}>✕</button
+    >
+  </div>
   <WorkspaceNavigation selected={view} onopen={navigate} disabled={busy} />
   <nav id="documents" aria-label="Documents">
     <DocumentTree
@@ -888,7 +1052,7 @@
       ondelete={stageDelete}
       oncreate={(folder) => void createHere(folder)}
       onopen={(path) =>
-        (path in (cache.deletions || {}) || conflictPaths.includes(path))
+        path in (cache.deletions || {}) || conflictPaths.includes(path)
           ? navigate('submit')
           : run(() => openPage(path))}
     />
@@ -941,14 +1105,23 @@
       <section aria-label="Reconcile server changes">
         <div class="submit-actions">
           <h2>Server changes</h2>
-          <button disabled={busy || reconciling || !online} onclick={() => run(syncDrafts)}>{reconciling ? 'Checking…' : 'Check server changes'}</button>
+          <button
+            disabled={busy || reconciling || !online}
+            onclick={() => run(syncDrafts)}
+            >{reconciling ? 'Checking…' : 'Check server changes'}</button
+          >
         </div>
         {#each conflictPaths as path (path)}
           {@const conflict = cache.conflicts![path]}
-          {#key JSON.stringify([conflict.base, conflict.local, conflict.server])}
-            <ConflictResolver {path} {conflict} disabled={busy || reconciling}
+          {#key JSON.stringify( [conflict.base, conflict.local, conflict.server] )}
+            <ConflictResolver
+              {path}
+              {conflict}
+              disabled={busy || reconciling}
               onprogress={(choices) => saveResolution(path, choices)}
-              onresolve={(text) => resolveConflict(path, cache.conflicts![path], text)} />
+              onresolve={(text) =>
+                resolveConflict(path, cache.conflicts![path], text)}
+            />
           {/key}
         {:else}<p class="muted">No unresolved conflicts.</p>{/each}
       </section>
@@ -1040,9 +1213,12 @@
                   'Clear cached documents and local drafts for this repository?'
                 )
               ) {
+                void clearDocuments(cache.repository).catch(() =>
+                  message('Could not clear offline documents.', true)
+                );
                 clearCache(localStorage, cache.repository);
                 cache = emptyCache(cache.repository);
-                current = null;
+
                 validated = '';
                 saved = true;
               }
@@ -1053,7 +1229,9 @@
     </div>
   {:else if view === 'search'}
     <header class="document-header">
-      {@render sidebarToggle()}<h1 class="pane-title">Search</h1></header>
+      {@render sidebarToggle()}
+      <h1 class="pane-title">Search</h1>
+    </header>
     <div class="workspace-page">
       <form
         onsubmit={(e) => {
@@ -1099,7 +1277,7 @@
   {:else}
     <section class="document-workspace" aria-label="Document">
       <header class="document-header">
-      {@render sidebarToggle()}
+        {@render sidebarToggle()}
         <nav id="path" class="document-breadcrumb" aria-label="Document path">
           {#if current}
             {#each current.path.split('/') as part, index}
@@ -1230,7 +1408,8 @@
             >
               <CodeEditor
                 bind:this={codeEditor}
-                onsource={(path, line) => void run(() => openSchemaSource(path, line))}
+                onsource={(path, line) =>
+                  void run(() => openSchemaSource(path, line))}
                 findings={currentFindings}
                 value={current.text}
                 path={current.path}
@@ -1245,14 +1424,24 @@
             </div>
             {#if mode === 'rendered' && !sourceOnly(current.path)}
               {#if isApp(current.text)}
-                <AppViews path={current.path} {cache} {online} {busy} onopen={(path) => void run(() => openPage(path))} onstage={stageAppAction} />
+                <AppViews
+                  path={current.path}
+                  {cache}
+                  {online}
+                  {busy}
+                  onopen={(path) => void run(() => openPage(path))}
+                  onstage={stageAppAction}
+                />
               {:else}
-              <article
-                id="preview"
-                class="markdown"
-                use:renderedLinks
-                use:markdownView={{ text: current.text, schema: current.template?.definition?.frontmatter }}
-              ></article>
+                <article
+                  id="preview"
+                  class="markdown"
+                  use:renderedLinks
+                  use:markdownView={{
+                    text: current.text,
+                    schema: current.template?.definition?.frontmatter
+                  }}
+                ></article>
               {/if}
             {/if}
           </div>
@@ -1260,7 +1449,7 @@
       {:else}<div class="empty">
           <span>▧</span>
           <h2>Your knowledge, connected.</h2>
-        {#if error}<p class="error" role="alert">{feedback}</p>{/if}
+          {#if error}<p class="error" role="alert">{feedback}</p>{/if}
           <p>Explore your library. Write in place. Keep working offline.</p>
         </div>{/if}
     </section>

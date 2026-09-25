@@ -7,10 +7,12 @@
     "preview": "vite preview --host 127.0.0.1",
     "dev": "pnpm build:wasm && vite dev --host 127.0.0.1",
     "build": "pnpm build:wasm && vite build",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check": "pnpm format:check && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:browser": "playwright test",
-    "build:wasm": "node scripts/build-wasm.mjs"
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "format": "prettier --write src tests scripts *.json *.ts *.js",
+    "format:check": "prettier --check src tests scripts *.json *.ts *.js"
   },
   "dependencies": {
     "@pierre/diffs": "1.4.3",

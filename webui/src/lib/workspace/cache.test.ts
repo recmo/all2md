@@ -17,7 +17,7 @@ it('restores exact draft bases and commit summaries, isolated per repository', (
     text: '# Updated\r\n'
   };
   saveCache(localStorage, cache);
-  expect(loadCache(localStorage)).toEqual(cache);
+  expect(loadCache(localStorage)).toEqual({ ...cache, pages: {}, paths: [] });
   expect(loadCache(localStorage, 'repo-b').drafts).toEqual({});
   expect(editRequest(cache.summary, cache.drafts).edits).toEqual([
     {
@@ -61,4 +61,33 @@ it('does not silently overwrite a change saved by another tab', () => {
     JSON.stringify({ ...cache, summary: 'Other tab' })
   );
   expect(() => saveCache(localStorage, cache)).toThrow('Another tab changed');
+});
+
+it('draft journal size does not depend on cached corpus or validation snapshot', () => {
+  const cache = emptyCache('large');
+  cache.pages['large.md'] = {
+    path: 'large.md',
+    text: 'x'.repeat(6_000_000),
+    exists: true,
+    template: null
+  };
+  cache.drafts['new.md'] = {
+    path: 'new.md',
+    text: '# Draft',
+    base: '',
+    exists: false,
+    template: null
+  };
+  cache.validationSnapshot = {
+    version: 1,
+    revision: 'r',
+    files: { 'schema.md': 'y'.repeat(6_000_000) },
+    documents: {},
+    edges: []
+  };
+  saveCache(localStorage, cache);
+  expect(
+    localStorage.getItem('mdstore:workspace:v1:large')!.length
+  ).toBeLessThan(1000);
+  expect(loadCache(localStorage).drafts).toEqual(cache.drafts);
 });

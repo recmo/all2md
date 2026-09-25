@@ -42,9 +42,11 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
   Starlark uses Python coloring; Markdown frontmatter uses YAML coloring.
   Configuration and template editing follow the daemon permission settings.
   The service worker caches bundled language assets for offline rendering.
-- Document sources, templates, draft bases, edits, and summaries are written to
-  localStorage, scoped by origin and repository. Connecting automatically caches
-  the published corpus. The service worker caches only the app shell.
+- Draft bases, edits, conflicts, and summaries use a synchronous localStorage
+  journal, scoped by origin and repository. Published documents and validation
+  snapshots use a separate IndexedDB cache with per-document writes. Connecting
+  caches the published corpus; cache failures do not block saved drafts from
+  being submitted. The service worker caches only the app shell.
 - Offline search is explicitly labelled cached-text search. Reconnecting refreshes
   the listing; it never auto-submits and requires fresh validation. Exact original
   source is retained for concurrency checks, including across browser reloads.

@@ -918,11 +918,11 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
     fn directory_templates_select_heterogeneous_page_types() {
         let templates = Templates::compile(&HashMap::from([
             (
-                "people/template.md".into(),
+                "people/schema.md".into(),
                 "```starlark\nstructure(additional_sections=False)\nsection(\"Biography\", required=True, level=1)\n```\n".into(),
             ),
             (
-                "tasks/template.md".into(),
+                "tasks/schema.md".into(),
                 "```starlark\nstructure(additional_sections=False)\nsection(\"Status\", required=True, level=1)\n```\n".into(),
             ),
         ]))
@@ -1041,7 +1041,7 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
                 .err()
                 .unwrap();
         assert_eq!(invalid.len(), 1);
-        assert_eq!(invalid[0].path, "template.md");
+        assert_eq!(invalid[0].path, "schema.md");
         let templates =
             test_templates("```starlark\nfrontmatter(fields={\"required\": field({}, required=True)}, allow_extra=True)\n```\n").unwrap();
         let pages = HashMap::from([
@@ -1133,9 +1133,9 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
         .unwrap();
         compare(&before, &tighter);
         let nested = Templates::compile(&HashMap::from([
-            ("template.md".into(), rules.into()),
+            ("schema.md".into(), rules.into()),
             (
-                "notes/template.md".into(),
+                "notes/schema.md".into(),
                 "```starlark\nfrontmatter(name=string(required=True))\n```\n".into(),
             ),
         ]))
@@ -1196,14 +1196,14 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
         VALIDATED_PAGES.with_borrow(|paths| assert_eq!(paths, &["notes/7.md"]));
         let nested = Templates::compile(&HashMap::from([
             (
-                "notes/template.md".into(),
+                "notes/schema.md".into(),
                 "```starlark\nmarkdown('rumdl.toml')\n```\n".into(),
             ),
             (
                 "notes/rumdl.toml".into(),
                 "[global]\nenable = [\"MD047\"]\n".into(),
             ),
-            ("unused/template.md".into(), "# Unrelated policy\n".into()),
+            ("unused/schema.md".into(), "# Unrelated policy\n".into()),
         ]))
         .unwrap();
         VALIDATED_PAGES.with_borrow_mut(Vec::clear);
@@ -1220,7 +1220,7 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
         .unwrap();
         VALIDATED_PAGES.with_borrow(|paths| assert_eq!(paths.len(), 128));
         let unused = Templates::compile(&HashMap::from([(
-            "unused/template.md".into(),
+            "unused/schema.md".into(),
             "# Unrelated policy\n".into(),
         )]))
         .unwrap();

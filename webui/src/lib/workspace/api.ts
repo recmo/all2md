@@ -4,7 +4,13 @@ export type Page = {
   hash?: string | null;
   exists: boolean;
   text: string;
-  template: { path: string; content: string; definition?: { frontmatter?: import("../documents/markdown").PropertySchema } } | null;
+  template: {
+    path: string;
+    content: string;
+    definition?: {
+      frontmatter?: import('../documents/markdown').PropertySchema;
+    };
+  } | null;
 };
 export type Directory = {
   path: string;
@@ -32,7 +38,7 @@ export type SearchResult = {
   end_line: number;
 };
 export type ValidationFinding = {
-  source?: {path: string; line: number} | null;
+  source?: { path: string; line: number } | null;
   path: string;
   message: string;
   line?: number | null;
@@ -74,7 +80,10 @@ export class Api {
     if (response.status === 401)
       throw new ApiError('Enter your bearer token to connect.', 401);
     const value = await response.json().catch(() => {
-      throw new ApiError(`Request failed: HTTP ${response.status} ${response.statusText}`, response.status);
+      throw new ApiError(
+        `Request failed: HTTP ${response.status} ${response.statusText}`,
+        response.status
+      );
     });
     if (!response.ok)
       throw new ApiError(value.error || response.statusText, response.status);
@@ -153,7 +162,7 @@ export function readonly(
   return (
     ((path === 'config.yaml' || /(^|\/)\.?rumdl\.toml$/.test(path)) &&
       !allowConfigEdits) ||
-    (!allowTemplateEdits && path.split('/').at(-1) === 'template.md')
+    (!allowTemplateEdits && path.split('/').at(-1) === 'schema.md')
   );
 }
 

@@ -1,0 +1,4 @@
+src/lib/wasm/
+node_modules/
+.svelte-kit/
+build/

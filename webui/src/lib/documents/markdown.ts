@@ -1,7 +1,10 @@
 import MarkdownIt from 'markdown-it';
 import DOMPurify from 'dompurify';
 import { parseDocument } from 'yaml';
-export type PropertySchema = { properties?: Record<string, { enum?: unknown[]; type?: unknown }>; required?: string[] };
+export type PropertySchema = {
+  properties?: Record<string, { enum?: unknown[]; type?: unknown }>;
+  required?: string[];
+};
 const parser = new MarkdownIt({
   html: false,
   linkify: true,
@@ -38,17 +41,30 @@ parser.renderer.rules.image = (tokens, index) =>
 const escape = parser.utils.escapeHtml;
 function propertyValue(value: unknown): string {
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (Array.isArray(value) && value.every(v => typeof v === 'string' && v.length < 60))
-    return value.map(v => `<span class="property-pill">${escape(v)}</span>`).join(' ');
+  if (
+    Array.isArray(value) &&
+    value.every((v) => typeof v === 'string' && v.length < 60)
+  )
+    return value
+      .map((v) => `<span class="property-pill">${escape(v)}</span>`)
+      .join(' ');
   if (typeof value === 'string' && /^https?:\/\//i.test(value))
     return `<a href="${escape(value)}" rel="noreferrer">${escape(value)}</a>`;
-  return escape(typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value));
+  return escape(
+    typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)
+  );
 }
 export function renderMarkdown(text: string, schema?: PropertySchema): string {
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (!frontmatter && /^---\r?\n/.test(text))
-    return '<p class="frontmatter-error" role="alert">Invalid frontmatter: missing closing delimiter.</p><pre><code class="language-yaml">' + escape(text) + '</code></pre>';
-  let html = parser.render(frontmatter ? text.slice(frontmatter[0].length) : text);
+    return (
+      '<p class="frontmatter-error" role="alert">Invalid frontmatter: missing closing delimiter.</p><pre><code class="language-yaml">' +
+      escape(text) +
+      '</code></pre>'
+    );
+  let html = parser.render(
+    frontmatter ? text.slice(frontmatter[0].length) : text
+  );
   if (frontmatter) {
     try {
       const document = parseDocument(frontmatter[1]);
@@ -57,29 +73,52 @@ export function renderMarkdown(text: string, schema?: PropertySchema): string {
       if (!values || typeof values !== 'object' || Array.isArray(values))
         throw new Error('Frontmatter must be a YAML mapping.');
       const tokens = parser.parse(text.slice(frontmatter[0].length), {});
-      const headingIndex = tokens.findIndex(t => t.type === 'heading_open' && t.tag === 'h1');
-      const title = headingIndex < 0 ? '' : (tokens[headingIndex + 1].children || [])
-        .filter(t => ['text', 'code_inline'].includes(t.type)).map(t => t.content).join('');
+      const headingIndex = tokens.findIndex(
+        (t) => t.type === 'heading_open' && t.tag === 'h1'
+      );
+      const title =
+        headingIndex < 0
+          ? ''
+          : (tokens[headingIndex + 1].children || [])
+              .filter((t) => ['text', 'code_inline'].includes(t.type))
+              .map((t) => t.content)
+              .join('');
       const badges: string[] = [];
       const rows: string[] = [];
       for (const [key, value] of Object.entries(values)) {
-        if (value === null || value === '' || (Array.isArray(value) && !value.length)) continue;
+        if (
+          value === null ||
+          value === '' ||
+          (Array.isArray(value) && !value.length)
+        )
+          continue;
         if (key === 'title' && value === title) continue;
-        const label = key.replace(/[_-]/g, ' ').replace(/^./, c => c.toUpperCase());
+        const label = key
+          .replace(/[_-]/g, ' ')
+          .replace(/^./, (c) => c.toUpperCase());
         const field = schema?.properties?.[key];
         if (field?.enum || ['state', 'status', 'tags'].includes(key)) {
-          badges.push(`<span class="property-badge" title="${escape(label)}" aria-label="${escape(label)}: ${escape(String(value))}">${propertyValue(value)}</span>`);
+          badges.push(
+            `<span class="property-badge" title="${escape(label)}" aria-label="${escape(label)}: ${escape(String(value))}">${propertyValue(value)}</span>`
+          );
         } else {
-          rows.push(`<dt>${escape(label)}</dt><dd>${propertyValue(value)}</dd>`);
+          rows.push(
+            `<dt>${escape(label)}</dt><dd>${propertyValue(value)}</dd>`
+          );
         }
       }
       const properties = `<div class="document-properties">${badges.length ? `<div class="property-badges">${badges.join('')}</div>` : ''}${rows.length ? `<details><summary>Properties</summary><dl>${rows.join('')}</dl></details>` : ''}</div>`;
       if (badges.length || rows.length) {
         const end = html.indexOf('</h1>');
-        html = end < 0 ? properties + html : html.slice(0, end + 5) + properties + html.slice(end + 5);
+        html =
+          end < 0
+            ? properties + html
+            : html.slice(0, end + 5) + properties + html.slice(end + 5);
       }
     } catch (error) {
-      html = `<p class="frontmatter-error" role="alert">Invalid frontmatter: ${escape(String(error))}</p><pre><code class="language-yaml">${escape(frontmatter[0])}</code></pre>` + html;
+      html =
+        `<p class="frontmatter-error" role="alert">Invalid frontmatter: ${escape(String(error))}</p><pre><code class="language-yaml">${escape(frontmatter[0])}</code></pre>` +
+        html;
     }
   }
   return DOMPurify.sanitize(html, {

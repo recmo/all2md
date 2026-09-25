@@ -428,7 +428,7 @@ section("Timeline", required=True, content=dated_list())
 
     fn templates(source: &str) -> Templates {
         Templates::compile(&HashMap::from([(
-            "tasks/template.md".into(),
+            "tasks/schema.md".into(),
             source.into(),
         )]))
         .unwrap()
@@ -475,7 +475,7 @@ section("Timeline", required=True, content=dated_list())
         let findings = check(TEMPLATE, &page("waiting"));
         assert_eq!(findings[0].message, "Explain the dependency");
         let source = findings[0].source.as_ref().unwrap();
-        assert_eq!(source.path, "tasks/template.md");
+        assert_eq!(source.path, "tasks/schema.md");
         assert!(TEMPLATE.lines().nth(source.line - 1).unwrap().contains("require("));
         let schema_error = check(TEMPLATE, &page("unknown"));
         assert_eq!(schema_error[0].line, Some(3));
@@ -531,7 +531,7 @@ validate_change(check)
             "```starlark schema\nx = 1\n```\n",
             "```starlark\nload('file.star', 'x')\n```\n",
         ] {
-            assert!(Script::compile("tasks/template.md", source).is_err());
+            assert!(Script::compile("tasks/schema.md", source).is_err());
         }
     }
 
@@ -550,7 +550,7 @@ validate_change(check)
             "```starlark\nvalidate_change('not a function')\n```\n",
         ] {
             assert!(
-                Templates::compile(&HashMap::from([("template.md".into(), source.into())]))
+                Templates::compile(&HashMap::from([("schema.md".into(), source.into())]))
                     .is_err()
             );
         }

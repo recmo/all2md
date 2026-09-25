@@ -138,7 +138,7 @@ mod tests {
 
     fn check(text: &str) -> Vec<Finding> {
         let templates = Templates::compile(&HashMap::from([(
-            "people/template.md".into(),
+            "people/schema.md".into(),
             r#"```starlark
 structure(level=2, additional_sections=True)
 section("Timeline", required=True, list={"minimum_items": 1, "ordered": False, "date_order": "descending"}, level=2)
@@ -236,7 +236,7 @@ section("Timeline", required=True, list={"minimum_items": 1, "ordered": False, "
     #[test]
     fn alternative_folder_template_and_invalid_configuration() {
         let templates = Templates::compile(&HashMap::from([(
-            "projects/template.md".into(),
+            "projects/schema.md".into(),
             r#"```starlark
 structure(additional_sections=False)
 section("Milestones", required=True, list={"ordered": True, "minimum_items": 2, "date_order": "ascending", "item_pattern": "^\\d{4}-\\d{2}-\\d{2} M[0-9]+: "}, level=1)

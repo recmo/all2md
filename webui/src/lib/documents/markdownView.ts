@@ -3,7 +3,10 @@ import { renderMarkdown, type PropertySchema } from './markdown';
 import { fenceLanguage } from './pierre';
 
 // Svelte action: sanitized prose plus locally rendered Pierre code blocks.
-export function markdownView(node: HTMLElement, text: string | { text: string; schema?: PropertySchema }) {
+export function markdownView(
+  node: HTMLElement,
+  text: string | { text: string; schema?: PropertySchema }
+) {
   let files: File[] = [];
   function clear() {
     for (const file of files) file.cleanUp();
@@ -11,7 +14,10 @@ export function markdownView(node: HTMLElement, text: string | { text: string; s
   }
   function render(value: typeof text) {
     clear();
-    node.innerHTML = renderMarkdown(typeof value === "string" ? value : value.text, typeof value === "string" ? undefined : value.schema);
+    node.innerHTML = renderMarkdown(
+      typeof value === 'string' ? value : value.text,
+      typeof value === 'string' ? undefined : value.schema
+    );
     for (const code of node.querySelectorAll('pre > code')) {
       const source = code.textContent || '';
       const languageClass = [...code.classList].find((c) =>

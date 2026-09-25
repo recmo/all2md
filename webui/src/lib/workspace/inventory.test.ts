@@ -86,19 +86,19 @@ describe('MCP document inventory', () => {
   it('refreshes template projections when policy source changes', async () => {
     const api = {
       directory: vi.fn(async () =>
-        directory('/', 'b', [entry('a.md'), entry('template.md', 'new')])
+        directory('/', 'b', [entry('a.md'), entry('schema.md', 'new')])
       ),
       page: vi.fn(async (path: string) =>
-        file(path, 'b', path === 'template.md' ? 'new' : path)
+        file(path, 'b', path === 'schema.md' ? 'new' : path)
       )
     };
     await readInventory(api as unknown as Api, {
       'a.md': file('a.md'),
-      'template.md': file('template.md')
+      'schema.md': file('schema.md')
     });
     expect(api.page.mock.calls.map(([path]) => path).sort()).toEqual([
       'a.md',
-      'template.md'
+      'schema.md'
     ]);
   });
 
