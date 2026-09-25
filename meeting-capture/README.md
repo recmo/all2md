@@ -27,13 +27,38 @@ open result/Applications/MeetingCapture.app
 The Nix derivation uses the locally installed Xcode and ad-hoc signs the result
 with the capture entitlement.
 
-At launch, Meeting Capture requests Microphone, Screen & System Audio
-Recording, and Accessibility permissions. Without screen and system-audio
-access it stays paused: it does not monitor, count down, or allow manual
-recording. The menu opens the correct System Settings pane and monitoring
-resumes only after macOS reports access granted. Automatic recording never
-falls back to a microphone-only capture when participant audio is unavailable.
-Accessibility remains optional and only enriches metadata.
+At launch, Meeting Capture checks Microphone and Screen & System Audio
+Recording access, requesting authorization if needed, and tests writing to the
+meeting folder. It then opens the real capture paths in the recording app for a
+1.5-second disposable recording before enabling monitoring or manual recording.
+The test requires saved microphone frames (silence is valid), successful system
+capture start/stop, and readable system audio when samples arrive. On a quiet
+system, the menu explicitly reports that access was authorized but no system
+audio was observed; play audio and rerun the check to verify sample delivery.
+Test audio is deleted and never appears among meetings or recovery files.
+
+The startup check also asks the actual worker to read the disposable audio and
+create, verify, hash, rename, and delete a small archive under the meeting folder.
+This exercises worker folder access and its ffmpeg/ffprobe subprocesses. The same
+worker checks Accessibility trust without prompting and, when authorized, tries
+an Accessibility read and observer creation against the app. The menu reports
+the optional metadata check separately; a target meeting app can still expose
+different Accessibility capabilities.
+
+The permission inventory is Microphone, Screen & System Audio Recording,
+Documents access under Files & Folders, and optional Accessibility. The current
+implementation does not use Camera, Input Monitoring, Automation/Apple Events,
+Calendar, Contacts, or notification authorization, and does not require Full
+Disk Access. The audio-input signing entitlement is included in the app package;
+the real microphone probe exercises that capability as well as user consent.
+
+Failures keep recording disabled and expose Settings links and an explicit Retry
+action. macOS may require quitting and reopening the installed app after a grant.
+Permission rechecks cannot run during capture, countdown, or detection. Optional
+Accessibility metadata does not gate recording or prompt automatically.
+Automatic recording never falls back to microphone-only capture when participant
+audio is unavailable. The startup check exercises default devices; it cannot
+guarantee that permissions or a meeting application's devices will remain usable.
 
 ## Current capture path
 
@@ -59,8 +84,22 @@ Accessibility remains optional and only enriches metadata.
   publishes the archive, records its SHA-256 in the v2 manifest, and only then
   deletes the temporary PCM files. A failed finalization leaves the PCM files
   available for recovery.
+- Finalization, verification, hashing, manifest publication, interrupted-file
+  recovery, and optional Accessibility probing run in dedicated worker
+  processes. A worker crash or hang cannot terminate the recorder or replace
+  its live state. Stopping a recording returns the app to monitoring before
+  deferred finalization finishes.
 - Interrupted CAF chunks are discovered at launch and can be recovered from
-  the menu.
+  the menu only while idle. Recovery remains a secondary maintenance status;
+  it cannot replace detection, countdown, or recording state. Header-only CAF
+  files are preserved with an `.unrecoverable.caf` suffix rather than retried
+  forever.
+- Capture, finalization, and recovery claim each recording exclusively. Claimed
+  recordings are excluded from recovery discovery; worker claims are released by
+  the operating system even if a worker crashes. Unreadable audio fails processing
+  and is preserved for recovery rather than silently omitted and deleted.
+- Manually started recordings, including those selected from active audio
+  applications, continue until explicitly stopped even when the meeting is muted.
 - Generic Accessibility inspection currently contributes the focused window
   title when permission is available; it never gates recording.
 - Every attributed recording also starts a generic Accessibility probe for the

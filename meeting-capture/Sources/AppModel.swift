@@ -11,20 +11,33 @@ final class AppModel: ObservableObject {
         case recording(AudioClient)
         case finalizing
         case permissionRequired
+        case checkingPermissions
         case error(String)
     }
 
-    @Published private(set) var state: State = .idle
+    @Published private(set) var state: State = .checkingPermissions
+    @Published private(set) var permissionMessage = ""
+    @Published private(set) var startupReport: StartupCaptureReport?
+    private let checkCapture: @MainActor () async throws -> StartupCaptureReport
+    private var permissionCheckTask: Task<Void, Never>?
     @Published var lastManifest: URL?
     @Published var recoverableFiles: [URL] = []
+    @Published private(set) var recoveryInProgress = false
+    @Published private(set) var recoveryError: String?
+    @Published private(set) var finalizationsInProgress = 0
+    @Published private(set) var activeOutputClients: [AudioClient] = []
     let capture = CaptureCoordinator()
 
     private let monitor = AudioActivityMonitor()
     private var countdownTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
-    private var permissionTimer: Timer?
     private var ignoredUntil: [String: Date] = [:]
     private var started = false
+    private var recordingMethod: TriggerMethod = .audioProcess
+
+    init(checkCapture: @escaping @MainActor () async throws -> StartupCaptureReport = StartupCaptureCheck.run) {
+        self.checkCapture = checkCapture
+    }
 
     var statusIcon: String {
         switch state {
@@ -38,19 +51,37 @@ final class AppModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        AccessibilityMetadataProvider.requestAccess()
         recoverableFiles = capture.recoverableFiles()
-        guard screenRecordingPermissionGranted(prompt: true) else {
-            requireScreenRecordingPermission()
-            return
+        checkPermissions()
+    }
+
+    func checkPermissions() {
+        guard permissionCheckTask == nil else { return }
+        guard Self.allowsPermissionCheck(in: state) else { return }
+        monitor.stop()
+        startupReport = nil
+        state = .checkingPermissions
+        permissionMessage = "Checking microphone and system-audio recording…"
+        permissionCheckTask = Task {
+            do {
+                startupReport = try await checkCapture()
+                startMonitoring()
+            } catch {
+                permissionMessage = error.localizedDescription
+                state = .permissionRequired
+            }
+            permissionCheckTask = nil
         }
-        startMonitoring()
     }
 
     func startNow() { if case let .countdown(client, _) = state { beginRecording(client) } }
 
     func manualStart() {
         let client = AudioClient(audioObjectID: 0, processID: 0, bundleID: nil, applicationName: "Manual recording", inputDevices: [])
+        beginRecording(client, method: .manual)
+    }
+
+    func manualStart(client: AudioClient) {
         beginRecording(client, method: .manual)
     }
 
@@ -76,9 +107,14 @@ final class AppModel: ObservableObject {
 
     func stopRecording() {
         guard case .recording = state else { return }
+        stopTask?.cancel(); stopTask = nil
         state = .finalizing
         Task {
-            do { lastManifest = try await capture.stop(); recoverableFiles = capture.recoverableFiles(); state = .idle }
+            do {
+                let request = try await capture.stop()
+                state = .idle
+                finalizeInBackground(request)
+            }
             catch {
                 recoverableFiles = capture.recoverableFiles()
                 state = .error(error.localizedDescription)
@@ -86,7 +122,24 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func dismissError() { state = .idle }
+    func dismissError() {
+        if startupReport == nil { checkPermissions() } else { state = .idle }
+    }
+
+    func openMicrophoneSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func openFilesSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func openAccessibilitySettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
+        NSWorkspace.shared.open(url)
+    }
 
     func openScreenRecordingSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
@@ -94,16 +147,53 @@ final class AppModel: ObservableObject {
     }
 
     func recoverInterruptedRecordings() {
-        state = .finalizing
+        guard Self.allowsMaintenance(in: state), !recoveryInProgress,
+              let interruptedFile = recoverableFiles.first else { return }
+        recoveryInProgress = true
+        recoveryError = nil
         Task {
             do {
-                lastManifest = try await capture.recoverInterruptedRecordings()
+                lastManifest = try await capture.recoverInterruptedRecording(interruptedFile)
                 recoverableFiles = capture.recoverableFiles()
-                state = .idle
             } catch {
                 recoverableFiles = capture.recoverableFiles()
-                state = .error(error.localizedDescription)
+                recoveryError = error.localizedDescription
             }
+            recoveryInProgress = false
+        }
+    }
+
+    var showsMaintenance: Bool { Self.allowsMaintenance(in: state) }
+
+    var allowsTermination: Bool {
+        switch state {
+        case .idle, .permissionRequired, .checkingPermissions, .error: true
+        case .detecting, .countdown, .recording, .finalizing: false
+        }
+    }
+
+    static func allowsMaintenance(in state: State) -> Bool {
+        if case .idle = state { return true }
+        return false
+    }
+
+    static func allowsPermissionCheck(in state: State) -> Bool {
+        switch state {
+        case .idle, .permissionRequired, .checkingPermissions, .error: true
+        default: false
+        }
+    }
+
+    private func finalizeInBackground(_ request: FinalizeCaptureRequest) {
+        finalizationsInProgress += 1
+        Task {
+            do {
+                if let manifest = try await capture.finalize(request) { lastManifest = manifest }
+            } catch {
+                recoveryError = error.localizedDescription
+            }
+            finalizationsInProgress -= 1
+            recoverableFiles = capture.recoverableFiles()
         }
     }
 
@@ -128,7 +218,7 @@ final class AppModel: ObservableObject {
                 stopTask?.cancel(); stopTask = nil
                 capture.updateMicrophoneDevices(current.inputDevices)
                 if current != candidate { state = .recording(current) }
-            } else if stopTask == nil {
+            } else if Self.shouldAutoStop(method: recordingMethod), stopTask == nil {
                 stopTask = Task { @MainActor [weak self] in
                     try? await Task.sleep(for: .seconds(15))
                     guard !Task.isCancelled else { return }
@@ -158,48 +248,43 @@ final class AppModel: ObservableObject {
     }
 
     private func beginRecording(_ client: AudioClient, method: TriggerMethod = .audioProcess) {
+        guard startupReport != nil else { return }
+        switch state {
+        case .idle, .detecting, .countdown: break
+        default: return
+        }
         countdownTask?.cancel(); countdownTask = nil
+        stopTask?.cancel(); stopTask = nil
+        recordingMethod = method
         state = .finalizing
         let resolvedMethod: TriggerMethod = method == .manual ? .manual : (client.processID > 0 ? .audioProcess : .deviceRunning)
         let trigger = CaptureTrigger(method: resolvedMethod, processID: client.processID > 0 ? client.processID : nil, bundleID: client.bundleID, applicationName: client.applicationName)
         Task {
             do { try await capture.start(trigger: trigger, microphoneDevice: client.primaryInputDevice); state = .recording(client) }
             catch {
-                if let captureError = error as? CaptureError,
-                   case .screenRecordingPermissionRequired = captureError {
-                    requireScreenRecordingPermission()
-                    return
+                if let captureError = error as? CaptureError {
+                    switch captureError {
+                    case .screenRecordingPermissionRequired, .microphonePermissionRequired:
+                        startupReport = nil
+                        monitor.stop()
+                        permissionMessage = error.localizedDescription
+                        state = .permissionRequired
+                        return
+                    default: break
+                    }
                 }
                 state = .error(error.localizedDescription)
             }
         }
     }
 
-    private func screenRecordingPermissionGranted(prompt: Bool = false) -> Bool {
-        if CGPreflightScreenCaptureAccess() { return true }
-        return prompt && CGRequestScreenCaptureAccess()
-    }
-
-    private func requireScreenRecordingPermission() {
-        countdownTask?.cancel(); countdownTask = nil
-        stopTask?.cancel(); stopTask = nil
-        monitor.stop()
-        state = .permissionRequired
-        guard permissionTimer == nil else { return }
-        permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                guard self.screenRecordingPermissionGranted() else { return }
-                self.permissionTimer?.invalidate()
-                self.permissionTimer = nil
-                self.startMonitoring()
-            }
-        }
-    }
+    static func shouldAutoStop(method: TriggerMethod) -> Bool { method != .manual }
 
     private func startMonitoring() {
-        permissionTimer?.invalidate(); permissionTimer = nil
         monitor.onClientsChanged = { [weak self] clients in self?.handle(clients) }
+        monitor.onOutputClientsChanged = { [weak self] clients in
+            self?.activeOutputClients = clients
+        }
         state = .idle
         monitor.start()
     }
