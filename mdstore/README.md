@@ -25,7 +25,7 @@ Use MCP directly or run the separate [web interface](../webui/README.md).
 
 Every served repository tracks a root `config.yaml` with operational settings
 only. Document rules belong exclusively in directory templates. Both kinds of
-configuration are readable but cannot be changed through `apply_edits`.
+configuration are readable but cannot be changed through `edit`.
 
 ```yaml
 documents:
@@ -114,7 +114,7 @@ Starlark callback validation remain separate from Markdown linting.
 Place `schema.md` beside the documents it governs. The nearest ancestor
 template applies recursively and replaces its parent. Use directories such as
 `tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
-Templates are readable through `get_page`, protected from `apply_edits`, and
+Templates are readable through `get`, protected from `edit`, and
 excluded from search and embeddings.
 
 Markdown supplies instructions and examples. Only top-level fences labelled
@@ -180,7 +180,7 @@ or repeated placeholders and placeholders on other edit operations are rejected.
 Allocation changes only the path, and retries consult durable receipts first.
 Resolved paths are returned in `touched_paths` and `fresh_hashlines`.
 
-`get_page` returns `template: {path, definition, content}`, also for proposed paths
+`get` returns `template: {path, definition, content}`, also for proposed paths
 with `exists: false`. The definition contains declared rules; content is the
 original Markdown. Template updates are authored externally and activated through
 validated Git synchronization.
@@ -231,15 +231,15 @@ mdstore --root /path/to/brain serve
 ```
 
 The daemon exposes `/mcp` for document operations and `/health` for operational
-status. `get_page` accepts `/` or a directory path ending in `/` to list direct
+status. `get` accepts `/` or a directory path ending in `/` to list direct
 children of the published document tree. Directory reads include permissions,
 repository identity, and the Git revision; file reads include the same revision
 and an exact source hash. Empty directories are not persisted by Git.
 Clients can traverse directories and check revisions to obtain a consistent
 inventory. Client-specific caches, validation baselines, and previews are built
-by clients. `apply_edits` always validates changes before committing.
+by clients. `edit` always validates changes before committing.
 
-An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
+An edit request uses `LINE:HASH` anchors returned by `get`. Hashes are
 32 hexadecimal characters (128 bits of SHA-256) and include trailing whitespace:
 
 ```json
@@ -284,7 +284,7 @@ server:
 
 These permissions apply to every caller accepted by this server's bearer-token
 check (or local callers when authentication is disabled). The UI discovers them
-from root-directory `get_page` reads. Root configuration cannot be deleted. Template changes
+from root-directory `get` reads. Root configuration cannot be deleted. Template changes
 compile the proposed Starlark and validate the entire proposed corpus; documents
 can be updated in the same atomic batch to satisfy new rules. Transition checks
 from both the old and proposed templates remain enforced. Configuration changes
@@ -316,3 +316,136 @@ Independent clients can link it with `default-features = false`.
 Templates may declare `scope(exclude=["overview.md"])`. Patterns are relative to
 the template directory. Excluded documents inherit the nearest matching parent
 schema; they do not bypass ordinary Markdown parsing or link validation.
+
+## Assets and derived documents
+
+mdstore supports immutable content-addressed assets and generic leased derivations.
+Speech-specific guidance and execution live in webui and speech2md; the server
+stores input/output declarations and validates published Markdown normally.
+
+The repository is served directly under `/`. `/health`, `/mcp`, `/worker`, and `/webui`
+are reserved top-level names. The independently built frontend lives at `/webui/`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /`, `GET /<folder>/` | Directory inventory |
+| `GET/HEAD /<path>` | Raw text or binary content, with ETags and media byte ranges |
+| `PUT /<path>` | Create or replace a file; Markdown/config changes are validated |
+| `DELETE /<path>` | Delete a file with normal validation and ownership checks |
+| `POST /mcp` | MCP search, metadata reads, and atomic multi-file edits |
+| `GET /mcp/events` | SSE repository revision and job-change notifications |
+| `POST/DELETE /mcp/session` | Exchange bearer credential for browser session / sign out |
+| `POST /worker` | Claim work, renew a lease, publish outputs, or search leased references (`op`: `claim`, `heartbeat`, `complete`, `search`, `retry`) |
+| `GET /health` | Health and processing job status |
+
+MCP exposes only three document tools:
+
+- `get({path, start_line?, end_line?})` reads documents and directories.
+- `edit({edit_summary, edits})` validates and commits an atomic document batch.
+- `search({query, variants})` searches documents.
+
+Processing declarations are ordinary operational configuration in `config.yaml`:
+
+```yaml
+derivations:
+  meeting:
+    source: meetings/example/recording.md
+    recipe: speech2md-v1
+    fields: [audio, hotwords, attendees, edits]
+    inputs: [meetings/example/audio.m4a]
+    outputs: [meetings/example/transcript.md, meetings/example/voiceprints.json]
+    reference_namespace: speakers
+```
+
+Upload inputs before configuring a derivation. Configuration writes use the same
+conditional file writes or document edits as other configuration, require config
+write access, and validate sources, inputs, output ownership, and the corpus.
+Names identify jobs. Changing consumed inputs fences old leases and queues work.
+Removing a declaration stops scheduling and fences its running job; published
+outputs retain their provenance and read-only protection. Published output paths
+cannot be reassigned by changing a declaration: use a new name and output paths.
+`GET /health` returns a `jobs` array with status, progress, errors, and whether a
+publication exists, without active lease credentials. `POST /worker` with
+`{op: "retry", id}` requests retry/regeneration using ordinary authenticated
+client credentials (including browser sessions) or worker credentials.
+
+File listings and metadata include assets; there is no separate asset inventory API.
+
+Create with `If-None-Match: *`; replace or delete with `If-Match: "<hash>"`.
+Missing preconditions return 428; stale preconditions return 412. Request
+`Accept: application/vnd.mdstore.page+json` on a file URL for page metadata,
+schema, hash, and effective read-only status. MCP `edit` retains atomic
+multi-file submissions. Asset paths can be replaced conditionally; old objects
+remain in LFS for historical versions. Assets used by a derivation cannot be deleted.
+
+Browsers exchange the configured bearer credential for an opaque 12-hour
+HttpOnly, SameSite=Strict cookie, Secure except on plain loopback development.
+Sessions survive page reloads but end on logout, expiry, or daemon restart.
+Cookie-authenticated writes require a same-origin Origin header. Native media
+uses ordinary file URLs and cookies, without playback tickets. API clients can
+continue using bearer authentication. Reverse proxies must preserve Host and
+Origin consistently; serve the frontend and API on the same origin.
+
+Execution and vector search require `MDSTORE_WORKER_TOKEN` and do not access MCP. All worker
+operations use `POST /worker`: `claim` takes `recipes`; `heartbeat` takes `id`,
+`attempt`, optional `progress` and `failure`; `complete` takes `id`, `attempt`,
+`outputs` and optional `assets`; `search` takes `id`, `attempt`, and a `query`
+containing `space`, `vector`, `limit`, and optional `filter`. Searches are limited
+to the lease's frozen references. Workers transfer through ordinary
+file URLs with `?job=<id>&attempt=<lease>`, restricted to assigned input and output
+paths. Uploaded outputs remain unpublished until completion. Worker credentials
+grant no ordinary repository access. Transfer limits are 16 GiB for source assets
+and 64 MiB for worker outputs.
+
+Storage selection is internal: recognized text media (including JSON voiceprints)
+are ordinary Git blobs; binary media use standard Git LFS pointers and objects.
+Clients use the same file URLs for either representation. There is no public LFS
+transfer API and no git-lfs executable or Git filter requirement. A Git push alone
+does not transfer binary objects: back up `.git/lfs/objects` separately or provide
+external LFS hosting. No object garbage collection is performed, preserving history.
+
+Published output ownership and provenance reside in committed `.mdstore-artifacts.json`, not
+editable document frontmatter. Ordinary writes cannot modify owned paths or hide
+published Markdown and derivation sources through document-selection settings.
+The target schema declaration `backlinks(required=False)` permits incoming links
+without an authored reciprocal link; targets and anchors are still validated.
+
+See [the recording integration](../webui/SPEECH_REVIEW.md) for the first client,
+including examples and operational limitations.
+
+### Errors, validators, notifications, and retries
+
+HTTP failures use `application/problem+json` (RFC 9457): `type`, `title`, `status`,
+and `detail`, with `findings` for validation source locations. MCP tool errors
+carry this same object as `structuredContent` inside their normal `isError`
+envelope. Protocol-level JSON-RPC errors retain JSON-RPC error codes.
+
+Raw-file ETags identify content. Metadata and directory ETags identify their
+complete JSON representation, including revision and schema information. The
+metadata body's `hash` remains the content precondition for writes; do not use
+the metadata ETag for PUT/DELETE. Conditional GET/HEAD supports `If-None-Match`
+(including weak tags) and returns validators on 304 responses. Responses remain
+private and non-storable; webui manages its own offline cache.
+
+`GET /mcp/events` returns `text/event-stream` with named `change` events:
+`{"revision":"<git commit>","jobs":1}`. Every connection begins with current
+state. Subsequent notifications are coalesced invalidations, not a durable event
+log: clients re-fetch authoritative state, including after reconnect. The jobs
+counter is process-local and may reset on restart. The daemon reconciles job
+expiry every five seconds and publishes changes from commits, worker progress,
+and synchronization. Cookie sessions are rechecked while streaming; logout or
+expiry closes the stream within fifteen seconds. Proxies must stream responses
+without buffering. No credentials or document bodies appear in events.
+
+PUT/DELETE text preconditions are checked under the repository lock and then use
+the same validation/commit operation as MCP batches. Cross-file changes must be
+submitted together with `edit`; separate requests cannot expose invalid
+intermediate states.
+
+Edit batches already have durable content-derived receipts: retry the exact
+request, including its summary and base text, to recover a lost commit response.
+The browser retries it once on a transport failure or HTTP 5xx. Existing replay
+checks still reject partially superseded batches; changed requests undergo normal
+concurrency and validation checks. Worker completion is replay-safe by lease
+attempt and output hashes, even after restart; workers likewise retry an uncertain
+completion once. Claims and other non-idempotent actions are not retried this way.

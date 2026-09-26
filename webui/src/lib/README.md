@@ -2,6 +2,8 @@
 
 - `apps/`: Starlark app evaluation, worker, and table/kanban/Gantt views.
 - `documents/`: Markdown rendering, frontmatter, source editing, and syntax highlighting.
+- `imports/`: File and folder drop/picker traversal, import planning, and progress UI.
+- `speech/`: Recording review and asset playback.
 - `navigation/`: Document tree, navigation drawer, tree edits/status, and link rewriting for moves.
 - `workspace/`: MCP access, inventory/cache, draft reconciliation, staged diffs, and connection settings.
 - `validation/`: Local validation orchestration and its worker.

@@ -9,15 +9,13 @@
     event.preventDefault();
     busy = true;
     failed = false;
-    const previous = api.token;
-    api.token = token;
+    const credential = token;
     token = '';
     try {
+      await api.login(credential);
       await onconnect();
-      message =
-        'Connected. Your token is available until this tab is reloaded or closed.';
+      message = 'Connected. This browser session lasts up to 12 hours.';
     } catch (error) {
-      api.token = previous;
       message = error instanceof Error ? error.message : String(error);
       failed = true;
     } finally {
@@ -43,6 +41,25 @@
       >{busy ? 'Connecting…' : 'Connect'}</button
     >
   </form>
-  <p class="muted">Kept in memory only. Never saved in browser storage.</p>
+  <p class="muted">
+    Your API key is exchanged for an HttpOnly session cookie and is not stored
+    in the browser.
+  </p>
+  <button
+    disabled={busy}
+    onclick={async () => {
+      busy = true;
+      try {
+        await api.logout();
+        message = 'Signed out.';
+        failed = false;
+      } catch (e) {
+        message = String(e);
+        failed = true;
+      } finally {
+        busy = false;
+      }
+    }}>Sign out</button
+  >
   {#if message}<p class:error={failed} role="status">{message}</p>{/if}
 </section>

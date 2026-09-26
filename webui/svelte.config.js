@@ -16,6 +16,7 @@ for (const path of [
 export default {
   preprocess: vitePreprocess(),
   kit: {
+    paths: { base: '/webui' },
     version: { name: version.digest('hex').slice(0, 16) },
     adapter: adapter({ fallback: 'index.html' }),
     csp: {

@@ -25,18 +25,44 @@ pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 struct AppState {
     store: Arc<Store>,
     bearer_token: Option<String>,
+    worker_token: Option<String>,
+    sessions: session::Sessions,
 }
+
+mod events;
+mod files;
+mod problem;
+mod session;
+mod transfers;
+mod worker;
 
 fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
     let state = AppState {
         store,
         bearer_token,
+        worker_token: std::env::var("MDSTORE_WORKER_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        sessions: Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new())),
     };
+    application(state)
+}
+
+fn application(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
+        .route("/mcp/events", get(events::subscribe))
+        .route("/mcp/session", post(session::create).delete(session::delete))
+        .route("/worker", post(worker::handle))
+        .merge(files::routes())
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
-        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(problem::normalize))
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &Request| {
+            // Worker attempts are capabilities; never log query strings or headers.
+            let path = request.uri().path();
+            tracing::debug_span!("http-request", method = %request.method(), path)
+        }))
         .with_state(state)
 }
 
@@ -65,24 +91,28 @@ pub async fn serve_listener(
     tracing::info!(%listen, "mdstore listening");
     let sync = Arc::clone(&store).synchronize();
     let embeddings = Arc::clone(&store).maintain_embeddings();
+    let jobs = Arc::clone(&store).maintain_jobs();
+    let shutdown_store = Arc::clone(&store);
     let server = axum::serve(listener, router(store, bearer_token))
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            shutdown_store.stop_changes();
         })
         .into_future();
     tokio::select! {
         result = server => result?,
         _ = sync => bail!("synchronization worker stopped"),
         _ = embeddings => bail!("embedding worker stopped"),
+        _ = jobs => bail!("job reconciliation stopped"),
     }
     Ok(())
 }
 
 async fn health(State(state): State<AppState>) -> Response {
-    match run_blocking(move || state.store.status()).await {
-        Ok(status) => (
+    match run_blocking(move || Ok((state.store.status()?, state.store.jobs()?))).await {
+        Ok((status, jobs)) => (
             StatusCode::OK,
-            Json(json!({"status": "ok", "store": status})),
+            Json(json!({"status": "ok", "store": status, "jobs": jobs})),
         )
             .into_response(),
         Err(error) => (
@@ -105,6 +135,19 @@ where
 }
 
 async fn authorize(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let actual = request.headers().get("authorization")
+        .and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
+    let worker = state.worker_token.as_deref().is_some_and(|expected| actual == Some(expected));
+    if request.uri().path() == "/worker" && worker {
+        return next.run(request).await;
+    }
+    if worker && request.uri().path() != "/mcp" && !request.uri().path().starts_with("/mcp/") && request.uri().path() != "/health" {
+        // File handlers still enforce the active lease and exact assigned path.
+        return next.run(request).await;
+    }
+    if worker {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     // With no credential, reject DNS-rebinding hosts as well as cross-site fetches.
     if state.bearer_token.is_none() {
         let host = request
@@ -149,19 +192,14 @@ async fn authorize(State(state): State<AppState>, request: Request, next: Next) 
         )
             .into_response();
     }
-    if let Some(expected) = &state.bearer_token {
-        let actual = request
-            .headers()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if actual != Some(expected.as_str()) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "unauthorized"})),
-            )
-                .into_response();
-        }
+    let session_creation = request.uri().path() == "/mcp/session" && request.method() == axum::http::Method::POST;
+    let bearer = state.bearer_token.as_deref().is_some_and(|expected| actual == Some(expected));
+    let cookie = !session_creation && session::authorized(&state, request.headers());
+    if cookie && !bearer && !matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD) && !same_origin {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "cookie-authenticated writes require a same-origin Origin header"}))).into_response();
+    }
+    if state.bearer_token.is_some() && !bearer && !cookie {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"}))).into_response();
     }
     next.run(request).await
 }
@@ -236,7 +274,7 @@ fn initialize(id: Value, params: &Value) -> Response {
 #[must_use]
 /// Returns the exact public MCP tool allowlist.
 pub fn tool_names() -> [&'static str; 3] {
-    ["search", "get_page", "apply_edits"]
+    ["search", "get", "edit"]
 }
 
 fn tools() -> Vec<Value> {
@@ -255,7 +293,7 @@ fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "get_page",
+            "name": "get",
             "description": "Read a file or directory from the published document tree. Use / for the root or a relative path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return that revision, source hash, hashline anchors and exact source text for full-page reads. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
@@ -269,7 +307,7 @@ fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "apply_edits",
+            "name": "edit",
             "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener and authentication changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
             "inputSchema": {
                 "type": "object",
@@ -368,7 +406,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                 .and_then(|value| serde_json::to_value(value).map_err(Into::into)),
             Err(error) => Err(error.into()),
         },
-        "get_page" => match serde_json::from_value::<GetArguments>(params.arguments) {
+        "get" => match serde_json::from_value::<GetArguments>(params.arguments) {
             Ok(arguments) => {
                 let window = arguments
                     .start_line
@@ -380,13 +418,14 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                         store.get_directory(&arguments.path)
                     }
                 } else {
-                    store.get_page(&arguments.path, window)
+                    store
+                        .get_page(&arguments.path, window)
                         .and_then(|value| serde_json::to_value(value).map_err(Into::into))
                 }
             }
             Err(error) => Err(error.into()),
         },
-        "apply_edits" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
+        "edit" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
             Ok(arguments) => {
                 let blocking_store = Arc::clone(store);
                 match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
@@ -408,16 +447,12 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             }),
         ),
         Err(error) => {
-            let findings = error
-                .downcast_ref::<ValidationError>()
-                .map(|validation| validation.findings.clone());
-            let mut result = json!({
-                "content": [{"type": "text", "text": error.to_string()}],
+            let problem = problem::Problem::from_error(&error);
+            let result = json!({
+                "content": [{"type": "text", "text": problem.detail}],
+                "structuredContent": problem,
                 "isError": true
             });
-            if let Some(findings) = findings {
-                result["structuredContent"] = json!({"validation_findings": findings});
-            }
             rpc_result(id, result)
         }
     }

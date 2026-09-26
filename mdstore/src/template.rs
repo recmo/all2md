@@ -21,10 +21,17 @@ pub(crate) struct Template {
     markdown: Option<String>,
     pub(crate) links: crate::LinkConfig,
     pub(crate) relations: Vec<crate::RelationRule>,
+    pub(crate) backlinks: Option<Backlinks>,
     pub(crate) metadata: std::collections::BTreeMap<String, String>,
     structure: Structure,
     preamble: Rules,
     sections: Vec<Section>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Backlinks {
+    pub(crate) required: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

@@ -85,6 +85,28 @@ pub struct Config {
     #[serde(default)]
     /// HTTP server settings.
     pub server: ServerConfig,
+    #[serde(default)]
+    /// Declarative processing jobs, keyed by a stable repository-local name.
+    pub derivations: std::collections::BTreeMap<String, DerivationConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Inputs and outputs for one configured background derivation.
+pub struct DerivationConfig {
+    /// Authored source document.
+    pub source: String,
+    /// Worker pipeline recipe.
+    pub recipe: String,
+    /// Source frontmatter fields that invalidate the result.
+    pub fields: Vec<String>,
+    /// Content-addressed input files.
+    pub inputs: Vec<String>,
+    /// Reserved output files.
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    /// Optional embedding namespace for cross-document references.
+    pub reference_namespace: Option<String>,
 }
 
 impl Config {
@@ -101,6 +123,32 @@ impl Config {
             bail!("documents.include must contain at least one glob");
         }
         let _ = self.document_globs()?;
+        for (id, definition) in &self.derivations {
+            if id.is_empty()
+                || definition.recipe.is_empty()
+                || definition.fields.is_empty()
+                || definition.outputs.is_empty()
+            {
+                bail!("derivation name, recipe, fields and outputs must be nonempty");
+            }
+            validate_repo_path(&definition.source)?;
+            let mut outputs = std::collections::BTreeSet::new();
+            for path in &definition.inputs {
+                validate_repo_path(path)?;
+            }
+            for path in &definition.outputs {
+                validate_repo_path(path)?;
+                if !outputs.insert(path)
+                    || definition.inputs.contains(path)
+                    || crate::template::is_template(path)
+                    || is_config_resource_path(path)
+                    || path.starts_with('.')
+                {
+                    bail!("invalid derivation output: {path}");
+                }
+            }
+        }
+
         for pointer in &self.chunking.context_pointers {
             validate_json_pointer(pointer, "chunking context")?;
         }
@@ -177,6 +225,12 @@ pub(crate) fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
 /// Validates a repository-relative path without accessing the filesystem.
 pub fn validate_repo_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
+    if matches!(
+        path.split('/').next(),
+        Some("mcp" | "health" | "webui" | "worker")
+    ) {
+        bail!("reserved HTTP namespace: {path}");
+    }
     if path.is_empty() || candidate.is_absolute() {
         bail!("path must stay within the repository: {path}");
     }

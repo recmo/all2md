@@ -20,7 +20,7 @@ MDSTORE_URL=http://127.0.0.1:3131 pnpm preview
 ```
 
 For development, run a daemon and `MDSTORE_URL=http://127.0.0.1:3131 pnpm dev`.
-The Vite development proxy forwards API calls to that daemon. `MDSTORE_URL` is a
+Open `/webui/`. The Vite development proxy forwards paths outside `/webui/` to that daemon. `MDSTORE_URL` is a
 server-side development setting, not a browser-selectable destination.
 
 `pnpm test:browser` starts a fresh disposable Git repository and compiled debug
@@ -29,12 +29,14 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 
 ## Data flow
 
-- Search, reads, and submissions call `/mcp` (`search`, `get_page`, `apply_edits`).
-- `get_page` reads directories as well as files. Webui traverses `/`, reuses
+- Search and atomic submissions call `/mcp` (`search`, `edit`). Reads use
+  repository URLs: directory JSON at `/<folder>/`, page metadata at `/<path>`
+  with `Accept: application/vnd.mdstore.page+json`.
+- `get` reads directories as well as files. Webui traverses `/`, reuses
   cached sources with matching hashes, and retries if revisions change during
   traversal. It builds its validation baseline locally in a WASM worker.
 - Shared Rust validation runs incrementally in WASM while editing. The server
-  independently validates every submission through `apply_edits`.
+  independently validates every submission through `edit`.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
   the editor stays mounted across view switches to preserve undo and selection.
   Markdown-it and DOMPurify render prose locally; Pierre File renders fenced and
@@ -50,9 +52,9 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 - Offline search is explicitly labelled cached-text search. Reconnecting refreshes
   the listing; it never auto-submits and requires fresh validation. Exact original
   source is retained for concurrency checks, including across browser reloads.
-- Connection credentials live on the Settings page; tokens remain in memory. Cache quota and concurrent-tab conflicts are surfaced;
+- Connection credentials live on the Settings page; the API key is exchanged for an HttpOnly session cookie and then discarded. Cache quota and concurrent-tab conflicts are surfaced;
   export drafts before closing a tab whose changes could not be saved. Local
-  cached documents remain readable without a token, until the cache is cleared.
+  cached documents remain readable after logout, until the cache is cleared.
 
 Service workers require localhost or HTTPS. An insecure non-local HTTP deployment
 can keep drafts in localStorage but cannot reload the application shell offline.
@@ -69,11 +71,18 @@ remain visible together on mobile. See the app API below.
 
 Submit shows diffs, validation, and reconciliation against server changes. A
 three-way merge automatically reconciles non-overlapping edits and presents
-conflicts for explicit resolution. Nothing is submitted automatically.
+conflicts for explicit resolution. Nothing is submitted automatically. An uncertain submission response is retried once
+with the identical request, using the server's durable batch receipt.
 
-For production, host `build/` with a static web server and reverse-proxy `/mcp` and
-`/health` to mdstore on the same origin. Keep authorization headers intact. Vite dev/preview provides that
-proxy locally via `MDSTORE_URL`; preview is for local inspection.
+One shared SSE connection at `/mcp/events` refreshes the workspace on repository
+changes and recording review on job progress. Reconnection receives current state;
+normal GET requests fetch the data. Recording review has no polling timer.
+
+For production, mount `build/` at `/webui/` with SPA fallback and proxy all other
+paths to mdstore on the same origin. Preserve cookies, authorization, Host, and
+Origin headers. `/health`, `/mcp`, `/worker`, and `/webui` are reserved names. The frontend
+remains a separate artifact; a separate frontend process can provide this proxy.
+Vite dev/preview provides it locally via `MDSTORE_URL`.
 `nix build .#webui` produces static assets, independently of `.#mdstore`.
 
 ## Offline validation
@@ -85,7 +94,7 @@ before bundling the SPA; Nix builds it as a separate dependency. Generated binar
 and bindings are not committed. Run `pnpm build:wasm` before
 standalone frontend type checks in a fresh checkout.
 
-Webui builds its own versioned baseline from ordinary `get_page` reads: source
+Webui builds its own versioned baseline from ordinary `get` reads: source
 hashes, parsed document facts, relation edges, and configuration/template sources.
 The first connection downloads the published document inventory; subsequent
 refreshes reuse unchanged sources unless schema/configuration changes require
@@ -190,3 +199,24 @@ so both local and server validation reject dangling dependencies. Rewriting uses
 the portable Rust resolver, preserves wiki labels/fragments and YAML comments,
 and stages all affected documents together. A move is rejected if its new names
 cannot preserve references under the governing schema.
+
+## Recording review
+
+Documents marked `mdstore: recording` open the integrated recording review view.
+See [recording review](SPEECH_REVIEW.md) for setup, storage, worker operation,
+voiceprint references, and current limitations.
+
+## Importing files and folders
+
+Drop Markdown or media files, or whole folders, onto the workspace. Dropping on
+a tree folder selects it as the destination; dropping on a file selects its
+parent. The import dialog preserves the selected folder hierarchy and lets you
+change the destination before starting. The **Import** tree item also offers file and
+folder pickers.
+
+Markdown becomes local drafts using the normal validation and submission flow;
+media and capture JSON files upload immediately through the asset API. Existing
+paths are never overwritten. Failed transfers show per-file errors and can be
+retried without repeating successful imports. Markdown can be staged offline;
+asset uploads require a connection. Unsupported files are listed as skipped, Git
+metadata is excluded, and empty directories are not imported.

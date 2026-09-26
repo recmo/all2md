@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 speech2md = "speech2md.cli:main"
+speech2md-worker = "speech2md.worker:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/speech2md"]

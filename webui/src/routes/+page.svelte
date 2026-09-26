@@ -12,6 +12,7 @@
   import { readInventory } from '$lib/workspace/inventory';
   import { buildSnapshot } from '$lib/validation/localValidation';
   import { onMount, tick } from 'svelte';
+  import { subscribeChanges } from '$lib/workspace/events';
   import { navigationDrawer } from '$lib/navigation/navigationDrawer';
   let mobile = $state(false);
   let drawerOpen = $state(false);
@@ -36,6 +37,12 @@
     return () => media.removeEventListener('change', update);
   });
   import AppViews from '$lib/apps/AppViews.svelte';
+  import SpeechReview from '$lib/speech/SpeechReview.svelte';
+  import AssetView from '$lib/speech/AssetView.svelte';
+  import ImportFiles from '$lib/imports/ImportFiles.svelte';
+  let importDialog: ImportFiles;
+  import { importKind, type ImportFile } from '$lib/imports/files';
+  import { isRecording } from '$lib/speech/recording';
   import { isApp, applyAppEdit, type AppEdit } from '$lib/apps/apps';
   import ConflictResolver from '$lib/workspace/ConflictResolver.svelte';
   import {
@@ -58,9 +65,10 @@
   }
   import {
     api,
+    fileUrl,
     ApiError,
     editRequest,
-    readonly,
+    readonly as documentReadonly,
     type Page,
     type Draft,
     type ValidationFinding,
@@ -240,10 +248,9 @@
         : await buildSnapshot(
             inventory.root.revision,
             Object.fromEntries(
-              Object.entries(inventory.pages).map(([path, page]) => [
-                path,
-                page.text
-              ])
+              Object.entries(inventory.pages)
+                .filter(([, page]) => !page.asset)
+                .map(([path, page]) => [path, page.text])
             )
           );
     if (
@@ -324,6 +331,15 @@
     };
     persist();
   }
+  function readonly(
+    path: string,
+    templates: boolean,
+    config: boolean
+  ): boolean {
+    return (
+      !!cache.pages[path]?.readonly || documentReadonly(path, templates, config)
+    );
+  }
   async function stageAppAction(edits: AppEdit[]) {
     if (busy) throw Error('Another operation is in progress');
     busy = true;
@@ -379,6 +395,31 @@
       busy = false;
     }
   }
+  let announcedRevision = $state('');
+  let refreshingChanges = $state(false);
+  let handledRevision = $state('');
+  $effect(() => {
+    const revision = announcedRevision;
+    if (
+      !online ||
+      busy ||
+      reconciling ||
+      refreshingChanges ||
+      !revision ||
+      revision === handledRevision ||
+      revision === cache.validationSnapshot?.revision
+    )
+      return;
+    refreshingChanges = true;
+    handledRevision = revision;
+    void refresh()
+      .catch((e) => {
+        failure(e);
+      })
+      .finally(() => {
+        refreshingChanges = false;
+      });
+  });
   async function refresh() {
     const listing = await api.directory();
     allowTemplateEdits = listing.allow_template_edits === true;
@@ -538,7 +579,9 @@
         return;
       }
       const sources = Object.fromEntries(
-        Object.entries(cache.pages).map(([path, page]) => [path, page.text])
+        Object.entries(cache.pages)
+          .filter(([, page]) => !page.asset)
+          .map(([path, page]) => [path, page.text])
       );
       let result = await validateLocally(snapshot, request, sources);
       if (version !== validationVersion || checkedSignature !== signature)
@@ -630,7 +673,7 @@
         return;
       }
       const request = { ...batch, edit_summary: cache.summary.trim() };
-      // apply_edits validates the entire batch against the current repository
+      // edit validates the entire batch against the current repository
       // and commits it atomically; local validation is only the preview.
       const result = await api.apply(request);
       const pages = { ...cache.pages };
@@ -880,6 +923,108 @@
       busy = false;
     }
   }
+  async function importFiles(
+    files: ImportFile[],
+    report: (path: string, status: string) => void
+  ) {
+    if (busy) throw Error('Another operation is in progress');
+    if (!cache.repository) throw Error('Connect to a repository first.');
+    busy = true;
+    try {
+      const documents = new Map<string, string>();
+      const known = [
+        ...cache.paths,
+        ...Object.keys(cache.drafts),
+        ...Object.keys(cache.deletions || {})
+      ];
+      if (online) {
+        const inventory = await readInventory(api, cache.pages);
+        if (inventory.root.repository !== cache.repository)
+          throw Error('Repository changed. Reconnect before importing.');
+        known.push(...Object.keys(inventory.pages));
+      }
+      // Preflight the complete batch before writing anything, including local conflicts.
+      for (const { path, file } of files) {
+        if (
+          known.some(
+            (item) =>
+              item === path ||
+              item.startsWith(path + '/') ||
+              (!item.endsWith('/') && path.startsWith(item + '/'))
+          ) ||
+          files.some(
+            (other) => other.path !== path && other.path.startsWith(path + '/')
+          )
+        )
+          throw Error(
+            'Destination already exists or conflicts with another file: ' + path
+          );
+        if (importKind(path) === 'markdown') {
+          if (readonly(path, allowTemplateEdits, allowConfigEdits))
+            throw Error('No write access: ' + path);
+          if (file.size > 8 * 1024 * 1024)
+            throw Error('Markdown exceeds the 8 MiB import limit: ' + path);
+          documents.set(
+            path,
+            new TextDecoder('utf-8', { fatal: true }).decode(
+              await file.arrayBuffer()
+            )
+          );
+        } else if (!online)
+          throw Error(
+            'Connect before uploading media. Markdown can be staged offline.'
+          );
+      }
+      let failed = 0;
+      for (const { path, file } of files) {
+        report(path, documents.has(path) ? 'Staging…' : 'Uploading…');
+        try {
+          if (documents.has(path)) {
+            const draft: Draft = {
+              path,
+              text: documents.get(path)!,
+              base: '',
+              exists: false,
+              template: null
+            };
+            cache = { ...cache, drafts: { ...cache.drafts, [path]: draft } };
+            validated = '';
+            report(path, 'Staged');
+          } else {
+            const asset = await api.request<{ oid: string; size: number }>(
+              fileUrl(path),
+              { method: 'PUT', headers: { 'If-None-Match': '*' }, body: file }
+            );
+            const page: Page = {
+              path,
+              text: '',
+              exists: true,
+              template: null,
+              readonly: true,
+              hash: asset.oid,
+              asset
+            };
+            cache = {
+              ...cache,
+              paths: [...new Set([...cache.paths, path])],
+              pages: { ...cache.pages, [path]: page }
+            };
+            report(path, 'Uploaded');
+          }
+          persist();
+        } catch (e) {
+          failed++;
+          report(path, 'Failed: ' + String(e));
+        }
+      }
+      if (failed)
+        throw Error(
+          `${failed} imports failed. Successful imports are listed above and have been kept.`
+        );
+    } finally {
+      busy = false;
+    }
+  }
   async function createHere(folder: string) {
     view = 'document';
     newPath = folder ? folder + '/' : '';
@@ -952,6 +1097,10 @@
         event.returnValue = '';
       }
     };
+    const stopChanges = subscribeChanges((change) => {
+      handledRevision = '';
+      announcedRevision = change.revision;
+    });
     window.addEventListener('offline', offline);
     window.addEventListener('online', connect);
     window.addEventListener('beforeunload', unload);
@@ -977,6 +1126,7 @@
       if (view === 'document' && path) await openPage(path);
     });
     return () => {
+      stopChanges();
       disposeValidation();
       window.removeEventListener('offline', offline);
       window.removeEventListener('online', connect);
@@ -1069,7 +1219,12 @@
       onclick={closeDrawer}>✕</button
     >
   </div>
-  <WorkspaceNavigation selected={view} onopen={navigate} disabled={busy} />
+  <WorkspaceNavigation
+    selected={view}
+    onopen={navigate}
+    onimport={() => importDialog.open()}
+    disabled={busy}
+  />
   <nav id="documents" aria-label="Documents">
     <DocumentTree
       paths={[
@@ -1101,6 +1256,13 @@
     />
   </nav>
 </aside>
+<ImportFiles
+  bind:this={importDialog}
+  {busy}
+  {paths}
+  onshow={closeDrawer}
+  onimport={importFiles}
+/>
 <main class="document-main" inert={mobile && drawerOpen}>
   {#if view === 'submit'}
     <header class="document-header">
@@ -1442,52 +1604,64 @@
         </form>{/if}
       {#if current}
         {#key current.path}
-          <div class="document-views">
-            <div
-              class="code-layer"
-              class:inactive={mode !== 'code' && !sourceOnly(current.path)}
-              inert={mode !== 'code' && !sourceOnly(current.path)}
-              aria-hidden={mode !== 'code' && !sourceOnly(current.path)}
-            >
-              <CodeEditor
-                bind:this={codeEditor}
-                onsource={(path, line) =>
-                  void run(() => openSchemaSource(path, line))}
-                findings={currentFindings}
-                value={current.text}
-                path={current.path}
-                readonly={readonly(
-                  current.path,
-                  allowTemplateEdits,
-                  allowConfigEdits
-                )}
-                disabled={busy}
-                onchange={edit}
-              />
-            </div>
-            {#if mode === 'rendered' && !sourceOnly(current.path)}
-              {#if isApp(current.text)}
-                <AppViews
+          {#if current.asset}
+            <AssetView page={current} {api} />
+          {:else}
+            <div class="document-views">
+              <div
+                class="code-layer"
+                class:inactive={mode !== 'code' && !sourceOnly(current.path)}
+                inert={mode !== 'code' && !sourceOnly(current.path)}
+                aria-hidden={mode !== 'code' && !sourceOnly(current.path)}
+              >
+                <CodeEditor
+                  bind:this={codeEditor}
+                  onsource={(path, line) =>
+                    void run(() => openSchemaSource(path, line))}
+                  findings={currentFindings}
+                  value={current.text}
                   path={current.path}
-                  {cache}
-                  {online}
-                  {busy}
-                  onopen={(path) => void run(() => openPage(path))}
-                  onstage={stageAppAction}
+                  readonly={readonly(
+                    current.path,
+                    allowTemplateEdits,
+                    allowConfigEdits
+                  )}
+                  disabled={busy}
+                  onchange={edit}
                 />
-              {:else}
-                <article
-                  id="preview"
-                  class="markdown"
-                  use:renderedLinks
-                  use:markdownView={{
-                    text: current.text,
-                    schema: current.template?.definition?.frontmatter
-                  }}
-                ></article>
+              </div>
+              {#if mode === 'rendered' && !sourceOnly(current.path)}
+                {#if isRecording(current.text)}
+                  <SpeechReview
+                    page={current}
+                    {api}
+                    dirty={!!cache.drafts[current.path]}
+                    onstage={stageAppAction}
+                    onopen={(path) => void run(() => openPage(path))}
+                  />
+                {:else if isApp(current.text)}
+                  <AppViews
+                    path={current.path}
+                    {cache}
+                    {online}
+                    {busy}
+                    onopen={(path) => void run(() => openPage(path))}
+                    onstage={stageAppAction}
+                  />
+                {:else}
+                  <article
+                    id="preview"
+                    class="markdown"
+                    use:renderedLinks
+                    use:markdownView={{
+                      text: current.text,
+                      schema: current.template?.definition?.frontmatter
+                    }}
+                  ></article>
+                {/if}
               {/if}
-            {/if}
-          </div>
+            </div>
+          {/if}
         {/key}
       {:else}<div class="empty">
           <span>▧</span>

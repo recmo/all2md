@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import yaml
 from pathlib import Path
 
 import pytest
@@ -17,20 +19,25 @@ def attendee(handle: str, *ranges: SpeakerHint) -> AttendeeHint:
     return AttendeeHint(handle, "", tuple(ranges))
 
 
-def test_absent_and_empty_hint_sidecars(tmp_path: Path):
-    absent = tmp_path / "absent.hint.yaml"
-    assert load_hints(absent) == SpeechHints()
+def test_recording_is_required_and_empty_guidance_is_valid(tmp_path: Path):
+    with pytest.raises(FileNotFoundError):
+        load_hints(tmp_path / "missing.md")
+    path = tmp_path / "recording.md"
+    path.write_text("---\n{}\n---\n# Recording\n")
+    assert load_hints(path).hotwords == ()
+    path.write_text("# Missing frontmatter\n")
+    with pytest.raises(ValueError, match="frontmatter"):
+        load_hints(path)
 
-    empty = tmp_path / "empty.hint.yaml"
-    empty.write_text("")
-    hints = load_hints(empty)
-    assert hints.hotwords == ()
-    assert hints.speakers == ()
-    assert hints.sha256 == hashlib.sha256(b"").hexdigest()
+
+def guidance_hash(raw):
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    return hashlib.sha256(json.dumps(yaml.safe_load(raw), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
 def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Path):
-    path = tmp_path / "meeting.hint.yaml"
+    path = tmp_path / "meeting.md"
     raw = (
         "hotwords:\n"
         "  - ' ProveKit '\n"
@@ -54,7 +61,7 @@ def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Pa
         "    before: F two Z\n"
         "    after: F2Z\n"
     )
-    path.write_text(raw)
+    path.write_text("---\n" + raw + "\n---\n# Recording\n")
     hints = load_hints(path)
     assert hints.hotwords == ("ProveKit", "F2Z")
     assert hints.speakers == (
@@ -74,13 +81,13 @@ def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Pa
     assert hints.edits == (
         TranscriptEdit(12.5, 18.0, "F two Z", "F2Z", "participants"),
     )
-    assert hints.sha256 == hashlib.sha256(raw.encode()).hexdigest()
+    assert hints.sha256 == guidance_hash(raw)
 
 
 def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch):
-    path = tmp_path / "meeting.hint.yaml"
+    path = tmp_path / "meeting.md"
     raw = b"hotwords: [ProveKit]\n"
-    path.write_bytes(raw)
+    path.write_bytes(b"---\n" + raw + b"\n---\n# Recording\n")
     original_read_bytes = Path.read_bytes
     reads = 0
 
@@ -88,7 +95,7 @@ def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch
         nonlocal reads
         reads += 1
         if reads > 1:
-            raise AssertionError("hint sidecar was read more than once")
+            raise AssertionError("recording document was read more than once")
         return original_read_bytes(self)
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes_once)
@@ -96,7 +103,7 @@ def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch
 
     assert reads == 1
     assert hints.hotwords == ("ProveKit",)
-    assert hints.sha256 == hashlib.sha256(raw).hexdigest()
+    assert hints.sha256 == guidance_hash(raw)
 
 
 @pytest.mark.parametrize(
@@ -135,16 +142,16 @@ def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch
     ],
 )
 def test_invalid_hint_shapes_fail_clearly(tmp_path: Path, raw: str, message: str):
-    path = tmp_path / "meeting.hint.yaml"
-    path.write_text(raw)
+    path = tmp_path / "meeting.md"
+    path.write_text("---\n" + raw + "\n---\n# Recording\n")
     with pytest.raises(ValueError, match=message):
         load_hints(path)
 
 
 def test_malformed_yaml_fails_clearly(tmp_path: Path):
-    path = tmp_path / "meeting.hint.yaml"
-    path.write_text("attendees: [\n")
-    with pytest.raises(ValueError, match="invalid hint YAML"):
+    path = tmp_path / "meeting.md"
+    path.write_text("---\nattendees: [\n---\n")
+    with pytest.raises(ValueError, match="invalid recording YAML"):
         load_hints(path)
 
 

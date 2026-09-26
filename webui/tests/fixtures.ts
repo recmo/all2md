@@ -3,11 +3,13 @@ import { spawn } from 'node:child_process';
 
 // Each test gets a fresh repository and daemon: submissions must not leak into
 // later tests, even when the browser itself uses an isolated context.
-export const test = base.extend<{ daemon: void }>({
+export const test = base.extend<{ daemon: void; apiToken: string }>({
+  apiToken: ['', { option: true }],
   daemon: [
-    async ({}, use) => {
+    async ({ apiToken }, use) => {
       const child = spawn(process.execPath, ['tests/daemon.mjs'], {
-        stdio: ['ignore', 'ignore', 'pipe']
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: { ...process.env, MDSTORE_TEST_TOKEN: apiToken }
       });
       let errors = '';
       child.stderr.on('data', (chunk) => {
@@ -22,7 +24,9 @@ export const test = base.extend<{ daemon: void }>({
             async () => {
               if (child.exitCode !== null)
                 throw Error(errors || 'Test daemon exited');
-              return fetch('http://127.0.0.1:43132/health')
+              return fetch('http://127.0.0.1:43132/health', {
+                headers: apiToken ? { Authorization: `Bearer ${apiToken}` } : {}
+              })
                 .then((r) => r.ok)
                 .catch(() => false);
             },
