@@ -71,7 +71,12 @@ remain visible together on mobile. See the app API below.
 
 Submit shows diffs, validation, and reconciliation against server changes. A
 three-way merge automatically reconciles non-overlapping edits and presents
-conflicts for explicit resolution. Nothing is submitted automatically.
+conflicts for explicit resolution. Nothing is submitted automatically. An uncertain submission response is retried once
+with the identical request, using the server's durable batch receipt.
+
+One shared SSE connection at `/mcp/events` refreshes the workspace on repository
+changes and recording review on job progress. Reconnection receives current state;
+normal GET requests fetch the data. Recording review has no polling timer.
 
 For production, mount `build/` at `/webui/` with SPA fallback and proxy all other
 paths to mdstore on the same origin. Preserve cookies, authorization, Host, and

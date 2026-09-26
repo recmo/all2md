@@ -1,3 +1,4 @@
+import { reconnectChanges } from './events';
 export type Page = {
   readonly?: boolean;
   asset?: { oid: string; size: number };
@@ -62,13 +63,16 @@ export function fileUrl(path: string) {
 }
 export class Api {
   async login(token: string) {
-    return this.request('/mcp/session', {
+    const result = await this.request('/mcp/session', {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {}
     });
+    reconnectChanges();
+    return result;
   }
   async logout() {
-    return this.request('/mcp/session', { method: 'DELETE' });
+    await this.request('/mcp/session', { method: 'DELETE' });
+    reconnectChanges();
   }
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await fetch(path, {
@@ -81,44 +85,52 @@ export class Api {
     const value = await response.json().catch(() => ({}));
     if (!response.ok)
       throw new ApiError(
-        value.error || response.statusText,
+        value.detail || value.title || response.statusText,
         response.status,
         value.findings || []
       );
     return value as T;
   }
   private async mcp<T>(name: string, args: unknown): Promise<T> {
-    let response: Response;
-    try {
-      response = await fetch('/mcp', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: crypto.randomUUID(),
-          method: 'tools/call',
-          params: { name, arguments: args }
-        }),
-        signal: AbortSignal.timeout(15000)
-      });
-    } catch {
-      throw new ApiError(
-        'Daemon unavailable. Cached documents and local drafts remain available.'
-      );
-    }
-    if (response.status === 401)
-      throw new ApiError('Enter your bearer token to connect.', 401);
-    const value = await response.json().catch(() => {
-      throw new ApiError(
-        `Request failed: HTTP ${response.status} ${response.statusText}`,
-        response.status
-      );
+    // Identical apply_edits requests have durable, content-derived receipts.
+    // Retry the original bytes once if the commit response was lost.
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: crypto.randomUUID(),
+      method: 'tools/call',
+      params: { name, arguments: args }
     });
+    let response: Response | undefined;
+    let value;
+    const attempts = name === 'apply_edits' ? 2 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        response = await fetch('/mcp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          signal: AbortSignal.timeout(15000)
+        });
+        if (response.status === 401)
+          throw new ApiError('Enter your bearer token to connect.', 401);
+        if (response.status >= 500 && attempt + 1 < attempts) {
+          await response.body?.cancel();
+          continue;
+        }
+        value = await response.json();
+        break;
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        if (attempt + 1 === attempts)
+          throw new ApiError(
+            'Daemon unavailable. Cached documents and local drafts remain available.'
+          );
+      }
+    }
+    if (!response) throw new ApiError('Daemon unavailable.');
     if (!response.ok)
       throw new ApiError(
-        value.error || response.statusText,
+        value.detail || value.title || response.statusText,
         response.status,
         value.findings || []
       );
@@ -128,16 +140,18 @@ export class Api {
       content: { text: string }[];
       structuredContent: T;
     } = value.result;
-    if (result.isError)
+    if (result.isError) {
+      const problem = result.structuredContent as {
+        detail?: string;
+        status?: number;
+        findings?: ValidationFinding[];
+      };
       throw new ApiError(
-        result.content.map((c) => c.text).join('\n'),
-        422,
-        (
-          result.structuredContent as {
-            validation_findings?: ValidationFinding[];
-          }
-        )?.validation_findings || []
+        problem?.detail || result.content.map((c) => c.text).join('\n'),
+        problem?.status || 422,
+        problem?.findings || []
       );
+    }
     return result.structuredContent;
   }
   page(path: string) {

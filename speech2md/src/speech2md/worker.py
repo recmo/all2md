@@ -13,7 +13,8 @@ import threading
 import time
 from urllib.parse import urlencode, urlparse, quote
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
+from http.client import IncompleteRead
 
 
 class Client:
@@ -32,12 +33,21 @@ class Client:
             body = json.dumps(value, allow_nan=False).encode()
             headers["Content-Type"] = "application/json"
         request = Request(self.server + path, data=body, headers=headers, method=method)
-        try:
-            with urlopen(request, timeout=60) as response:
-                return json.load(response)
-        except HTTPError as error:
-            detail = error.read(8192).decode("utf-8", errors="replace")
-            raise RuntimeError(f"mdstore returned {error.code}: {detail}") from error
+        # Completion is replay-safe by attempt and output hashes, including
+        # after a server restart. Retry the same bytes if its response is lost.
+        attempts = 2 if path.endswith("/complete") else 1
+        for attempt in range(attempts):
+            try:
+                with urlopen(request, timeout=60) as response:
+                    return json.load(response)
+            except HTTPError as error:
+                detail = error.read(8192).decode("utf-8", errors="replace")
+                if error.code >= 500 and attempt + 1 < attempts:
+                    continue
+                raise RuntimeError(f"mdstore returned {error.code}: {detail}") from error
+            except (URLError, TimeoutError, ConnectionError, IncompleteRead, json.JSONDecodeError):
+                if attempt + 1 == attempts:
+                    raise
 
     def download(self, query: dict, target: Path, asset: dict):
         target.parent.mkdir(parents=True, exist_ok=True)

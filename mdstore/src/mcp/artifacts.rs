@@ -149,11 +149,7 @@ async fn lfs_upload(
 }
 
 pub(super) fn error(error: anyhow::Error) -> Response {
-    (
-        StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({"error": format!("{error:#}")})),
-    )
-        .into_response()
+    problem::Problem::from_error(&error).into_response()
 }
 
 fn reply<T: serde::Serialize>(result: Result<T>) -> Response {

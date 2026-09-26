@@ -12,6 +12,7 @@
   import { readInventory } from '$lib/workspace/inventory';
   import { buildSnapshot } from '$lib/validation/localValidation';
   import { onMount, tick } from 'svelte';
+  import { subscribeChanges } from '$lib/workspace/events';
   import { navigationDrawer } from '$lib/navigation/navigationDrawer';
   let mobile = $state(false);
   let drawerOpen = $state(false);
@@ -394,6 +395,31 @@
       busy = false;
     }
   }
+  let announcedRevision = $state('');
+  let refreshingChanges = $state(false);
+  let handledRevision = $state('');
+  $effect(() => {
+    const revision = announcedRevision;
+    if (
+      !online ||
+      busy ||
+      reconciling ||
+      refreshingChanges ||
+      !revision ||
+      revision === handledRevision ||
+      revision === cache.validationSnapshot?.revision
+    )
+      return;
+    refreshingChanges = true;
+    handledRevision = revision;
+    void refresh()
+      .catch((e) => {
+        failure(e);
+      })
+      .finally(() => {
+        refreshingChanges = false;
+      });
+  });
   async function refresh() {
     const listing = await api.directory();
     allowTemplateEdits = listing.allow_template_edits === true;
@@ -1071,6 +1097,10 @@
         event.returnValue = '';
       }
     };
+    const stopChanges = subscribeChanges((change) => {
+      handledRevision = '';
+      announcedRevision = change.revision;
+    });
     window.addEventListener('offline', offline);
     window.addEventListener('online', connect);
     window.addEventListener('beforeunload', unload);
@@ -1096,6 +1126,7 @@
       if (view === 'document' && path) await openPage(path);
     });
     return () => {
+      stopChanges();
       disposeValidation();
       window.removeEventListener('offline', offline);
       window.removeEventListener('online', connect);

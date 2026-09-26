@@ -29,10 +29,13 @@ use crate::{
 };
 
 pub(crate) mod artifacts;
+mod changes;
+mod files;
 
 /// Daemon-owned coherent view of one Git-backed Markdown repository.
 pub struct Store {
     root: PathBuf,
+    changes: tokio::sync::watch::Sender<changes::Change>,
     startup_server: crate::config::ServerConfig,
     state: RwLock<Arc<StoreState>>,
     provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
@@ -352,6 +355,12 @@ impl Store {
         Ok(Arc::new(Self {
             root,
             startup_server: snapshot.config.server.clone(),
+            changes: tokio::sync::watch::channel(changes::Change {
+                revision: snapshot.head.clone(),
+                jobs: 0,
+                shutdown: false,
+            })
+            .0,
             state: RwLock::new(Arc::new(snapshot)),
             provider_factory,
             reindex_lock: tokio::sync::Mutex::new(()),
@@ -540,6 +549,14 @@ impl Store {
 
     /// Validates and commits one atomic hashline edit batch, then notifies replication.
     pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<ApplyEditsResponse> {
+        let _lock = self.lock_repository()?;
+        git::recover_worktree(&self.root)?;
+        self.refresh_external_commit()?;
+        self.apply_edits_locked(request)
+    }
+
+    // Caller holds the repository lock and has refreshed the published state.
+    fn apply_edits_locked(&self, request: &ApplyEditsRequest) -> Result<ApplyEditsResponse> {
         if request.edit_summary.trim().is_empty() {
             bail!("edit_summary must be non-empty");
         }
@@ -547,9 +564,6 @@ impl Store {
             bail!("edits must contain at least one operation");
         }
         let digest = request_digest(request)?;
-        let _lock = self.lock_repository()?;
-        git::recover_worktree(&self.root)?;
-        self.refresh_external_commit()?;
         if let Some(response) = self.read_receipt(&digest)? {
             return Ok(response);
         }
@@ -797,6 +811,7 @@ impl Store {
             provider,
             generation: current.generation + 1,
         });
+        self.publish_revision();
         let push = self.current_push_state()?;
         let response = ApplyEditsResponse {
             restart_required: self.restart_required(&self.state.read().config),
@@ -1046,6 +1061,7 @@ impl Store {
                     }
                     git::activate_candidate(&self.root, &local, &incoming)?;
                     *self.state.write() = Arc::new(state);
+                    self.publish_revision();
                     self.reindex_notify.notify_one();
                     local = incoming;
                 } else if !git::is_ancestor(&self.root, &incoming, &local)? {
@@ -1094,6 +1110,7 @@ impl Store {
             let _ = self.set_external_blocked(error.to_string());
         })?;
         *self.state.write() = Arc::new(state);
+        self.publish_revision();
         self.reindex_notify.notify_one();
         if matches!(*self.blocked.read(), Some(WriteBlock::ExternalCommit(_))) {
             self.set_blocked(None)?;

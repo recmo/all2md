@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { subscribeChanges } from '../workspace/events';
   import { fileUrl, type Api, type Page } from '../workspace/api';
   import type { AppEdit } from '../apps/apps';
   import {
@@ -143,15 +144,28 @@
       await refresh();
       if (!disposed) await prepareTracks();
     });
-    const timer = setInterval(() => {
-      if (!busy)
-        void refresh().catch((e) => {
+    let refreshing = false;
+    let pending = false;
+    const stop = subscribeChanges(() => {
+      pending = true;
+      if (refreshing) return;
+      refreshing = true;
+      void (async () => {
+        try {
+          while (pending && !disposed) {
+            pending = false;
+            await refresh();
+          }
+        } catch (e) {
           if (!disposed) error = String(e);
-        });
-    }, 10000);
+        } finally {
+          refreshing = false;
+        }
+      })();
+    });
     return () => {
       disposed = true;
-      clearInterval(timer);
+      stop();
     };
   });
   function select(turn: Turn) {

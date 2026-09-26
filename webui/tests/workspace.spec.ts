@@ -621,7 +621,7 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
   });
   const result = (await response.json()).result;
   expect(result.isError).toBe(true);
-  const findings = result.structuredContent.validation_findings;
+  const findings = result.structuredContent.findings;
   expect(findings).toEqual([
     expect.objectContaining({
       path: 'other.md',
@@ -1314,7 +1314,7 @@ test('conflicts persist offline, resolve per passage, and detect another server 
   await expect(page.locator('#submit')).toBeEnabled();
   const newer = theirs.replace('Server passage.', 'Newer server passage.');
   await remoteEdit(page, path, newer, theirs);
-  await page.locator('#submit').click();
+  // The change stream detects this conflict before submission.
   await expect(conflict).toBeVisible();
   await expect(page.locator('#submit')).toBeDisabled();
   await conflict.getByRole('button', { name: 'Server', exact: true }).click();

@@ -1,9 +1,6 @@
 //! Repository resources use their own URLs; text writes reuse the validated edit path.
 use super::*;
-use crate::{
-    EditOperation,
-    config::{is_config_resource_path, validate_repo_path},
-};
+use crate::config::{is_config_resource_path, validate_repo_path};
 use axum::{
     body::Body,
     extract::{Path, Query},
@@ -19,7 +16,7 @@ async fn root(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return StatusCode::FORBIDDEN.into_response();
     }
     match run_blocking(move || state.store.get_directory("/")).await {
-        Ok(value) => Json(value).into_response(),
+        Ok(value) => json_read(&value, &headers).unwrap_or_else(artifacts::error),
         Err(e) => artifacts::error(e),
     }
 }
@@ -80,10 +77,36 @@ fn etag(headers: &HeaderMap, hash: &str) -> bool {
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| {
-            v == "*"
-                || v.split(',')
-                    .any(|part| part.trim() == format!("\"{hash}\""))
+            v.trim() == "*"
+                || v.split(',').any(|part| {
+                    part.trim().strip_prefix("W/").unwrap_or(part.trim()) == format!("\"{hash}\"")
+                })
         })
+}
+fn not_modified(hash: &str) -> Response {
+    (
+        StatusCode::NOT_MODIFIED,
+        [
+            ("etag", format!("\"{hash}\"")),
+            ("vary", "Accept".into()),
+            ("cache-control", "private, no-store".into()),
+        ],
+    )
+        .into_response()
+}
+fn json_read(value: &impl serde::Serialize, headers: &HeaderMap) -> Result<Response> {
+    let bytes = serde_json::to_string(value)?;
+    let hash = crate::validation::source_hash(&bytes);
+    if etag(headers, &hash) {
+        return Ok(not_modified(&hash));
+    }
+    Ok(Response::builder()
+        .header("content-type", "application/json")
+        .header("content-length", bytes.len())
+        .header("etag", format!("\"{hash}\""))
+        .header("vary", "Accept")
+        .header("cache-control", "private, no-store")
+        .body(Body::from(bytes))?)
 }
 async fn read(
     State(state): State<AppState>,
@@ -98,7 +121,7 @@ async fn read(
             Some(state.store.leased_asset(job, attempt, &path)?)
         } else {
             if path.ends_with('/') {
-                return Ok(Json(state.store.get_directory(&path)?).into_response());
+                return json_read(&state.store.get_directory(&path)?, &headers);
             }
             validate_repo_path(&path)?;
             state.store.asset(&path).ok()
@@ -108,18 +131,10 @@ async fn read(
                 .get("accept")
                 .is_some_and(|value| value == "application/vnd.mdstore.page+json");
         let mut response = if metadata {
-            let page = state.store.get_page(&path, None)?;
-            let hash = page.hash.clone();
-            let mut response = Json(page).into_response();
-            if let Some(hash) = hash {
-                response
-                    .headers_mut()
-                    .insert("etag", format!("\"{hash}\"").parse()?);
-            }
-            response
+            return json_read(&state.store.get_page(&path, None)?, &headers);
         } else if let Some(asset) = asset {
             if etag(&headers, &asset.oid) {
-                return Ok(StatusCode::NOT_MODIFIED.into_response());
+                return Ok(not_modified(&asset.oid));
             }
             artifacts::serve_asset(&state.store, asset, &headers).await?
         } else {
@@ -129,7 +144,7 @@ async fn read(
             };
             let hash = page.hash.context("missing file hash")?;
             if etag(&headers, &hash) {
-                return Ok(StatusCode::NOT_MODIFIED.into_response());
+                return Ok(not_modified(&hash));
             }
             let text = page.text.unwrap_or_default();
             Response::builder()
@@ -152,7 +167,7 @@ async fn read(
         Ok::<_, anyhow::Error>(response)
     }
     .await;
-    result.unwrap_or_else(file_error)
+    result.unwrap_or_else(artifacts::error)
 }
 fn condition(headers: &HeaderMap) -> std::result::Result<Option<String>, Response> {
     if headers.get("if-none-match").is_some_and(|v| v == "*") && !headers.contains_key("if-match") {
@@ -167,29 +182,6 @@ fn condition(headers: &HeaderMap) -> std::result::Result<Option<String>, Respons
         return Ok(Some(hash.into()));
     }
     Err((StatusCode::PRECONDITION_REQUIRED, Json(json!({"error": "Use If-None-Match: * to create, or If-Match: <quoted ETag> to replace/delete"}))).into_response())
-}
-fn matches(current: Option<&str>, expected: Option<&str>) -> Result<()> {
-    if current != expected {
-        return Err(crate::store::artifacts::PreconditionFailed.into());
-    }
-    Ok(())
-}
-fn file_error(error: anyhow::Error) -> Response {
-    if error.is::<crate::store::artifacts::PreconditionFailed>() {
-        return (
-            StatusCode::PRECONDITION_FAILED,
-            Json(json!({"error": "file changed or already exists"})),
-        )
-            .into_response();
-    }
-    if let Some(validation) = error.downcast_ref::<ValidationError>() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"error": "validation failed", "findings": validation.findings})),
-        )
-            .into_response();
-    }
-    artifacts::error(error)
 }
 async fn write(
     State(state): State<AppState>,
@@ -209,7 +201,7 @@ async fn write(
             Ok::<_, anyhow::Error>(Json(asset).into_response())
         }
         .await;
-        return result.unwrap_or_else(file_error);
+        return result.unwrap_or_else(artifacts::error);
     }
     let expected = match condition(&headers) {
         Ok(value) => value,
@@ -222,25 +214,10 @@ async fn write(
             let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024).await?;
             let text = String::from_utf8(bytes.to_vec())?;
             run_blocking(move || {
-                let page = state.store.get_page(&path, None)?;
-                matches(page.hash.as_deref(), expected.as_deref())?;
-                let edit = if page.exists {
-                    EditOperation::ReplacePage {
-                        path: path.clone(),
-                        base: page.text.unwrap_or_default(),
-                        content: text,
-                    }
-                } else {
-                    EditOperation::CreatePage {
-                        path: path.clone(),
-                        content: text,
-                    }
-                };
-                state.store.apply_edits(&ApplyEditsRequest {
-                    edit_summary: format!("Write {path}"),
-                    edits: vec![edit],
-                })?;
-                let page = state.store.get_page(&path, None)?;
+                let page = state
+                    .store
+                    .edit_file(&path, expected.as_deref(), Some(text))?
+                    .context("missing written page")?;
                 let hash = page.hash.clone().context("missing file hash")?;
                 let mut response = Json(page).into_response();
                 response
@@ -272,7 +249,7 @@ async fn write(
         Ok::<_, anyhow::Error>(response)
     }
     .await;
-    result.unwrap_or_else(file_error)
+    result.unwrap_or_else(artifacts::error)
 }
 async fn delete(
     State(state): State<AppState>,
@@ -292,25 +269,18 @@ async fn delete(
         if state.store.asset(&path).is_ok() {
             state.store.delete_asset(&path, &expected)?;
         } else {
-            let page = state.store.get_page(&path, None)?;
-            matches(page.hash.as_deref(), Some(&expected))?;
-            state.store.apply_edits(&ApplyEditsRequest {
-                edit_summary: format!("Delete {path}"),
-                edits: vec![EditOperation::DeletePage {
-                    path,
-                    base: page.text.unwrap_or_default(),
-                }],
-            })?;
+            state.store.edit_file(&path, Some(&expected), None)?;
         }
         Ok(StatusCode::NO_CONTENT.into_response())
     })
     .await;
-    result.unwrap_or_else(file_error)
+    result.unwrap_or_else(artifacts::error)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EditOperation;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -355,6 +325,266 @@ mod tests {
         });
         (dir, app, store)
     }
+    #[tokio::test]
+    async fn shutdown_closes_idle_change_streams() {
+        let (_dir, app, store) = fixture();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp/events")
+                    .header("host", "localhost")
+                    .header("authorization", "Bearer user")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut stream = response.into_body();
+        assert!(stream.frame().await.is_some());
+        store.stop_changes();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), stream.frame())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_validators_are_independent_from_content_preconditions() {
+        let (_dir, app, _) = fixture();
+        let auth = ("authorization", "Bearer user");
+        let accept = ("accept", "application/vnd.mdstore.page+json");
+        let (_, raw, _) = send(&app, "GET", "/recording.md", &[auth], "").await;
+        let (_, meta, bytes) = send(&app, "GET", "/recording.md", &[auth, accept], "").await;
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let content_tag = raw["etag"].to_str().unwrap();
+        let meta_tag = meta["etag"].to_str().unwrap();
+        assert_ne!(meta_tag, content_tag);
+        assert_eq!(
+            content_tag,
+            format!("\"{}\"", value["hash"].as_str().unwrap())
+        );
+        let weak = format!("W/{meta_tag}");
+        let (status, headers, body) = send(
+            &app,
+            "GET",
+            "/recording.md",
+            &[auth, accept, ("if-none-match", &weak)],
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        assert_eq!(headers["etag"], meta_tag);
+        assert_eq!(headers["vary"], "Accept");
+        assert!(body.is_empty());
+        let (_, directory, _) = send(&app, "GET", "/", &[auth], "").await;
+        assert_eq!(
+            send(
+                &app,
+                "GET",
+                "/",
+                &[auth, ("if-none-match", directory["etag"].to_str().unwrap())],
+                ""
+            )
+            .await
+            .0,
+            StatusCode::NOT_MODIFIED
+        );
+        assert_eq!(
+            send(
+                &app,
+                "PUT",
+                "/other.md",
+                &[auth, ("if-none-match", "*")],
+                "# Other\n"
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        let (status, next, bytes) = send(
+            &app,
+            "GET",
+            "/recording.md",
+            &[auth, accept, ("if-none-match", meta_tag)],
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(next["etag"], meta_tag);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["hash"],
+            value["hash"]
+        );
+        assert_eq!(
+            send(
+                &app,
+                "PUT",
+                "/recording.md",
+                &[auth, ("if-match", meta_tag)],
+                "# Recording\n"
+            )
+            .await
+            .0,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(
+            send(
+                &app,
+                "PUT",
+                "/recording.md",
+                &[auth, ("if-match", content_tag)],
+                "# Recording\n"
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn single_file_and_batch_constraints_share_problem_details() {
+        let (_dir, app, _) = fixture();
+        let auth = ("authorization", "Bearer user");
+        let a = "# A\n\n[B](b.md)\n";
+        let b = "# B\n\n[A](a.md)\n";
+        let (status, headers, bytes) =
+            send(&app, "PUT", "/a.md", &[auth, ("if-none-match", "*")], a).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(headers["content-type"], "application/problem+json");
+        let problem: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem["status"], 422);
+        assert!(!problem["findings"].as_array().unwrap().is_empty());
+        let request = |edits: Value| {
+            json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"apply_edits", "arguments":{"edit_summary":"Atomic change", "edits":edits}}}).to_string()
+        };
+        let (_, _, bytes) = send(
+            &app,
+            "POST",
+            "/mcp",
+            &[auth],
+            request(json!([{"op":"create_page", "path":"a.md", "content":a}])),
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["structuredContent"],
+            problem
+        );
+        let (_, _, bytes) = send(&app, "POST", "/mcp", &[auth], request(json!([{"op":"create_page", "path":"a.md", "content":a}, {"op":"create_page", "path":"b.md", "content":b}]))).await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["isError"],
+            false
+        );
+        let (_, headers, _) = send(&app, "GET", "/a.md", &[auth], "").await;
+        assert_eq!(
+            send(
+                &app,
+                "DELETE",
+                "/a.md",
+                &[auth, ("if-match", headers["etag"].to_str().unwrap())],
+                ""
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let (_, _, bytes) = send(&app, "POST", "/mcp", &[auth], request(json!([{"op":"delete_page", "path":"a.md", "base":a}, {"op":"delete_page", "path":"b.md", "base":b}]))).await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["isError"],
+            false
+        );
+        for path in ["/a.md", "/b.md"] {
+            let (status, headers, bytes) = send(&app, "GET", path, &[auth], "").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(headers["content-type"], "application/problem+json");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
+                404
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn change_stream_sends_current_state_updates_and_honors_logout() {
+        let (_dir, app, store) = fixture();
+        let auth = ("authorization", "Bearer user");
+        let (_, headers, _) = send(&app, "POST", "/mcp/session", &[auth], "").await;
+        let cookie = headers["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp/events")
+                    .header("host", "localhost")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let mut stream = response.into_body();
+        async fn event(stream: &mut Body) -> String {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), stream.frame())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap()
+        }
+        let initial = event(&mut stream).await;
+        assert!(initial.contains(&store.get_page("recording.md", None).unwrap().revision));
+        store.jobs().unwrap();
+        assert!(event(&mut stream).await.contains("\"jobs\":1"));
+        store.jobs().unwrap(); // No notification for unchanged state.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), stream.frame())
+                .await
+                .is_err()
+        );
+        send(
+            &app,
+            "PUT",
+            "/new.md",
+            &[auth, ("if-none-match", "*")],
+            "# New\n",
+        )
+        .await;
+        assert!(
+            event(&mut stream)
+                .await
+                .contains(&store.get_page("new.md", None).unwrap().revision)
+        );
+        send(
+            &app,
+            "DELETE",
+            "/mcp/session",
+            &[("cookie", cookie), ("origin", "http://localhost")],
+            "",
+        )
+        .await;
+        send(
+            &app,
+            "PUT",
+            "/next.md",
+            &[auth, ("if-none-match", "*")],
+            "# Next\n",
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.frame())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn assets_replace_and_delete_conditionally_without_losing_history() {
         let (_dir, app, store) = fixture();

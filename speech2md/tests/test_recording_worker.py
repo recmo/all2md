@@ -50,3 +50,40 @@ def test_worker_downloads_inputs_and_publishes_assigned_outputs(tmp_path, monkey
     assert calls[-1][0].endswith('/complete')
     assert calls[-1][1]['outputs'] == {'meeting/transcript.md': '# Derived\n'}
     assert calls[-1][1]['assets']['meeting/transcript.voiceprints.json']['oid'] == 'a'*64
+
+
+def test_completion_retries_identical_bytes_after_lost_response(monkeypatch):
+    import io
+    from urllib.error import URLError
+    from speech2md import worker
+
+    requests = []
+
+    def urlopen(request, **kwargs):
+        requests.append(request)
+        if len(requests) == 1:
+            raise URLError("response lost")
+        return io.BytesIO(b"null")
+
+    monkeypatch.setattr(worker, "urlopen", urlopen)
+    client = worker.Client("http://localhost", "worker-token")
+    assert client.request("/mcp/worker/jobs/job/complete", {"attempt": "lease", "outputs": {}}) is None
+    assert len(requests) == 2
+    assert requests[0].data == requests[1].data
+
+
+def test_worker_does_not_retry_non_idempotent_claim(monkeypatch):
+    from urllib.error import URLError
+    from speech2md import worker
+    import pytest
+
+    calls = []
+
+    def urlopen(request, **kwargs):
+        calls.append(request)
+        raise URLError("connection lost")
+
+    monkeypatch.setattr(worker, "urlopen", urlopen)
+    with pytest.raises(URLError):
+        worker.Client("http://localhost", "worker-token").request("/mcp/worker/claim", {"recipes": []})
+    assert len(calls) == 1

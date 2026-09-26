@@ -519,6 +519,7 @@ impl Store {
         let mut state = candidate;
         state.head = commit.clone();
         *self.state.write() = Arc::new(state);
+        self.publish_revision();
         self.reindex_notify.notify_one();
         self.sync_notify.notify_one();
         Ok(commit)
@@ -526,6 +527,19 @@ impl Store {
 
     fn jobs_path(&self) -> PathBuf {
         self.git_dir.join("mdstore/jobs.json")
+    }
+
+    fn save_jobs(&self, jobs: &BTreeMap<String, Job>) -> Result<()> {
+        let bytes = serde_json::to_vec(jobs)?;
+        let previous = match fs::read(self.jobs_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        if previous == bytes { return Ok(()); }
+        write_atomic(&self.jobs_path(), &bytes)?;
+        self.changes.send_modify(|change| change.jobs = change.jobs.wrapping_add(1));
+        Ok(())
     }
 
     fn reconcile_jobs(&self) -> Result<(Manifest, BTreeMap<String, Job>)> {
@@ -590,7 +604,7 @@ impl Store {
         let _guard = self.lock_repository()?;
         self.refresh_external_commit()?;
         let (_, jobs) = self.reconcile_jobs()?;
-        write_atomic(&self.jobs_path(), &serde_json::to_vec(&jobs)?)?;
+        self.save_jobs(&jobs)?;
         Ok(jobs
             .into_values()
             .map(|mut j| {
@@ -612,7 +626,7 @@ impl Store {
         job.expires = 0;
         job.error = None;
         job.progress = None;
-        write_atomic(&self.jobs_path(), &serde_json::to_vec(&jobs)?)
+        self.save_jobs(&jobs)
     }
 
     pub(crate) fn remove_derivation(&self, id: &str) -> Result<()> {
@@ -684,7 +698,7 @@ impl Store {
         } else {
             None
         };
-        write_atomic(&self.jobs_path(), &serde_json::to_vec(&jobs)?)?;
+        self.save_jobs(&jobs)?;
         Ok(assignment)
     }
 
@@ -738,7 +752,7 @@ impl Store {
             .into();
             job.expires = now() + 30 * u64::from(job.failures);
         }
-        write_atomic(&self.jobs_path(), &serde_json::to_vec(&jobs)?)
+        self.save_jobs(&jobs)
     }
 
     pub(crate) fn complete_job(&self, id: &str, completion: Completion) -> Result<()> {
@@ -961,6 +975,9 @@ pub(crate) mod tests {
         let reopened = Store::open_with_provider(dir.path(), Arc::new(Provider)).unwrap();
         assert_eq!(reopened.jobs().unwrap()[0].status, "current");
         assert!(reopened.get_page("transcript.md", None).unwrap().readonly);
+        let revision = reopened.get_page("transcript.md", None).unwrap().revision;
+        reopened.complete_job(&id, completion(&attempt, "# Transcript\nHello\n")).unwrap();
+        assert_eq!(reopened.get_page("transcript.md", None).unwrap().revision, revision);
     }
     #[test]
     fn changes_fence_old_workers_but_notes_do_not_recompute() {

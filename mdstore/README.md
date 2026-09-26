@@ -333,6 +333,7 @@ are reserved top-level names. The independently built frontend lives at `/webui/
 | `PUT /<path>` | Create or replace a file; Markdown/config changes are validated |
 | `DELETE /<path>` | Delete a file with normal validation and ownership checks |
 | `POST /mcp` | MCP search, metadata reads, and atomic multi-file edits |
+| `GET /mcp/events` | SSE repository revision and job-change notifications |
 | `POST/DELETE /mcp/session` | Exchange bearer credential for browser session / sign out |
 | `GET /mcp/artifacts` | Assets, derivation definitions, and provenance |
 | `POST /mcp/derivations` | Register a derivation |
@@ -383,3 +384,40 @@ without an authored reciprocal link; targets and anchors are still validated.
 
 See [the recording integration](../webui/SPEECH_REVIEW.md) for the first client,
 including examples and operational limitations.
+
+### Errors, validators, notifications, and retries
+
+HTTP failures use `application/problem+json` (RFC 9457): `type`, `title`, `status`,
+and `detail`, with `findings` for validation source locations. MCP tool errors
+carry this same object as `structuredContent` inside their normal `isError`
+envelope. Protocol-level JSON-RPC errors retain JSON-RPC error codes.
+
+Raw-file ETags identify content. Metadata and directory ETags identify their
+complete JSON representation, including revision and schema information. The
+metadata body's `hash` remains the content precondition for writes; do not use
+the metadata ETag for PUT/DELETE. Conditional GET/HEAD supports `If-None-Match`
+(including weak tags) and returns validators on 304 responses. Responses remain
+private and non-storable; webui manages its own offline cache.
+
+`GET /mcp/events` returns `text/event-stream` with named `change` events:
+`{"revision":"<git commit>","jobs":1}`. Every connection begins with current
+state. Subsequent notifications are coalesced invalidations, not a durable event
+log: clients re-fetch authoritative state, including after reconnect. The jobs
+counter is process-local and may reset on restart. The daemon reconciles job
+expiry every five seconds and publishes changes from commits, worker progress,
+and synchronization. Cookie sessions are rechecked while streaming; logout or
+expiry closes the stream within fifteen seconds. Proxies must stream responses
+without buffering. No credentials or document bodies appear in events.
+
+PUT/DELETE text preconditions are checked under the repository lock and then use
+the same validation/commit operation as MCP batches. Cross-file changes must be
+submitted together with `apply_edits`; separate requests cannot expose invalid
+intermediate states.
+
+Edit batches already have durable content-derived receipts: retry the exact
+request, including its summary and base text, to recover a lost commit response.
+The browser retries it once on a transport failure or HTTP 5xx. Existing replay
+checks still reject partially superseded batches; changed requests undergo normal
+concurrency and validation checks. Worker completion is replay-safe by lease
+attempt and output hashes, even after restart; workers likewise retry an uncertain
+completion once. Claims and other non-idempotent actions are not retried this way.

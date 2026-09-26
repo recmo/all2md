@@ -1483,7 +1483,7 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
         .unwrap();
     let value: serde_json::Value = response.json().await.unwrap();
     assert_eq!(value["result"]["isError"], true);
-    let findings = value["result"]["structuredContent"]["validation_findings"]
+    let findings = value["result"]["structuredContent"]["findings"]
         .as_array()
         .unwrap();
     assert!(

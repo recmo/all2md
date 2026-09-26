@@ -30,7 +30,9 @@ struct AppState {
 }
 
 mod artifacts;
+mod events;
 mod files;
+mod problem;
 mod session;
 
 fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
@@ -49,10 +51,12 @@ fn application(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
+        .route("/mcp/events", get(events::subscribe))
         .route("/mcp/session", post(session::create).delete(session::delete))
         .nest("/mcp", artifacts::routes())
         .merge(files::routes())
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
+        .layer(middleware::from_fn(problem::normalize))
         .layer(TraceLayer::new_for_http().make_span_with(|request: &Request| {
             // Worker attempts are capabilities; never log query strings or headers.
             let path = request.uri().path();
@@ -86,15 +90,19 @@ pub async fn serve_listener(
     tracing::info!(%listen, "mdstore listening");
     let sync = Arc::clone(&store).synchronize();
     let embeddings = Arc::clone(&store).maintain_embeddings();
+    let jobs = Arc::clone(&store).maintain_jobs();
+    let shutdown_store = Arc::clone(&store);
     let server = axum::serve(listener, router(store, bearer_token))
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            shutdown_store.stop_changes();
         })
         .into_future();
     tokio::select! {
         result = server => result?,
         _ = sync => bail!("synchronization worker stopped"),
         _ = embeddings => bail!("embedding worker stopped"),
+        _ = jobs => bail!("job reconciliation stopped"),
     }
     Ok(())
 }
@@ -434,16 +442,12 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             }),
         ),
         Err(error) => {
-            let findings = error
-                .downcast_ref::<ValidationError>()
-                .map(|validation| validation.findings.clone());
-            let mut result = json!({
-                "content": [{"type": "text", "text": error.to_string()}],
+            let problem = problem::Problem::from_error(&error);
+            let result = json!({
+                "content": [{"type": "text", "text": problem.detail}],
+                "structuredContent": problem,
                 "isError": true
             });
-            if let Some(findings) = findings {
-                result["structuredContent"] = json!({"validation_findings": findings});
-            }
             rpc_result(id, result)
         }
     }
