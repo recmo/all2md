@@ -197,3 +197,18 @@ cannot preserve references under the governing schema.
 Documents marked `mdstore: recording` open the integrated recording review view.
 See [recording review](SPEECH_REVIEW.md) for setup, storage, worker operation,
 voiceprint references, and current limitations.
+
+## Importing files and folders
+
+Drop Markdown or media files, or whole folders, onto the workspace. Dropping on
+a tree folder selects it as the destination; dropping on a file selects its
+parent. The import dialog preserves the selected folder hierarchy and lets you
+change the destination before starting. The **Import** tree item also offers file and
+folder pickers.
+
+Markdown becomes local drafts using the normal validation and submission flow;
+media and capture JSON files upload immediately through the asset API. Existing
+paths are never overwritten. Failed transfers show per-file errors and can be
+retried without repeating successful imports. Markdown can be staged offline;
+asset uploads require a connection. Unsupported files are listed as skipped, Git
+metadata is excluded, and empty directories are not imported.

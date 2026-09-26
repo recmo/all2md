@@ -38,6 +38,9 @@
   import AppViews from '$lib/apps/AppViews.svelte';
   import SpeechReview from '$lib/speech/SpeechReview.svelte';
   import AssetView from '$lib/speech/AssetView.svelte';
+  import ImportFiles from '$lib/imports/ImportFiles.svelte';
+  let importDialog: ImportFiles;
+  import { importKind, type ImportFile } from '$lib/imports/files';
   import { isRecording } from '$lib/speech/recording';
   import { isApp, applyAppEdit, type AppEdit } from '$lib/apps/apps';
   import ConflictResolver from '$lib/workspace/ConflictResolver.svelte';
@@ -243,10 +246,9 @@
         : await buildSnapshot(
             inventory.root.revision,
             Object.fromEntries(
-              Object.entries(inventory.pages).map(([path, page]) => [
-                path,
-                page.text
-              ])
+              Object.entries(inventory.pages)
+                .filter(([, page]) => !page.asset)
+                .map(([path, page]) => [path, page.text])
             )
           );
     if (
@@ -550,7 +552,9 @@
         return;
       }
       const sources = Object.fromEntries(
-        Object.entries(cache.pages).map(([path, page]) => [path, page.text])
+        Object.entries(cache.pages)
+          .filter(([, page]) => !page.asset)
+          .map(([path, page]) => [path, page.text])
       );
       let result = await validateLocally(snapshot, request, sources);
       if (version !== validationVersion || checkedSignature !== signature)
@@ -892,6 +896,108 @@
       busy = false;
     }
   }
+  async function importFiles(
+    files: ImportFile[],
+    report: (path: string, status: string) => void
+  ) {
+    if (busy) throw Error('Another operation is in progress');
+    if (!cache.repository) throw Error('Connect to a repository first.');
+    busy = true;
+    try {
+      const documents = new Map<string, string>();
+      const known = [
+        ...cache.paths,
+        ...Object.keys(cache.drafts),
+        ...Object.keys(cache.deletions || {})
+      ];
+      if (online) {
+        const inventory = await readInventory(api, cache.pages);
+        if (inventory.root.repository !== cache.repository)
+          throw Error('Repository changed. Reconnect before importing.');
+        known.push(...Object.keys(inventory.pages));
+      }
+      // Preflight the complete batch before writing anything, including local conflicts.
+      for (const { path, file } of files) {
+        if (
+          known.some(
+            (item) =>
+              item === path ||
+              item.startsWith(path + '/') ||
+              (!item.endsWith('/') && path.startsWith(item + '/'))
+          ) ||
+          files.some(
+            (other) => other.path !== path && other.path.startsWith(path + '/')
+          )
+        )
+          throw Error(
+            'Destination already exists or conflicts with another file: ' + path
+          );
+        if (importKind(path) === 'markdown') {
+          if (readonly(path, allowTemplateEdits, allowConfigEdits))
+            throw Error('No write access: ' + path);
+          if (file.size > 8 * 1024 * 1024)
+            throw Error('Markdown exceeds the 8 MiB import limit: ' + path);
+          documents.set(
+            path,
+            new TextDecoder('utf-8', { fatal: true }).decode(
+              await file.arrayBuffer()
+            )
+          );
+        } else if (!online)
+          throw Error(
+            'Connect before uploading media. Markdown can be staged offline.'
+          );
+      }
+      let failed = 0;
+      for (const { path, file } of files) {
+        report(path, documents.has(path) ? 'Staging…' : 'Uploading…');
+        try {
+          if (documents.has(path)) {
+            const draft: Draft = {
+              path,
+              text: documents.get(path)!,
+              base: '',
+              exists: false,
+              template: null
+            };
+            cache = { ...cache, drafts: { ...cache.drafts, [path]: draft } };
+            validated = '';
+            report(path, 'Staged');
+          } else {
+            const asset = await api.request<{ oid: string; size: number }>(
+              '/assets?path=' + encodeURIComponent(path),
+              { method: 'PUT', body: file }
+            );
+            const page: Page = {
+              path,
+              text: '',
+              exists: true,
+              template: null,
+              readonly: true,
+              hash: asset.oid,
+              asset
+            };
+            cache = {
+              ...cache,
+              paths: [...new Set([...cache.paths, path])],
+              pages: { ...cache.pages, [path]: page }
+            };
+            report(path, 'Uploaded');
+          }
+          persist();
+        } catch (e) {
+          failed++;
+          report(path, 'Failed: ' + String(e));
+        }
+      }
+      if (failed)
+        throw Error(
+          `${failed} imports failed. Successful imports are listed above and have been kept.`
+        );
+    } finally {
+      busy = false;
+    }
+  }
   async function createHere(folder: string) {
     view = 'document';
     newPath = folder ? folder + '/' : '';
@@ -1081,7 +1187,12 @@
       onclick={closeDrawer}>✕</button
     >
   </div>
-  <WorkspaceNavigation selected={view} onopen={navigate} disabled={busy} />
+  <WorkspaceNavigation
+    selected={view}
+    onopen={navigate}
+    onimport={() => importDialog.open()}
+    disabled={busy}
+  />
   <nav id="documents" aria-label="Documents">
     <DocumentTree
       paths={[
@@ -1113,6 +1224,13 @@
     />
   </nav>
 </aside>
+<ImportFiles
+  bind:this={importDialog}
+  {busy}
+  {paths}
+  onshow={closeDrawer}
+  onimport={importFiles}
+/>
 <main class="document-main" inert={mobile && drawerOpen}>
   {#if view === 'submit'}
     <header class="document-header">
