@@ -29,11 +29,12 @@ struct AppState {
     sessions: session::Sessions,
 }
 
-mod artifacts;
+mod control;
 mod events;
 mod files;
 mod problem;
 mod session;
+mod transfers;
 
 fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
     let state = AppState {
@@ -53,7 +54,7 @@ fn application(state: AppState) -> Router {
         .route("/mcp", post(mcp))
         .route("/mcp/events", get(events::subscribe))
         .route("/mcp/session", post(session::create).delete(session::delete))
-        .nest("/mcp", artifacts::routes())
+        .route("/mcp/worker", post(control::worker))
         .merge(files::routes())
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .layer(middleware::from_fn(problem::normalize))
@@ -137,11 +138,14 @@ async fn authorize(State(state): State<AppState>, request: Request, next: Next) 
     let actual = request.headers().get("authorization")
         .and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
     let worker = state.worker_token.as_deref().is_some_and(|expected| actual == Some(expected));
-    if request.uri().path().starts_with("/mcp/worker/") {
+    if request.uri().path() == "/mcp/worker" {
         return if worker { next.run(request).await } else { StatusCode::UNAUTHORIZED.into_response() };
     }
     if worker && request.uri().path() != "/mcp" && !request.uri().path().starts_with("/mcp/") && request.uri().path() != "/health" {
         // File handlers still enforce the active lease and exact assigned path.
+        return next.run(request).await;
+    }
+    if worker && request.uri().path() == "/mcp" {
         return next.run(request).await;
     }
     // With no credential, reject DNS-rebinding hosts as well as cross-site fetches.
@@ -240,7 +244,21 @@ async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         "initialize" => initialize(id, &params),
         "ping" => rpc_result(id, json!({})),
         "tools/list" => rpc_result(id, json!({"tools": tools()})),
-        "tools/call" => call_tool(id, &state.store, params).await,
+        "tools/call" => {
+            call_tool(
+                id,
+                &state.store,
+                params,
+                state.worker_token.as_deref().is_some_and(|token| {
+                    headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.strip_prefix("Bearer "))
+                        == Some(token)
+                }),
+            )
+            .await
+        }
         _ => rpc_error(id, -32601, "method not found"),
     }
 }
@@ -270,11 +288,11 @@ fn initialize(id: Value, params: &Value) -> Response {
 #[must_use]
 /// Returns the exact public MCP tool allowlist.
 pub fn tool_names() -> [&'static str; 3] {
-    ["search", "get_page", "apply_edits"]
+    ["search", "get", "edit"]
 }
 
 fn tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": "search",
             "description": "Hybrid exact, embedding, graph-assisted, and reranked search. Query expansion belongs to the caller.",
@@ -289,7 +307,7 @@ fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "get_page",
+            "name": "get",
             "description": "Read a file or directory from the published document tree. Use / for the root or a relative path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return that revision, source hash, hashline anchors and exact source text for full-page reads. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
@@ -303,7 +321,7 @@ fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "apply_edits",
+            "name": "edit",
             "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener and authentication changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
             "inputSchema": {
                 "type": "object",
@@ -319,7 +337,11 @@ fn tools() -> Vec<Value> {
                 "additionalProperties": false
             }
         }),
-    ]
+    ];
+    for tool in &mut tools {
+        control::extend_schema(tool);
+    }
+    tools
 }
 
 fn edit_operation_schemas() -> Vec<Value> {
@@ -389,48 +411,76 @@ struct GetArguments {
     end_line: Option<usize>,
 }
 
-async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
+async fn call_tool(id: Value, store: &Arc<Store>, params: Value, worker: bool) -> Response {
     let params: CallParams = match serde_json::from_value(params) {
         Ok(value) => value,
         Err(error) => return rpc_error(id, -32602, &format!("invalid tool call: {error}")),
     };
-    let result = match params.name.as_str() {
-        "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
-            Ok(arguments) => store
-                .search(&arguments.query, &arguments.variants)
+    let result = if worker && (params.name != "search" || params.arguments.get("space").is_none()) {
+        Err(anyhow::anyhow!(
+            "worker credentials only allow leased vector search"
+        ))
+    } else {
+        match params.name.as_str() {
+            "get" if params.arguments.get("resource").is_some() => {
+                let store = Arc::clone(store);
+                run_blocking(move || {
+                    control::read(&store, serde_json::from_value(params.arguments)?)
+                })
                 .await
-                .and_then(|value| serde_json::to_value(value).map_err(Into::into)),
-            Err(error) => Err(error.into()),
-        },
-        "get_page" => match serde_json::from_value::<GetArguments>(params.arguments) {
-            Ok(arguments) => {
-                let window = arguments
-                    .start_line
-                    .map(|start| (start, arguments.end_line.unwrap_or(start)));
-                if arguments.path.ends_with('/') {
-                    if arguments.start_line.is_some() || arguments.end_line.is_some() {
-                        Err(anyhow::anyhow!("line windows are only supported for files"))
+            }
+            "edit" if params.arguments.get("resource").is_some() => {
+                let store = Arc::clone(store);
+                run_blocking(move || {
+                    control::edit(&store, serde_json::from_value(params.arguments)?)
+                })
+                .await
+            }
+            "search" if params.arguments.get("space").is_some() => {
+                let store = Arc::clone(store);
+                run_blocking(move || {
+                    control::search(&store, serde_json::from_value(params.arguments)?, worker)
+                })
+                .await
+            }
+            "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
+                Ok(arguments) => store
+                    .search(&arguments.query, &arguments.variants)
+                    .await
+                    .and_then(|value| serde_json::to_value(value).map_err(Into::into)),
+                Err(error) => Err(error.into()),
+            },
+            "get" => match serde_json::from_value::<GetArguments>(params.arguments) {
+                Ok(arguments) => {
+                    let window = arguments
+                        .start_line
+                        .map(|start| (start, arguments.end_line.unwrap_or(start)));
+                    if arguments.path.ends_with('/') {
+                        if arguments.start_line.is_some() || arguments.end_line.is_some() {
+                            Err(anyhow::anyhow!("line windows are only supported for files"))
+                        } else {
+                            store.get_directory(&arguments.path)
+                        }
                     } else {
-                        store.get_directory(&arguments.path)
+                        store
+                            .get_page(&arguments.path, window)
+                            .and_then(|value| serde_json::to_value(value).map_err(Into::into))
                     }
-                } else {
-                    store.get_page(&arguments.path, window)
-                        .and_then(|value| serde_json::to_value(value).map_err(Into::into))
                 }
-            }
-            Err(error) => Err(error.into()),
-        },
-        "apply_edits" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
-            Ok(arguments) => {
-                let blocking_store = Arc::clone(store);
-                match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
-                    Ok(value) => serde_json::to_value(value).map_err(Into::into),
-                    Err(error) => Err(error),
+                Err(error) => Err(error.into()),
+            },
+            "edit" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
+                Ok(arguments) => {
+                    let blocking_store = Arc::clone(store);
+                    match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
+                        Ok(value) => serde_json::to_value(value).map_err(Into::into),
+                        Err(error) => Err(error),
+                    }
                 }
-            }
-            Err(error) => Err(error.into()),
-        },
-        _ => return rpc_error(id, -32602, "unknown tool"),
+                Err(error) => Err(error.into()),
+            },
+            _ => return rpc_error(id, -32602, "unknown tool"),
+        }
     };
     match result {
         Ok(value) => rpc_result(

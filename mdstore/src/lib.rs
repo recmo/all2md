@@ -12,6 +12,8 @@ mod markdown_lint;
 #[cfg(feature = "server")]
 mod mcp;
 #[cfg(feature = "server")]
+mod media;
+#[cfg(feature = "server")]
 mod provider;
 #[cfg(feature = "server")]
 mod search;

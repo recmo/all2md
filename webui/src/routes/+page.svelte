@@ -673,7 +673,7 @@
         return;
       }
       const request = { ...batch, edit_summary: cache.summary.trim() };
-      // apply_edits validates the entire batch against the current repository
+      // edit validates the entire batch against the current repository
       // and commits it atomically; local validation is only the preview.
       const result = await api.apply(request);
       const pages = { ...cache.pages };

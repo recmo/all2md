@@ -76,7 +76,7 @@ pub(super) async fn create(State(state): State<AppState>, headers: HeaderMap) ->
         )
             .into_response())
     })();
-    result.unwrap_or_else(artifacts::error)
+    result.unwrap_or_else(problem::error)
 }
 pub(super) async fn delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(id) = id(&headers) {

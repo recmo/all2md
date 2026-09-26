@@ -1,6 +1,10 @@
 //! The same structured failure is carried by HTTP and MCP tool responses.
 use super::*;
 
+pub(super) fn error(error: anyhow::Error) -> Response {
+    Problem::from_error(&error).into_response()
+}
+
 #[derive(serde::Serialize)]
 pub(super) struct Problem {
     #[serde(rename = "type")]

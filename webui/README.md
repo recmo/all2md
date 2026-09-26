@@ -29,14 +29,14 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 
 ## Data flow
 
-- Search and atomic submissions call `/mcp` (`search`, `apply_edits`). Reads use
+- Search and atomic submissions call `/mcp` (`search`, `edit`). Reads use
   repository URLs: directory JSON at `/<folder>/`, page metadata at `/<path>`
   with `Accept: application/vnd.mdstore.page+json`.
-- `get_page` reads directories as well as files. Webui traverses `/`, reuses
+- `get` reads directories as well as files. Webui traverses `/`, reuses
   cached sources with matching hashes, and retries if revisions change during
   traversal. It builds its validation baseline locally in a WASM worker.
 - Shared Rust validation runs incrementally in WASM while editing. The server
-  independently validates every submission through `apply_edits`.
+  independently validates every submission through `edit`.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
   the editor stays mounted across view switches to preserve undo and selection.
   Markdown-it and DOMPurify render prose locally; Pierre File renders fenced and
@@ -94,7 +94,7 @@ before bundling the SPA; Nix builds it as a separate dependency. Generated binar
 and bindings are not committed. Run `pnpm build:wasm` before
 standalone frontend type checks in a fresh checkout.
 
-Webui builds its own versioned baseline from ordinary `get_page` reads: source
+Webui builds its own versioned baseline from ordinary `get` reads: source
 hashes, parsed document facts, relation edges, and configuration/template sources.
 The first connection downloads the published document inventory; subsequent
 refreshes reuse unchanged sources unless schema/configuration changes require

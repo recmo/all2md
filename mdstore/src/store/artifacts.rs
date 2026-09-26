@@ -30,7 +30,7 @@ pub(crate) struct Derivation {
     pub recipe: String,
     /// Top-level frontmatter properties consumed by the recipe.
     pub fields: Vec<String>,
-    /// Explicit repository-relative immutable asset dependencies.
+    /// Explicit repository-relative content-addressed asset dependencies.
     pub inputs: Vec<String>,
     /// Exact output paths reserved for this derivation.
     pub outputs: Vec<String>,
@@ -123,10 +123,24 @@ pub(super) fn load_manifest(root: &Path, revision: &str) -> Result<Manifest> {
     for (path, asset) in &manifest.assets {
         validate_repo_path(path)?;
         validate_oid(&asset.oid)?;
-        ensure!(
-            git::read_text(root, revision, path)? == asset.pointer(),
-            "asset pointer mismatch: {path}"
-        );
+        let stored = git::read_text(root, revision, path)?;
+        if stored != asset.pointer() {
+            ensure!(
+                crate::media::git_text(path)
+                    && stored.len() as u64 == asset.size
+                    && crate::validation::source_hash(&stored) == asset.oid,
+                "asset content mismatch: {path}"
+            );
+            // Inline Git contents can rebuild the local object cache after a clone.
+            let object = git::git_dir(root)?
+                .join("lfs/objects")
+                .join(&asset.oid[..2])
+                .join(&asset.oid[2..4])
+                .join(&asset.oid);
+            if !object.exists() {
+                write_atomic(&object, stored.as_bytes())?;
+            }
+        }
     }
     for derivation in manifest.derivations.values() {
         validate_repo_path(&derivation.source)?;
@@ -257,8 +271,10 @@ impl std::fmt::Display for PreconditionFailed {
 impl std::error::Error for PreconditionFailed {}
 
 impl Store {
-    pub(crate) fn artifact_manifest(&self) -> Result<Value> {
-        Ok(serde_json::to_value(&*self.state.read().artifacts)?)
+    pub(crate) fn derivations(&self) -> Result<Value> {
+        Ok(serde_json::to_value(
+            &self.state.read().artifacts.derivations,
+        )?)
     }
 
     pub(crate) fn object_path(&self, oid: &str) -> Result<PathBuf> {
@@ -302,6 +318,23 @@ impl Store {
         Ok(asset)
     }
 
+    fn asset_representation(&self, path: &str, asset: &Asset) -> Result<String> {
+        if crate::media::git_text(path) {
+            ensure!(
+                asset.size <= 16 * 1024 * 1024,
+                "text file exceeds upload limit"
+            );
+            let content = fs::read_to_string(self.object_path(&asset.oid)?)?;
+            ensure!(
+                crate::validation::source_hash(&content) == asset.oid,
+                "asset content mismatch"
+            );
+            Ok(content)
+        } else {
+            Ok(asset.pointer())
+        }
+    }
+
     pub(crate) fn put_asset(
         &self,
         path: String,
@@ -332,7 +365,7 @@ impl Store {
             fs::metadata(self.object_path(&asset.oid)?)?.len() == asset.size,
             "object size mismatch"
         );
-        let pointer = asset.pointer();
+        let pointer = self.asset_representation(&path, &asset)?;
         manifest.assets.insert(path.clone(), asset);
         self.commit_artifacts(
             &current,
@@ -444,6 +477,9 @@ impl Store {
             !inputs.iter().any(|p| definition.outputs.contains(p)),
             "output cannot be an input"
         );
+        if definition.inputs == inputs {
+            return Ok(());
+        }
         definition.inputs = inputs;
         self.commit_artifacts(&current, &manifest, vec![], "Update derivation inputs")?;
         Ok(())
@@ -480,6 +516,14 @@ impl Store {
                 "{} filter=lfs diff=lfs merge=lfs -text",
                 serde_json::to_string(&pattern)?
             );
+            if crate::media::git_text(path) {
+                attributes = attributes
+                    .lines()
+                    .filter(|existing| *existing != line)
+                    .map(|line| format!("{line}\n"))
+                    .collect();
+                continue;
+            }
             if !attributes.lines().any(|existing| existing == line) {
                 if !attributes.is_empty() && !attributes.ends_with('\n') {
                     attributes.push('\n');
@@ -488,7 +532,7 @@ impl Store {
                 attributes.push('\n');
             }
         }
-        if !attributes.is_empty() {
+        if !attributes.is_empty() || git::is_tracked(&self.root, ".gitattributes")? {
             changes.push((".gitattributes".into(), Some(attributes)));
         }
         changes.push((
@@ -536,9 +580,12 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error.into()),
         };
-        if previous == bytes { return Ok(()); }
+        if previous == bytes {
+            return Ok(());
+        }
         write_atomic(&self.jobs_path(), &bytes)?;
-        self.changes.send_modify(|change| change.jobs = change.jobs.wrapping_add(1));
+        self.changes
+            .send_modify(|change| change.jobs = change.jobs.wrapping_add(1));
         Ok(())
     }
 
@@ -765,17 +812,25 @@ impl Store {
             .as_ref()
             .filter(|p| p.attempt == completion.attempt)
         {
-            let hashes: BTreeMap<_, _> = completion
+            let mut hashes: BTreeMap<_, _> = completion
                 .outputs
                 .iter()
                 .map(|(path, text)| (path.clone(), crate::validation::source_hash(text)))
-                .chain(completion.assets.iter().map(|(path, asset)| {
-                    (
-                        path.clone(),
-                        crate::validation::source_hash(&asset.pointer()),
-                    )
-                }))
                 .collect();
+            for (path, asset) in &completion.assets {
+                ensure!(
+                    manifest.assets.get(path) == Some(asset),
+                    "completed attempt has different output bytes"
+                );
+                hashes.insert(
+                    path.clone(),
+                    crate::validation::source_hash(&git::read_text(
+                        &self.root,
+                        &self.state.read().head,
+                        path,
+                    )?),
+                );
+            }
             ensure!(
                 hashes == publication.hashes,
                 "completed attempt has different output bytes"
@@ -821,7 +876,7 @@ impl Store {
                 fs::metadata(self.object_path(&asset.oid)?)?.len() == asset.size,
                 "output object missing or wrong size"
             );
-            outputs.insert(path.clone(), asset.pointer());
+            outputs.insert(path.clone(), self.asset_representation(&path, &asset)?);
             manifest.assets.insert(path, asset);
         }
         let definition = manifest
@@ -936,6 +991,35 @@ pub(crate) mod tests {
         }
     }
     #[test]
+    fn text_assets_are_git_blobs_and_binary_media_use_internal_lfs() {
+        let (dir, store) = fixture();
+        for (path, bytes) in [
+            ("capture.json", b"{\"tracks\":[]}".as_slice()),
+            ("audio.wav", b"binary fixture".as_slice()),
+        ] {
+            let mut object = store.object_temporary().unwrap();
+            object.write_all(bytes).unwrap();
+            let asset = store.store_object(object).unwrap();
+            store.put_asset(path.into(), asset.clone(), None).unwrap();
+            let committed = git::read_text(dir.path(), &store.state.read().head, path).unwrap();
+            if path.ends_with("json") {
+                assert_eq!(committed.as_bytes(), bytes);
+                fs::remove_file(store.object_path(&asset.oid).unwrap()).unwrap();
+                let reopened = Store::open_with_provider(dir.path(), Arc::new(Provider)).unwrap();
+                assert_eq!(
+                    fs::read(reopened.object_path(&asset.oid).unwrap()).unwrap(),
+                    bytes
+                );
+            } else {
+                assert_eq!(committed, asset.pointer());
+            }
+        }
+        let attributes = fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
+        assert!(attributes.contains("audio.wav"));
+        assert!(!attributes.contains("capture.json"));
+    }
+
+    #[test]
     fn publication_is_validated_readonly_and_recoverable() {
         let (dir, store) = fixture();
         let id = setup(&store);
@@ -976,8 +1060,13 @@ pub(crate) mod tests {
         assert_eq!(reopened.jobs().unwrap()[0].status, "current");
         assert!(reopened.get_page("transcript.md", None).unwrap().readonly);
         let revision = reopened.get_page("transcript.md", None).unwrap().revision;
-        reopened.complete_job(&id, completion(&attempt, "# Transcript\nHello\n")).unwrap();
-        assert_eq!(reopened.get_page("transcript.md", None).unwrap().revision, revision);
+        reopened
+            .complete_job(&id, completion(&attempt, "# Transcript\nHello\n"))
+            .unwrap();
+        assert_eq!(
+            reopened.get_page("transcript.md", None).unwrap().revision,
+            revision
+        );
     }
     #[test]
     fn changes_fence_old_workers_but_notes_do_not_recompute() {

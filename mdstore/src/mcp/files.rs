@@ -16,8 +16,8 @@ async fn root(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return StatusCode::FORBIDDEN.into_response();
     }
     match run_blocking(move || state.store.get_directory("/")).await {
-        Ok(value) => json_read(&value, &headers).unwrap_or_else(artifacts::error),
-        Err(e) => artifacts::error(e),
+        Ok(value) => json_read(&value, &headers).unwrap_or_else(problem::error),
+        Err(e) => problem::error(e),
     }
 }
 #[derive(Default, Deserialize)]
@@ -41,36 +41,6 @@ fn lease(query: &Lease) -> Result<(&str, &str)> {
             .as_deref()
             .context("worker attempt is required")?,
     ))
-}
-fn media_type(path: &str) -> &'static str {
-    match path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "md" => "text/markdown; charset=utf-8",
-        "yaml" | "yml" => "application/yaml",
-        "toml" => "application/toml",
-        "json" => "application/json",
-        "pdf" => "application/pdf",
-        "mp4" | "m4v" => "video/mp4",
-        "webm" => "video/webm",
-        "mov" => "video/quicktime",
-        "m4a" => "audio/mp4",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "flac" => "audio/flac",
-        "ogg" | "opus" => "audio/ogg",
-        "aac" => "audio/aac",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "avif" => "image/avif",
-        _ => "application/octet-stream",
-    }
 }
 fn etag(headers: &HeaderMap, hash: &str) -> bool {
     headers
@@ -136,7 +106,7 @@ async fn read(
             if etag(&headers, &asset.oid) {
                 return Ok(not_modified(&asset.oid));
             }
-            artifacts::serve_asset(&state.store, asset, &headers).await?
+            transfers::serve_asset(&state.store, asset, &headers).await?
         } else {
             let page = match state.store.get_page(&path, None) {
                 Ok(page) if page.exists => page,
@@ -155,7 +125,7 @@ async fn read(
         if !metadata {
             response
                 .headers_mut()
-                .insert("content-type", media_type(&path).parse()?);
+                .insert("content-type", crate::media::media_type(&path).parse()?);
         }
         response
             .headers_mut()
@@ -167,7 +137,7 @@ async fn read(
         Ok::<_, anyhow::Error>(response)
     }
     .await;
-    result.unwrap_or_else(artifacts::error)
+    result.unwrap_or_else(problem::error)
 }
 fn condition(headers: &HeaderMap) -> std::result::Result<Option<String>, Response> {
     if headers.get("if-none-match").is_some_and(|v| v == "*") && !headers.contains_key("if-match") {
@@ -195,13 +165,12 @@ async fn write(
             let (job, attempt) = lease(&query)?;
             state.store.check_output_lease(job, attempt, &path)?;
             let asset =
-                artifacts::receive_object(state.store.clone(), body, 64 * 1024 * 1024, None)
-                    .await?;
+                transfers::receive_object(state.store.clone(), body, 64 * 1024 * 1024).await?;
             state.store.check_output_lease(job, attempt, &path)?;
             Ok::<_, anyhow::Error>(Json(asset).into_response())
         }
         .await;
-        return result.unwrap_or_else(artifacts::error);
+        return result.unwrap_or_else(problem::error);
     }
     let expected = match condition(&headers) {
         Ok(value) => value,
@@ -228,7 +197,7 @@ async fn write(
             .await?
         } else {
             let asset =
-                artifacts::receive_object(state.store.clone(), body, 16 * 1024 * 1024 * 1024, None)
+                transfers::receive_object(state.store.clone(), body, 16 * 1024 * 1024 * 1024)
                     .await?;
             run_blocking(move || {
                 state.store.put_asset(path, asset.clone(), expected)?;
@@ -249,7 +218,7 @@ async fn write(
         Ok::<_, anyhow::Error>(response)
     }
     .await;
-    result.unwrap_or_else(artifacts::error)
+    result.unwrap_or_else(problem::error)
 }
 async fn delete(
     State(state): State<AppState>,
@@ -274,13 +243,12 @@ async fn delete(
         Ok(StatusCode::NO_CONTENT.into_response())
     })
     .await;
-    result.unwrap_or_else(artifacts::error)
+    result.unwrap_or_else(problem::error)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EditOperation;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -325,6 +293,132 @@ mod tests {
         });
         (dir, app, store)
     }
+    #[tokio::test]
+    async fn control_resources_share_tools_and_workers_keep_lease_boundaries() {
+        let (_dir, app, _) = fixture();
+        let auth = ("authorization", "Bearer user");
+        let worker = ("authorization", "Bearer worker");
+        async fn tool(app: &Router, auth: (&str, &str), name: &str, args: Value) -> Value {
+            let (_, _, body) = send(app, "POST", "/mcp", &[auth], json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}).to_string()).await;
+            let result: Value = serde_json::from_slice(&body).unwrap();
+            result
+        }
+        send(
+            &app,
+            "PUT",
+            "/audio.wav",
+            &[auth, ("if-none-match", "*")],
+            "audio",
+        )
+        .await;
+        let created = tool(&app, auth, "edit", json!({"resource":"derivations","action":"create","definition":{"source":"recording.md","recipe":"fixture","fields":["hotwords"],"inputs":["audio.wav"],"outputs":["transcript.md"]}})).await;
+        assert_eq!(created["result"]["isError"], false, "{created}");
+        let id = created["result"]["structuredContent"]["id"]
+            .as_str()
+            .unwrap();
+        assert!(tool(&app, auth, "get", json!({"resource":"derivations"})).await["result"]["structuredContent"].get(id).is_some());
+        assert_eq!(
+            tool(
+                &app,
+                auth,
+                "edit",
+                json!({"resource":"derivations","action":"update","id":id,"inputs":["audio.wav"]})
+            )
+            .await["result"]["isError"],
+            false
+        );
+        assert_eq!(
+            tool(&app, worker, "get", json!({"path":"recording.md"})).await["result"]["isError"],
+            true
+        );
+        assert_eq!(
+            send(
+                &app,
+                "POST",
+                "/mcp/worker",
+                &[auth, ("content-type", "application/json")],
+                "{\"op\":\"claim\",\"recipes\":[\"fixture\"]}"
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (_, _, claimed) = send(
+            &app,
+            "POST",
+            "/mcp/worker",
+            &[worker, ("content-type", "application/json")],
+            "{\"op\":\"claim\",\"recipes\":[\"fixture\"]}",
+        )
+        .await;
+        let claimed: Value = serde_json::from_slice(&claimed).unwrap();
+        let attempt = claimed["job"]["attempt"].as_str().unwrap();
+        let vector = json!({"space":{"namespace":"speakers","recipe":"fixture","dimensions":2},"vector":[1,0],"limit":5,"job":id,"attempt":attempt});
+        assert_eq!(
+            tool(&app, worker, "search", vector).await["result"]["isError"],
+            false
+        );
+        assert_eq!(tool(&app, worker, "search", json!({"space":{"namespace":"speakers","recipe":"fixture","dimensions":2},"vector":[1,0],"limit":5})).await["result"]["isError"], true);
+        for request in [
+            json!({"op":"heartbeat","id":id,"attempt":attempt,"progress":{"stage":"working"}}),
+            json!({"op":"complete","id":id,"attempt":attempt,"outputs":{"transcript.md":"# Transcript\n"}}),
+        ] {
+            let (status, _, body) = send(
+                &app,
+                "POST",
+                "/mcp/worker",
+                &[worker, ("content-type", "application/json")],
+                request.to_string(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        }
+        assert_eq!(
+            tool(&app, auth, "get", json!({"resource":"jobs"})).await["result"]["structuredContent"]["jobs"]
+                [0]["status"],
+            "current"
+        );
+        assert_eq!(
+            tool(
+                &app,
+                auth,
+                "edit",
+                json!({"resource":"jobs","action":"retry","id":id})
+            )
+            .await["result"]["isError"],
+            false
+        );
+        assert_eq!(
+            tool(
+                &app,
+                auth,
+                "edit",
+                json!({"resource":"derivations","action":"delete","id":id})
+            )
+            .await["result"]["isError"],
+            false
+        );
+        for name in ["get_page", "apply_edits"] {
+            assert_eq!(
+                tool(&app, auth, name, json!({})).await["error"]["code"],
+                -32602
+            );
+        }
+        for path in [
+            "/mcp/artifacts",
+            "/mcp/derivations",
+            "/mcp/jobs",
+            "/mcp/vectors/search",
+            "/mcp/lfs/objects/batch",
+            "/mcp/worker/claim",
+        ] {
+            assert_ne!(
+                send(&app, "POST", path, &[auth], "{}").await.0,
+                StatusCode::OK
+            );
+        }
+    }
+
     #[tokio::test]
     async fn shutdown_closes_idle_change_streams() {
         let (_dir, app, store) = fixture();
@@ -457,7 +551,7 @@ mod tests {
         assert_eq!(problem["status"], 422);
         assert!(!problem["findings"].as_array().unwrap().is_empty());
         let request = |edits: Value| {
-            json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"apply_edits", "arguments":{"edit_summary":"Atomic change", "edits":edits}}}).to_string()
+            json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"edit", "arguments":{"edit_summary":"Atomic change", "edits":edits}}}).to_string()
         };
         let (_, _, bytes) = send(
             &app,

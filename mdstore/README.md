@@ -25,7 +25,7 @@ Use MCP directly or run the separate [web interface](../webui/README.md).
 
 Every served repository tracks a root `config.yaml` with operational settings
 only. Document rules belong exclusively in directory templates. Both kinds of
-configuration are readable but cannot be changed through `apply_edits`.
+configuration are readable but cannot be changed through `edit`.
 
 ```yaml
 documents:
@@ -114,7 +114,7 @@ Starlark callback validation remain separate from Markdown linting.
 Place `schema.md` beside the documents it governs. The nearest ancestor
 template applies recursively and replaces its parent. Use directories such as
 `tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
-Templates are readable through `get_page`, protected from `apply_edits`, and
+Templates are readable through `get`, protected from `edit`, and
 excluded from search and embeddings.
 
 Markdown supplies instructions and examples. Only top-level fences labelled
@@ -180,7 +180,7 @@ or repeated placeholders and placeholders on other edit operations are rejected.
 Allocation changes only the path, and retries consult durable receipts first.
 Resolved paths are returned in `touched_paths` and `fresh_hashlines`.
 
-`get_page` returns `template: {path, definition, content}`, also for proposed paths
+`get` returns `template: {path, definition, content}`, also for proposed paths
 with `exists: false`. The definition contains declared rules; content is the
 original Markdown. Template updates are authored externally and activated through
 validated Git synchronization.
@@ -231,15 +231,15 @@ mdstore --root /path/to/brain serve
 ```
 
 The daemon exposes `/mcp` for document operations and `/health` for operational
-status. `get_page` accepts `/` or a directory path ending in `/` to list direct
+status. `get` accepts `/` or a directory path ending in `/` to list direct
 children of the published document tree. Directory reads include permissions,
 repository identity, and the Git revision; file reads include the same revision
 and an exact source hash. Empty directories are not persisted by Git.
 Clients can traverse directories and check revisions to obtain a consistent
 inventory. Client-specific caches, validation baselines, and previews are built
-by clients. `apply_edits` always validates changes before committing.
+by clients. `edit` always validates changes before committing.
 
-An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
+An edit request uses `LINE:HASH` anchors returned by `get`. Hashes are
 32 hexadecimal characters (128 bits of SHA-256) and include trailing whitespace:
 
 ```json
@@ -284,7 +284,7 @@ server:
 
 These permissions apply to every caller accepted by this server's bearer-token
 check (or local callers when authentication is disabled). The UI discovers them
-from root-directory `get_page` reads. Root configuration cannot be deleted. Template changes
+from root-directory `get` reads. Root configuration cannot be deleted. Template changes
 compile the proposed Starlark and validate the entire proposed corpus; documents
 can be updated in the same atomic batch to satisfy new rules. Transition checks
 from both the old and proposed templates remain enforced. Configuration changes
@@ -335,23 +335,28 @@ are reserved top-level names. The independently built frontend lives at `/webui/
 | `POST /mcp` | MCP search, metadata reads, and atomic multi-file edits |
 | `GET /mcp/events` | SSE repository revision and job-change notifications |
 | `POST/DELETE /mcp/session` | Exchange bearer credential for browser session / sign out |
-| `GET /mcp/artifacts` | Assets, derivation definitions, and provenance |
-| `POST /mcp/derivations` | Register a derivation |
-| `PATCH/DELETE /mcp/derivations/{id}` | Update input assignment / remove definition and outputs |
-| `GET /mcp/jobs` | Reconcile and read durable job status |
-| `POST /mcp/jobs/{id}/retry` | Retry or explicitly regenerate |
-| `POST /mcp/vectors/search` | Exact cosine search in an explicit embedding space |
-| `POST /mcp/worker/claim` | Claim supported work |
-| `POST /mcp/worker/jobs/{id}/heartbeat` | Renew lease, report progress or failure |
-| `POST /mcp/worker/jobs/{id}/complete` | Validate and atomically publish assigned outputs |
-| `POST /mcp/worker/vectors/search` | Search frozen reference artifacts |
-| `POST /mcp/lfs/objects/batch` | Git LFS basic transfer discovery |
-| `GET/PUT /mcp/lfs/objects/{oid}` | Authenticated LFS object transfer |
+| `POST /mcp/worker` | Claim work, renew a lease, or atomically publish outputs (`op`: `claim`, `heartbeat`, `complete`) |
+| `GET /health` | Health status |
+
+MCP exposes three tools:
+
+- `get({path, start_line?, end_line?})` reads documents; `get({resource: "derivations"})`
+  reads processing definitions and `get({resource: "jobs"})` reconciles and reads job status.
+- `edit({edit_summary, edits})` validates and commits atomic document batches.
+  `edit({resource: "derivations", action: "create", definition})` registers processing;
+  `action: "update"` takes `id` and `inputs`, and `action: "delete"` takes `id`.
+  `edit({resource: "jobs", action: "retry", id})` retries or regenerates a job.
+  Control edits are separate operations, not part of document batches.
+- `search({query, variants})` searches documents; `search({space, vector, limit, filter?})`
+  searches an explicit embedding space. Worker searches also require `job` and
+  `attempt` and are restricted to frozen reference artifacts.
+
+File listings and metadata include assets; there is no separate asset inventory API.
 
 Create with `If-None-Match: *`; replace or delete with `If-Match: "<hash>"`.
 Missing preconditions return 428; stale preconditions return 412. Request
 `Accept: application/vnd.mdstore.page+json` on a file URL for page metadata,
-schema, hash, and effective read-only status. MCP `apply_edits` retains atomic
+schema, hash, and effective read-only status. MCP `edit` retains atomic
 multi-file submissions. Asset paths can be replaced conditionally; old objects
 remain in LFS for historical versions. Assets used by a derivation cannot be deleted.
 
@@ -369,12 +374,12 @@ paths. Uploaded outputs remain unpublished until completion. Worker credentials
 grant no ordinary repository access. Transfer limits are 16 GiB for source assets
 and 64 MiB for worker outputs.
 
-Set `MDSTORE_PUBLIC_URL` to the externally reachable HTTP(S) origin and configure
-Git clients' LFS URL to that origin plus `/mcp/lfs`, with bearer authorization.
-Source uploads and worker publication write standard pointers and objects without
-requiring git-lfs or running Git filters. A Git push alone does not transfer
-objects: use LFS transfer or back up `.git/lfs/objects` separately. No object
-garbage collection is performed, preserving retained history.
+Storage selection is internal: recognized text media (including JSON voiceprints)
+are ordinary Git blobs; binary media use standard Git LFS pointers and objects.
+Clients use the same file URLs for either representation. There is no public LFS
+transfer API and no git-lfs executable or Git filter requirement. A Git push alone
+does not transfer binary objects: back up `.git/lfs/objects` separately or provide
+external LFS hosting. No object garbage collection is performed, preserving history.
 
 Published output ownership resides in committed `.mdstore-artifacts.json`, not
 editable document frontmatter. Ordinary writes cannot modify owned paths or hide
@@ -411,7 +416,7 @@ without buffering. No credentials or document bodies appear in events.
 
 PUT/DELETE text preconditions are checked under the repository lock and then use
 the same validation/commit operation as MCP batches. Cross-file changes must be
-submitted together with `apply_edits`; separate requests cannot expose invalid
+submitted together with `edit`; separate requests cannot expose invalid
 intermediate states.
 
 Edit batches already have durable content-derived receipts: retry the exact

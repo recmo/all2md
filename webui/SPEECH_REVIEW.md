@@ -44,8 +44,8 @@ editing cannot remove ownership.
 
 `.mdstore-artifacts.json` is committed and owns asset paths, derivation definitions,
 selected frontmatter fields, recipes, output paths, and publication provenance.
-Source audio/video and JSON voiceprints use standard Git LFS pointers and objects.
-Published Markdown stays in ordinary Git. Each publication records the exact
+Source audio/video use internal Git LFS pointers and objects. JSON voiceprints
+and published Markdown stay in ordinary Git. File URLs hide the storage choice. Each publication records the exact
 source revision, input fingerprint, output hashes, worker attempt, and frozen
 reference objects. External changes to owned output bytes fail provenance checks.
 
@@ -89,5 +89,5 @@ current. Adding a meeting does not retranscribe the archive.
   pipeline with its compatible inference cache; there is no candidate-only
   revalidation endpoint.
 - Audio is streamed on demand and is not included in automatic offline caching.
-- The server implements Git LFS basic upload/download. No external LFS hosting or
-  client Git remote is configured automatically.
+- Binary objects need a separate backup or external LFS hosting; mdstore does not
+  expose Git LFS transfer endpoints or configure a client Git remote.

@@ -91,8 +91,8 @@ export class Api {
       );
     return value as T;
   }
-  private async mcp<T>(name: string, args: unknown): Promise<T> {
-    // Identical apply_edits requests have durable, content-derived receipts.
+  async mcp<T>(name: string, args: unknown): Promise<T> {
+    // Identical document edit requests have durable, content-derived receipts.
     // Retry the original bytes once if the commit response was lost.
     const body = JSON.stringify({
       jsonrpc: '2.0',
@@ -102,7 +102,13 @@ export class Api {
     });
     let response: Response | undefined;
     let value;
-    const attempts = name === 'apply_edits' ? 2 : 1;
+    const attempts =
+      name === 'edit' &&
+      typeof args === 'object' &&
+      args !== null &&
+      'edits' in args
+        ? 2
+        : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         response = await fetch('/mcp', {
@@ -174,7 +180,7 @@ export class Api {
       push: 'disabled' | 'pushed' | 'queued' | 'diverged';
       status: 'accepted' | 'already_applied';
       restart_required?: boolean;
-    }>('apply_edits', request);
+    }>('edit', request);
   }
 }
 export function editRequest(

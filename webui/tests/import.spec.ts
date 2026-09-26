@@ -29,9 +29,15 @@ test('folder import preserves hierarchy, stages Markdown, and uploads assets', a
     await expect(dialog.getByText('Staged', { exact: true })).toBeVisible();
     await expect(dialog.getByText('Uploaded', { exact: true })).toBeVisible();
     await expect(dialog.getByText('Skipped: unsupported file')).toBeVisible();
-    const manifest = await (await request.get('/mcp/artifacts')).json();
-    expect(manifest.assets['incoming/bundle/audio.wav']).toBeTruthy();
-    expect(manifest.assets['incoming/bundle/notes/readme.md']).toBeUndefined();
+    const asset = await (
+      await request.get('/incoming/bundle/audio.wav', {
+        headers: { Accept: 'application/vnd.mdstore.page+json' }
+      })
+    ).json();
+    expect(asset.asset).toBeTruthy();
+    expect(
+      (await request.get('/incoming/bundle/notes/readme.md')).status()
+    ).toBe(404);
     await dialog.getByRole('button', { name: 'Close' }).click();
     await page
       .getByRole('treeitem', { name: 'readme.md', exact: true })
@@ -69,9 +75,5 @@ test('external file drops never overwrite existing documents or partially import
   await expect(dialog.getByRole('alert')).toContainText(
     'Destination already exists'
   );
-  expect(
-    (await (await request.get('/mcp/artifacts')).json()).assets[
-      'unexpected.wav'
-    ]
-  ).toBeUndefined();
+  expect((await request.get('/unexpected.wav')).status()).toBe(404);
 });

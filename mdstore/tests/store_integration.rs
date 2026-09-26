@@ -1220,7 +1220,7 @@ metadata(project_code="/code")
 
 #[test]
 fn mcp_allowlist_is_exact() {
-    assert_eq!(tool_names(), ["search", "get_page", "apply_edits"]);
+    assert_eq!(tool_names(), ["search", "get", "edit"]);
 }
 
 #[test]
@@ -1324,14 +1324,14 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["search", "get_page", "apply_edits"]);
+    assert_eq!(names, ["search", "get", "edit"]);
     let apply = value["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|tool| tool["name"] == "apply_edits")
+        .find(|tool| tool["name"] == "edit")
         .unwrap();
-    let variants = apply["inputSchema"]["properties"]["edits"]["items"]["oneOf"]
+    let variants = apply["inputSchema"]["oneOf"][0]["properties"]["edits"]["items"]["oneOf"]
         .as_array()
         .unwrap();
     assert_eq!(variants.len(), 8);
@@ -1464,7 +1464,7 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "apply_edits",
+            "name": "edit",
             "arguments": {
                 "edit_summary": "create invalid page",
                 "edits": [{
@@ -2002,7 +2002,7 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "apply_edits",
+            "name": "edit",
             "arguments": {
                 "edit_summary": "exercise delayed push",
                 "edits": [{
@@ -3071,7 +3071,7 @@ async fn document_batches_validate_and_submit_through_mcp() {
         .post(format!("{base_url}/mcp"))
         .json(
             &serde_json::json!({"jsonrpc": "2.0", "id": 99, "method": "tools/call",
-            "params": {"name": "apply_edits", "arguments": without_summary}}),
+            "params": {"name": "edit", "arguments": without_summary}}),
         )
         .send()
         .await
@@ -3088,7 +3088,7 @@ async fn document_batches_validate_and_submit_through_mcp() {
     let invalid_request: ApplyEditsRequest = serde_json::from_value(invalid).unwrap();
     let rejected = store.apply_edits(&invalid_request).unwrap_err();
     assert!(rejected.downcast_ref::<mdstore::ValidationError>().is_some());
-    let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "apply_edits", "arguments": batch}});
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "edit", "arguments": batch}});
     for _ in 0..2 {
         let result: serde_json::Value = client
             .post(format!("{base_url}/mcp"))
@@ -3112,7 +3112,7 @@ async fn document_batches_validate_and_submit_through_mcp() {
     );
     let mut stale = batch;
     stale["edit_summary"] = serde_json::json!("Stale overwrite");
-    let stale_call = serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"apply_edits", "arguments":stale}});
+    let stale_call = serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"edit", "arguments":stale}});
     let rejected: serde_json::Value = client
         .post(format!("{base_url}/mcp"))
         .json(&stale_call)
@@ -3174,7 +3174,7 @@ async fn private_proxy_host_is_explicitly_allowed() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
-    let response = client.post(format!("{base_url}/mcp")).header("host", "demo.example.ts.net").header("origin", "https://demo.example.ts.net").json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_page","arguments":{"path":"alice.md"}}})).send().await.unwrap();
+    let response = client.post(format!("{base_url}/mcp")).header("host", "demo.example.ts.net").header("origin", "https://demo.example.ts.net").json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get","arguments":{"path":"alice.md"}}})).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.json::<serde_json::Value>().await.unwrap()["result"]["isError"],
@@ -3499,7 +3499,7 @@ async fn mcp_directory_reads_share_file_revisions_and_replace_auxiliary_routes()
     let client = reqwest::Client::new();
     for path in ["/", "notes/", "notes/nested/"] {
         let response: serde_json::Value = client.post(format!("{url}/mcp"))
-            .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"get_page", "arguments":{"path":path}}}))
+            .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"get", "arguments":{"path":path}}}))
             .send().await.unwrap().json().await.unwrap();
         assert_eq!(response["result"]["isError"], false, "{response}");
         let directory = &response["result"]["structuredContent"];

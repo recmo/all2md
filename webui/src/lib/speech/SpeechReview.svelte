@@ -83,17 +83,15 @@
     }
   }
   async function refresh() {
-    const manifest = await api.request<{
-      derivations: Record<string, Definition>;
-    }>('/mcp/artifacts');
+    const definitions = await api.mcp<Record<string, Definition>>('get', {
+      resource: 'derivations'
+    });
     definitionId =
-      Object.keys(manifest.derivations).find(
-        (id) => manifest.derivations[id].source === page.path
+      Object.keys(definitions).find(
+        (id) => definitions[id].source === page.path
       ) || '';
-    definition = Object.values(manifest.derivations).find(
-      (d) => d.source === page.path
-    );
-    jobs = await api.request<Job[]>('/mcp/jobs');
+    definition = Object.values(definitions).find((d) => d.source === page.path);
+    jobs = (await api.mcp<{ jobs: Job[] }>('get', { resource: 'jobs' })).jobs;
     if (definition?.publication) {
       const path = definition.outputs.find((path) => path.endsWith('.md'));
       if (path) transcript = (await api.page(path)).text;
@@ -219,10 +217,11 @@
   }
   async function updateInputs() {
     await prepareTracks();
-    await api.request('/mcp/derivations/' + definitionId, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inputs: inputPaths() })
+    await api.mcp('edit', {
+      resource: 'derivations',
+      action: 'update',
+      id: definitionId,
+      inputs: inputPaths()
     });
     await refresh();
   }
@@ -234,10 +233,10 @@
       page.path.endsWith('/recording.md') || page.path === 'recording.md'
         ? sibling(page.path, 'transcript.md')
         : page.path.replace(/\.md$/, '.transcript.md');
-    await api.request('/mcp/derivations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    await api.mcp('edit', {
+      resource: 'derivations',
+      action: 'create',
+      definition: {
         source: page.path,
         recipe: 'speech2md-v1',
         fields: [
@@ -254,7 +253,7 @@
         inputs: inputPaths(),
         outputs: [base, base.replace(/\.md$/, '.voiceprints.json')],
         reference_namespace: 'speakers'
-      })
+      }
     });
     await refresh();
   }
@@ -282,7 +281,11 @@
         disabled={busy || dirty || ['running', 'queued'].includes(job.status)}
         onclick={() =>
           run(async () => {
-            await api.request(`/mcp/jobs/${job!.id}/retry`, { method: 'POST' });
+            await api.mcp('edit', {
+              resource: 'jobs',
+              action: 'retry',
+              id: job!.id
+            });
             await refresh();
           })}>{job.status === 'failed' ? 'Retry' : 'Regenerate'}</button
       >{/if}

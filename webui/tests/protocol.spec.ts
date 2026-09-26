@@ -30,7 +30,7 @@ test('a committed submission with a lost response is retried without duplicating
   await expect(page.locator('#submit')).toBeEnabled();
   const bodies: string[] = [];
   await page.route('**/mcp', async (route) => {
-    if (route.request().postDataJSON()?.params?.name !== 'apply_edits')
+    if (route.request().postDataJSON()?.params?.name !== 'edit')
       return route.continue();
     bodies.push(route.request().postData()!);
     if (bodies.length === 1) {

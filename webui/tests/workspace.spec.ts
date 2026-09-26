@@ -611,7 +611,7 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
       id: 1,
       method: 'tools/call',
       params: {
-        name: 'apply_edits',
+        name: 'edit',
         arguments: {
           edit_summary: 'Check rumdl',
           edits: [{ op: 'replace_page', path: 'other.md', base, content: text }]
@@ -916,7 +916,7 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   const applied = page.waitForRequest(
     (request) =>
       request.url().endsWith('/mcp') &&
-      request.postDataJSON()?.params?.name === 'apply_edits'
+      request.postDataJSON()?.params?.name === 'edit'
   );
   await page.locator('#submit').click();
   expect((await applied).postDataJSON().params.arguments.edits).toHaveLength(3);
@@ -960,7 +960,7 @@ test('server rejection preserves staged edits and description', async ({
   await expect(page.locator('#submit')).toBeEnabled();
   await page.route('**/mcp', async (route) => {
     const body = route.request().postDataJSON();
-    if (body?.params?.name !== 'apply_edits') return route.continue();
+    if (body?.params?.name !== 'edit') return route.continue();
     await route.fulfill({
       json: {
         jsonrpc: '2.0',
@@ -1217,7 +1217,7 @@ async function remoteEdit(
       id: 1,
       method: 'tools/call',
       params: {
-        name: 'apply_edits',
+        name: 'edit',
         arguments: {
           edit_summary: 'Concurrent client edit',
           edits: [
@@ -1258,9 +1258,7 @@ test('reconciliation merges remote changes before validated submission', async (
   const staged = page.getByRole('region', { name: 'Staged diff' });
   await expect(staged).toContainText('Local ending.');
   const applied = page.waitForRequest(
-    (r) =>
-      r.url().endsWith('/mcp') &&
-      r.postDataJSON()?.params?.name === 'apply_edits'
+    (r) => r.url().endsWith('/mcp') && r.postDataJSON()?.params?.name === 'edit'
   );
   await page.locator('#submit').click();
   const edit = (await applied).postDataJSON().params.arguments.edits[0];
@@ -1672,7 +1670,7 @@ async function directoryPaths(page: Page, path: string): Promise<string[]> {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'get_page', arguments: { path } }
+      params: { name: 'get', arguments: { path } }
     }
   });
   const result = (await response.json()).result;
@@ -1693,7 +1691,7 @@ test('document selection changes remain incomplete locally but can be submitted'
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'get_page', arguments: { path: 'config.yaml' } }
+      params: { name: 'get', arguments: { path: 'config.yaml' } }
     }
   });
   const source = (await response.json()).result.structuredContent
@@ -1813,7 +1811,7 @@ test('task renames rewrite dependency paths offline and preserve workload arrows
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'get_page', arguments: { path: old } }
+      params: { name: 'get', arguments: { path: old } }
     }
   });
   const original = (await originalResponse.json()).result.structuredContent
@@ -1824,7 +1822,7 @@ test('task renames rewrite dependency paths offline and preserve workload arrows
       id: 2,
       method: 'tools/call',
       params: {
-        name: 'apply_edits',
+        name: 'edit',
         arguments: {
           edit_summary: 'Reject dangling dependency',
           edits: [
@@ -1884,7 +1882,7 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
       id: 1,
       method: 'tools/call',
       params: {
-        name: 'apply_edits',
+        name: 'edit',
         arguments: {
           edit_summary: 'Create wiki fixture',
           edits: [
