@@ -35,6 +35,7 @@ mod files;
 mod problem;
 mod session;
 mod transfers;
+mod worker;
 
 fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
     let state = AppState {
@@ -54,7 +55,7 @@ fn application(state: AppState) -> Router {
         .route("/mcp", post(mcp))
         .route("/mcp/events", get(events::subscribe))
         .route("/mcp/session", post(session::create).delete(session::delete))
-        .route("/mcp/worker", post(control::worker))
+        .route("/worker", post(worker::handle))
         .merge(files::routes())
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .layer(middleware::from_fn(problem::normalize))
@@ -138,15 +139,15 @@ async fn authorize(State(state): State<AppState>, request: Request, next: Next) 
     let actual = request.headers().get("authorization")
         .and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
     let worker = state.worker_token.as_deref().is_some_and(|expected| actual == Some(expected));
-    if request.uri().path() == "/mcp/worker" {
+    if request.uri().path() == "/worker" {
         return if worker { next.run(request).await } else { StatusCode::UNAUTHORIZED.into_response() };
     }
     if worker && request.uri().path() != "/mcp" && !request.uri().path().starts_with("/mcp/") && request.uri().path() != "/health" {
         // File handlers still enforce the active lease and exact assigned path.
         return next.run(request).await;
     }
-    if worker && request.uri().path() == "/mcp" {
-        return next.run(request).await;
+    if worker {
+        return StatusCode::FORBIDDEN.into_response();
     }
     // With no credential, reject DNS-rebinding hosts as well as cross-site fetches.
     if state.bearer_token.is_none() {
@@ -244,21 +245,7 @@ async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         "initialize" => initialize(id, &params),
         "ping" => rpc_result(id, json!({})),
         "tools/list" => rpc_result(id, json!({"tools": tools()})),
-        "tools/call" => {
-            call_tool(
-                id,
-                &state.store,
-                params,
-                state.worker_token.as_deref().is_some_and(|token| {
-                    headers
-                        .get("authorization")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.strip_prefix("Bearer "))
-                        == Some(token)
-                }),
-            )
-            .await
-        }
+        "tools/call" => call_tool(id, &state.store, params).await,
         _ => rpc_error(id, -32601, "method not found"),
     }
 }
@@ -411,76 +398,66 @@ struct GetArguments {
     end_line: Option<usize>,
 }
 
-async fn call_tool(id: Value, store: &Arc<Store>, params: Value, worker: bool) -> Response {
+async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
     let params: CallParams = match serde_json::from_value(params) {
         Ok(value) => value,
         Err(error) => return rpc_error(id, -32602, &format!("invalid tool call: {error}")),
     };
-    let result = if worker && (params.name != "search" || params.arguments.get("space").is_none()) {
-        Err(anyhow::anyhow!(
-            "worker credentials only allow leased vector search"
-        ))
-    } else {
-        match params.name.as_str() {
-            "get" if params.arguments.get("resource").is_some() => {
-                let store = Arc::clone(store);
-                run_blocking(move || {
-                    control::read(&store, serde_json::from_value(params.arguments)?)
-                })
+    let result = match params.name.as_str() {
+        "get" if params.arguments.get("resource").is_some() => {
+            let store = Arc::clone(store);
+            run_blocking(move || control::read(&store, serde_json::from_value(params.arguments)?))
                 .await
-            }
-            "edit" if params.arguments.get("resource").is_some() => {
-                let store = Arc::clone(store);
-                run_blocking(move || {
-                    control::edit(&store, serde_json::from_value(params.arguments)?)
-                })
-                .await
-            }
-            "search" if params.arguments.get("space").is_some() => {
-                let store = Arc::clone(store);
-                run_blocking(move || {
-                    control::search(&store, serde_json::from_value(params.arguments)?, worker)
-                })
-                .await
-            }
-            "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
-                Ok(arguments) => store
-                    .search(&arguments.query, &arguments.variants)
-                    .await
-                    .and_then(|value| serde_json::to_value(value).map_err(Into::into)),
-                Err(error) => Err(error.into()),
-            },
-            "get" => match serde_json::from_value::<GetArguments>(params.arguments) {
-                Ok(arguments) => {
-                    let window = arguments
-                        .start_line
-                        .map(|start| (start, arguments.end_line.unwrap_or(start)));
-                    if arguments.path.ends_with('/') {
-                        if arguments.start_line.is_some() || arguments.end_line.is_some() {
-                            Err(anyhow::anyhow!("line windows are only supported for files"))
-                        } else {
-                            store.get_directory(&arguments.path)
-                        }
-                    } else {
-                        store
-                            .get_page(&arguments.path, window)
-                            .and_then(|value| serde_json::to_value(value).map_err(Into::into))
-                    }
-                }
-                Err(error) => Err(error.into()),
-            },
-            "edit" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
-                Ok(arguments) => {
-                    let blocking_store = Arc::clone(store);
-                    match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
-                        Ok(value) => serde_json::to_value(value).map_err(Into::into),
-                        Err(error) => Err(error),
-                    }
-                }
-                Err(error) => Err(error.into()),
-            },
-            _ => return rpc_error(id, -32602, "unknown tool"),
         }
+        "edit" if params.arguments.get("resource").is_some() => {
+            let store = Arc::clone(store);
+            run_blocking(move || control::edit(&store, serde_json::from_value(params.arguments)?))
+                .await
+        }
+        "search" if params.arguments.get("space").is_some() => {
+            let store = Arc::clone(store);
+            run_blocking(move || {
+                control::search(&store, serde_json::from_value(params.arguments)?, None)
+            })
+            .await
+        }
+        "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
+            Ok(arguments) => store
+                .search(&arguments.query, &arguments.variants)
+                .await
+                .and_then(|value| serde_json::to_value(value).map_err(Into::into)),
+            Err(error) => Err(error.into()),
+        },
+        "get" => match serde_json::from_value::<GetArguments>(params.arguments) {
+            Ok(arguments) => {
+                let window = arguments
+                    .start_line
+                    .map(|start| (start, arguments.end_line.unwrap_or(start)));
+                if arguments.path.ends_with('/') {
+                    if arguments.start_line.is_some() || arguments.end_line.is_some() {
+                        Err(anyhow::anyhow!("line windows are only supported for files"))
+                    } else {
+                        store.get_directory(&arguments.path)
+                    }
+                } else {
+                    store
+                        .get_page(&arguments.path, window)
+                        .and_then(|value| serde_json::to_value(value).map_err(Into::into))
+                }
+            }
+            Err(error) => Err(error.into()),
+        },
+        "edit" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
+            Ok(arguments) => {
+                let blocking_store = Arc::clone(store);
+                match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
+                    Ok(value) => serde_json::to_value(value).map_err(Into::into),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error.into()),
+        },
+        _ => return rpc_error(id, -32602, "unknown tool"),
     };
     match result {
         Ok(value) => rpc_result(

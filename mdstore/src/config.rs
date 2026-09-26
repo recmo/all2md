@@ -177,7 +177,7 @@ pub(crate) fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
 /// Validates a repository-relative path without accessing the filesystem.
 pub fn validate_repo_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
-    if matches!(path.split('/').next(), Some("mcp" | "health" | "webui")) {
+    if matches!(path.split('/').next(), Some("mcp" | "health" | "webui" | "worker")) {
         bail!("reserved HTTP namespace: {path}");
     }
     if path.is_empty() || candidate.is_absolute() {

@@ -80,7 +80,7 @@ normal GET requests fetch the data. Recording review has no polling timer.
 
 For production, mount `build/` at `/webui/` with SPA fallback and proxy all other
 paths to mdstore on the same origin. Preserve cookies, authorization, Host, and
-Origin headers. `/health`, `/mcp`, and `/webui` are reserved names. The frontend
+Origin headers. `/health`, `/mcp`, `/worker`, and `/webui` are reserved names. The frontend
 remains a separate artifact; a separate frontend process can provide this proxy.
 Vite dev/preview provides it locally via `MDSTORE_URL`.
 `nix build .#webui` produces static assets, independently of `.#mdstore`.

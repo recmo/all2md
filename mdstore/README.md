@@ -323,7 +323,7 @@ mdstore supports immutable content-addressed assets and generic leased derivatio
 Speech-specific guidance and execution live in webui and speech2md; the server
 stores input/output declarations and validates published Markdown normally.
 
-The repository is served directly under `/`. `/health`, `/mcp`, and `/webui`
+The repository is served directly under `/`. `/health`, `/mcp`, `/worker`, and `/webui`
 are reserved top-level names. The independently built frontend lives at `/webui/`.
 
 | Route | Purpose |
@@ -335,7 +335,7 @@ are reserved top-level names. The independently built frontend lives at `/webui/
 | `POST /mcp` | MCP search, metadata reads, and atomic multi-file edits |
 | `GET /mcp/events` | SSE repository revision and job-change notifications |
 | `POST/DELETE /mcp/session` | Exchange bearer credential for browser session / sign out |
-| `POST /mcp/worker` | Claim work, renew a lease, or atomically publish outputs (`op`: `claim`, `heartbeat`, `complete`) |
+| `POST /worker` | Claim work, renew a lease, publish outputs, or search leased references (`op`: `claim`, `heartbeat`, `complete`, `search`) |
 | `GET /health` | Health status |
 
 MCP exposes three tools:
@@ -348,8 +348,7 @@ MCP exposes three tools:
   `edit({resource: "jobs", action: "retry", id})` retries or regenerates a job.
   Control edits are separate operations, not part of document batches.
 - `search({query, variants})` searches documents; `search({space, vector, limit, filter?})`
-  searches an explicit embedding space. Worker searches also require `job` and
-  `attempt` and are restricted to frozen reference artifacts.
+  searches an explicit embedding space.
 
 File listings and metadata include assets; there is no separate asset inventory API.
 
@@ -368,7 +367,12 @@ uses ordinary file URLs and cookies, without playback tickets. API clients can
 continue using bearer authentication. Reverse proxies must preserve Host and
 Origin consistently; serve the frontend and API on the same origin.
 
-Workers use a separate `MDSTORE_WORKER_TOKEN`. They transfer through ordinary
+Workers use a separate `MDSTORE_WORKER_TOKEN` and do not access MCP. All worker
+operations use `POST /worker`: `claim` takes `recipes`; `heartbeat` takes `id`,
+`attempt`, optional `progress` and `failure`; `complete` takes `id`, `attempt`,
+`outputs` and optional `assets`; `search` takes `id`, `attempt`, and a `query`
+containing `space`, `vector`, `limit`, and optional `filter`. Searches are limited
+to the lease's frozen references. Workers transfer through ordinary
 file URLs with `?job=<id>&attempt=<lease>`, restricted to assigned input and output
 paths. Uploaded outputs remain unpublished until completion. Worker credentials
 grant no ordinary repository access. Transfer limits are 16 GiB for source assets

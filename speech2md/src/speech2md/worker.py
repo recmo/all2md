@@ -35,7 +35,7 @@ class Client:
         request = Request(self.server + path, data=body, headers=headers, method=method)
         # Completion is replay-safe by attempt and output hashes, including
         # after a server restart. Retry the same bytes if its response is lost.
-        attempts = 2 if path == "/mcp/worker" and value and value.get("op") == "complete" else 1
+        attempts = 2 if path == "/worker" and value and value.get("op") == "complete" else 1
         for attempt in range(attempts):
             try:
                 with urlopen(request, timeout=60) as response:
@@ -50,13 +50,9 @@ class Client:
                     raise
 
     def search(self, query: dict):
-        response = self.request("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search", "arguments": query}})
-        if "error" in response:
-            raise RuntimeError(response["error"]["message"])
-        result = response["result"]
-        if result.get("isError"):
-            raise RuntimeError(result["structuredContent"]["detail"])
-        return result["structuredContent"]["results"]
+        query = dict(query)
+        job, attempt = query.pop("job"), query.pop("attempt")
+        return self.request("/worker", {"op": "search", "id": job, "attempt": attempt, "query": query})["results"]
 
     def download(self, query: dict, target: Path, asset: dict):
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -104,7 +100,7 @@ def execute(client: Client, assignment: dict, cache: Path):
 def _execute_locked(client: Client, assignment: dict, root: Path):
     job = assignment["job"]
     attempt = job["attempt"]
-    endpoint = "/mcp/worker"
+    endpoint = "/worker"
     stopped = threading.Event()
     lease_lost = threading.Event()
     progress = [{"stage": "downloading inputs"}]
@@ -217,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     client = Client(args.server, os.environ.get(args.token_env, ""))
     while True:
         try:
-            assignment = client.request("/mcp/worker", {"op": "claim", "recipes": [args.recipe]})
+            assignment = client.request("/worker", {"op": "claim", "recipes": [args.recipe]})
             if assignment:
                 execute(client, assignment, args.cache)
             if args.once:

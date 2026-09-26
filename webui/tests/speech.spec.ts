@@ -44,7 +44,7 @@ test('recording review stages guidance and derived transcripts remain read-only'
   await expect(page.getByText('queued', { exact: true })).toBeVisible();
   const headers = { Authorization: 'Bearer browser-test-worker' };
   const assignment = await (
-    await request.post('http://127.0.0.1:43133/mcp/worker', {
+    await request.post('http://127.0.0.1:43133/worker', {
       headers,
       data: { op: 'claim', recipes: ['speech2md-v1'] }
     })
@@ -61,7 +61,7 @@ test('recording review stages guidance and derived transcripts remain read-only'
       }
     )
   ).json();
-  const completed = await request.post('http://127.0.0.1:43133/mcp/worker', {
+  const completed = await request.post('http://127.0.0.1:43133/worker', {
     headers,
     data: {
       op: 'complete',

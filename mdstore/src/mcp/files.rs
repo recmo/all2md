@@ -328,14 +328,14 @@ mod tests {
             false
         );
         assert_eq!(
-            tool(&app, worker, "get", json!({"path":"recording.md"})).await["result"]["isError"],
-            true
+            send(&app, "POST", "/mcp", &[worker], "{}").await.0,
+            StatusCode::FORBIDDEN
         );
         assert_eq!(
             send(
                 &app,
                 "POST",
-                "/mcp/worker",
+                "/worker",
                 &[auth, ("content-type", "application/json")],
                 "{\"op\":\"claim\",\"recipes\":[\"fixture\"]}"
             )
@@ -346,19 +346,23 @@ mod tests {
         let (_, _, claimed) = send(
             &app,
             "POST",
-            "/mcp/worker",
+            "/worker",
             &[worker, ("content-type", "application/json")],
             "{\"op\":\"claim\",\"recipes\":[\"fixture\"]}",
         )
         .await;
         let claimed: Value = serde_json::from_slice(&claimed).unwrap();
         let attempt = claimed["job"]["attempt"].as_str().unwrap();
-        let vector = json!({"space":{"namespace":"speakers","recipe":"fixture","dimensions":2},"vector":[1,0],"limit":5,"job":id,"attempt":attempt});
-        assert_eq!(
-            tool(&app, worker, "search", vector).await["result"]["isError"],
-            false
-        );
-        assert_eq!(tool(&app, worker, "search", json!({"space":{"namespace":"speakers","recipe":"fixture","dimensions":2},"vector":[1,0],"limit":5})).await["result"]["isError"], true);
+        let query = json!({"space":{"namespace":"speakers","recipe":"fixture","dimensions":2},"vector":[1,0],"limit":5});
+        let vector = json!({"op":"search","id":id,"attempt":attempt,"query":query});
+        let (status, _, body) = send(&app, "POST", "/worker", &[worker, ("content-type", "application/json")], vector.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["results"], json!([]));
+        for attempt in [Value::Null, json!("wrong-lease")] {
+            let request = json!({"op":"search","id":id,"attempt":attempt,"query":query});
+            assert!(!send(&app, "POST", "/worker", &[worker, ("content-type", "application/json")], request.to_string()).await.0.is_success());
+        }
+        assert_eq!(tool(&app, auth, "search", query).await["result"]["isError"], false);
         for request in [
             json!({"op":"heartbeat","id":id,"attempt":attempt,"progress":{"stage":"working"}}),
             json!({"op":"complete","id":id,"attempt":attempt,"outputs":{"transcript.md":"# Transcript\n"}}),
@@ -366,7 +370,7 @@ mod tests {
             let (status, _, body) = send(
                 &app,
                 "POST",
-                "/mcp/worker",
+                "/worker",
                 &[worker, ("content-type", "application/json")],
                 request.to_string(),
             )
@@ -410,6 +414,7 @@ mod tests {
             "/mcp/jobs",
             "/mcp/vectors/search",
             "/mcp/lfs/objects/batch",
+            "/mcp/worker",
             "/mcp/worker/claim",
         ] {
             assert_ne!(
@@ -952,7 +957,7 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(send(&app, "GET", "/", &[auth], "").await.0, StatusCode::OK);
-        for path in ["health/file.md", "mcp/file.md", "webui/file.md"] {
+        for path in ["health/file.md", "mcp/file.md", "webui/file.md", "worker/file.md"] {
             assert!(validate_repo_path(path).is_err());
         }
     }
