@@ -55,6 +55,7 @@ pub(crate) struct Publication {
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
     pub assets: BTreeMap<String, Asset>,
+    #[serde(rename = "publications", alias = "derivations")]
     pub derivations: BTreeMap<String, Derivation>,
 }
 
@@ -66,6 +67,8 @@ pub(crate) struct Job {
     pub fingerprint: String,
     pub source_revision: String,
     pub status: String,
+    #[serde(default)]
+    pub published: bool,
     pub attempt: Option<String>,
     pub expires: u64,
     pub error: Option<String>,
@@ -203,6 +206,9 @@ fn fingerprint(definition: &Derivation, state: &StoreState, manifest: &Manifest)
         .collect::<Result<_>>()?;
     Ok(crate::validation::source_hash(&serde_json::to_string(&(
         &definition.recipe,
+        &definition.source,
+        &definition.outputs,
+        &definition.reference_namespace,
         input,
         assets,
     ))?))
@@ -222,6 +228,57 @@ fn reference_is_current(path: &str, state: &StoreState, manifest: &Manifest) -> 
 }
 
 impl Manifest {
+    pub(super) fn configured(&self, config: &Config, root: &Path) -> Result<Self> {
+        let mut result = self.clone();
+        result
+            .derivations
+            .retain(|id, d| d.publication.is_some() || config.derivations.contains_key(id));
+        for (id, definition) in &config.derivations {
+            let previous = self.derivations.get(id);
+            if let Some(previous) = previous.filter(|d| d.publication.is_some()) {
+                ensure!(
+                    previous.outputs.iter().collect::<BTreeSet<_>>()
+                        == definition.outputs.iter().collect(),
+                    "published output paths cannot change; use a new derivation name"
+                );
+            }
+            for input in &definition.inputs {
+                ensure!(
+                    self.assets.contains_key(input),
+                    "unknown input asset: {input}"
+                );
+            }
+            for output in &definition.outputs {
+                let already_owned = previous.is_some_and(|d| d.outputs.contains(output));
+                ensure!(
+                    already_owned
+                        || (!git::is_tracked(root, output)?
+                            && fs::symlink_metadata(root.join(output)).is_err()),
+                    "output already exists: {output}"
+                );
+            }
+            result.derivations.insert(
+                id.clone(),
+                Derivation {
+                    source: definition.source.clone(),
+                    recipe: definition.recipe.clone(),
+                    fields: definition.fields.clone(),
+                    inputs: definition.inputs.clone(),
+                    outputs: definition.outputs.clone(),
+                    reference_namespace: definition.reference_namespace.clone(),
+                    publication: previous.and_then(|d| d.publication.clone()),
+                },
+            );
+        }
+        let mut owned = BTreeSet::new();
+        for definition in result.derivations.values() {
+            for path in &definition.outputs {
+                ensure!(owned.insert(path), "output has multiple owners: {path}");
+            }
+        }
+        Ok(result)
+    }
+
     pub(super) fn check_pages(
         &self,
         pages: &std::collections::HashMap<String, String>,
@@ -271,12 +328,6 @@ impl std::fmt::Display for PreconditionFailed {
 impl std::error::Error for PreconditionFailed {}
 
 impl Store {
-    pub(crate) fn derivations(&self) -> Result<Value> {
-        Ok(serde_json::to_value(
-            &self.state.read().artifacts.derivations,
-        )?)
-    }
-
     pub(crate) fn object_path(&self, oid: &str) -> Result<PathBuf> {
         validate_oid(oid)?;
         Ok(self
@@ -412,77 +463,31 @@ impl Store {
             .context("unknown asset")
     }
 
-    pub(crate) fn create_derivation(&self, mut definition: Derivation) -> Result<String> {
-        let _guard = self.lock_repository()?;
-        self.refresh_external_commit()?;
-        let current = self.state.read().clone();
-        ensure!(
-            definition.publication.is_none(),
-            "publication is server-owned"
-        );
-        ensure!(
-            current.pages.contains_key(&definition.source),
-            "source document is missing"
-        );
-        ensure!(
-            !definition.recipe.is_empty() && !definition.fields.is_empty(),
-            "recipe and input fields required"
-        );
-        ensure!(!definition.outputs.is_empty(), "outputs required");
-        definition.outputs.sort();
-        definition.outputs.dedup();
-        let mut manifest = (*current.artifacts).clone();
-        for path in &definition.outputs {
-            validate_repo_path(path)?;
-            ensure!(
-                !crate::template::is_template(path)
-                    && !is_config_resource_path(path)
-                    && !path.starts_with('.')
-                    && !definition.inputs.contains(path),
-                "reserved output path"
-            );
-            ensure!(
-                !manifest.owned(path) && !git::is_tracked(&self.root, path)?,
-                "output already exists or is reserved: {path}"
-            );
-        }
-        for path in &definition.inputs {
-            ensure!(
-                manifest.assets.contains_key(path),
-                "unknown input asset: {path}"
-            );
-        }
+    #[cfg(test)]
+    pub(crate) fn create_derivation(&self, definition: Derivation) -> Result<String> {
         let id = crate::validation::source_hash(&serde_json::to_string(&definition)?);
-        manifest.derivations.insert(id.clone(), definition);
-        self.commit_artifacts(&current, &manifest, vec![], "Register derivation")?;
-        Ok(id)
-    }
-
-    pub(crate) fn update_derivation_inputs(&self, id: &str, inputs: Vec<String>) -> Result<()> {
-        let _guard = self.lock_repository()?;
-        self.refresh_external_commit()?;
-        let current = self.state.read().clone();
-        let mut manifest = (*current.artifacts).clone();
-        for path in &inputs {
-            ensure!(
-                manifest.assets.contains_key(path),
-                "unknown input asset: {path}"
-            );
-        }
-        let definition = manifest
-            .derivations
-            .get_mut(id)
-            .context("unknown derivation")?;
-        ensure!(
-            !inputs.iter().any(|p| definition.outputs.contains(p)),
-            "output cannot be an input"
+        let base = self.get_page("config.yaml", None)?.text.unwrap();
+        let mut config = Config::from_yaml(&base)?;
+        config.derivations.insert(
+            id.clone(),
+            crate::config::DerivationConfig {
+                source: definition.source,
+                recipe: definition.recipe,
+                fields: definition.fields,
+                inputs: definition.inputs,
+                outputs: definition.outputs,
+                reference_namespace: definition.reference_namespace,
+            },
         );
-        if definition.inputs == inputs {
-            return Ok(());
-        }
-        definition.inputs = inputs;
-        self.commit_artifacts(&current, &manifest, vec![], "Update derivation inputs")?;
-        Ok(())
+        self.apply_edits(&ApplyEditsRequest {
+            edit_summary: "Configure derivation".into(),
+            edits: vec![crate::EditOperation::ReplacePage {
+                path: "config.yaml".into(),
+                base,
+                content: serde_yaml::to_string(&config)?,
+            }],
+        })?;
+        Ok(id)
     }
 
     fn commit_artifacts(
@@ -535,9 +540,14 @@ impl Store {
         if !attributes.is_empty() || git::is_tracked(&self.root, ".gitattributes")? {
             changes.push((".gitattributes".into(), Some(attributes)));
         }
+        // Configuration owns pending declarations; this file records published provenance only.
+        let mut persisted = manifest.clone();
+        persisted
+            .derivations
+            .retain(|_, definition| definition.publication.is_some());
         changes.push((
             MANIFEST.into(),
-            Some(serde_json::to_string_pretty(manifest)?),
+            Some(serde_json::to_string_pretty(&persisted)?),
         ));
         for (path, _) in &changes {
             ensure_repository_path_safe(&self.root, path)?;
@@ -598,8 +608,12 @@ impl Store {
         } else {
             BTreeMap::new()
         };
-        jobs.retain(|id, _| manifest.derivations.contains_key(id));
-        for (id, definition) in &manifest.derivations {
+        jobs.retain(|id, _| state.config.derivations.contains_key(id));
+        for (id, definition) in manifest
+            .derivations
+            .iter()
+            .filter(|(id, _)| state.config.derivations.contains_key(*id))
+        {
             let fingerprint = fingerprint(definition, &state, &manifest)?;
             let published = definition
                 .publication
@@ -612,6 +626,7 @@ impl Store {
                 fingerprint: fingerprint.clone(),
                 source_revision: state.head.clone(),
                 status: "queued".into(),
+                published: false,
                 attempt: None,
                 expires: 0,
                 error: None,
@@ -620,6 +635,7 @@ impl Store {
                 references: BTreeMap::new(),
                 rerun: false,
             });
+            job.published = definition.publication.is_some();
             if job.fingerprint != fingerprint {
                 job.fingerprint = fingerprint;
                 job.status = "queued".into();
@@ -674,31 +690,6 @@ impl Store {
         job.error = None;
         job.progress = None;
         self.save_jobs(&jobs)
-    }
-
-    pub(crate) fn remove_derivation(&self, id: &str) -> Result<()> {
-        let _guard = self.lock_repository()?;
-        self.refresh_external_commit()?;
-        let current = self.state.read().clone();
-        let mut manifest = (*current.artifacts).clone();
-        let definition = manifest
-            .derivations
-            .remove(id)
-            .context("unknown derivation")?;
-        let mut changes = vec![];
-        for path in definition.outputs {
-            manifest.assets.remove(&path);
-            if git::is_tracked(&self.root, &path)? {
-                changes.push((path, None));
-            }
-        }
-        self.commit_artifacts(
-            &current,
-            &manifest,
-            changes,
-            "Remove derivation and its published outputs",
-        )?;
-        Ok(())
     }
 
     pub(crate) fn claim_job(&self, recipes: &[String]) -> Result<Option<Assignment>> {
@@ -949,7 +940,7 @@ pub(crate) mod tests {
         );
         fs::write(
             dir.path().join("config.yaml"),
-            "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push: false\n",
+            "server:\n  allow_config_edits: true\ndocuments:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push: false\n",
         )
         .unwrap();
         fs::write(dir.path().join(".gitignore"), "*.mdstore\n").unwrap();
@@ -1017,6 +1008,61 @@ pub(crate) mod tests {
         let attributes = fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
         assert!(attributes.contains("audio.wav"));
         assert!(!attributes.contains("capture.json"));
+    }
+
+    #[test]
+    fn removed_configuration_preserves_old_provenance_after_restart() {
+        let (dir, store) = fixture();
+        let id = setup(&store);
+        let job = store
+            .claim_job(&["fixture-v1".into()])
+            .unwrap()
+            .unwrap()
+            .job;
+        store
+            .complete_job(
+                &id,
+                completion(job.attempt.as_deref().unwrap(), "# Transcript\n"),
+            )
+            .unwrap();
+        let base = store.get_page("config.yaml", None).unwrap().text.unwrap();
+        let mut config = Config::from_yaml(&base).unwrap();
+        config.derivations.clear();
+        store
+            .apply_edits(&ApplyEditsRequest {
+                edit_summary: "Stop processing".into(),
+                edits: vec![EditOperation::ReplacePage {
+                    path: "config.yaml".into(),
+                    base,
+                    content: serde_yaml::to_string(&config).unwrap(),
+                }],
+            })
+            .unwrap();
+        // Previous versions called the provenance map 'derivations'.
+        let path = dir.path().join(MANIFEST);
+        let mut manifest: Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let publications = manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("publications")
+            .unwrap();
+        manifest["derivations"] = publications;
+        fs::write(path, serde_json::to_string(&manifest).unwrap()).unwrap();
+        git(dir.path(), &["add", MANIFEST]);
+        git(
+            dir.path(),
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "Old provenance format",
+            ],
+        );
+        let reopened = Store::open_with_provider(dir.path(), Arc::new(Provider)).unwrap();
+        assert!(reopened.jobs().unwrap().is_empty());
+        assert!(reopened.get_page("transcript.md", None).unwrap().readonly);
     }
 
     #[test]
@@ -1150,12 +1196,12 @@ pub(crate) mod tests {
         let assignment = store.claim_job(&["fixture-v1".into()]).unwrap().unwrap();
         assert_eq!(assignment.references.len(), 1);
         let matches = store
-            .search_artifact_vectors(
+            .search_reference_vectors(
                 space,
                 vec![1.0, 0.0],
                 5,
                 BTreeMap::from([("confirmed".into(), Value::Bool(true))]),
-                Some((next.clone(), assignment.job.attempt.clone().unwrap())),
+                (next.clone(), assignment.job.attempt.clone().unwrap()),
             )
             .unwrap();
         assert_eq!(matches.as_array().unwrap().len(), 1);
@@ -1224,23 +1270,20 @@ pub(crate) struct VectorArtifact {
 }
 
 impl Store {
-    pub(crate) fn search_artifact_vectors(
+    pub(crate) fn search_reference_vectors(
         &self,
         space: crate::vectors::EmbeddingSpace,
         query: Vec<f32>,
         limit: usize,
         filter: BTreeMap<String, Value>,
-        lease: Option<(String, String)>,
+        lease: (String, String),
     ) -> Result<Value> {
         use crate::vectors::VectorCollection;
         let _guard = self.lock_repository()?;
-        let (manifest, jobs) = self.reconcile_jobs()?;
-        let assets = if let Some((id, attempt)) = lease {
-            check_lease(jobs.get(&id), &attempt)?;
-            jobs[&id].references.clone()
-        } else {
-            manifest.assets
-        };
+        let (_, jobs) = self.reconcile_jobs()?;
+        let (id, attempt) = lease;
+        check_lease(jobs.get(&id), &attempt)?;
+        let assets = jobs[&id].references.clone();
         let mut records = Vec::new();
         for (path, asset) in assets {
             if asset.size > 16 * 1024 * 1024 {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { parseDocument } from 'yaml';
   import { subscribeChanges } from '../workspace/events';
   import { fileUrl, type Api, type Page } from '../workspace/api';
   import type { AppEdit } from '../apps/apps';
@@ -27,6 +28,7 @@
     id: string;
     source: string;
     status: string;
+    published: boolean;
     error?: string;
     progress?: { stage?: string };
   };
@@ -34,13 +36,13 @@
     source: string;
     outputs: string[];
     inputs: string[];
-    publication?: unknown;
   };
   let jobs = $state<Job[]>([]),
     error = $state(''),
     busy = $state(false);
   let definition = $state<Definition | undefined>();
   let definitionId = $state('');
+  let configWritable = $state(false);
   let transcript = $state(''),
     playback = $state('');
   let playbackNotice = $state('');
@@ -83,16 +85,20 @@
     }
   }
   async function refresh() {
-    const definitions = await api.mcp<Record<string, Definition>>('get', {
-      resource: 'derivations'
-    });
+    const configPage = await api.page('config.yaml');
+    configWritable = !configPage.readonly;
+    const config = parseDocument(configPage.text).toJS();
+    const definitions = (config.derivations || {}) as Record<
+      string,
+      Definition
+    >;
     definitionId =
       Object.keys(definitions).find(
         (id) => definitions[id].source === page.path
       ) || '';
     definition = Object.values(definitions).find((d) => d.source === page.path);
-    jobs = (await api.mcp<{ jobs: Job[] }>('get', { resource: 'jobs' })).jobs;
-    if (definition?.publication) {
+    jobs = (await api.request<{ jobs: Job[] }>('/health')).jobs;
+    if (definition && job?.published) {
       const path = definition.outputs.find((path) => path.endsWith('.md'));
       if (path) transcript = (await api.page(path)).text;
       const vectors = definition.outputs.find((path) =>
@@ -217,12 +223,9 @@
   }
   async function updateInputs() {
     await prepareTracks();
-    await api.mcp('edit', {
-      resource: 'derivations',
-      action: 'update',
-      id: definitionId,
-      inputs: inputPaths()
-    });
+    await configure((config) =>
+      config.setIn(['derivations', definitionId, 'inputs'], inputPaths())
+    );
     await refresh();
   }
   async function enable() {
@@ -233,10 +236,8 @@
       page.path.endsWith('/recording.md') || page.path === 'recording.md'
         ? sibling(page.path, 'transcript.md')
         : page.path.replace(/\.md$/, '.transcript.md');
-    await api.mcp('edit', {
-      resource: 'derivations',
-      action: 'create',
-      definition: {
+    await configure((config) =>
+      config.setIn(['derivations', page.path], {
         source: page.path,
         recipe: 'speech2md-v1',
         fields: [
@@ -253,9 +254,29 @@
         inputs: inputPaths(),
         outputs: [base, base.replace(/\.md$/, '.voiceprints.json')],
         reference_namespace: 'speakers'
-      }
-    });
+      })
+    );
     await refresh();
+  }
+  async function configure(
+    change: (config: ReturnType<typeof parseDocument>) => void
+  ) {
+    const current = await api.page('config.yaml');
+    if (current.readonly) throw Error('Configuration write access is required');
+    const config = parseDocument(current.text);
+    if (config.errors.length) throw config.errors[0];
+    change(config);
+    await api.apply({
+      edit_summary: 'Configure recording processing',
+      edits: [
+        {
+          op: 'replace_page',
+          path: 'config.yaml',
+          base: current.text,
+          content: config.toString()
+        }
+      ]
+    });
   }
 </script>
 
@@ -264,7 +285,10 @@
     <strong>{job?.status || 'Not scheduled'}</strong>
     {#if job?.progress?.stage}<span>{job.progress.stage}</span>{/if}
     {#if !definition}<button
-        disabled={busy || dirty}
+        disabled={busy || dirty || !configWritable}
+        title={configWritable
+          ? undefined
+          : 'Requires configuration write access'}
         onclick={() => run(enable)}>Enable transcription</button
       >{/if}
     {#if definition}<button
@@ -274,17 +298,17 @@
       >{/if}
     <button disabled={busy} onclick={() => run(refresh)}>Refresh</button>
     {#if definition}<button
-        disabled={busy || dirty}
+        disabled={busy || dirty || !configWritable}
         onclick={() => run(updateInputs)}>Update source inputs</button
       >{/if}
     {#if job}<button
         disabled={busy || dirty || ['running', 'queued'].includes(job.status)}
         onclick={() =>
           run(async () => {
-            await api.mcp('edit', {
-              resource: 'jobs',
-              action: 'retry',
-              id: job!.id
+            await api.request('/worker', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ op: 'retry', id: job!.id })
             });
             await refresh();
           })}>{job.status === 'failed' ? 'Retry' : 'Regenerate'}</button

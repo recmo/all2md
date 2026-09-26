@@ -1,5 +1,10 @@
 import { test, expect } from './fixtures';
 
+test.skip(
+  !process.env.MDSTORE_TEST_ADMIN,
+  'Requires configuration write access'
+);
+
 test('recording review stages guidance and derived transcripts remain read-only', async ({
   page,
   request
@@ -76,6 +81,8 @@ test('recording review stages guidance and derived transcripts remain read-only'
   });
   expect(completed.ok()).toBeTruthy();
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await page.getByRole('button', { name: 'Regenerate', exact: true }).click();
+  await expect(page.getByText('queued', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: /Hello world/ }).click();
   await page.getByLabel('Speaker', { exact: true }).fill('Alice');
   await page.getByRole('button', { name: 'Stage assignment' }).click();

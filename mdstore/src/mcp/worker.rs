@@ -5,10 +5,13 @@ use crate::store::artifacts::Completion;
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum WorkerRequest {
+    Retry {
+        id: String,
+    },
     Search {
         id: String,
         attempt: String,
-        query: control::VectorQuery,
+        query: VectorQuery,
     },
     Claim {
         recipes: Vec<String>,
@@ -30,11 +33,23 @@ pub(super) enum WorkerRequest {
 }
 pub(super) async fn handle(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<WorkerRequest>,
 ) -> Response {
+    let is_worker = state.worker_token.as_deref().is_some_and(|token| {
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            == Some(token)
+    });
+    if !is_worker && !matches!(request, WorkerRequest::Retry { .. }) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     match run_blocking(move || match request {
+        WorkerRequest::Retry { id } => { state.store.retry_job(&id)?; Ok(Value::Null) },
         WorkerRequest::Search { id, attempt, query } => {
-            control::search(&state.store, query, Some((id, attempt)))
+            Ok(json!({"results": state.store.search_reference_vectors(query.space, query.vector, query.limit, query.filter, (id, attempt))?}))
         }
         WorkerRequest::Claim { recipes } => {
             Ok(serde_json::to_value(state.store.claim_job(&recipes)?)?)
@@ -70,4 +85,14 @@ pub(super) async fn handle(
         Ok(value) => Json(value).into_response(),
         Err(error) => problem::Problem::from_error(&error).into_response(),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct VectorQuery {
+    space: crate::vectors::EmbeddingSpace,
+    vector: Vec<f32>,
+    limit: usize,
+    #[serde(default)]
+    filter: std::collections::BTreeMap<String, Value>,
 }

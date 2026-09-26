@@ -29,7 +29,6 @@ struct AppState {
     sessions: session::Sessions,
 }
 
-mod control;
 mod events;
 mod files;
 mod problem;
@@ -110,10 +109,10 @@ pub async fn serve_listener(
 }
 
 async fn health(State(state): State<AppState>) -> Response {
-    match run_blocking(move || state.store.status()).await {
-        Ok(status) => (
+    match run_blocking(move || Ok((state.store.status()?, state.store.jobs()?))).await {
+        Ok((status, jobs)) => (
             StatusCode::OK,
-            Json(json!({"status": "ok", "store": status})),
+            Json(json!({"status": "ok", "store": status, "jobs": jobs})),
         )
             .into_response(),
         Err(error) => (
@@ -139,8 +138,8 @@ async fn authorize(State(state): State<AppState>, request: Request, next: Next) 
     let actual = request.headers().get("authorization")
         .and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
     let worker = state.worker_token.as_deref().is_some_and(|expected| actual == Some(expected));
-    if request.uri().path() == "/worker" {
-        return if worker { next.run(request).await } else { StatusCode::UNAUTHORIZED.into_response() };
+    if request.uri().path() == "/worker" && worker {
+        return next.run(request).await;
     }
     if worker && request.uri().path() != "/mcp" && !request.uri().path().starts_with("/mcp/") && request.uri().path() != "/health" {
         // File handlers still enforce the active lease and exact assigned path.
@@ -279,7 +278,7 @@ pub fn tool_names() -> [&'static str; 3] {
 }
 
 fn tools() -> Vec<Value> {
-    let mut tools = vec![
+    vec![
         json!({
             "name": "search",
             "description": "Hybrid exact, embedding, graph-assisted, and reranked search. Query expansion belongs to the caller.",
@@ -324,11 +323,7 @@ fn tools() -> Vec<Value> {
                 "additionalProperties": false
             }
         }),
-    ];
-    for tool in &mut tools {
-        control::extend_schema(tool);
-    }
-    tools
+    ]
 }
 
 fn edit_operation_schemas() -> Vec<Value> {
@@ -404,23 +399,6 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
         Err(error) => return rpc_error(id, -32602, &format!("invalid tool call: {error}")),
     };
     let result = match params.name.as_str() {
-        "get" if params.arguments.get("resource").is_some() => {
-            let store = Arc::clone(store);
-            run_blocking(move || control::read(&store, serde_json::from_value(params.arguments)?))
-                .await
-        }
-        "edit" if params.arguments.get("resource").is_some() => {
-            let store = Arc::clone(store);
-            run_blocking(move || control::edit(&store, serde_json::from_value(params.arguments)?))
-                .await
-        }
-        "search" if params.arguments.get("space").is_some() => {
-            let store = Arc::clone(store);
-            run_blocking(move || {
-                control::search(&store, serde_json::from_value(params.arguments)?, None)
-            })
-            .await
-        }
         "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
             Ok(arguments) => store
                 .search(&arguments.query, &arguments.variants)

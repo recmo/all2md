@@ -23,7 +23,8 @@ def test_recording_projection_ignores_notes_and_yaml_formatting(tmp_path):
         local_path(tmp_path, '../escape')
 
 
-def test_worker_downloads_inputs_and_publishes_assigned_outputs(tmp_path, monkeypatch):
+@pytest.mark.parametrize('job_id', ['fixture', '../outside', '/absolute/name'])
+def test_worker_downloads_inputs_and_publishes_assigned_outputs(tmp_path, monkeypatch, job_id):
     calls = []
     class Client:
         server = 'http://fixture'
@@ -42,11 +43,12 @@ def test_worker_downloads_inputs_and_publishes_assigned_outputs(tmp_path, monkey
         def poll(self): return 0
     monkeypatch.setattr('speech2md.worker.subprocess.Popen', Process)
     execute(Client(), {
-        'job': {'id': 'fixture', 'source': 'meeting/recording.md', 'attempt': 'lease'},
+        'job': {'id': job_id, 'source': 'meeting/recording.md', 'attempt': 'lease'},
         'recording': '---\naudio: audio.wav\n---\n# Meeting\n',
         'inputs': {'meeting/audio.wav': {'oid': 'a'*64, 'size': 5}},
         'outputs': ['meeting/transcript.md', 'meeting/transcript.voiceprints.json'],
     }, tmp_path)
+    assert len(list(tmp_path.glob('*/*/.worker.lock'))) == 1
     assert calls[-1][0] == '/worker'
     assert calls[-1][1]['op'] == 'complete'
     assert calls[-1][1]['outputs'] == {'meeting/transcript.md': '# Derived\n'}

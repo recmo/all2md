@@ -26,7 +26,7 @@ mod template;
 mod template_script;
 
 pub use config::{
-    ChunkConfig, Config, DateOrder, DocumentConfig, GitConfig, LinkConfig, ProviderConfig,
+    ChunkConfig, Config, DateOrder, DerivationConfig, DocumentConfig, GitConfig, LinkConfig, ProviderConfig,
     RelationLinkSyntax, RelationRule, RelationSelector, SearchConfig, SectionListRule,
     ServerConfig,
 };

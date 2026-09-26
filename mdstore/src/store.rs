@@ -684,7 +684,8 @@ impl Store {
             }
         }
         ensure_pages_match_config(&config, &pages)?;
-        current.artifacts.check_pages(&pages)?;
+        let artifacts = current.artifacts.configured(&config, &self.root)?;
+        artifacts.check_pages(&pages)?;
         if config.provider != current.config.provider && self.provider_factory.is_none() {
             bail!("provider changes require a daemon with a configurable provider");
         }
@@ -795,7 +796,7 @@ impl Store {
             provider.as_ref(),
         );
         *self.state.write() = Arc::new(StoreState {
-            artifacts: Arc::clone(&current.artifacts),
+            artifacts: Arc::new(artifacts),
             head: base_head,
             templates,
             config,
@@ -1379,7 +1380,7 @@ fn load_snapshot(
     provider: Arc<dyn RetrievalProvider>,
     generation: u64,
 ) -> Result<StoreState> {
-    let artifacts = artifacts::load_manifest(root, &head)?;
+    let artifacts = artifacts::load_manifest(root, &head)?.configured(&config, root)?;
     let pages = load_pages(root, &head, &config)?;
     artifacts.check_pages(&pages)?;
     let config_files = load_config_files(root, &head)?;

@@ -294,15 +294,10 @@ mod tests {
         (dir, app, store)
     }
     #[tokio::test]
-    async fn control_resources_share_tools_and_workers_keep_lease_boundaries() {
-        let (_dir, app, _) = fixture();
+    async fn processing_uses_config_health_and_worker_without_mcp_extensions() {
+        let (_dir, app, store) = fixture();
         let auth = ("authorization", "Bearer user");
         let worker = ("authorization", "Bearer worker");
-        async fn tool(app: &Router, auth: (&str, &str), name: &str, args: Value) -> Value {
-            let (_, _, body) = send(app, "POST", "/mcp", &[auth], json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}).to_string()).await;
-            let result: Value = serde_json::from_slice(&body).unwrap();
-            result
-        }
         send(
             &app,
             "PUT",
@@ -311,61 +306,86 @@ mod tests {
             "audio",
         )
         .await;
-        let created = tool(&app, auth, "edit", json!({"resource":"derivations","action":"create","definition":{"source":"recording.md","recipe":"fixture","fields":["hotwords"],"inputs":["audio.wav"],"outputs":["transcript.md"]}})).await;
-        assert_eq!(created["result"]["isError"], false, "{created}");
-        let id = created["result"]["structuredContent"]["id"]
-            .as_str()
-            .unwrap();
-        assert!(tool(&app, auth, "get", json!({"resource":"derivations"})).await["result"]["structuredContent"].get(id).is_some());
-        assert_eq!(
-            tool(
-                &app,
-                auth,
-                "edit",
-                json!({"resource":"derivations","action":"update","id":id,"inputs":["audio.wav"]})
+        async fn configure(app: &Router, store: &Store, declarations: Value) -> StatusCode {
+            let page = store.get_page("config.yaml", None).unwrap();
+            let mut config = crate::config::Config::from_yaml(page.text.as_ref().unwrap()).unwrap();
+            config.derivations = serde_json::from_value(declarations).unwrap();
+            let response = send(
+                app,
+                "PUT",
+                "/config.yaml",
+                &[
+                    ("authorization", "Bearer user"),
+                    ("if-match", &format!("\"{}\"", page.hash.unwrap())),
+                ],
+                serde_yaml::to_string(&config).unwrap(),
             )
-            .await["result"]["isError"],
-            false
+            .await;
+            response.0
+        }
+        let definition = json!({"source":"recording.md","recipe":"fixture","fields":["hotwords"],"inputs":["audio.wav"],"outputs":["transcript.md"]});
+        assert_eq!(
+            configure(&app, &store, json!({"recording": definition})).await,
+            StatusCode::OK
         );
+        let head = store.get_page("config.yaml", None).unwrap().revision;
+        assert!(
+            !configure(
+                &app,
+                &store,
+                json!({"recording": definition, "duplicate": definition})
+            )
+            .await
+            .is_success()
+        );
+        assert_eq!(store.get_page("config.yaml", None).unwrap().revision, head);
+        for (name, args) in [
+            ("get", json!({"resource":"jobs"})),
+            ("get", json!({"resource":"derivations"})),
+            (
+                "edit",
+                json!({"resource":"jobs","action":"retry","id":"recording"}),
+            ),
+            ("search", json!({"space":{},"vector":[],"limit":1})),
+        ] {
+            let (_, _, body) = send(&app, "POST", "/mcp", &[auth], json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}).to_string()).await;
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap()["result"]["isError"],
+                true
+            );
+        }
         assert_eq!(
             send(&app, "POST", "/mcp", &[worker], "{}").await.0,
             StatusCode::FORBIDDEN
         );
+        let claim = json!({"op":"claim","recipes":["fixture"]});
         assert_eq!(
             send(
                 &app,
                 "POST",
                 "/worker",
                 &[auth, ("content-type", "application/json")],
-                "{\"op\":\"claim\",\"recipes\":[\"fixture\"]}"
+                claim.to_string()
             )
             .await
             .0,
-            StatusCode::UNAUTHORIZED
+            StatusCode::FORBIDDEN
         );
-        let (_, _, claimed) = send(
+        let (_, _, body) = send(
             &app,
             "POST",
             "/worker",
             &[worker, ("content-type", "application/json")],
-            "{\"op\":\"claim\",\"recipes\":[\"fixture\"]}",
+            claim.to_string(),
         )
         .await;
-        let claimed: Value = serde_json::from_slice(&claimed).unwrap();
-        let attempt = claimed["job"]["attempt"].as_str().unwrap();
+        let assignment: Value = serde_json::from_slice(&body).unwrap();
+        let attempt = assignment["job"]["attempt"].as_str().unwrap();
         let query = json!({"space":{"namespace":"speakers","recipe":"fixture","dimensions":2},"vector":[1,0],"limit":5});
-        let vector = json!({"op":"search","id":id,"attempt":attempt,"query":query});
-        let (status, _, body) = send(&app, "POST", "/worker", &[worker, ("content-type", "application/json")], vector.to_string()).await;
-        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["results"], json!([]));
-        for attempt in [Value::Null, json!("wrong-lease")] {
-            let request = json!({"op":"search","id":id,"attempt":attempt,"query":query});
-            assert!(!send(&app, "POST", "/worker", &[worker, ("content-type", "application/json")], request.to_string()).await.0.is_success());
-        }
-        assert_eq!(tool(&app, auth, "search", query).await["result"]["isError"], false);
         for request in [
-            json!({"op":"heartbeat","id":id,"attempt":attempt,"progress":{"stage":"working"}}),
-            json!({"op":"complete","id":id,"attempt":attempt,"outputs":{"transcript.md":"# Transcript\n"}}),
+            json!({"op":"search","id":"recording","attempt":attempt,"query":query}),
+            json!({"op":"heartbeat","id":"recording","attempt":attempt,"progress":{"stage":"working"}}),
+            json!({"op":"complete","id":"recording","attempt":attempt,"outputs":{"transcript.md":"# Transcript\n"}}),
         ] {
             let (status, _, body) = send(
                 &app,
@@ -377,53 +397,41 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         }
+        let (_, _, body) = send(&app, "GET", "/health", &[auth], "").await;
+        let status: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["jobs"][0]["status"], "current");
+        assert_eq!(status["jobs"][0]["published"], true);
+        assert!(status["jobs"][0]["attempt"].is_null());
         assert_eq!(
-            tool(&app, auth, "get", json!({"resource":"jobs"})).await["result"]["structuredContent"]["jobs"]
-                [0]["status"],
-            "current"
-        );
-        assert_eq!(
-            tool(
+            send(
                 &app,
-                auth,
-                "edit",
-                json!({"resource":"jobs","action":"retry","id":id})
+                "POST",
+                "/worker",
+                &[auth, ("content-type", "application/json")],
+                json!({"op":"retry","id":"recording"}).to_string()
             )
-            .await["result"]["isError"],
-            false
+            .await
+            .0,
+            StatusCode::OK
         );
-        assert_eq!(
-            tool(
-                &app,
-                auth,
-                "edit",
-                json!({"resource":"derivations","action":"delete","id":id})
-            )
-            .await["result"]["isError"],
-            false
+        let claimed = store.claim_job(&["fixture".into()]).unwrap().unwrap();
+        assert_eq!(configure(&app, &store, json!({})).await, StatusCode::OK);
+        assert!(store.jobs().unwrap().is_empty());
+        assert!(store.get_page("transcript.md", None).unwrap().readonly);
+        let (status, _, _) = send(
+            &app,
+            "POST",
+            "/worker",
+            &[worker, ("content-type", "application/json")],
+            json!({"op":"heartbeat","id":"recording","attempt":claimed.job.attempt}).to_string(),
+        )
+        .await;
+        assert!(!status.is_success());
+        assert_ne!(
+            send(&app, "POST", "/mcp/worker", &[auth], "{}").await.0,
+            StatusCode::OK
         );
-        for name in ["get_page", "apply_edits"] {
-            assert_eq!(
-                tool(&app, auth, name, json!({})).await["error"]["code"],
-                -32602
-            );
-        }
-        for path in [
-            "/mcp/artifacts",
-            "/mcp/derivations",
-            "/mcp/jobs",
-            "/mcp/vectors/search",
-            "/mcp/lfs/objects/batch",
-            "/mcp/worker",
-            "/mcp/worker/claim",
-        ] {
-            assert_ne!(
-                send(&app, "POST", path, &[auth], "{}").await.0,
-                StatusCode::OK
-            );
-        }
     }
-
     #[tokio::test]
     async fn shutdown_closes_idle_change_streams() {
         let (_dir, app, store) = fixture();
@@ -957,7 +965,12 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(send(&app, "GET", "/", &[auth], "").await.0, StatusCode::OK);
-        for path in ["health/file.md", "mcp/file.md", "webui/file.md", "worker/file.md"] {
+        for path in [
+            "health/file.md",
+            "mcp/file.md",
+            "webui/file.md",
+            "worker/file.md",
+        ] {
             assert!(validate_repo_path(path).is_err());
         }
     }

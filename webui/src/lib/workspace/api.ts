@@ -91,7 +91,7 @@ export class Api {
       );
     return value as T;
   }
-  async mcp<T>(name: string, args: unknown): Promise<T> {
+  private async mcp<T>(name: string, args: unknown): Promise<T> {
     // Identical document edit requests have durable, content-derived receipts.
     // Retry the original bytes once if the commit response was lost.
     const body = JSON.stringify({

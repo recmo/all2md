@@ -1325,13 +1325,18 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["search", "get", "edit"]);
+    for tool in value["result"]["tools"].as_array().unwrap() {
+        assert!(tool["inputSchema"]["oneOf"].is_null());
+        assert!(tool["inputSchema"]["properties"].get("resource").is_none());
+        assert!(tool["inputSchema"]["properties"].get("space").is_none());
+    }
     let apply = value["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .find(|tool| tool["name"] == "edit")
         .unwrap();
-    let variants = apply["inputSchema"]["oneOf"][0]["properties"]["edits"]["items"]["oneOf"]
+    let variants = apply["inputSchema"]["properties"]["edits"]["items"]["oneOf"]
         .as_array()
         .unwrap();
     assert_eq!(variants.len(), 8);

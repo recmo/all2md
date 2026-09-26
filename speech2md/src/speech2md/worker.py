@@ -89,7 +89,9 @@ def execute(client: Client, assignment: dict, cache: Path):
     job = assignment["job"]
     # Include the server identity so jobs from separate stores cannot share paths.
     scope = hashlib.sha256(client.server.encode()).hexdigest()
-    root = local_path(cache.expanduser().resolve() / scope, job["id"])
+    # Configured job names are labels, not filesystem paths.
+    job_key = hashlib.sha256(job["id"].encode()).hexdigest()
+    root = cache.expanduser().resolve() / scope / job_key
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (root / ".worker.lock").open("a") as lock:
         # A sleeping process can still hold this cache after its server lease expires.

@@ -12,7 +12,9 @@ standalone speech-review server and hint-sidecar input format are removed.
    [the recording example](../mdstore/examples/meetings/example/recording.md)
    and [its schema](../mdstore/examples/meetings/schema.md).
 2. Submit the document, upload its source audio from the recording
-   view, and choose **Enable transcription**. Capture manifests and their
+   view, and choose **Enable transcription**. This writes a declaration in
+   `config.yaml` through the ordinary validated edit API and requires configuration
+   write access. Capture manifests and their
    constituent files can also be uploaded through `PUT /<path>` with `If-None-Match: *`.
 3. Run a worker with a separate `MDSTORE_WORKER_TOKEN`:
    `speech2md-worker --server https://your-store.example`. The server must have
@@ -36,14 +38,21 @@ or removing graph edges.
 **Regenerate** requests another run, **Retry** restarts failed work, and **Update
 source inputs** refreshes the explicit asset assignment after committing a new
 source reference. Replacing source bytes uses `PUT /<path>` with the current `If-Match` ETag;
-changed input hashes invalidate in-flight results. Deleting a
-derivation and its outputs is an explicit API operation; ordinary document
-editing cannot remove ownership.
+changed input hashes invalidate in-flight results. Removing a declaration from
+`config.yaml` stops scheduling and fences running attempts. Existing published
+outputs remain read-only and retain their provenance. Status comes from `/health`;
+retry and regeneration use `/worker`.
+
+Existing stores using the earlier registration API must move their declarations
+from `.mdstore-artifacts.json` into `config.yaml` under `derivations`, preserving
+each job ID and omitting the server-owned `publication` field. Old provenance is
+still readable, but registrations outside config no longer schedule jobs.
 
 ## Storage and provenance
 
-`.mdstore-artifacts.json` is committed and owns asset paths, derivation definitions,
-selected frontmatter fields, recipes, output paths, and publication provenance.
+`config.yaml` owns processing definitions. The committed `.mdstore-artifacts.json`
+records asset paths, output ownership, and publication provenance, including the
+source Git revision and input fingerprint for each result. It is not a second configuration surface.
 Source audio/video use internal Git LFS pointers and objects. JSON voiceprints
 and published Markdown stay in ordinary Git. File URLs hide the storage choice. Each publication records the exact
 source revision, input fingerprint, output hashes, worker attempt, and frozen

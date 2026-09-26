@@ -335,20 +335,39 @@ are reserved top-level names. The independently built frontend lives at `/webui/
 | `POST /mcp` | MCP search, metadata reads, and atomic multi-file edits |
 | `GET /mcp/events` | SSE repository revision and job-change notifications |
 | `POST/DELETE /mcp/session` | Exchange bearer credential for browser session / sign out |
-| `POST /worker` | Claim work, renew a lease, publish outputs, or search leased references (`op`: `claim`, `heartbeat`, `complete`, `search`) |
-| `GET /health` | Health status |
+| `POST /worker` | Claim work, renew a lease, publish outputs, or search leased references (`op`: `claim`, `heartbeat`, `complete`, `search`, `retry`) |
+| `GET /health` | Health and processing job status |
 
-MCP exposes three tools:
+MCP exposes only three document tools:
 
-- `get({path, start_line?, end_line?})` reads documents; `get({resource: "derivations"})`
-  reads processing definitions and `get({resource: "jobs"})` reconciles and reads job status.
-- `edit({edit_summary, edits})` validates and commits atomic document batches.
-  `edit({resource: "derivations", action: "create", definition})` registers processing;
-  `action: "update"` takes `id` and `inputs`, and `action: "delete"` takes `id`.
-  `edit({resource: "jobs", action: "retry", id})` retries or regenerates a job.
-  Control edits are separate operations, not part of document batches.
-- `search({query, variants})` searches documents; `search({space, vector, limit, filter?})`
-  searches an explicit embedding space.
+- `get({path, start_line?, end_line?})` reads documents and directories.
+- `edit({edit_summary, edits})` validates and commits an atomic document batch.
+- `search({query, variants})` searches documents.
+
+Processing declarations are ordinary operational configuration in `config.yaml`:
+
+```yaml
+derivations:
+  meeting:
+    source: meetings/example/recording.md
+    recipe: speech2md-v1
+    fields: [audio, hotwords, attendees, edits]
+    inputs: [meetings/example/audio.m4a]
+    outputs: [meetings/example/transcript.md, meetings/example/voiceprints.json]
+    reference_namespace: speakers
+```
+
+Upload inputs before configuring a derivation. Configuration writes use the same
+conditional file writes or document edits as other configuration, require config
+write access, and validate sources, inputs, output ownership, and the corpus.
+Names identify jobs. Changing consumed inputs fences old leases and queues work.
+Removing a declaration stops scheduling and fences its running job; published
+outputs retain their provenance and read-only protection. Published output paths
+cannot be reassigned by changing a declaration: use a new name and output paths.
+`GET /health` returns a `jobs` array with status, progress, errors, and whether a
+publication exists, without active lease credentials. `POST /worker` with
+`{op: "retry", id}` requests retry/regeneration using ordinary authenticated
+client credentials (including browser sessions) or worker credentials.
 
 File listings and metadata include assets; there is no separate asset inventory API.
 
@@ -367,7 +386,7 @@ uses ordinary file URLs and cookies, without playback tickets. API clients can
 continue using bearer authentication. Reverse proxies must preserve Host and
 Origin consistently; serve the frontend and API on the same origin.
 
-Workers use a separate `MDSTORE_WORKER_TOKEN` and do not access MCP. All worker
+Execution and vector search require `MDSTORE_WORKER_TOKEN` and do not access MCP. All worker
 operations use `POST /worker`: `claim` takes `recipes`; `heartbeat` takes `id`,
 `attempt`, optional `progress` and `failure`; `complete` takes `id`, `attempt`,
 `outputs` and optional `assets`; `search` takes `id`, `attempt`, and a `query`
@@ -385,7 +404,7 @@ transfer API and no git-lfs executable or Git filter requirement. A Git push alo
 does not transfer binary objects: back up `.git/lfs/objects` separately or provide
 external LFS hosting. No object garbage collection is performed, preserving history.
 
-Published output ownership resides in committed `.mdstore-artifacts.json`, not
+Published output ownership and provenance reside in committed `.mdstore-artifacts.json`, not
 editable document frontmatter. Ordinary writes cannot modify owned paths or hide
 published Markdown and derivation sources through document-selection settings.
 The target schema declaration `backlinks(required=False)` permits incoming links
