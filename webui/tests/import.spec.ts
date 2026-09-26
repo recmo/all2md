@@ -17,7 +17,7 @@ test('folder import preserves hierarchy, stages Markdown, and uploads assets', a
   writeFileSync(join(folder, 'audio.wav'), 'audio fixture');
   writeFileSync(join(folder, 'ignored.exe'), 'unsupported');
   try {
-    await page.goto('/');
+    await page.goto('/webui/');
     await page.getByRole('treeitem', { name: 'Import', exact: true }).click();
     await page.getByLabel('Choose folder').setInputFiles(folder);
     await page.getByLabel('Destination folder').fill('incoming');
@@ -29,7 +29,7 @@ test('folder import preserves hierarchy, stages Markdown, and uploads assets', a
     await expect(dialog.getByText('Staged', { exact: true })).toBeVisible();
     await expect(dialog.getByText('Uploaded', { exact: true })).toBeVisible();
     await expect(dialog.getByText('Skipped: unsupported file')).toBeVisible();
-    const manifest = await (await request.get('/artifacts')).json();
+    const manifest = await (await request.get('/mcp/artifacts')).json();
     expect(manifest.assets['incoming/bundle/audio.wav']).toBeTruthy();
     expect(manifest.assets['incoming/bundle/notes/readme.md']).toBeUndefined();
     await dialog.getByRole('button', { name: 'Close' }).click();
@@ -51,7 +51,7 @@ test('external file drops never overwrite existing documents or partially import
   page,
   request
 }) => {
-  await page.goto('/#welcome.md');
+  await page.goto('/webui/#welcome.md');
   await expect(
     page.getByRole('heading', { name: 'Welcome', exact: true })
   ).toBeVisible();
@@ -70,6 +70,8 @@ test('external file drops never overwrite existing documents or partially import
     'Destination already exists'
   );
   expect(
-    (await (await request.get('/artifacts')).json()).assets['unexpected.wav']
+    (await (await request.get('/mcp/artifacts')).json()).assets[
+      'unexpected.wav'
+    ]
   ).toBeUndefined();
 });

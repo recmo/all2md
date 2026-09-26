@@ -1,31 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import type { Api, Page } from '../workspace/api';
-  let { page, api }: { page: Page; api: Api } = $props();
-  let url = $state(''),
-    error = $state('');
-  onMount(() => {
-    let active = true;
-    void api
-      .request<{ url: string }>(
-        '/assets/ticket?path=' + encodeURIComponent(page.path),
-        { method: 'POST' }
-      )
-      .then((ticket) => {
-        if (active) url = ticket.url;
-      })
-      .catch((e) => {
-        if (active) error = String(e);
-      });
-    return () => {
-      active = false;
-    };
-  });
+  import { fileUrl, type Api, type Page } from '../workspace/api';
+  let { page }: { page: Page; api: Api } = $props();
+  const url = $derived(fileUrl(page.path));
 </script>
 
 <section>
   <p>{page.path} · {((page.asset?.size || 0) / 1024 / 1024).toFixed(2)} MiB</p>
-  {#if error}<p role="alert">{error}</p>{/if}
   {#if url}
     {#if /\.(mp4|webm)$/i.test(page.path)}
       <!-- Original uploads may precede transcription; no caption track exists yet. -->

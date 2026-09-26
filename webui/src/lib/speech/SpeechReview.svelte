@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { Api, Page } from '../workspace/api';
+  import { fileUrl, type Api, type Page } from '../workspace/api';
   import type { AppEdit } from '../apps/apps';
   import {
     properties,
@@ -84,7 +84,7 @@
   async function refresh() {
     const manifest = await api.request<{
       derivations: Record<string, Definition>;
-    }>('/artifacts');
+    }>('/mcp/artifacts');
     definitionId =
       Object.keys(manifest.derivations).find(
         (id) => manifest.derivations[id].source === page.path
@@ -92,7 +92,7 @@
     definition = Object.values(manifest.derivations).find(
       (d) => d.source === page.path
     );
-    jobs = await api.request<Job[]>('/jobs');
+    jobs = await api.request<Job[]>('/mcp/jobs');
     if (definition?.publication) {
       const path = definition.outputs.find((path) => path.endsWith('.md'));
       if (path) transcript = (await api.page(path)).text;
@@ -101,9 +101,7 @@
       );
       if (vectors && job?.status === 'current') {
         suggestions = (
-          await api.request<{ records: typeof suggestions }>(
-            '/assets?path=' + encodeURIComponent(vectors)
-          )
+          await api.request<{ records: typeof suggestions }>(fileUrl(vectors))
         ).records;
       }
     }
@@ -116,7 +114,7 @@
       const capture = await api.request<{
         audio: { file?: string; role: string }[];
         container?: { file: string };
-      }>('/assets?path=' + encodeURIComponent(manifestPath));
+      }>(fileUrl(manifestPath));
       tracks = capture.audio.map((a) => ({
         path: sibling(manifestPath, a.file || capture.container!.file),
         role: a.role
@@ -136,13 +134,7 @@
         'This capture stores multiple tracks in one container. Browser track selection is unavailable; use the original capture to review track-specific audio.';
       return;
     }
-    if (source)
-      playback = (
-        await api.request<{ url: string }>(
-          '/assets/ticket?path=' + encodeURIComponent(source.path),
-          { method: 'POST' }
-        )
-      ).url;
+    if (source) playback = fileUrl(source.path);
   }
   onMount(() => {
     let disposed = false;
@@ -213,7 +205,7 @@
   }
   async function updateInputs() {
     await prepareTracks();
-    await api.request('/derivations/' + definitionId, {
+    await api.request('/mcp/derivations/' + definitionId, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ inputs: inputPaths() })
@@ -228,7 +220,7 @@
       page.path.endsWith('/recording.md') || page.path === 'recording.md'
         ? sibling(page.path, 'transcript.md')
         : page.path.replace(/\.md$/, '.transcript.md');
-    await api.request('/derivations', {
+    await api.request('/mcp/derivations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -276,7 +268,7 @@
         disabled={busy || dirty || ['running', 'queued'].includes(job.status)}
         onclick={() =>
           run(async () => {
-            await api.request(`/jobs/${job!.id}/retry`, { method: 'POST' });
+            await api.request(`/mcp/jobs/${job!.id}/retry`, { method: 'POST' });
             await refresh();
           })}>{job.status === 'failed' ? 'Retry' : 'Regenerate'}</button
       >{/if}
@@ -295,11 +287,11 @@
           const file = event.currentTarget.files?.[0];
           if (file)
             void run(async () => {
-              await api.request(
-                '/assets?path=' +
-                  encodeURIComponent(sibling(page.path, guidance.audio!)),
-                { method: 'PUT', body: file }
-              );
+              await api.request(fileUrl(sibling(page.path, guidance.audio!)), {
+                method: 'PUT',
+                headers: { 'If-None-Match': '*' },
+                body: file
+              });
               await prepareTracks();
             });
         }}

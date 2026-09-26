@@ -34,23 +34,24 @@ test('recording review stages guidance and derived transcripts remain read-only'
   audio.writeUInt16LE(16, 34);
   audio.write('data', 36);
   audio.writeUInt32LE(audio.length - 44, 40);
-  const upload = await request.put('/assets?path=audio.wav', {
-    data: audio
+  const upload = await request.put('/audio.wav', {
+    data: audio,
+    headers: { 'If-None-Match': '*' }
   });
   expect(upload.ok()).toBeTruthy();
-  await page.goto('/#recording.md');
+  await page.goto('/webui/#recording.md');
   await page.getByRole('button', { name: 'Enable transcription' }).click();
   await expect(page.getByText('queued', { exact: true })).toBeVisible();
   const headers = { Authorization: 'Bearer browser-test-worker' };
   const assignment = await (
-    await request.post('http://127.0.0.1:43133/worker/claim', {
+    await request.post('http://127.0.0.1:43133/mcp/worker/claim', {
       headers,
       data: { recipes: ['speech2md-v1'] }
     })
   ).json();
   const artifact = await (
     await request.put(
-      `http://127.0.0.1:43133/worker/outputs?job=${assignment.job.id}&attempt=${assignment.job.attempt}&path=transcript.voiceprints.json`,
+      `http://127.0.0.1:43133/transcript.voiceprints.json?job=${assignment.job.id}&attempt=${assignment.job.attempt}`,
       {
         headers,
         data: JSON.stringify({
@@ -61,7 +62,7 @@ test('recording review stages guidance and derived transcripts remain read-only'
     )
   ).json();
   const completed = await request.post(
-    `http://127.0.0.1:43133/worker/jobs/${assignment.job.id}/complete`,
+    `http://127.0.0.1:43133/mcp/worker/jobs/${assignment.job.id}/complete`,
     {
       headers,
       data: {

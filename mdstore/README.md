@@ -323,41 +323,57 @@ mdstore supports immutable content-addressed assets and generic leased derivatio
 Speech-specific guidance and execution live in webui and speech2md; the server
 stores input/output declarations and validates published Markdown normally.
 
+The repository is served directly under `/`. `/health`, `/mcp`, and `/webui`
+are reserved top-level names. The independently built frontend lives at `/webui/`.
+
 | Route | Purpose |
 | --- | --- |
-| `GET /artifacts` | Committed assets, derivation definitions, and provenance |
-| `PUT /assets?path=…` | Upload an immutable asset and commit its LFS pointer |
-| `GET /assets?path=…` | Authenticated streaming download with byte ranges |
-| `POST /assets/ticket?path=…` | One-hour playback URL for native browser media |
-| `POST /derivations` | Register source, recipe, selected fields, input assets, outputs |
-| `PATCH /derivations/{id}` | Replace the explicit `inputs` asset list |
-| `DELETE /derivations/{id}` | Remove a definition and its outputs with normal validation |
-| `GET /jobs` | Reconcile and read durable job status |
-| `POST /jobs/{id}/retry` | Retry or explicitly regenerate |
-| `POST /vectors/search` | Exact cosine search in an explicit embedding space |
-| `POST /worker/claim` | Claim work for supported recipe names |
-| `GET /worker/inputs` | Download an input authorized by job and attempt |
-| `PUT /worker/outputs` | Upload a leased output object |
-| `POST /worker/jobs/{id}/heartbeat` | Renew lease, report progress or failure |
-| `POST /worker/jobs/{id}/complete` | Validate and atomically publish assigned outputs |
-| `POST /worker/vectors/search` | Search only frozen reference artifacts |
-| `POST /lfs/objects/batch` | Git LFS basic transfer discovery |
-| `GET/PUT /lfs/objects/{oid}` | Authenticated LFS object transfer |
+| `GET /`, `GET /<folder>/` | Directory inventory |
+| `GET/HEAD /<path>` | Raw text or binary content, with ETags and media byte ranges |
+| `PUT /<path>` | Create or replace a file; Markdown/config changes are validated |
+| `DELETE /<path>` | Delete a file with normal validation and ownership checks |
+| `POST /mcp` | MCP search, metadata reads, and atomic multi-file edits |
+| `POST/DELETE /mcp/session` | Exchange bearer credential for browser session / sign out |
+| `GET /mcp/artifacts` | Assets, derivation definitions, and provenance |
+| `POST /mcp/derivations` | Register a derivation |
+| `PATCH/DELETE /mcp/derivations/{id}` | Update input assignment / remove definition and outputs |
+| `GET /mcp/jobs` | Reconcile and read durable job status |
+| `POST /mcp/jobs/{id}/retry` | Retry or explicitly regenerate |
+| `POST /mcp/vectors/search` | Exact cosine search in an explicit embedding space |
+| `POST /mcp/worker/claim` | Claim supported work |
+| `POST /mcp/worker/jobs/{id}/heartbeat` | Renew lease, report progress or failure |
+| `POST /mcp/worker/jobs/{id}/complete` | Validate and atomically publish assigned outputs |
+| `POST /mcp/worker/vectors/search` | Search frozen reference artifacts |
+| `POST /mcp/lfs/objects/batch` | Git LFS basic transfer discovery |
+| `GET/PUT /mcp/lfs/objects/{oid}` | Authenticated LFS object transfer |
 
-Worker routes require a separate `MDSTORE_WORKER_TOKEN`; it grants no ordinary
-repository editing access. Ordinary routes retain the daemon's configured bearer
-authentication. Playback URLs are short-lived bearer capabilities; avoid logging
-them. Transfer limits are 16 GiB for source assets and 64 MiB for worker outputs.
-`get_page` and directory inventory include asset metadata and effective read-only
-status without downloading binary contents.
+Create with `If-None-Match: *`; replace or delete with `If-Match: "<hash>"`.
+Missing preconditions return 428; stale preconditions return 412. Request
+`Accept: application/vnd.mdstore.page+json` on a file URL for page metadata,
+schema, hash, and effective read-only status. MCP `apply_edits` retains atomic
+multi-file submissions. Asset paths can be replaced conditionally; old objects
+remain in LFS for historical versions. Assets used by a derivation cannot be deleted.
 
-Set `MDSTORE_PUBLIC_URL` to the daemon's externally reachable HTTP(S) origin to
-use its LFS basic transfer API. Configure Git clients' LFS URL to that origin plus
-`/lfs`, with the daemon's ordinary bearer authorization. Source uploads and worker
-publication do not require a local git-lfs executable. They explicitly write
-standard pointers and LFS objects without executing Git filters. A Git push alone
-does not transfer objects: use LFS transfer or back up `.git/lfs/objects` separately.
-No object garbage collection is performed, preserving retained history.
+Browsers exchange the configured bearer credential for an opaque 12-hour
+HttpOnly, SameSite=Strict cookie, Secure except on plain loopback development.
+Sessions survive page reloads but end on logout, expiry, or daemon restart.
+Cookie-authenticated writes require a same-origin Origin header. Native media
+uses ordinary file URLs and cookies, without playback tickets. API clients can
+continue using bearer authentication. Reverse proxies must preserve Host and
+Origin consistently; serve the frontend and API on the same origin.
+
+Workers use a separate `MDSTORE_WORKER_TOKEN`. They transfer through ordinary
+file URLs with `?job=<id>&attempt=<lease>`, restricted to assigned input and output
+paths. Uploaded outputs remain unpublished until completion. Worker credentials
+grant no ordinary repository access. Transfer limits are 16 GiB for source assets
+and 64 MiB for worker outputs.
+
+Set `MDSTORE_PUBLIC_URL` to the externally reachable HTTP(S) origin and configure
+Git clients' LFS URL to that origin plus `/mcp/lfs`, with bearer authorization.
+Source uploads and worker publication write standard pointers and objects without
+requiring git-lfs or running Git filters. A Git push alone does not transfer
+objects: use LFS transfer or back up `.git/lfs/objects` separately. No object
+garbage collection is performed, preserving retained history.
 
 Published output ownership resides in committed `.mdstore-artifacts.json`, not
 editable document frontmatter. Ordinary writes cannot modify owned paths or hide

@@ -11,9 +11,9 @@ standalone speech-review server and hint-sidecar input format are removed.
    The Markdown body contains human notes. Start from
    [the recording example](../mdstore/examples/meetings/example/recording.md)
    and [its schema](../mdstore/examples/meetings/schema.md).
-2. Submit the document, upload its immutable source audio from the recording
+2. Submit the document, upload its source audio from the recording
    view, and choose **Enable transcription**. Capture manifests and their
-   constituent files can also be uploaded through `PUT /assets?path=…`.
+   constituent files can also be uploaded through `PUT /<path>` with `If-None-Match: *`.
 3. Run a worker with a separate `MDSTORE_WORKER_TOKEN`:
    `speech2md-worker --server https://your-store.example`. The server must have
    the same worker token configured. This starts no worker on browser clients.
@@ -35,7 +35,8 @@ or removing graph edges.
 
 **Regenerate** requests another run, **Retry** restarts failed work, and **Update
 source inputs** refreshes the explicit asset assignment after committing a new
-source reference. Replacing source bytes requires a new asset path. Deleting a
+source reference. Replacing source bytes uses `PUT /<path>` with the current `If-Match` ETag;
+changed input hashes invalidate in-flight results. Deleting a
 derivation and its outputs is an explicit API operation; ordinary document
 editing cannot remove ownership.
 

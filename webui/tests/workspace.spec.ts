@@ -5,7 +5,7 @@ test('language fences retain highlighting through preview, editing and offline r
   page,
   context
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   const samples = [
     ['starlark', 'markdown("rumdl.toml")', 'rumdl.toml'],
@@ -70,7 +70,7 @@ test('offline editing survives reload and search uses the MCP API online', async
   page.on('request', (r) => {
     if (r.url().endsWith('/mcp')) calls.push(r.postDataJSON().params.name);
   });
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
   await replaceDocument(page, '# Welcome\n\nOffline knowledge garden.\n');
   await expect(page.locator('.document-header')).toContainText('Valid');
@@ -96,22 +96,20 @@ test('offline editing survives reload and search uses the MCP API online', async
   await page.locator('#search').press('Enter');
   await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
   expect(calls).toContain('search');
-  expect(calls).toContain('get_page');
+  // Inventory now uses GET on repository paths.
 });
 
-test('connection settings are separate and keep the token in memory across SPA navigation', async ({
+test('connection settings exchange the token for a session that survives navigation and reload', async ({
   page
 }) => {
-  await page.goto('/settings');
+  await page.goto('/webui/settings');
   await expect(
     page.getByRole('heading', { name: 'Settings', exact: true })
   ).toBeVisible();
   await page.getByLabel('Bearer token').fill('test-memory-token');
   const listing = page.waitForRequest(
     (r) =>
-      r.url().endsWith('/mcp') &&
-      r.postDataJSON()?.params?.name === 'get_page' &&
-      r.postDataJSON()?.params?.arguments?.path === '/' &&
+      r.url().endsWith('/mcp/session') &&
       r.headers()['authorization'] === 'Bearer test-memory-token'
   );
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
@@ -128,7 +126,7 @@ test('connection settings are separate and keep the token in memory across SPA n
     'test-memory-token'
   );
   await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
-  await expect(page).toHaveURL('/#@settings');
+  await expect(page).toHaveURL('/webui/#@settings');
   await expect(
     page.getByRole('heading', { name: 'Settings', exact: true })
   ).toBeVisible();
@@ -142,7 +140,7 @@ test('connection settings are separate and keep the token in memory across SPA n
 test('configuration is read-only YAML and template fences are highlighted', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page
     .getByRole('treeitem', { name: 'config.yaml', exact: true })
     .click();
@@ -170,7 +168,7 @@ test('configuration is read-only YAML and template fences are highlighted', asyn
 test('folder hierarchy opens documents with rendered task lists', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   const notes = page.getByRole('treeitem', {
     name: 'notes / guides',
     exact: true
@@ -202,7 +200,7 @@ test('folder hierarchy opens documents with rendered task lists', async ({
 test('switching rendered and code preserves changes and undo history', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Replacement\n\nText.\n');
   await page.getByRole('radio', { name: 'Render', exact: true }).click();
@@ -223,7 +221,7 @@ test('switching rendered and code preserves changes and undo history', async ({
 test('new empty documents can be edited and discarded without stale content', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page
     .getByRole('treeitem', { name: 'notes / guides', exact: true })
     .click({ button: 'right' });
@@ -259,7 +257,7 @@ test('tree offline badges update and folder menus create drafts in place', async
   page,
   context
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   const document = page.getByRole('treeitem', {
     name: 'tasks.md',
     exact: true
@@ -325,7 +323,7 @@ test('tree offline badges update and folder menus create drafts in place', async
 test('CodeView retains its full scroll range across rendered/code switches', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'long.md', exact: true }).click();
   const view = page.locator('.code-editor');
   const pane = page.locator('main.document-main');
@@ -358,7 +356,7 @@ test('CodeView retains its full scroll range across rendered/code switches', asy
 test('validation does not require a commit description, but submission does', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Other note\n\nValidate before describing.\n');
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
@@ -378,7 +376,7 @@ test('validation does not require a commit description, but submission does', as
 test('validation findings navigate to inline editor annotations and clear after edits', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Other note\n\n[Broken](missing-target.md)\n');
   await page.getByRole('radio', { name: 'Render', exact: true }).click();
@@ -405,7 +403,7 @@ test('privileged configuration and template edits validate in the editor', async
   page
 }) => {
   test.skip(!process.env.MDSTORE_TEST_ADMIN, 'Requires privileged test daemon');
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.locator('[data-item-path="schema.md"]').click();
   await replaceDocument(page, '```starlark\nunknown_rule()\n```\n');
   await expect(page.locator('.validation-diagnostic')).toContainText(
@@ -455,7 +453,7 @@ test('WASM validates offline without fetching unchanged document source or calli
     serverValidations++;
     await route.abort();
   });
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Other\n\nCurrent edit.\n');
   await expect(page.locator('.document-status')).toContainText('Valid');
@@ -490,22 +488,17 @@ test('WASM catches an unchanged document losing its reciprocal link without fetc
     };
   });
   let fetchedB = false;
-  await page.route('**/mcp', async (route) => {
-    const request = route.request().postDataJSON();
-    if (
-      request.params?.name === 'get_page' &&
-      request.params.arguments.path === 'reciprocal/b.md'
-    )
-      fetchedB = true;
+  await page.route('**/reciprocal/b.md', async (route) => {
+    fetchedB = true;
     await route.continue();
   });
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'a.md', exact: true }).click();
   await page.evaluate(async () => {
     await navigator.serviceWorker.ready;
   });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
-  fetchedB = false; // Initial MCP traversal cached all published sources.
+  fetchedB = false; // Initial HTTP traversal cached all published sources.
   await context.setOffline(true);
   await replaceDocument(page, '# Removed link\n');
   await expect
@@ -527,22 +520,17 @@ test('WASM template changes validate the cached corpus offline', async ({
 }) => {
   test.skip(!process.env.MDSTORE_TEST_ADMIN, 'Requires privileged test daemon');
   let fetchedB = false;
-  await page.route('**/mcp', async (route) => {
-    const request = route.request().postDataJSON();
-    if (
-      request.params?.name === 'get_page' &&
-      request.params.arguments.path === 'reciprocal/b.md'
-    )
-      fetchedB = true;
+  await page.route('**/reciprocal/b.md', async (route) => {
+    fetchedB = true;
     await route.continue();
   });
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.locator('[data-item-path="reciprocal/schema.md"]').click();
   await page.evaluate(async () => {
     await navigator.serviceWorker.ready;
   });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
-  fetchedB = false; // Initial MCP traversal cached all published sources.
+  fetchedB = false; // Initial HTTP traversal cached all published sources.
   await context.setOffline(true);
   await replaceDocument(
     page,
@@ -575,7 +563,7 @@ test('inline diagnostics remain visible until background validation replaces the
       }
     };
   });
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Note\n\n[Missing](first-missing.md)\n');
   const diagnostics = page.locator('.validation-diagnostic');
@@ -613,7 +601,7 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
   page,
   context
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   const base = '# Other note\n\nKeep it simple.\n';
   const text = '# Other note\n\nKeep it simple.\n\n\nMore.\n';
@@ -656,7 +644,7 @@ test('tree folders and moves persist offline and stage rewritten backlinks', asy
   page,
   context
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await page
     .locator('.document-tree-host')
@@ -675,7 +663,7 @@ test('tree folders and moves persist offline and stage rewritten backlinks', asy
   await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
   await page.getByLabel('Destination path').fill('archive/other.md');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.locator('dialog')).not.toBeVisible();
+  await expect(page.locator('dialog.tree-dialog')).not.toBeVisible();
   await expect(
     page.locator('[data-item-path="archive/other.md"]')
   ).toBeVisible();
@@ -717,7 +705,7 @@ test('tree folders and moves persist offline and stage rewritten backlinks', asy
 test('drag moves and double-click renames stage backlink updates', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await page
     .locator('.document-tree-host')
@@ -812,7 +800,7 @@ test('sidebar contains only trees with Search and Settings pages', async ({
   page,
   context
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await expect(page.locator('aside input')).toHaveCount(0);
   await expect(page.locator('aside footer')).toHaveCount(0);
@@ -867,7 +855,7 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   page,
   context
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(
     page,
@@ -964,7 +952,7 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
 test('server rejection preserves staged edits and description', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Other note\n\nKeep this local draft.\n');
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
@@ -999,7 +987,7 @@ test('server rejection preserves staged edits and description', async ({
 test('file and folder deletion is staged, validated, undoable, and survives reload', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(page, '# Other note\n\nPreserve this draft on undo.\n');
   await page
@@ -1065,7 +1053,7 @@ test('file and folder deletion is staged, validated, undoable, and survives relo
 test('long tree names preserve badges and display validation and deletion states', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   const name =
     'a-very-long-task-file-name-that-must-leave-room-for-validation-and-sync-status.md';
   const path = 'notes/guides/' + name;
@@ -1115,7 +1103,7 @@ test('mobile navigation overlays content, preserves the tree, and closes accessi
   page
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/');
+  await page.goto('/webui/');
   const drawer = page.locator('#navigation-sidebar');
   const toggle = page.getByRole('button', {
     name: 'Open navigation',
@@ -1195,7 +1183,7 @@ test('frontmatter renders compact properties on mobile and preserves YAML in edi
   page
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/');
+  await page.goto('/webui/');
   await page
     .getByRole('button', { name: 'Open navigation', exact: true })
     .click();
@@ -1252,7 +1240,7 @@ test('reconciliation merges remote changes before validated submission', async (
   const path = 'merge-clean.md';
   const base = '# Original\n\nShared paragraph.\n\nOriginal ending.\n';
   await remoteEdit(page, path, base);
-  await page.goto('/#' + path);
+  await page.goto('/webui/#' + path);
   await expect(page.locator('#preview')).toContainText('Original ending.');
   await replaceDocument(
     page,
@@ -1294,7 +1282,7 @@ test('conflicts persist offline, resolve per passage, and detect another server 
   const base = '# Conflict\n\nOriginal passage.\n\nShared ending.\n';
   const theirs = base.replace('Original passage.', 'Server passage.');
   await remoteEdit(page, path, base);
-  await page.goto('/#' + path);
+  await page.goto('/webui/#' + path);
   await expect(page.locator('#preview')).toContainText('Original passage.');
   await replaceDocument(
     page,
@@ -1361,7 +1349,7 @@ test('Starlark apps render SVAR views and stage validated actions offline', asyn
   page,
   context
 }) => {
-  await page.goto('/#tasks%2Fv1%2Fapp.md');
+  await page.goto('/webui/#tasks%2Fv1%2Fapp.md');
   await expect(
     page.getByRole('button', { name: 'Tasks', exact: true })
   ).toBeVisible();
@@ -1453,7 +1441,7 @@ test('Starlark apps render SVAR views and stage validated actions offline', asyn
 test('computed schema errors are concise and link to their template source', async ({
   page
 }) => {
-  await page.goto('/#tasks%2Fv1%2F2026%2F09%2F23-001-plan.md');
+  await page.goto('/webui/#tasks%2Fv1%2F2026%2F09%2F23-001-plan.md');
   await expect(page.locator('#preview')).toContainText('Plan a project');
   await replaceDocument(
     page,
@@ -1485,7 +1473,7 @@ test('computed schema errors are concise and link to their template source', asy
 test('resource timeline stacks overlapping tasks on the same resource row', async ({
   page
 }) => {
-  await page.goto('/#tasks%2Fv1%2Fapp.md');
+  await page.goto('/webui/#tasks%2Fv1%2Fapp.md');
   await page.getByRole('button', { name: 'Workload', exact: true }).click();
   const chart = page.getByRole('region', { name: 'Collection schedule' });
   await expect(chart.locator('.wx-bar.resource')).toHaveCount(1);
@@ -1525,7 +1513,7 @@ test('Gantt gestures stage moves and edge resizing, cancel safely, and work offl
   page,
   context
 }) => {
-  await page.goto('/#tasks%2Fv1%2Fapp.md');
+  await page.goto('/webui/#tasks%2Fv1%2Fapp.md');
   await page.getByRole('button', { name: 'Schedule', exact: true }).click();
   const chart = page.getByRole('region', { name: 'Collection schedule' });
   const task = chart.getByRole('button', {
@@ -1638,7 +1626,7 @@ test('Markdown frontmatter uses YAML highlighting without consuming later Markdo
   page,
   context
 }) => {
-  await page.goto('/#other.md');
+  await page.goto('/webui/#other.md');
   await replaceDocument(
     page,
     '---\nmdstore: example\ncount: 3\n---\n\n# Planner\n\n---\n\nmdstore: ordinary prose\n\n```starlark\nvalue = True\n```\n'
@@ -1698,7 +1686,7 @@ test('document selection changes remain incomplete locally but can be submitted'
   page
 }) => {
   test.skip(!process.env.MDSTORE_TEST_ADMIN, 'Requires privileged test daemon');
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.locator('[data-item-path="config.yaml"]').click();
   const response = await page.request.post('/mcp', {
     data: {
@@ -1736,7 +1724,7 @@ test('document selection changes remain incomplete locally but can be submitted'
 test('reconnect updates the selected clean document and its next edit base', async ({
   page
 }) => {
-  await page.goto('/#other.md');
+  await page.goto('/webui/#other.md');
   await expect(page.locator('#preview')).toContainText('Keep it simple.');
   const updated = '# Other note\n\nUpdated remotely.\n';
   await remoteEdit(
@@ -1768,7 +1756,7 @@ test('unavailable offline document cache does not block saved drafts or submissi
       throw new DOMException('Full', 'QuotaExceededError');
     };
   });
-  await page.goto('/#other.md');
+  await page.goto('/webui/#other.md');
   await expect(page.locator('#preview')).toContainText('Keep it simple.');
   await replaceDocument(
     page,
@@ -1850,7 +1838,7 @@ test('task renames rewrite dependency paths offline and preserve workload arrows
   const unsafe = (await unsafeResponse.json()).result;
   expect(unsafe.isError).toBe(true);
   expect(JSON.stringify(unsafe)).toContain('dangling internal target');
-  await page.goto('/#' + encodeURIComponent(old));
+  await page.goto('/webui/#' + encodeURIComponent(old));
   await expect(page.locator('#preview')).toContainText('Plan a project');
   await page.evaluate(async () => {
     await navigator.serviceWorker.ready;
@@ -1918,7 +1906,7 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
     }
   });
   expect((await response.json()).result.isError).not.toBe(true);
-  await page.goto('/#wiki%2Ftarget.md');
+  await page.goto('/webui/#wiki%2Ftarget.md');
   await expect(page.locator('#preview')).toContainText('Target');
   await page.locator('[data-item-path="wiki/target.md"]').dblclick();
   const rename = page.getByRole('textbox', {

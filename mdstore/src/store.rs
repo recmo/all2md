@@ -445,7 +445,7 @@ impl Store {
         let state = self.state.read();
         if let Some(asset) = state.artifacts.assets.get(path) {
             return Ok(PageResponse {
-                readonly: true,
+                readonly: state.artifacts.owned(path),
                 asset: Some(serde_json::to_value(asset)?),
                 revision: state.head.clone(),
                 hash: Some(asset.oid.clone()),

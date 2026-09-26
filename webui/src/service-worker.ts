@@ -1,8 +1,9 @@
 /// <reference lib="webworker" />
+const base = new URL('.', self.location.href).pathname.replace(/\/$/, '');
 import { build, files, version } from '$service-worker';
 const worker = self as unknown as ServiceWorkerGlobalScope;
 const CACHE = `mdstore-shell-${version}`;
-const ASSETS = ['/', '/settings', ...build, ...files];
+const ASSETS = [base + '/', base + '/settings', ...build, ...files];
 worker.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
 });

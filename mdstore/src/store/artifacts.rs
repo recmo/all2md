@@ -247,6 +247,15 @@ impl Manifest {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct PreconditionFailed;
+impl std::fmt::Display for PreconditionFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("file precondition failed")
+    }
+}
+impl std::error::Error for PreconditionFailed {}
+
 impl Store {
     pub(crate) fn artifact_manifest(&self) -> Result<Value> {
         Ok(serde_json::to_value(&*self.state.read().artifacts)?)
@@ -293,36 +302,69 @@ impl Store {
         Ok(asset)
     }
 
-    pub(crate) fn attach_asset(&self, path: String, asset: Asset) -> Result<()> {
+    pub(crate) fn put_asset(
+        &self,
+        path: String,
+        asset: Asset,
+        expected: Option<String>,
+    ) -> Result<()> {
         let _guard = self.lock_repository()?;
         self.refresh_external_commit()?;
         validate_repo_path(&path)?;
         ensure!(
-            !path.ends_with(".md")
-                && !is_config_resource_path(&path)
-                && path != MANIFEST
-                && !path.starts_with('.'),
+            !path.ends_with(".md") && !is_config_resource_path(&path) && !path.starts_with('.'),
             "reserved asset path"
         );
         let current = self.state.read().clone();
         let mut manifest = (*current.artifacts).clone();
         ensure!(!manifest.owned(&path), "derived asset is read-only");
+        if manifest.assets.get(&path).map(|a| &a.oid) != expected.as_ref() {
+            return Err(PreconditionFailed.into());
+        }
+        if manifest.assets.get(&path) == Some(&asset) {
+            return Ok(());
+        }
+        ensure!(
+            manifest.assets.contains_key(&path) || !git::is_tracked(&self.root, &path)?,
+            "path already exists"
+        );
         ensure!(
             fs::metadata(self.object_path(&asset.oid)?)?.len() == asset.size,
             "object size mismatch"
         );
-        if let Some(existing) = manifest.assets.get(&path) {
-            ensure!(existing == &asset, "assets are immutable; use a new path");
-            return Ok(());
-        }
-        ensure!(!git::is_tracked(&self.root, &path)?, "path already exists");
         let pointer = asset.pointer();
         manifest.assets.insert(path.clone(), asset);
         self.commit_artifacts(
             &current,
             &manifest,
             vec![(path, Some(pointer))],
-            "Add recording asset",
+            "Write asset",
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_asset(&self, path: &str, expected: &str) -> Result<()> {
+        let _guard = self.lock_repository()?;
+        self.refresh_external_commit()?;
+        let current = self.state.read().clone();
+        let mut manifest = (*current.artifacts).clone();
+        if manifest.assets.get(path).map(|a| a.oid.as_str()) != Some(expected) {
+            return Err(PreconditionFailed.into());
+        }
+        ensure!(!manifest.owned(path), "derived asset is read-only");
+        ensure!(
+            !manifest
+                .derivations
+                .values()
+                .any(|d| d.inputs.iter().any(|p| p == path)),
+            "asset is an input to a derivation"
+        );
+        manifest.assets.remove(path);
+        self.commit_artifacts(
+            &current,
+            &manifest,
+            vec![(path.into(), None)],
+            "Delete asset",
         )?;
         Ok(())
     }
@@ -859,7 +901,7 @@ pub(crate) mod tests {
         let mut file = store.object_temporary().unwrap();
         file.write_all(b"audio bytes").unwrap();
         let asset = store.store_object(file).unwrap();
-        store.attach_asset("audio.m4a".into(), asset).unwrap();
+        store.put_asset("audio.m4a".into(), asset, None).unwrap();
         store
             .create_derivation(Derivation {
                 source: "recording.md".into(),

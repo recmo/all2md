@@ -3190,7 +3190,7 @@ async fn document_api_auth_and_origin_boundaries() {
     let (base_url, server) = start_daemon(store.clone(), Some("secret".into())).await;
     let client = reqwest::Client::new();
     let shell = client.get(format!("{base_url}/")).bearer_auth("secret").send().await.unwrap();
-    assert_eq!(shell.status(), StatusCode::NOT_FOUND);
+    assert_eq!(shell.status(), StatusCode::OK);
     for path in ["/health"] {
         assert_eq!(
             client
@@ -3513,7 +3513,7 @@ async fn mcp_directory_reads_share_file_revisions_and_replace_auxiliary_routes()
     }
     for path in ["../", "/notes/", "missing/"] { assert!(store.get_directory(path).is_err()); }
     for path in ["/documents", "/validation-snapshot", "/validate", "/cli"] {
-        assert_eq!(client.post(format!("{url}{path}")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(client.post(format!("{url}{path}")).send().await.unwrap().status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(client.get(format!("{url}{path}")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
     }
     server.abort();

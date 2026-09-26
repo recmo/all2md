@@ -55,19 +55,36 @@ export class ApiError extends Error {
     super(message);
   }
 }
+export function fileUrl(path: string) {
+  return (
+    '/' + path.replace(/^\//, '').split('/').map(encodeURIComponent).join('/')
+  );
+}
 export class Api {
-  token = '';
+  async login(token: string) {
+    return this.request('/mcp/session', {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    });
+  }
+  async logout() {
+    return this.request('/mcp/session', { method: 'DELETE' });
+  }
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await fetch(path, {
       ...init,
       headers: {
-        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
         ...init.headers
       }
     });
-    const value = await response.json();
+    if (response.status === 204) return undefined as T;
+    const value = await response.json().catch(() => ({}));
     if (!response.ok)
-      throw new ApiError(value.error || response.statusText, response.status);
+      throw new ApiError(
+        value.error || response.statusText,
+        response.status,
+        value.findings || []
+      );
     return value as T;
   }
   private async mcp<T>(name: string, args: unknown): Promise<T> {
@@ -76,8 +93,7 @@ export class Api {
       response = await fetch('/mcp', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           jsonrpc: '2.0',
@@ -101,7 +117,11 @@ export class Api {
       );
     });
     if (!response.ok)
-      throw new ApiError(value.error || response.statusText, response.status);
+      throw new ApiError(
+        value.error || response.statusText,
+        response.status,
+        value.findings || []
+      );
     if (value.error) throw new ApiError(value.error.message, 400);
     const result: {
       isError: boolean;
@@ -121,10 +141,12 @@ export class Api {
     return result.structuredContent;
   }
   page(path: string) {
-    return this.mcp<Page>('get_page', { path });
+    return this.request<Page>(fileUrl(path), {
+      headers: { Accept: 'application/vnd.mdstore.page+json' }
+    });
   }
   directory(path = '/') {
-    return this.mcp<Directory>('get_page', { path });
+    return this.request<Directory>(fileUrl(path));
   }
   search(query: string, variants: string[]) {
     return this.mcp<{ results: SearchResult[]; degraded: string[] }>('search', {

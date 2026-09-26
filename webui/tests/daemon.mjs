@@ -16,6 +16,9 @@ writeFileSync(
   (process.env.MDSTORE_TEST_ADMIN
     ? 'server:\n  allow_template_edits: true\n  allow_config_edits: true\n  listen: 127.0.0.1:43133\n'
     : 'server:\n  listen: 127.0.0.1:43133\n') +
+    (process.env.MDSTORE_TEST_TOKEN
+      ? '  bearer_token_env: MDSTORE_TEST_TOKEN\n'
+      : '') +
     'documents:\n  include: ["**/*.md"]\ngit:\n  push: false\nprovider:\n  api_key_env: MDSTORE_TEST_NO_KEY\n'
 );
 writeFileSync(

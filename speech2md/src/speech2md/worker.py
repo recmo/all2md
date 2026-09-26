@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
@@ -44,7 +44,7 @@ class Client:
         if target.is_file() and digest(target) == asset["oid"]:
             return
         temporary = target.with_name(target.name + ".part")
-        request = Request(self.server + "/worker/inputs?" + urlencode(query), headers={"Authorization": f"Bearer {self.token}"})
+        request = Request(self.server + "/" + quote(query["path"], safe="/") + "?" + urlencode({k: v for k, v in query.items() if k != "path"}), headers={"Authorization": f"Bearer {self.token}"})
         try:
             with urlopen(request, timeout=60) as response, temporary.open("wb") as output:
                 while chunk := response.read(1024 * 1024):
@@ -85,7 +85,7 @@ def execute(client: Client, assignment: dict, cache: Path):
 def _execute_locked(client: Client, assignment: dict, root: Path):
     job = assignment["job"]
     attempt = job["attempt"]
-    endpoint = f"/worker/jobs/{job['id']}"
+    endpoint = f"/mcp/worker/jobs/{job['id']}"
     stopped = threading.Event()
     lease_lost = threading.Event()
     progress = [{"stage": "downloading inputs"}]
@@ -163,7 +163,7 @@ def _execute_locked(client: Client, assignment: dict, root: Path):
             for record in voiceprints["records"]:
                 if record["metadata"].get("confirmed"):
                     continue
-                record["metadata"]["suggestions"] = client.request("/worker/vectors/search", {
+                record["metadata"]["suggestions"] = client.request("/mcp/worker/vectors/search", {
                     "job": job["id"], "attempt": attempt, "space": voiceprints["space"],
                     "vector": record["vector"], "limit": 5, "filter": {"confirmed": True},
                 })
@@ -173,7 +173,7 @@ def _execute_locked(client: Client, assignment: dict, root: Path):
             if path.endswith(".md"):
                 outputs[path] = target.read_text(encoding="utf-8")
             else:
-                assets[path] = client.request("/worker/outputs?" + urlencode({"job": job["id"], "attempt": attempt, "path": path}), body=target.read_bytes(), method="PUT")
+                assets[path] = client.request("/" + quote(path, safe="/") + "?" + urlencode({"job": job["id"], "attempt": attempt}), body=target.read_bytes(), method="PUT")
         client.request(endpoint + "/complete", {"attempt": attempt, "outputs": outputs, "assets": assets})
     except Exception as error:
         if not lease_lost.is_set():
@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     client = Client(args.server, os.environ.get(args.token_env, ""))
     while True:
         try:
-            assignment = client.request("/worker/claim", {"recipes": [args.recipe]})
+            assignment = client.request("/mcp/worker/claim", {"recipes": [args.recipe]})
             if assignment:
                 execute(client, assignment, args.cache)
             if args.once:

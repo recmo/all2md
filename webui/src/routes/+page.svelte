@@ -64,6 +64,7 @@
   }
   import {
     api,
+    fileUrl,
     ApiError,
     editRequest,
     readonly as documentReadonly,
@@ -965,8 +966,8 @@
             report(path, 'Staged');
           } else {
             const asset = await api.request<{ oid: string; size: number }>(
-              '/assets?path=' + encodeURIComponent(path),
-              { method: 'PUT', body: file }
+              fileUrl(path),
+              { method: 'PUT', headers: { 'If-None-Match': '*' }, body: file }
             );
             const page: Page = {
               path,
