@@ -177,7 +177,6 @@
     if (e instanceof ApiError && e.findings.length) {
       findings = e.findings;
     }
-    if (e instanceof ApiError && e.status === 401) navigate('settings');
     if (e instanceof ApiError && e.status === 0) {
       online = false;
       validated = '';
@@ -582,7 +581,7 @@
       validated = checkedSignature;
       message(
         result.restart_required
-          ? 'Validation passed. Listener or authentication changes require a daemon restart after submission.'
+          ? 'Validation passed. Listener changes require a daemon restart after submission.'
           : !online
             ? 'Validation passed offline against the cached baseline. Reconnect to submit.'
             : cache.summary.trim()
@@ -673,7 +672,7 @@
           diverged: ' Remote push is blocked by diverged history.'
         }[result.push] || '') +
         (result.restart_required
-          ? ' Restart the daemon to apply listener or authentication changes.'
+          ? ' Restart the daemon to apply listener changes.'
           : '');
       try {
         await refresh();

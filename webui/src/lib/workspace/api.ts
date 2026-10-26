@@ -54,15 +54,13 @@ export class ApiError extends Error {
   }
 }
 export class Api {
-  token = '';
   private async mcp<T>(name: string, args: unknown): Promise<T> {
     let response: Response;
     try {
       response = await fetch('/mcp', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           jsonrpc: '2.0',
@@ -77,8 +75,6 @@ export class Api {
         'Daemon unavailable. Cached documents and local drafts remain available.'
       );
     }
-    if (response.status === 401)
-      throw new ApiError('Enter your bearer token to connect.', 401);
     const value = await response.json().catch(() => {
       throw new ApiError(
         `Request failed: HTTP ${response.status} ${response.statusText}`,
@@ -166,5 +162,5 @@ export function readonly(
   );
 }
 
-// Shared by SPA routes; credentials never enter persistent storage.
+// Shared by SPA routes.
 export const api = new Api();

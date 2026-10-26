@@ -20,18 +20,12 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// Older MCP protocol revision accepted for compatibility.
 pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
-#[derive(Clone)]
-struct AppState {
-    store: Arc<Store>,
-}
-
 fn router(store: Arc<Store>) -> Router {
-    let state = AppState { store };
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(store)
 }
 
 /// Serves the daemon until shutdown on the configured socket.
@@ -64,8 +58,8 @@ pub async fn serve_listener(
     Ok(())
 }
 
-async fn health(State(state): State<AppState>) -> Response {
-    match run_blocking(move || state.store.status()).await {
+async fn health(State(store): State<Arc<Store>>) -> Response {
+    match run_blocking(move || store.status()).await {
         Ok(status) => (
             StatusCode::OK,
             Json(json!({"status": "ok", "store": status})),
@@ -90,7 +84,7 @@ where
         .context("blocking daemon operation failed")?
 }
 
-async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn mcp(State(store): State<Arc<Store>>, headers: HeaderMap, body: Bytes) -> Response {
     if let Some(version) = headers.get("mcp-protocol-version") {
         let Ok(version) = version.to_str() else {
             return StatusCode::BAD_REQUEST.into_response();
@@ -130,7 +124,7 @@ async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         "initialize" => initialize(id, &params),
         "ping" => rpc_result(id, json!({})),
         "tools/list" => rpc_result(id, json!({"tools": tools()})),
-        "tools/call" => call_tool(id, &state.store, params).await,
+        "tools/call" => call_tool(id, &store, params).await,
         _ => rpc_error(id, -32601, "method not found"),
     }
 }

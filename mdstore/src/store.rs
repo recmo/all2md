@@ -31,7 +31,7 @@ use crate::{
 /// Daemon-owned coherent view of one Git-backed Markdown repository.
 pub struct Store {
     root: PathBuf,
-    startup_server: crate::config::ServerConfig,
+    startup_listen: String,
     state: RwLock<Arc<StoreState>>,
     provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     reindex_lock: tokio::sync::Mutex<()>,
@@ -343,7 +343,7 @@ impl Store {
         };
         Ok(Arc::new(Self {
             root,
-            startup_server: snapshot.config.server.clone(),
+            startup_listen: snapshot.config.server.listen.clone(),
             state: RwLock::new(Arc::new(snapshot)),
             provider_factory,
             reindex_lock: tokio::sync::Mutex::new(()),
@@ -375,8 +375,7 @@ impl Store {
     }
 
     fn restart_required(&self, config: &Config) -> bool {
-        config.server.listen != self.startup_server.listen
-
+        config.server.listen != self.startup_listen
     }
 
     /// Lists direct children of a directory in the published document tree.

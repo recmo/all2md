@@ -50,9 +50,10 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 - Offline search is explicitly labelled cached-text search. Reconnecting refreshes
   the listing; it never auto-submits and requires fresh validation. Exact original
   source is retained for concurrency checks, including across browser reloads.
-- Connection credentials live on the Settings page; tokens remain in memory. Cache quota and concurrent-tab conflicts are surfaced;
-  export drafts before closing a tab whose changes could not be saved. Local
-  cached documents remain readable without a token, until the cache is cleared.
+- Settings provides connection retry and cache management. Cache quota and
+  concurrent-tab conflicts are surfaced; export drafts before closing a tab
+  whose changes could not be saved. Cached documents remain readable offline
+  until the cache is cleared.
 
 Service workers require localhost or HTTPS. An insecure non-local HTTP deployment
 can keep drafts in localStorage but cannot reload the application shell offline.

@@ -261,8 +261,7 @@ fn check(input: ClientValidationInput) -> Result<ClientValidationResult, Vec<Fin
     templates.validate_changes(&before, &after)?;
     Ok(ClientValidationResult {
         valid: true,
-        restart_required: config.server.listen != old_config.server.listen
-            || config.server.bearer_token_env != old_config.server.bearer_token_env,
+        restart_required: config.server.listen != old_config.server.listen,
         ..Default::default()
     })
 }
