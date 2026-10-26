@@ -1,6 +1,121 @@
 import { type Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 
+test('browser history visits documents and workspace views without duplicate entries', async ({
+  page
+}) => {
+  await page.goto('/');
+  await expect(
+    page.getByRole('treeitem', { name: 'welcome.md', exact: true })
+  ).toBeVisible();
+  const initialLength = await page.evaluate(() => history.length);
+  await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
+  await expect(page.locator('#preview')).toContainText('Welcome');
+  await page
+    .locator('#preview')
+    .getByRole('link', { name: 'Other note' })
+    .click();
+  await expect(page.locator('#preview')).toContainText('Keep it simple.');
+  for (const name of ['Search', 'Settings', 'Submit']) {
+    await page.getByRole('treeitem', { name, exact: true }).click();
+    await expect(
+      page.getByRole('heading', { name, exact: true })
+    ).toBeVisible();
+  }
+  expect(await page.evaluate(() => history.length)).toBe(initialLength + 5);
+  for (const name of ['Settings', 'Search']) {
+    await page.goBack();
+    await expect(
+      page.getByRole('heading', { name, exact: true })
+    ).toBeVisible();
+  }
+  await page.goBack();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('other.md');
+  await page.goBack();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('welcome.md');
+  await page.goBack();
+  await expect(page.locator('.empty')).toContainText(
+    'Your knowledge, connected.'
+  );
+  for (const path of ['welcome.md', 'other.md']) {
+    await page.goForward();
+    await expect(page.locator('.document-breadcrumb')).toHaveText(path);
+  }
+  await page.goForward();
+  await expect(
+    page.getByRole('heading', { name: 'Search', exact: true })
+  ).toBeVisible();
+  expect(await page.evaluate(() => history.length)).toBe(initialLength + 5);
+});
+
+test('browser history preserves drafts offline and reload does not add an entry', async ({
+  page,
+  context
+}) => {
+  await page.goto('/#other.md');
+  await expect(page.locator('#preview')).toContainText('Keep it simple.');
+  const initialLength = await page.evaluate(() => history.length);
+  await replaceDocument(page, '# Other note\n\nA local draft.\n');
+  await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('welcome.md');
+  await context.setOffline(true);
+  await page.goBack();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('other.md');
+  await expect(page.locator('.code-editor [role=textbox]')).toContainText(
+    'A local draft.'
+  );
+  await page.goForward();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('welcome.md');
+  await context.setOffline(false);
+  await page.reload();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('welcome.md');
+  expect(await page.evaluate(() => history.length)).toBe(initialLength + 1);
+  await page.goBack();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('other.md');
+  await expect(page.locator('#preview')).toContainText('A local draft.');
+});
+
+test('Back cancels an outstanding document read without losing Forward history', async ({
+  page
+}) => {
+  await page.goto('/#welcome.md');
+  await expect(page.locator('#preview')).toContainText('Welcome');
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let requested!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    requested = resolve;
+  });
+  await page.route('**/mcp', async (route) => {
+    const { params } = route.request().postDataJSON();
+    if (params?.name === 'get_page' && params.arguments.path === 'other.md') {
+      requested();
+      await gate;
+    }
+    await route.continue();
+  });
+  await page
+    .locator('#preview')
+    .getByRole('link', { name: 'Other note' })
+    .click();
+  await pending;
+  await expect(page.locator('.document-breadcrumb')).toHaveText('other.md');
+  await page.goBack();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('welcome.md');
+  const response = page.waitForResponse((res) => {
+    if (!res.url().endsWith('/mcp')) return false;
+    const { params } = res.request().postDataJSON();
+    return params?.name === 'get_page' && params.arguments.path === 'other.md';
+  });
+  release();
+  await response;
+  await expect(page.locator('.document-breadcrumb')).toHaveText('welcome.md');
+  await page.goForward();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('other.md');
+});
+
 test('language fences retain highlighting through preview, editing and offline reload', async ({
   page,
   context
@@ -136,12 +251,13 @@ test('folder hierarchy opens documents with rendered task lists', async ({
     exact: true
   });
   const tasks = page.getByRole('treeitem', { name: 'tasks.md', exact: true });
-  await expect(tasks).toBeVisible();
+  await expect(tasks).toBeHidden();
   await notes.focus();
+  await notes.press('ArrowRight');
+  await expect(tasks).toBeVisible();
   await notes.press('ArrowLeft');
   await expect(tasks).toBeHidden();
   await notes.press('ArrowRight');
-  await expect(tasks).toBeVisible();
   await tasks.focus();
   await tasks.press('Enter');
   await expect(page.locator('.document-breadcrumb')).toHaveText(
@@ -220,6 +336,9 @@ test('tree offline badges update and folder menus create drafts in place', async
   context
 }) => {
   await page.goto('/');
+  await page
+    .getByRole('treeitem', { name: 'notes / guides', exact: true })
+    .press('ArrowRight');
   const document = page.getByRole('treeitem', {
     name: 'tasks.md',
     exact: true
@@ -460,6 +579,9 @@ test('WASM catches an unchanged document losing its reciprocal link without fetc
     await route.continue();
   });
   await page.goto('/');
+  await page
+    .getByRole('treeitem', { name: 'reciprocal', exact: true })
+    .press('ArrowRight');
   await page.getByRole('treeitem', { name: 'a.md', exact: true }).click();
   await page.evaluate(async () => {
     await navigator.serviceWorker.ready;
@@ -497,6 +619,9 @@ test('WASM template changes validate the cached corpus offline', async ({
     await route.continue();
   });
   await page.goto('/');
+  await page
+    .getByRole('treeitem', { name: 'reciprocal', exact: true })
+    .press('ArrowRight');
   await page.locator('[data-item-path="reciprocal/schema.md"]').click();
   await page.evaluate(async () => {
     await navigator.serviceWorker.ready;
@@ -989,6 +1114,9 @@ test('file and folder deletion is staged, validated, undoable, and survives relo
   );
   await page
     .getByRole('treeitem', { name: 'notes / guides', exact: true })
+    .press('ArrowRight');
+  await page
+    .getByRole('treeitem', { name: 'notes / guides', exact: true })
     .click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await expect(
@@ -1002,6 +1130,9 @@ test('file and folder deletion is staged, validated, undoable, and survives relo
   await expect(page.getByRole('region', { name: 'Staged diff' })).toContainText(
     'notes/guides/tasks.md'
   );
+  await page
+    .getByRole('treeitem', { name: 'notes / guides', exact: true })
+    .press('ArrowRight');
   await expect(
     page.locator(
       '[data-item-path="notes/guides/tasks.md"] [data-item-section="content"]'
@@ -1028,6 +1159,9 @@ test('long tree names preserve badges and display validation and deletion states
   page
 }) => {
   await page.goto('/');
+  await page
+    .getByRole('treeitem', { name: 'notes / guides', exact: true })
+    .press('ArrowRight');
   const name =
     'a-very-long-task-file-name-that-must-leave-room-for-validation-and-sync-status.md';
   const path = 'notes/guides/' + name;

@@ -49,6 +49,14 @@
   let staging = false;
   let moveError = $state('');
   let previousPaths = '';
+  function revealSelection(tree: FileTree, path: string) {
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const folder = tree.getItem(parts.slice(0, i).join('/'));
+      if (folder && 'expand' in folder) folder.expand();
+    }
+    tree.getItem(path)?.select();
+  }
   const statuses = $derived(
     treeStatuses(
       paths.filter((path) => !path.endsWith('/')),
@@ -193,7 +201,7 @@
         } finally {
           tree.resetPaths(paths);
           previousPaths = JSON.stringify(paths);
-          if (selected) tree.getItem(selected)?.select();
+          if (selected) revealSelection(tree, selected);
           staging = false;
           dragging = false;
         }
@@ -201,7 +209,7 @@
     }
     const tree = new FileTree({
       paths,
-      initialExpansion: 'open',
+      initialExpansion: 'closed',
       initialSelectedPaths: selected ? [selected] : [],
       density: 'default',
       unsafeCSS: `[data-item-section="content"] { flex: 1 1 0; min-width: 0; }
@@ -365,14 +373,7 @@
         for (const path of tree.getSelectedPaths()) {
           if (path !== current) tree.getItem(path)?.deselect();
         }
-        if (current) {
-          const parts = current.split('/');
-          for (let i = 1; i < parts.length; i++) {
-            const folder = tree.getItem(parts.slice(0, i).join('/'));
-            if (folder && 'expand' in folder) folder.expand();
-          }
-          tree.getItem(current)?.select();
-        }
+        if (current) revealSelection(tree, current);
       });
     } finally {
       syncing = false;

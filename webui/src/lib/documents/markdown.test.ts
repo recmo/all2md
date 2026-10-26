@@ -1,6 +1,83 @@
 import { describe, it, expect } from 'vitest';
 import { renderMarkdown } from './markdown';
 describe('local Markdown', () => {
+  it('renders repository wiki links, aliases, and literal filename characters', () => {
+    const el = document.createElement('div');
+    el.innerHTML = renderMarkdown(
+      '[[companies/moja-firma]] [[companies/moja-firma.md#People|Our company]] [[notes/café %20|A & B]]'
+    );
+    const links = [...el.querySelectorAll('a')];
+    expect(links.map((a) => a.getAttribute('href'))).toEqual([
+      '/companies/moja-firma.md',
+      '/companies/moja-firma.md#People',
+      '/notes/caf%C3%A9%20%2520.md'
+    ]);
+    expect(links.map((a) => a.textContent)).toEqual([
+      'companies/moja-firma',
+      'Our company',
+      'A & B'
+    ]);
+    expect(links.every((a) => a.classList.contains('internal-link'))).toBe(
+      true
+    );
+  });
+
+  it('resolves unique wiki short names and marks ambiguous destinations', () => {
+    const el = document.createElement('div');
+    el.innerHTML = renderMarkdown(
+      '[[unique]] [[shared]] [[a/shared]]',
+      undefined,
+      {
+        paths: ['notes/unique.md', 'a/shared.md', 'b/shared.md']
+      }
+    );
+    expect(
+      [...el.querySelectorAll('a')].map((a) => a.getAttribute('href'))
+    ).toEqual(['/notes/unique.md', '/a/shared.md']);
+    expect(el.querySelector('.ambiguous-link')?.textContent).toBe('shared');
+  });
+
+  it('preserves wiki examples in code, escaped text, and existing links', () => {
+    const el = document.createElement('div');
+    el.innerHTML = renderMarkdown(
+      '`[[inline]]`\n\n```md\n[[fenced]]\n```\n\n\\[[escaped]]\n\n[See [[example]]](other.md)\n\n[[unclosed'
+    );
+    expect(el.querySelectorAll('a')).toHaveLength(1);
+    expect(el.querySelector('a')?.textContent).toBe('See [[example]]');
+    expect(el.textContent).toContain('[[escaped]]');
+    expect(el.textContent).toContain('[[unclosed');
+  });
+
+  it('keeps wiki labels inert and rejects unsafe destinations', () => {
+    const el = document.createElement('div');
+    el.innerHTML = renderMarkdown(
+      '[[safe|<script>alert(1)</script>]] [[javascript:alert(1)]] [[../escape]] [[//evil.test]]'
+    );
+    expect(el.querySelector('script')).toBeNull();
+    expect(el.querySelector('a')?.getAttribute('href')).toBe('/safe.md');
+    expect(el.querySelector('a')?.textContent).toBe(
+      '<script>alert(1)</script>'
+    );
+    expect(el.innerHTML).not.toContain('href="javascript:');
+    expect(el.innerHTML).not.toContain('href="/escape');
+    // URL auto-linking may still recognize external text inside invalid wiki syntax.
+    expect(el.querySelectorAll('a.internal-link')).toHaveLength(1);
+  });
+
+  it('distinguishes internal links from external URLs, email, and metadata links', () => {
+    const el = document.createElement('div');
+    el.innerHTML = renderMarkdown(
+      '---\nwebsite: https://company.test\n---\n# Links\n\n[Note](other.md) [Section](#links) [Web](https://example.test) [CDN](//cdn.test/file) [Email](mailto:hello@example.test) https://autolink.test'
+    );
+    expect(el.querySelectorAll('a.internal-link')).toHaveLength(2);
+    expect(el.querySelectorAll('a.external-link')).toHaveLength(5);
+    expect(
+      [...el.querySelectorAll('a.external-link')].every((a) =>
+        a.getAttribute('rel')?.includes('noreferrer')
+      )
+    ).toBe(true);
+  });
+
   it('renders rich Markdown without executable HTML or remote images', () => {
     const html = renderMarkdown(
       '# Heading\n\n<script>alert(1)</script>\n\n[x](javascript:alert%281%29) ![alt](https://tracker.test/x)\n\n| a | b |\n|---|---|\n| 1 | 2 |'

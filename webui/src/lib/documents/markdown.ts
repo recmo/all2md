@@ -10,6 +10,87 @@ const parser = new MarkdownIt({
   linkify: true,
   typographer: false
 });
+export type LinkContext = { paths?: string[] };
+
+// Wiki destinations are repository paths, not URLs relative to the source page.
+parser.inline.ruler.before('link', 'wiki_links', (state, silent) => {
+  // Label lookahead must leave brackets to Markdown's own nesting scanner.
+  if (
+    silent ||
+    state.linkLevel ||
+    state.src.slice(state.pos, state.pos + 2) !== '[['
+  )
+    return false;
+  const end = state.src.indexOf(']]', state.pos + 2);
+  if (end < 0 || end + 2 > state.posMax) return false;
+  const content = state.src.slice(state.pos + 2, end);
+  if (/[\n\r\[\]]/.test(content)) return false;
+  const separator = content.indexOf('|');
+  const target = (separator < 0 ? content : content.slice(0, separator)).trim();
+  const label = separator < 0 ? target : content.slice(separator + 1).trim();
+  if (!target || /^(?:[a-z][a-z\d+.-]*:|\/)|[\\\x00-\x1f]/i.test(target))
+    return false;
+  const boundary = target.search(/[?#]/);
+  const rawPath = boundary < 0 ? target : target.slice(0, boundary);
+  const suffix = boundary < 0 ? '' : target.slice(boundary);
+  const parts: string[] = [];
+  for (const part of rawPath.split('/')) {
+    if (part === '..') {
+      if (!parts.length) return false;
+      parts.pop();
+    } else if (part && part !== '.') parts.push(part);
+  }
+  const path = parts.join('/');
+  const candidate = path.endsWith('.md') ? path : path + '.md';
+  const paths = (state.env as LinkContext).paths;
+  const stem = path.replace(/\.md$/, '');
+  const matches = paths?.filter(
+    (p) =>
+      p.replace(/\.md$/, '') === stem ||
+      p.replace(/\.md$/, '').split('/').pop() === stem
+  );
+  const ambiguous =
+    !paths?.includes(candidate) && matches && matches.length > 1;
+  const resolved = paths?.includes(candidate)
+    ? candidate
+    : matches?.[0] || candidate;
+  const open = state.push(
+    ambiguous ? 'span_open' : 'link_open',
+    ambiguous ? 'span' : 'a',
+    1
+  );
+  if (ambiguous) {
+    open.attrSet('class', 'ambiguous-link');
+    open.attrSet('title', `Ambiguous document: ${target}`);
+  } else {
+    open.attrSet(
+      'href',
+      rawPath
+        ? '/' + resolved.split('/').map(encodeURIComponent).join('/') + suffix
+        : suffix
+    );
+  }
+  state.push('text', '', 0).content = label;
+  state.push(
+    ambiguous ? 'span_close' : 'link_close',
+    ambiguous ? 'span' : 'a',
+    -1
+  );
+  state.pos = end + 2;
+  return true;
+});
+parser.renderer.rules.link_open = (tokens, index, options, _env, renderer) => {
+  const token = tokens[index];
+  const external = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(
+    String(token.attrGet('href') || '')
+  );
+  token.attrJoin('class', external ? 'external-link' : 'internal-link');
+  if (external) {
+    token.attrSet('rel', 'noopener noreferrer');
+    token.attrSet('title', 'Opens externally');
+  }
+  return renderer.renderToken(tokens, index, options);
+};
 // Recognize task markers only at the start of a list item's first paragraph.
 parser.core.ruler.after('inline', 'task_lists', (state) => {
   for (let i = 2; i < state.tokens.length; i++) {
@@ -49,12 +130,16 @@ function propertyValue(value: unknown): string {
       .map((v) => `<span class="property-pill">${escape(v)}</span>`)
       .join(' ');
   if (typeof value === 'string' && /^https?:\/\//i.test(value))
-    return `<a href="${escape(value)}" rel="noreferrer">${escape(value)}</a>`;
+    return `<a class="external-link" href="${escape(value)}" rel="noopener noreferrer" title="Opens externally">${escape(value)}</a>`;
   return escape(
     typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)
   );
 }
-export function renderMarkdown(text: string, schema?: PropertySchema): string {
+export function renderMarkdown(
+  text: string,
+  schema?: PropertySchema,
+  links: LinkContext = {}
+): string {
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (!frontmatter && /^---\r?\n/.test(text))
     return (
@@ -63,7 +148,8 @@ export function renderMarkdown(text: string, schema?: PropertySchema): string {
       '</code></pre>'
     );
   let html = parser.render(
-    frontmatter ? text.slice(frontmatter[0].length) : text
+    frontmatter ? text.slice(frontmatter[0].length) : text,
+    links
   );
   if (frontmatter) {
     try {

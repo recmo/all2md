@@ -12,6 +12,7 @@
   import { readInventory } from '$lib/workspace/inventory';
   import { buildSnapshot } from '$lib/validation/localValidation';
   import { onMount, tick } from 'svelte';
+  import { pushState, replaceState } from '$app/navigation';
   import { navigationDrawer } from '$lib/navigation/navigationDrawer';
   let mobile = $state(false);
   let drawerOpen = $state(false);
@@ -48,12 +49,23 @@
   import ConnectionSettings from '$lib/workspace/ConnectionSettings.svelte';
   import WorkspaceNavigation from '$lib/navigation/WorkspaceNavigation.svelte';
   let view = $state<'document' | 'search' | 'settings' | 'submit'>('document');
-  function navigate(next: 'search' | 'settings' | 'submit') {
+  type HistoryMode = 'push' | 'replace' | 'none';
+  let routeHash: string | undefined;
+  function updateLocation(hash: string, mode: HistoryMode = 'push') {
+    routeHash = mode === 'none' ? location.hash : hash;
+    if (mode === 'none' || location.hash === hash) return;
+    if (mode === 'replace') replaceState(hash, {});
+    else pushState(hash, {});
+  }
+  function navigate(
+    next: 'search' | 'settings' | 'submit',
+    historyMode: HistoryMode = 'push'
+  ) {
     closeDrawer();
     ++readVersion;
     view = next;
     showCreate = false;
-    history.replaceState(null, '', '#@' + next);
+    updateLocation('#@' + next, historyMode);
     if (next === 'submit' && online) void run(syncDrafts);
   }
   import {
@@ -396,18 +408,18 @@
     online = true;
     await syncDrafts();
     if (view === 'document' && !current && cache.selected)
-      await openPage(cache.selected);
+      await openPage(cache.selected, 'replace');
   }
-  async function openPage(path: string) {
-    if (busy) return;
+  async function openPage(path: string, historyMode: HistoryMode = 'push') {
+    if (busy && historyMode !== 'none') return;
     if (path in (cache.deletions || {})) {
-      navigate('submit');
+      navigate('submit', historyMode === 'none' ? 'replace' : historyMode);
       return;
     }
     const version = ++readVersion;
     const draft = cache.drafts[path];
     const cached = draft || cache.pages[path];
-    if (cached) select(cached);
+    if (cached) select(cached, historyMode);
     if (!online) {
       if (!cached)
         throw Error(
@@ -425,7 +437,7 @@
           'This document has overlapping server changes. Resolve them in Submit.',
           true
         );
-      else if (!cache.drafts[path]) select(page);
+      else if (!cache.drafts[path]) select(page, historyMode);
     } catch (e) {
       if (!cached) throw e;
       failure(e);
@@ -440,7 +452,7 @@
     await tick();
     codeEditor?.revealLine(line);
   }
-  function select(page: Page) {
+  function select(page: Page, historyMode: HistoryMode = 'push') {
     closeDrawer();
     view = 'document';
     if (
@@ -456,7 +468,26 @@
         : { ...cache.pages, [page.path]: page }
     };
     persist();
-    history.replaceState(null, '', `#${encodeURIComponent(page.path)}`);
+    updateLocation(`#${encodeURIComponent(page.path)}`, historyMode);
+  }
+  async function restoreLocation() {
+    const target = decodeURIComponent(location.hash.slice(1));
+    closeDrawer();
+    showCreate = false;
+    ++readVersion;
+    if (
+      target === '@search' ||
+      target === '@settings' ||
+      target === '@submit'
+    ) {
+      navigate(target.slice(1) as 'search' | 'settings' | 'submit', 'none');
+    } else if (target) {
+      await openPage(target, 'none');
+    } else {
+      view = 'document';
+      cache = { ...cache, selected: '' };
+      persist();
+    }
   }
   function edit(text: string) {
     if (
@@ -835,8 +866,8 @@
     if (cache !== original)
       throw Error('Workspace changed while preparing the move. Try again.');
     cache = next;
-    if (current) {
-      history.replaceState(null, '', `#${encodeURIComponent(cache.selected)}`);
+    if (current && view === 'document') {
+      updateLocation(`#${encodeURIComponent(cache.selected)}`, 'replace');
     }
     results = null;
   }
@@ -914,7 +945,7 @@
   }
   function follow(href: string) {
     if (!href || href.startsWith('#') || !current) return;
-    if (/^(https?:|mailto:)/i.test(href)) {
+    if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href)) {
       window.open(href, '_blank', 'noopener,noreferrer');
       return;
     }
@@ -973,13 +1004,23 @@
         failure(e);
       }
       const path = requestedPath || cache.selected;
-      if (view === 'document' && path) await openPage(path);
+      if (view === 'document' && path) await openPage(path, 'replace');
+      routeHash = location.hash;
     });
+    const restoreHistory = () => {
+      if (routeHash === location.hash) return;
+      routeHash = location.hash;
+      void run(restoreLocation);
+    };
+    window.addEventListener('popstate', restoreHistory);
+    window.addEventListener('hashchange', restoreHistory);
     return () => {
       disposeValidation();
       window.removeEventListener('offline', offline);
       window.removeEventListener('online', connect);
       window.removeEventListener('beforeunload', unload);
+      window.removeEventListener('popstate', restoreHistory);
+      window.removeEventListener('hashchange', restoreHistory);
     };
   });
 </script>
@@ -1320,7 +1361,12 @@
     <section class="document-workspace" aria-label="Document">
       <header class="document-header">
         {@render sidebarToggle()}
-        <nav id="path" class="document-breadcrumb" aria-label="Document path">
+        <nav
+          id="path"
+          class="document-breadcrumb"
+          aria-label="Document path"
+          title={current?.path}
+        >
           {#if current}
             {#each current.path.split('/') as part, index}
               {#if index > 0}<span class="path-separator" aria-hidden="true"
@@ -1340,7 +1386,7 @@
               <a
                 class="governing-template"
                 href={`#${encodeURIComponent(current.template.path)}`}
-                title="Governing template"
+                title={`Governing template: ${current.template.path}`}
                 onclick={(event) => {
                   event.preventDefault();
                   void run(() => openPage(current!.template!.path));
@@ -1481,6 +1527,7 @@
                   use:renderedLinks
                   use:markdownView={{
                     text: current.text,
+                    paths: cache.paths,
                     schema: current.template?.definition?.frontmatter
                   }}
                 ></article>

@@ -195,6 +195,21 @@ textarea {
   text-decoration-thickness: 1pt;
   text-underline-offset: 3px;
 }
+.markdown a.internal-link {
+  color: #176b64;
+}
+.markdown a.external-link {
+  text-decoration-style: dotted;
+}
+.markdown a.external-link::after {
+  content: '\202f↗';
+  font-family: sans-serif;
+  font-size: 0.75em;
+}
+.markdown .ambiguous-link {
+  text-decoration: underline wavy;
+  text-underline-offset: 3px;
+}
 .markdown :is(ul, ol) {
   margin-block: 1em;
   padding-inline-start: 2em;
@@ -515,13 +530,24 @@ main.document-main {
 }
 .document-breadcrumb {
   display: flex;
-  flex-wrap: wrap;
+  flex: 1 1 16rem;
   align-items: baseline;
   gap: 6px;
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.document-breadcrumb > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.document-breadcrumb .path-separator {
+  flex: 0 0 auto;
 }
 .document-breadcrumb [aria-current='page'] {
+  flex-shrink: 0;
+  max-width: 75%;
   font-weight: 600;
 }
 .path-separator {
@@ -535,11 +561,15 @@ main.document-main {
   gap: 14px;
   margin-left: auto;
   min-width: 0;
+  max-width: 100%;
 }
 .governing-template {
+  min-width: 0;
   color: var(--muted);
   text-underline-offset: 3px;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .word-count {
   color: var(--muted);
@@ -547,9 +577,13 @@ main.document-main {
 }
 .document-status {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   color: var(--green);
   font-weight: 600;
+}
+.document-status > span {
+  white-space: nowrap;
 }
 .document-status .status-muted {
   color: var(--muted);
@@ -884,13 +918,27 @@ aside.tree-sidebar {
     border: 0;
   }
   .document-header {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 8px;
     justify-content: flex-start;
   }
   .document-breadcrumb {
-    flex: 1;
+    width: 100%;
   }
   .document-controls {
-    margin-left: auto;
+    grid-column: 1 / -1;
+    width: 100%;
+    margin-left: 0;
+    gap: 8px;
+  }
+  .governing-template {
+    flex: 1 1 64px;
+  }
+  .view-switch span {
+    min-height: 40px;
+    display: flex;
+    align-items: center;
   }
   aside.tree-sidebar {
     position: fixed;
