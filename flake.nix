@@ -220,6 +220,12 @@
         nixpkgs.lib.cleanSourceFilter path type
         && !(nixpkgs.lib.hasSuffix "/src/lib/wasm" (toString path))
         && !(builtins.elem (builtins.baseNameOf path) [ "target" "node_modules" ".svelte-kit" "build" "test-results" "playwright-report" ]);
+      wasmBindgenVersion =
+        (nixpkgs.lib.findFirst (package: package.name == "wasm-bindgen")
+          (throw "wasm-bindgen is missing from webui/wasm/Cargo.lock")
+          (builtins.fromTOML (builtins.readFile ./webui/wasm/Cargo.lock)).package).version;
+      mkWasmBindgenCli = mdSystem:
+        nixpkgs.legacyPackages.${mdSystem}."wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasmBindgenVersion}";
       mkMdstoreWasm = mdSystem:
         let systemPkgs = nixpkgs.legacyPackages.${mdSystem};
         in systemPkgs.rustPlatform.buildRustPackage {
@@ -232,8 +238,7 @@
           '';
           sourceRoot = "source/webui/wasm";
           cargoLock.lockFile = ./webui/wasm/Cargo.lock;
-          # The CLI schema must match webui/wasm/Cargo.lock exactly.
-          nativeBuildInputs = [ systemPkgs.wasm-bindgen-cli_0_2_129 systemPkgs.llvmPackages.lld ];
+          nativeBuildInputs = [ (mkWasmBindgenCli mdSystem) systemPkgs.llvmPackages.lld ];
           doCheck = false;
           buildPhase = ''
             runHook preBuild
@@ -316,7 +321,7 @@
           packages = [
             systemPkgs.nodejs
             systemPkgs.pnpm_11
-            systemPkgs.wasm-bindgen-cli_0_2_129
+            (mkWasmBindgenCli mdSystem)
             systemPkgs.llvmPackages.lld
           ];
           shellHook = ''

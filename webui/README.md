@@ -9,9 +9,11 @@ Frontend modules are grouped by feature; see [the source layout](src/lib/README.
 
 From the repository root, run `nix develop .#webui`, then `cd webui`.
 The shell provides the Rust, Node, WASM linker and CLI tools used below.
+Nix selects the wasm-bindgen CLI version from `wasm/Cargo.lock`.
 
 ```sh
-# Requires Rust with the wasm32-unknown-unknown target and wasm-bindgen-cli 0.2.129.
+# Outside Nix, install Rust with the wasm32-unknown-unknown target and a
+# wasm-bindgen-cli version matching wasm-bindgen in wasm/Cargo.lock.
 pnpm install --frozen-lockfile
 pnpm build
 pnpm check
