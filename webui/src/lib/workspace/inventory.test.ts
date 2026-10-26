@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { type Api, type Directory, type Page } from './api';
+import { type Directory, type Page } from './api';
 import { readInventory } from './inventory';
 
 const file = (path: string, revision = 'a', hash = path): Page => ({
@@ -42,7 +42,7 @@ describe('MCP document inventory', () => {
       ),
       page: vi.fn(async (path: string) => file(path, 'b'))
     };
-    const result = await readInventory(api as unknown as Api, {
+    const result = await readInventory(api, {
       'a.md': file('a.md')
     });
     expect(result.paths).toEqual(['a.md', 'notes/b.md']);
@@ -59,7 +59,7 @@ describe('MCP document inventory', () => {
         return file(path, revision);
       })
     };
-    const result = await readInventory(api as unknown as Api, {});
+    const result = await readInventory(api, {});
     expect(result.root.revision).toBe('b');
     expect(api.page).toHaveBeenCalledTimes(2);
   });
@@ -80,7 +80,7 @@ describe('MCP document inventory', () => {
       }),
       page: vi.fn()
     };
-    expect((await readInventory(api as unknown as Api, {})).paths).toEqual([]);
+    expect((await readInventory(api, {})).paths).toEqual([]);
   });
 
   it('refreshes template projections when policy source changes', async () => {
@@ -92,7 +92,7 @@ describe('MCP document inventory', () => {
         file(path, 'b', path === 'schema.md' ? 'new' : path)
       )
     };
-    await readInventory(api as unknown as Api, {
+    await readInventory(api, {
       'a.md': file('a.md'),
       'schema.md': file('schema.md')
     });
@@ -107,9 +107,7 @@ describe('MCP document inventory', () => {
       directory: vi.fn(async () => directory('/', 'a', [entry('a.md')])),
       page: vi.fn(async (path: string) => file(path, 'b'))
     };
-    await expect(readInventory(api as unknown as Api, {})).rejects.toThrow(
-      'Repository changed'
-    );
+    await expect(readInventory(api, {})).rejects.toThrow('Repository changed');
     expect(api.page).toHaveBeenCalledTimes(3);
   });
 });

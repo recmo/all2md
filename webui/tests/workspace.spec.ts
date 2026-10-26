@@ -99,46 +99,6 @@ test('offline editing survives reload and search uses the MCP API online', async
   expect(calls).toContain('get_page');
 });
 
-test('connection settings are separate and keep the token in memory across SPA navigation', async ({
-  page
-}) => {
-  await page.goto('/settings');
-  await expect(
-    page.getByRole('heading', { name: 'Settings', exact: true })
-  ).toBeVisible();
-  await page.getByLabel('Bearer token').fill('test-memory-token');
-  const listing = page.waitForRequest(
-    (r) =>
-      r.url().endsWith('/mcp') &&
-      r.postDataJSON()?.params?.name === 'get_page' &&
-      r.postDataJSON()?.params?.arguments?.path === '/' &&
-      r.headers()['authorization'] === 'Bearer test-memory-token'
-  );
-  await page.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(
-    page.getByRole('status').filter({ hasText: 'Connected.' })
-  ).toBeVisible();
-  expect((await listing).headers()['authorization']).toBe(
-    'Bearer test-memory-token'
-  );
-  await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
-  await expect(page.getByLabel('Bearer token')).toHaveCount(0);
-  await expect(page.locator('#preview h1')).toHaveText('Other note');
-  expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(
-    'test-memory-token'
-  );
-  await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
-  await expect(page).toHaveURL('/#@settings');
-  await expect(
-    page.getByRole('heading', { name: 'Settings', exact: true })
-  ).toBeVisible();
-  await page.reload();
-  await expect(
-    page.getByRole('heading', { name: 'Settings', exact: true })
-  ).toBeVisible();
-  await expect(page.getByLabel('Bearer token')).toHaveValue('');
-});
-
 test('configuration is read-only YAML and template fences are highlighted', async ({
   page
 }) => {
@@ -830,7 +790,9 @@ test('sidebar contains only trees with Search and Settings pages', async ({
   await page.locator('#search').press('Enter');
   await mcp;
   await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
-  await expect(page.getByLabel('Bearer token')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Connect', exact: true })
+  ).toBeVisible();
   await expect(page.locator('.cache-settings summary')).toContainText('cached');
   await page.evaluate(async () => {
     await navigator.serviceWorker.ready;

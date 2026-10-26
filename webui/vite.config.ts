@@ -7,10 +7,7 @@ export default defineConfig({
       ['/mcp', '/health'].map((path) => [
         path,
         {
-          target: process.env.MDSTORE_URL || 'http://127.0.0.1:3131',
-          changeOrigin: true,
-          configure: (proxy) =>
-            proxy.on('proxyReq', (req) => req.removeHeader('origin'))
+          target: process.env.MDSTORE_URL || 'http://127.0.0.1:3131'
         }
       ])
     )
