@@ -10,9 +10,21 @@ const parser = new MarkdownIt({
   linkify: true,
   typographer: false
 });
-export type LinkContext = { paths?: string[] };
+export type LinkContext = { paths?: string[]; sourcePath?: string };
 
-// Wiki destinations are repository paths, not URLs relative to the source page.
+function wikiPath(path: string): string | undefined {
+  const parts: string[] = [];
+  for (const part of path.split('/')) {
+    if (part === '..') {
+      if (!parts.length) return undefined;
+      parts.pop();
+    } else if (part && part !== '.') parts.push(part);
+  }
+  const normalized = parts.join('/');
+  return normalized.endsWith('.md') ? normalized : normalized + '.md';
+}
+
+// Prefer a destination beside the source before repository paths or short names.
 parser.inline.ruler.before('link', 'wiki_links', (state, silent) => {
   // Label lookahead must leave brackets to Markdown's own nesting scanner.
   if (
@@ -33,27 +45,27 @@ parser.inline.ruler.before('link', 'wiki_links', (state, silent) => {
   const boundary = target.search(/[?#]/);
   const rawPath = boundary < 0 ? target : target.slice(0, boundary);
   const suffix = boundary < 0 ? '' : target.slice(boundary);
-  const parts: string[] = [];
-  for (const part of rawPath.split('/')) {
-    if (part === '..') {
-      if (!parts.length) return false;
-      parts.pop();
-    } else if (part && part !== '.') parts.push(part);
-  }
-  const path = parts.join('/');
-  const candidate = path.endsWith('.md') ? path : path + '.md';
-  const paths = (state.env as LinkContext).paths;
-  const stem = path.replace(/\.md$/, '');
-  const matches = paths?.filter(
-    (p) =>
-      p.replace(/\.md$/, '') === stem ||
-      p.replace(/\.md$/, '').split('/').pop() === stem
-  );
-  const ambiguous =
-    !paths?.includes(candidate) && matches && matches.length > 1;
-  const resolved = paths?.includes(candidate)
-    ? candidate
-    : matches?.[0] || candidate;
+  const { paths, sourcePath = '' } = state.env as LinkContext;
+  const parent = sourcePath.split('/').slice(0, -1).join('/');
+  const relative = wikiPath([parent, rawPath].filter(Boolean).join('/'));
+  if (!relative) return false;
+  const explicitRelative = /^\.\.?\//.test(rawPath);
+  const candidate = explicitRelative ? relative : wikiPath(rawPath);
+  const exact = paths?.includes(relative)
+    ? relative
+    : candidate && paths?.includes(candidate)
+      ? candidate
+      : undefined;
+  const stem = candidate?.replace(/\.md$/, '');
+  const matches = explicitRelative
+    ? []
+    : paths?.filter(
+        (p) =>
+          p.replace(/\.md$/, '') === stem ||
+          p.replace(/\.md$/, '').split('/').pop() === stem
+      );
+  const ambiguous = !exact && matches && matches.length > 1;
+  const resolved = exact || matches?.[0] || relative;
   const open = state.push(
     ambiguous ? 'span_open' : 'link_open',
     ambiguous ? 'span' : 'a',

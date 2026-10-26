@@ -734,6 +734,21 @@ impl TargetResolver {
         if target.starts_with('/') {
             return Err(format!("absolute internal link is not allowed: {target}"));
         }
+        if matches!(syntax, LinkSyntax::Wiki) {
+            let parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
+            let relative = normalize_path(&parent.join(target))?;
+            let relative = if relative.ends_with(".md") {
+                relative
+            } else {
+                format!("{relative}.md")
+            };
+            if self.exact.contains(&relative) {
+                return Ok(Some(relative));
+            }
+            if target.starts_with("./") || target.starts_with("../") {
+                return Err(format!("dangling internal target {raw:?}"));
+            }
+        }
         let candidate = if matches!(syntax, LinkSyntax::Markdown) {
             let parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
             normalize_path(&parent.join(target))?
@@ -1034,6 +1049,53 @@ relation(name="source", reciprocal="source", selector={"kind": "markdown_links",
         assert_eq!(
             resolver.resolve("source.md", "page", LinkSyntax::Wiki),
             Ok(Some("page.md".into()))
+        );
+    }
+
+    #[test]
+    fn wiki_links_prefer_source_relative_paths_before_repository_matches() {
+        let paths = [
+            "meeting.md".to_owned(),
+            "work/meeting.md".to_owned(),
+            "personal/meeting.md".to_owned(),
+            "work/notes/detail.md".to_owned(),
+            "companies/example.md".to_owned(),
+            "archive/unique.md".to_owned(),
+        ];
+        let resolver = TargetResolver::new(paths.iter());
+        for (source, target, expected) in [
+            ("work/page.md", "meeting", "work/meeting.md"),
+            (
+                "personal/page.md",
+                "meeting.md#Notes",
+                "personal/meeting.md",
+            ),
+            ("work/page.md", "notes/detail", "work/notes/detail.md"),
+            ("work/notes/page.md", "../meeting", "work/meeting.md"),
+            ("work/page.md", "companies/example", "companies/example.md"),
+            ("work/page.md", "unique", "archive/unique.md"),
+        ] {
+            assert_eq!(
+                resolver.resolve(source, target, LinkSyntax::Wiki),
+                Ok(Some(expected.into()))
+            );
+        }
+        assert!(
+            resolver
+                .resolve("other/page.md", "./meeting", LinkSyntax::Wiki)
+                .is_err()
+        );
+        assert!(
+            resolver
+                .resolve("work/page.md", "../../meeting", LinkSyntax::Wiki)
+                .is_err()
+        );
+        let ambiguous = TargetResolver::new(paths[1..].iter());
+        assert!(
+            ambiguous
+                .resolve("other/page.md", "meeting", LinkSyntax::Wiki)
+                .unwrap_err()
+                .contains("ambiguous")
         );
     }
 

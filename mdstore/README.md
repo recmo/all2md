@@ -133,6 +133,12 @@ Declarations register rules checked by Rust:
 | `structure(level=None, order="unrestricted", additional_sections=True)` | Set root heading policy before declaring sections. |
 | `preamble(**rules)` | Constrain content before the declared sections. |
 
+Wiki targets first resolve relative to the source document's directory. If no
+local document matches, they fall back to repository paths, then unique short
+names. Explicit `./` and `../` targets stay relative; paths cannot escape the
+repository. For example, `[[meeting]]` in `work/page.md` prefers
+`work/meeting.md` over `personal/meeting.md` or `meeting.md`.
+
 Section rules include `required`, `nonempty`, `include_subsections`, and `content`
 (`paragraphs`, `list`, `table`, `code`, `blockquotes`, `empty`, or `dated_list()`).
 `paragraphs`, `words`, `characters`, and `list_items` accept `minimum`/`maximum`

@@ -1528,6 +1528,7 @@
                   use:markdownView={{
                     text: current.text,
                     paths: cache.paths,
+                    sourcePath: current.path,
                     schema: current.template?.definition?.frontmatter
                   }}
                 ></article>

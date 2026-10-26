@@ -37,6 +37,58 @@ describe('local Markdown', () => {
     expect(el.querySelector('.ambiguous-link')?.textContent).toBe('shared');
   });
 
+  it('prefers wiki links relative to the current document over repository matches', () => {
+    const el = document.createElement('div');
+    const paths = [
+      'meeting.md',
+      'work/meeting.md',
+      'personal/meeting.md',
+      'work/notes/detail.md'
+    ];
+    el.innerHTML = renderMarkdown(
+      '[[meeting]] [[meeting.md#Notes|Notes]] [[notes/detail]]',
+      undefined,
+      {
+        sourcePath: 'work/page.md',
+        paths
+      }
+    );
+    expect(
+      [...el.querySelectorAll('a')].map((a) => a.getAttribute('href'))
+    ).toEqual([
+      '/work/meeting.md',
+      '/work/meeting.md#Notes',
+      '/work/notes/detail.md'
+    ]);
+    expect(el.querySelector('.ambiguous-link')).toBeNull();
+  });
+
+  it('supports explicit relative wiki paths and keeps repository fallback for other targets', () => {
+    const el = document.createElement('div');
+    el.innerHTML = renderMarkdown(
+      '[[../meeting]] [[companies/example]] [[unique]] [[./missing]] [[../../../escape]]',
+      undefined,
+      {
+        sourcePath: 'work/notes/page.md',
+        paths: [
+          'work/meeting.md',
+          'companies/example.md',
+          'archive/unique.md',
+          'missing.md'
+        ]
+      }
+    );
+    expect(
+      [...el.querySelectorAll('a')].map((a) => a.getAttribute('href'))
+    ).toEqual([
+      '/work/meeting.md',
+      '/companies/example.md',
+      '/archive/unique.md',
+      '/work/notes/missing.md'
+    ]);
+    expect(el.textContent).toContain('[[../../../escape]]');
+  });
+
   it('preserves wiki examples in code, escaped text, and existing links', () => {
     const el = document.createElement('div');
     el.innerHTML = renderMarkdown(

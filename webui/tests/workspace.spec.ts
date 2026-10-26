@@ -1999,6 +1999,16 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
             { op: 'create_page', path: 'wiki/schema.md', content: schema },
             {
               op: 'create_page',
+              path: 'target.md',
+              content: '# Root target\n'
+            },
+            {
+              op: 'create_page',
+              path: 'other/target.md',
+              content: '# Other target\n'
+            },
+            {
+              op: 'create_page',
               path: 'wiki/target.md',
               content: '# Target\n'
             },
@@ -2014,7 +2024,15 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
     }
   });
   expect((await response.json()).result.isError).not.toBe(true);
-  await page.goto('/#wiki%2Ftarget.md');
+  await page.goto('/#wiki%2Fsource.md');
+  const link = page
+    .locator('#preview')
+    .getByRole('link', { name: 'Label', exact: true });
+  await expect(link).toHaveAttribute('href', '/wiki/target.md#part');
+  await link.click();
+  await expect(page.locator('.document-breadcrumb')).toHaveText(
+    /wiki\s*\/\s*target.md/
+  );
   await expect(page.locator('#preview')).toContainText('Target');
   await page.locator('[data-item-path="wiki/target.md"]').dblclick();
   const rename = page.getByRole('textbox', {
