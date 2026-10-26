@@ -492,18 +492,12 @@ impl Default for GitConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Configures the daemon HTTP listener and authentication source.
+/// Configures the daemon HTTP listener and editing permissions.
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
     /// Fixed IP socket address on which the daemon listens.
     pub listen: String,
-    #[serde(default)]
-    /// Optional environment variable containing the bearer token.
-    pub bearer_token_env: Option<String>,
-    /// Additional exact hostnames accepted without a bearer token, e.g. a private reverse proxy.
-    #[serde(default)]
-    pub allowed_hosts: Vec<String>,
-    /// Allow authenticated API callers (or local callers without auth) to edit templates.
+    /// Allow API callers to edit templates.
     #[serde(default)]
     pub allow_template_edits: bool,
     /// Allow API callers to edit root config.yaml.
@@ -515,8 +509,6 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: default_listen(),
-            bearer_token_env: None,
-            allowed_hosts: Vec::new(),
             allow_template_edits: false,
             allow_config_edits: false,
         }

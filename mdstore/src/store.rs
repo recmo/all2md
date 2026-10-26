@@ -105,7 +105,7 @@ pub struct ApplyEditsResponse {
     pub touched_paths: Vec<String>,
     /// Current hashline windows for changed regions.
     pub fresh_hashlines: HashMap<String, String>,
-    /// Listener or authentication changes take effect after restarting the daemon.
+    /// Listener changes take effect after restarting the daemon.
     pub restart_required: bool,
 }
 
@@ -376,7 +376,7 @@ impl Store {
 
     fn restart_required(&self, config: &Config) -> bool {
         config.server.listen != self.startup_server.listen
-            || config.server.bearer_token_env != self.startup_server.bearer_token_env
+
     }
 
     /// Lists direct children of a directory in the published document tree.

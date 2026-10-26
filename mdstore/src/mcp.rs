@@ -4,9 +4,8 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Request, State},
-    http::{HeaderMap, StatusCode, header::ORIGIN},
-    middleware::{self, Next},
+    extract::State,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -24,48 +23,35 @@ pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 #[derive(Clone)]
 struct AppState {
     store: Arc<Store>,
-    bearer_token: Option<String>,
 }
 
-fn router(store: Arc<Store>, bearer_token: Option<String>) -> Router {
-    let state = AppState {
-        store,
-        bearer_token,
-    };
+fn router(store: Arc<Store>) -> Router {
+    let state = AppState { store };
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
-        .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
 /// Serves the daemon until shutdown on the configured socket.
-pub async fn serve(
-    store: Arc<Store>,
-    listen: SocketAddr,
-    bearer_token: Option<String>,
-) -> Result<()> {
+pub async fn serve(store: Arc<Store>, listen: SocketAddr) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("bind {listen}"))?;
-    serve_listener(listener, store, bearer_token).await
+    serve_listener(listener, store).await
 }
 
 /// Serves the daemon on an already-bound socket.
 pub async fn serve_listener(
     listener: tokio::net::TcpListener,
     store: Arc<Store>,
-    bearer_token: Option<String>,
 ) -> Result<()> {
     let listen = listener.local_addr().context("inspect listening socket")?;
-    if !listen.ip().is_loopback() && bearer_token.as_deref().is_none_or(str::is_empty) {
-        bail!("a bearer token is required when listening beyond loopback");
-    }
     tracing::info!(%listen, "mdstore listening");
     let sync = Arc::clone(&store).synchronize();
     let embeddings = Arc::clone(&store).maintain_embeddings();
-    let server = axum::serve(listener, router(store, bearer_token))
+    let server = axum::serve(listener, router(store))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
@@ -102,68 +88,6 @@ where
     tokio::task::spawn_blocking(operation)
         .await
         .context("blocking daemon operation failed")?
-}
-
-async fn authorize(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    // With no credential, reject DNS-rebinding hosts as well as cross-site fetches.
-    if state.bearer_token.is_none() {
-        let host = request
-            .headers()
-            .get("host")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<axum::http::uri::Authority>().ok());
-        let allowed = host.as_ref().is_some_and(|host| {
-            let name = host.host().trim_matches(['[', ']']);
-            state
-                .store
-                .config()
-                .server
-                .allowed_hosts
-                .iter()
-                .any(|allowed| name.eq_ignore_ascii_case(allowed))
-                || name == "localhost"
-                || name
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        });
-        if !allowed {
-            return (StatusCode::FORBIDDEN, Json(json!({"error": "This hostname is not allowed. Configure server.allowed_hosts for the private reverse proxy."}))).into_response();
-        }
-    }
-    let same_origin = request
-        .headers()
-        .get(ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .zip(request.headers().get("host").and_then(|v| v.to_str().ok()))
-        .is_some_and(|(origin, host)| {
-            origin == format!("http://{host}") || origin == format!("https://{host}")
-        });
-    let cross_site = request
-        .headers()
-        .get("sec-fetch-site")
-        .is_some_and(|v| v == "cross-site");
-    if cross_site || (request.headers().contains_key(ORIGIN) && !same_origin) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "cross-origin requests are not allowed"})),
-        )
-            .into_response();
-    }
-    if let Some(expected) = &state.bearer_token {
-        let actual = request
-            .headers()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if actual != Some(expected.as_str()) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "unauthorized"})),
-            )
-                .into_response();
-        }
-    }
-    next.run(request).await
 }
 
 async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
@@ -270,7 +194,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "apply_edits",
-            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener and authentication changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
+            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

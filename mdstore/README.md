@@ -54,17 +54,9 @@ server:
   listen: 127.0.0.1:3131
 ```
 
-For a private reverse proxy such as Tailscale Serve, keep the listener on loopback
-and explicitly list its hostname in `server.allowed_hosts`. For example:
-
-```yaml
-server:
-  listen: 127.0.0.1:3131
-  allowed_hosts: ["my-machine.example.ts.net"]
-```
-
-Only exact hostnames are allowed; cross-origin requests remain blocked. The proxy
-must restrict access to trusted clients. Public deployments should use bearer authentication.
+The daemon does not authenticate requests or restrict Host/Origin headers.
+Deploy it on a trusted network behind a firewall or a reverse proxy that controls
+access. `server.listen` can bind a private interface directly.
 
 ### Markdown validation
 
@@ -202,7 +194,7 @@ worker.
 The worker fetches the configured branch into a private ref. A fast-forward
 candidate's complete tree, configuration, templates, and sidecar ignore rules
 must validate before the live branch, checkout, or published state changes.
-Invalid incoming trees leave the accepted state untouched. Valid listener/auth
+Invalid incoming trees leave the accepted state untouched. Valid listener
 changes are staged in private Git state and reported as requiring restart.
 Restart revalidates and activates the staged fast-forward before binding the
 new listener. If local history advanced meanwhile, the stale stage is discarded
@@ -266,9 +258,8 @@ All anchors in a request resolve against the same pre-edit snapshot. Stale,
 ambiguous, or overlapping edits fail before any worktree file changes.
 
 The MCP endpoint is `/mcp`; health and indexing coverage are available from
-`/health`. A configured bearer token protects all data endpoints, and listening
-beyond loopback is refused without one. Startup reuses valid sidecars and
-rebuilds only missing or stale vectors; the explicit `reindex` command forces a
+`/health`. Access control belongs to the deployment firewall or reverse proxy.
+Startup reuses valid sidecars and rebuilds only missing or stale vectors; the explicit `reindex` command forces a
 complete rebuild.
 
 ### Editing templates and configuration through the API
@@ -282,15 +273,14 @@ server:
   allow_config_edits: true
 ```
 
-These permissions apply to every caller accepted by this server's bearer-token
-check (or local callers when authentication is disabled). The UI discovers them
-from root-directory `get_page` reads. Root configuration cannot be deleted. Template changes
+These permissions apply to every caller that can reach the daemon. The UI
+discovers them from root-directory `get_page` reads. Root configuration cannot be deleted. Template changes
 compile the proposed Starlark and validate the entire proposed corpus; documents
 can be updated in the same atomic batch to satisfy new rules. Transition checks
 from both the old and proposed templates remain enforced. Configuration changes
 must parse and pass configuration and corpus validation before publication.
-Listener and bearer-token source changes return `restart_required: true`; the
-running listener and authentication remain active until the daemon is restarted.
+Listener changes return `restart_required: true`; the running listener remains
+active until the daemon is restarted.
 
 ### Incremental validation
 

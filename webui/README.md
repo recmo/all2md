@@ -72,7 +72,7 @@ three-way merge automatically reconciles non-overlapping edits and presents
 conflicts for explicit resolution. Nothing is submitted automatically.
 
 For production, host `build/` with a static web server and reverse-proxy `/mcp` and
-`/health` to mdstore on the same origin. Keep authorization headers intact. Vite dev/preview provides that
+`/health` to mdstore on the same origin. Restrict access at the reverse proxy. Vite dev/preview provides that
 proxy locally via `MDSTORE_URL`; preview is for local inspection.
 `nix build .#webui` produces static assets, independently of `.#mdstore`.
 

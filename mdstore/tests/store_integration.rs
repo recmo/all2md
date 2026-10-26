@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use fs2::FileExt;
 use mdstore::{
     ApplyEditsRequest, ApplyStatus, Config, EditOperation, InputType, PushState, RerankResult,
-    RetrievalProvider, Store, serve, serve_listener, short_hash, tool_names,
+    RetrievalProvider, Store, serve_listener, short_hash, tool_names,
 };
 use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
@@ -277,14 +277,11 @@ impl Repository {
     }
 }
 
-async fn start_daemon(
-    store: Arc<Store>,
-    bearer_token: Option<String>,
-) -> (String, tokio::task::JoinHandle<()>) {
+async fn start_daemon(store: Arc<Store>) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        serve_listener(listener, store, bearer_token).await.unwrap();
+        serve_listener(listener, store).await.unwrap();
     });
     (format!("http://{address}"), server)
 }
@@ -1287,36 +1284,20 @@ fn injected_provider_open_uses_committed_configuration() {
 }
 
 #[tokio::test]
-async fn mcp_lists_only_three_tools_and_enforces_authentication() {
+async fn mcp_lists_only_three_tools() {
     let repository = Repository::new();
     let store = repository.store();
-    let (base_url, server) = start_daemon(store.clone(), Some("secret".into())).await;
+    let (base_url, server) = start_daemon(store.clone()).await;
     let client = reqwest::Client::new();
     let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-    let unauthorized = client
+    let response = client
         .post(format!("{base_url}/mcp"))
         .json(&body)
         .send()
         .await
         .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-    let health = client
-        .get(format!("{base_url}/health"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(health.status(), StatusCode::UNAUTHORIZED);
-
-    let authorized = client
-        .post(format!("{base_url}/mcp"))
-        .bearer_auth("secret")
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(authorized.status(), StatusCode::OK);
-    let bytes = authorized.bytes().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.bytes().await.unwrap();
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let names: Vec<&str> = value["result"]["tools"]
         .as_array()
@@ -1348,36 +1329,17 @@ async fn mcp_lists_only_three_tools_and_enforces_authentication() {
 
     let health = client
         .get(format!("{base_url}/health"))
-        .bearer_auth("secret")
         .send()
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
-    server.abort();
-
-    let (base_url, server) = start_daemon(store, None).await;
-    for (path, body) in [
-        (
-            "/mcp",
-            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
-        ),
-    ] {
-        let response = client
-            .post(format!("{base_url}{path}"))
-            .header("origin", "https://attacker.example")
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    }
     server.abort();
 }
 
 #[tokio::test]
 async fn mcp_validates_protocol_and_json_rpc_envelopes() {
     let repository = Repository::new();
-    let (base_url, server) = start_daemon(repository.store(), None).await;
+    let (base_url, server) = start_daemon(repository.store()).await;
     let client = reqwest::Client::new();
 
     let unsupported = client
@@ -1458,7 +1420,7 @@ async fn mcp_validates_protocol_and_json_rpc_envelopes() {
 #[tokio::test]
 async fn mcp_apply_errors_preserve_structured_validation_findings() {
     let repository = Repository::new();
-    let (base_url, server) = start_daemon(repository.store(), None).await;
+    let (base_url, server) = start_daemon(repository.store()).await;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -1492,16 +1454,6 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
             .any(|finding| finding["path"] == "invalid.md")
     );
     server.abort();
-}
-
-#[tokio::test]
-async fn non_loopback_listener_requires_a_token() {
-    let repository = Repository::new();
-    let store = repository.store();
-    let error = serve(store, "0.0.0.0:0".parse().unwrap(), None)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("bearer token"));
 }
 
 #[test]
@@ -1996,7 +1948,7 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
     let hook_started = remote.path().join("hooks/pre-receive.started");
 
     let store = repository.store();
-    let (base_url, server) = start_daemon(store.clone(), None).await;
+    let (base_url, server) = start_daemon(store.clone()).await;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -2413,7 +2365,7 @@ async fn background_sync_retries_an_outage_without_another_edit() {
         })
         .unwrap();
     assert_eq!(response.push, PushState::Queued);
-    let (_, server) = start_daemon(store.clone(), None).await;
+    let (_, server) = start_daemon(store.clone()).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         while store.status().unwrap().replication.last_error.is_none() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2468,7 +2420,7 @@ async fn blocking_sidecar_reads_do_not_stall_the_async_scheduler() {
         .unwrap();
 
     let ping = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
-    let (base_url, server) = start_daemon(store, None).await;
+    let (base_url, server) = start_daemon(store).await;
     let response = tokio::time::timeout(
         Duration::from_millis(250),
         reqwest::Client::new()
@@ -2598,7 +2550,7 @@ async fn embedding_worker_recovers_without_another_edit() {
         calls: AtomicUsize::new(0),
     });
     let store = repository.store_with_provider(provider.clone());
-    let (_, server) = start_daemon(store.clone(), None).await;
+    let (_, server) = start_daemon(store.clone()).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let status = store.status().unwrap();
@@ -2628,7 +2580,7 @@ async fn new_edits_interrupt_embedding_backoff() {
         calls: AtomicUsize::new(0),
     });
     let store = repository.store_with_provider(provider.clone());
-    let (_, server) = start_daemon(store.clone(), None).await;
+    let (_, server) = start_daemon(store.clone()).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while provider.calls.load(Ordering::SeqCst) < 3 {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2683,7 +2635,7 @@ async fn daemon_embedding_worker_coalesces_edits_and_observes_direct_store_write
         content = next;
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let (_, server) = start_daemon(store.clone(), None).await;
+    let (_, server) = start_daemon(store.clone()).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let status = store.status().unwrap();
@@ -3043,7 +2995,7 @@ fn nested_timeline_cannot_satisfy_the_task_transition_rule() {
 async fn document_batches_validate_and_submit_through_mcp() {
     let repository = Repository::new();
     let store = repository.store();
-    let (base_url, server) = start_daemon(store.clone(), None).await;
+    let (base_url, server) = start_daemon(store.clone()).await;
     let client = reqwest::Client::new();
     let initial_head = command(&repository.root, &["rev-parse", "HEAD"]);
     let original = store.get_page("alice.md", None).unwrap().text.unwrap();
@@ -3126,139 +3078,6 @@ async fn document_batches_validate_and_submit_through_mcp() {
     assert_eq!(
         command(&repository.root, &["rev-list", "--count", "HEAD"]).trim(),
         "2"
-    );
-    server.abort();
-}
-
-#[tokio::test]
-async fn private_proxy_host_is_explicitly_allowed() {
-    let repository = Repository::new();
-    let path = repository.root.join("config.yaml");
-    let mut config: serde_yaml::Value =
-        serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    config["server"]["allowed_hosts"] = serde_yaml::to_value(vec!["demo.example.ts.net"]).unwrap();
-    fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
-    command(&repository.root, &["add", "config.yaml"]);
-    command(
-        &repository.root,
-        &[
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-qm",
-            "Allow private proxy",
-        ],
-    );
-    let (base_url, server) = start_daemon(repository.store(), None).await;
-    let client = reqwest::Client::new();
-    for path in ["/health"] {
-        let response = client
-            .get(format!("{base_url}{path}"))
-            .header("host", "demo.example.ts.net")
-            .header("origin", "https://demo.example.ts.net")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-    for (host, origin) in [
-        ("evil.example", "https://evil.example"),
-        ("demo.example.ts.net", "https://evil.example"),
-    ] {
-        let response = client
-            .get(format!("{base_url}/health"))
-            .header("host", host)
-            .header("origin", origin)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    }
-    let response = client.post(format!("{base_url}/mcp")).header("host", "demo.example.ts.net").header("origin", "https://demo.example.ts.net").json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_page","arguments":{"path":"alice.md"}}})).send().await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.json::<serde_json::Value>().await.unwrap()["result"]["isError"],
-        false
-    );
-    server.abort();
-}
-
-#[tokio::test]
-async fn document_api_auth_and_origin_boundaries() {
-    let repository = Repository::new();
-    let store = repository.store();
-    let (base_url, server) = start_daemon(store.clone(), Some("secret".into())).await;
-    let client = reqwest::Client::new();
-    let shell = client.get(format!("{base_url}/")).bearer_auth("secret").send().await.unwrap();
-    assert_eq!(shell.status(), StatusCode::NOT_FOUND);
-    for path in ["/health"] {
-        assert_eq!(
-            client
-                .get(format!("{base_url}{path}"))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            client
-                .get(format!("{base_url}{path}"))
-                .bearer_auth("secret")
-                .header("origin", &base_url)
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::OK
-        );
-        assert_eq!(
-            client
-                .get(format!("{base_url}{path}"))
-                .bearer_auth("secret")
-                .header("origin", "https://evil.example")
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-    for path in ["/mcp"] {
-        assert_eq!(
-            client
-                .post(format!("{base_url}{path}"))
-                .bearer_auth("secret")
-                .header("origin", "null")
-                .json(&serde_json::json!({}))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-    server.abort();
-    let (base_url, server) = start_daemon(store, None).await;
-    assert_eq!(
-        client
-            .get(format!("{base_url}/health"))
-            .header("host", "evil.example")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        client
-            .get(format!("{base_url}/health"))
-            .header("sec-fetch-site", "cross-site")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
     );
     server.abort();
 }
@@ -3495,7 +3314,7 @@ async fn mcp_directory_reads_share_file_revisions_and_replace_auxiliary_routes()
     command(&repository.root, &["add", "."]);
     command(&repository.root, &["commit", "-qm", "Nested page"]);
     let store = repository.store();
-    let (url, server) = start_daemon(store.clone(), None).await;
+    let (url, server) = start_daemon(store.clone()).await;
     let client = reqwest::Client::new();
     for path in ["/", "notes/", "notes/nested/"] {
         let response: serde_json::Value = client.post(format!("{url}/mcp"))
