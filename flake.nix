@@ -233,7 +233,7 @@
           sourceRoot = "source/webui/wasm";
           cargoLock.lockFile = ./webui/wasm/Cargo.lock;
           # The CLI schema must match webui/wasm/Cargo.lock exactly.
-          nativeBuildInputs = [ systemPkgs.wasm-bindgen-cli_0_2_121 systemPkgs.llvmPackages.lld ];
+          nativeBuildInputs = [ systemPkgs.wasm-bindgen-cli_0_2_129 systemPkgs.llvmPackages.lld ];
           doCheck = false;
           buildPhase = ''
             runHook preBuild
@@ -313,7 +313,12 @@
         let systemPkgs = nixpkgs.legacyPackages.${mdSystem};
         in systemPkgs.mkShell {
           inputsFrom = [ (mkMdstoreShell mdSystem) ];
-          packages = [ systemPkgs.nodejs systemPkgs.pnpm_11 systemPkgs.wasm-bindgen-cli_0_2_121 ];
+          packages = [
+            systemPkgs.nodejs
+            systemPkgs.pnpm_11
+            systemPkgs.wasm-bindgen-cli_0_2_129
+            systemPkgs.llvmPackages.lld
+          ];
           shellHook = ''
             echo "Run: pnpm --dir webui install --frozen-lockfile && pnpm --dir webui build"
           '';

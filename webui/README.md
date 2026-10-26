@@ -7,8 +7,11 @@ server has no dependency on this package and does not host the UI.
 
 Frontend modules are grouped by feature; see [the source layout](src/lib/README.md).
 
+From the repository root, run `nix develop .#webui`, then `cd webui`.
+The shell provides the Rust, Node, WASM linker and CLI tools used below.
+
 ```sh
-# Requires Rust with the wasm32-unknown-unknown target and wasm-bindgen-cli 0.2.121.
+# Requires Rust with the wasm32-unknown-unknown target and wasm-bindgen-cli 0.2.129.
 pnpm install --frozen-lockfile
 pnpm build
 pnpm check
