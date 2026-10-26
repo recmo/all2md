@@ -53,75 +53,76 @@ export class ApiError extends Error {
     super(message);
   }
 }
-export class Api {
-  private async mcp<T>(name: string, args: unknown): Promise<T> {
-    let response: Response;
-    try {
-      response = await fetch('/mcp', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: crypto.randomUUID(),
-          method: 'tools/call',
-          params: { name, arguments: args }
-        }),
-        signal: AbortSignal.timeout(15000)
-      });
-    } catch {
-      throw new ApiError(
-        'Daemon unavailable. Cached documents and local drafts remain available.'
-      );
-    }
-    const value = await response.json().catch(() => {
-      throw new ApiError(
-        `Request failed: HTTP ${response.status} ${response.statusText}`,
-        response.status
-      );
+async function mcp<T>(name: string, args: unknown): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch('/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: crypto.randomUUID(),
+        method: 'tools/call',
+        params: { name, arguments: args }
+      }),
+      signal: AbortSignal.timeout(15000)
     });
-    if (!response.ok)
-      throw new ApiError(value.error || response.statusText, response.status);
-    if (value.error) throw new ApiError(value.error.message, 400);
-    const result: {
-      isError: boolean;
-      content: { text: string }[];
-      structuredContent: T;
-    } = value.result;
-    if (result.isError)
-      throw new ApiError(
-        result.content.map((c) => c.text).join('\n'),
-        422,
-        (
-          result.structuredContent as {
-            validation_findings?: ValidationFinding[];
-          }
-        )?.validation_findings || []
-      );
-    return result.structuredContent;
+  } catch {
+    throw new ApiError(
+      'Daemon unavailable. Cached documents and local drafts remain available.'
+    );
   }
+  const value = await response.json().catch(() => {
+    throw new ApiError(
+      `Request failed: HTTP ${response.status} ${response.statusText}`,
+      response.status
+    );
+  });
+  if (!response.ok)
+    throw new ApiError(value.error || response.statusText, response.status);
+  if (value.error) throw new ApiError(value.error.message, 400);
+  const result: {
+    isError: boolean;
+    content: { text: string }[];
+    structuredContent: T;
+  } = value.result;
+  if (result.isError)
+    throw new ApiError(
+      result.content.map((c) => c.text).join('\n'),
+      422,
+      (
+        result.structuredContent as {
+          validation_findings?: ValidationFinding[];
+        }
+      )?.validation_findings || []
+    );
+  return result.structuredContent;
+}
+
+export const api = {
   page(path: string) {
-    return this.mcp<Page>('get_page', { path });
-  }
+    return mcp<Page>('get_page', { path });
+  },
   directory(path = '/') {
-    return this.mcp<Directory>('get_page', { path });
-  }
+    return mcp<Directory>('get_page', { path });
+  },
   search(query: string, variants: string[]) {
-    return this.mcp<{ results: SearchResult[]; degraded: string[] }>('search', {
+    return mcp<{ results: SearchResult[]; degraded: string[] }>('search', {
       query,
       variants
     });
-  }
+  },
   apply(request: EditRequest) {
-    return this.mcp<{
+    return mcp<{
       touched_paths: string[];
       push: 'disabled' | 'pushed' | 'queued' | 'diverged';
       status: 'accepted' | 'already_applied';
       restart_required?: boolean;
     }>('apply_edits', request);
   }
-}
+};
 export function editRequest(
   summary: string,
   drafts: Record<string, Draft>,
@@ -161,6 +162,3 @@ export function readonly(
     (!allowTemplateEdits && path.split('/').at(-1) === 'schema.md')
   );
 }
-
-// Shared by SPA routes.
-export const api = new Api();

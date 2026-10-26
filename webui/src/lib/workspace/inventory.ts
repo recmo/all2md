@@ -1,6 +1,11 @@
-import type { Api, Directory, Page } from './api';
+import type { api, Directory, Page } from './api';
 
-export async function readInventory(api: Api, cached: Record<string, Page>) {
+type InventoryApi = Pick<typeof api, 'directory' | 'page'>;
+
+export async function readInventory(
+  api: InventoryApi,
+  cached: Record<string, Page>
+) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const root = await api.directory();
     try {
