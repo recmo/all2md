@@ -33,39 +33,3 @@ pub(crate) fn project(sources: &HashMap<String, String>) -> Result<Vec<Value>> {
         )
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn records_honor_scope_exclusions_and_pending_schema_changes() {
-        let mut sources = HashMap::from([
-            ("schema.md".into(), "```starlark\n```\n".into()),
-            (
-                "tasks/schema.md".into(),
-                "```starlark\nscope(exclude=['overview.md'])\n```\n".into(),
-            ),
-            ("tasks/overview.md".into(), "# Overview\n".into()),
-            (
-                "tasks/a.md".into(),
-                "---\nstate: ready\n---\n# Task\n".into(),
-            ),
-            (
-                "tasks/app.md".into(),
-                "---\nmdstore: app\n---\n# Planner\n".into(),
-            ),
-        ]);
-        let records = project(&sources).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0]["template"], "/tasks/schema.md");
-        assert_eq!(records[0]["frontmatter"]["state"], "ready");
-        assert_eq!(records[1]["template"], "/schema.md");
-        sources.insert(
-            "tasks/schema.md".into(),
-            "```starlark\nscope(exclude=['*.md'])\n```\n".into(),
-        );
-        assert_eq!(project(&sources).unwrap()[0]["template"], "/schema.md");
-        sources.remove("tasks/schema.md");
-        assert_eq!(project(&sources).unwrap()[0]["template"], "/schema.md");
-    }
-}

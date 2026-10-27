@@ -241,12 +241,10 @@ forms are `/**` and `/**/`. Subtree listings exclude the starting directory,
 are sorted and deduplicated, and return the complete listing without truncation.
 These paths also work in batch reads. Directory reads return only newline-
 separated paths, with trailing `/` for directories. No hashes, revision,
-repository ID or configuration flags are included. Default file reads return
-plain text containing the path, schema path and hashline content. Raw file reads
-return structured `path`, `template` and `content` fields; missing files have
-`content: null`. Returned paths start with `/` and are rooted at the repository
-root. Reads and edits accept paths with or without the leading `/`. Empty
-directories are not persisted by Git. Clients traverse directory lists and read
+repository ID or configuration flags are included. File reads return
+plain text containing the path, schema path and hashline content. Returned paths
+start with `/` and are rooted at the repository root. Reads and edits accept paths
+with or without the leading `/`. Empty directories are not persisted by Git. Clients traverse directory lists and read
 sources to build inventories, content fingerprints, validation baselines and
 previews locally. The web editor reads edit permissions from `config.yaml`.
 `edit` always validates changes before committing.
@@ -306,26 +304,31 @@ Only `replace` and `append` are accepted:
 `base` is not accepted. `summary` is required and must be non-empty.
 
 `read` returns page content once as a plain-text MCP content block, with a
-path/schema header and hashline prefixes by default. Append `:10` to read one
-line or `:10-20` to read an inclusive line range. Separate line-number arguments
-are not accepted. Raw file reads, searches and edit results use
-`structuredContent` with an empty `content` array. No response includes a
-serialized JSON copy for older clients. File reads omit revision, file hash,
-existence flags, derived metadata and relations. `template` is the
-repository-rooted schema path, such as `/schema.md` (or `null`); read that path
-separately for its instructions and rules. Use `format: "raw"` for structured
-output containing exact full-page source, including line endings. Existing-file
-edits still require anchors. Raw reads support files only and cannot specify
-a line window. The schema is always a path; the web editor compiles property
-schemas locally from the schema sources it reads.
+path/schema header and hashline prefixes. Append `:10` to read one line or
+`:10-20` to read an inclusive line range. The only request argument is `path`;
+separate line-number arguments and `format` are not accepted. Searches and edit
+results use `structuredContent` with an empty `content` array. No response
+includes a serialized JSON copy for older clients. File reads omit revision,
+file hash, existence flags, derived metadata and relations. Read the schema path
+separately for its instructions and rules.
 
 `path` also accepts a non-empty array, for example `{"path": ["/alice.md",
-"/bob.md:10-20"]}`. Results preserve input order, including repeated paths.
-`format` applies to every path. Hashline batches return one text block per path,
-including plain directory lists. Raw file batches return `structuredContent:
-{"results": [...]}` without a text copy. Single-path calls keep their existing
-response shape. An invalid read rejects the complete batch; a missing Markdown
-page remains an ordinary missing-page result.
+"/bob.md:10-20"]}`. Results preserve input order, including repeated paths, with
+one text block per path, including plain directory lists. An invalid read
+rejects the complete batch; a missing Markdown page returns a missing-page
+message and the applicable schema path.
+
+For browser clients, `GET /path/alice.md` returns exact source as
+`text/plain; charset=utf-8`, preserving line endings without JSON escaping or
+hashline prefixes. `GET /path/notes/` returns direct child paths, one per line,
+with trailing `/` for directories; `GET /path/` lists the root. These endpoints
+read the published document tree, including configuration and schemas. A missing
+file returns HTTP 404 and an empty body; an existing empty file returns HTTP 200.
+An applicable schema is identified by `Link: </path/schema.md>; rel="describedby"`,
+including for a missing file. Responses use `Cache-Control: no-store`. The web
+editor compiles property schemas locally from these sources. Edits still require
+hashline anchors.
+
 Example edit:
 
 ```json
@@ -361,7 +364,7 @@ server:
 ```
 
 These permissions apply to every caller that can reach the daemon. The UI
-discovers them from root-directory `read` reads. Root configuration cannot be deleted. Template changes
+reads them from `GET /path/config.yaml`. Root configuration cannot be deleted. Template changes
 compile the proposed Starlark and validate the entire proposed corpus; documents
 can be updated in the same atomic batch to satisfy new rules. Transition checks
 from both the old and proposed templates remain enforced. Configuration changes
@@ -393,3 +396,15 @@ Independent clients can link it with `default-features = false`.
 Templates may declare `scope(exclude=["overview.md"])`. Patterns are relative to
 the template directory. Excluded documents inherit the nearest matching parent
 schema; they do not bypass ordinary Markdown parsing or link validation.
+
+## Validation before merging
+
+Keep the committed tests to a small smoke suite for hashline editing and the
+main repository/API workflows. Run it before merging:
+
+```sh
+nix develop .#mdstore --command cargo test --manifest-path mdstore/Cargo.toml
+```
+
+Use temporary targeted checks when developing or debugging a change, then discard
+those checks after verification rather than growing the committed suite.

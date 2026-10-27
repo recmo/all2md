@@ -49,11 +49,7 @@ function errorLocation(location: string): { path: string; line?: number } {
   };
 }
 
-async function mcp<T>(
-  name: string,
-  args: unknown,
-  format: 'structured' | 'text' = 'structured'
-): Promise<T> {
+async function mcp<T>(name: string, args: unknown): Promise<T> {
   let response: Response;
   try {
     response = await fetch('/mcp', {
@@ -114,9 +110,7 @@ async function mcp<T>(
       }) || []
     );
   }
-  return format === 'text'
-    ? (result.content.map((block) => block.text).join('\n') as T)
-    : result.structuredContent;
+  return result.structuredContent;
 }
 
 export async function completeAnchor(text: string): Promise<string> {
@@ -149,27 +143,52 @@ export async function completeAnchor(text: string): Promise<string> {
     : `${first}..${await hash(lines.length - 1)}`;
 }
 
+async function rawRead(path: string): Promise<Response> {
+  const url =
+    '/path/' +
+    path.replace(/^\//, '').split('/').map(encodeURIComponent).join('/');
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(15000)
+    });
+  } catch {
+    throw new ApiError(
+      'Daemon unavailable. Cached documents and local drafts remain available.'
+    );
+  }
+  if (!response.ok && response.status !== 404) {
+    throw new ApiError(await response.text(), response.status);
+  }
+  return response;
+}
+
 export const api = {
   async page(path: string): Promise<Page> {
-    const page = await mcp<{
-      path: string;
-      template: string | null;
-      content: string | null;
-    }>('read', { path, format: 'raw' });
-    const { content, ...metadata } = page;
-    const relative = (path: string) => path.replace(/^\//, '');
+    const response = await rawRead(path);
+    const link = response.headers
+      .get('link')
+      ?.match(/<([^>]+)>;\s*rel="describedby"/)?.[1];
+    const template = link
+      ? decodeURIComponent(
+          new URL(link, 'http://mdstore.invalid').pathname.slice(
+            '/path/'.length
+          )
+        )
+      : null;
     return {
-      ...metadata,
-      path: relative(metadata.path),
-      template: metadata.template
-        ? { path: relative(metadata.template) }
-        : null,
-      exists: content !== null,
-      text: content ?? ''
+      path: path.replace(/^\//, ''),
+      template: template ? { path: template } : null,
+      exists: response.ok,
+      text: response.ok ? await response.text() : ''
     };
   },
   async directory(path = '/'): Promise<Directory> {
-    const text = await mcp<string>('read', { path }, 'text');
+    const response = await rawRead(path);
+    if (!response.ok)
+      throw new ApiError(await response.text(), response.status);
+    const text = await response.text();
     return {
       path: path === '/' ? '/' : path.replace(/^\//, ''),
       children: text

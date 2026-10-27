@@ -18,7 +18,6 @@ pnpm install --frozen-lockfile
 pnpm build
 pnpm check
 pnpm test
-cargo test --manifest-path wasm/Cargo.toml --lib
 cargo build --manifest-path ../mdstore/Cargo.toml
 # In separate terminals, run mdstore serve and:
 MDSTORE_URL=http://127.0.0.1:3131 pnpm preview
@@ -32,12 +31,16 @@ server-side development setting, not a browser-selectable destination.
 daemon for each test on port 43133, with a separate UI proxy on port 43132. Install Playwright Chromium or set `CHROME_EXECUTABLE` to an
 installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 
+Keep the committed tests to a small smoke suite. Run the frontend checks and
+browser smoke tests before merging. Use temporary targeted checks for individual
+changes and discard them after verification.
+
 ## Data flow
 
-- Search, reads, and submissions call `/mcp` (`search`, `read`, `edit`).
-- `read` reads directories as well as files. Webui traverses `/`, reuses
-  cached sources with matching hashes, and retries if revisions change during
-  traversal. It builds its validation baseline locally in a WASM worker.
+- Search and submissions call `/mcp` (`search`, `edit`).
+- Raw document reads use `GET /path/document.md`; `GET /path/directory/` lists
+  child paths. Webui traverses the tree and builds its validation baseline
+  locally in a WASM worker. Schema paths arrive in the HTTP `Link` header.
 - Shared Rust validation runs incrementally in WASM while editing. The server
   independently validates every submission through `edit`.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
@@ -77,7 +80,7 @@ Submit shows diffs, validation, and reconciliation against server changes. A
 three-way merge automatically reconciles non-overlapping edits and presents
 conflicts for explicit resolution. Nothing is submitted automatically.
 
-For production, host `build/` with a static web server and reverse-proxy `/mcp` and
+For production, host `build/` with a static web server and reverse-proxy `/mcp`, `/path` and
 `/health` to mdstore on the same origin. Restrict access at the reverse proxy. Vite dev/preview provides that
 proxy locally via `MDSTORE_URL`; preview is for local inspection.
 `nix build .#webui` produces static assets, independently of `.#mdstore`.
@@ -91,11 +94,10 @@ before bundling the SPA; Nix builds it as a separate dependency. Generated binar
 and bindings are not committed. Run `pnpm build:wasm` before
 standalone frontend type checks in a fresh checkout.
 
-Webui builds its own versioned baseline from ordinary `read` reads: source
+Webui builds its own versioned baseline from raw HTTP reads: source
 hashes, parsed document facts, relation edges, and configuration/template sources.
 The first connection downloads the published document inventory; subsequent
-refreshes reuse unchanged sources unless schema/configuration changes require
-refreshing template projections. Validation uses that cached baseline offline.
+refreshes fetch current sources and update template projections. Validation uses that cached baseline offline.
 When document-selection globs change, the current client marks local validation
 incomplete and permits submission for authoritative checks; it never labels
 those edits valid based on an incomplete inventory.

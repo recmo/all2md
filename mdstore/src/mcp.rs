@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    extract::{Path, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -22,6 +22,9 @@ fn router(store: Arc<Store>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
+        .route("/path", get(raw_root))
+        .route("/path/", get(raw_root))
+        .route("/path/{*path}", get(raw_path))
         .layer(TraceLayer::new_for_http())
         .with_state(store)
 }
@@ -35,10 +38,7 @@ pub async fn serve(store: Arc<Store>, listen: SocketAddr) -> Result<()> {
 }
 
 /// Serves the daemon on an already-bound socket.
-pub async fn serve_listener(
-    listener: tokio::net::TcpListener,
-    store: Arc<Store>,
-) -> Result<()> {
+pub async fn serve_listener(listener: tokio::net::TcpListener, store: Arc<Store>) -> Result<()> {
     let listen = listener.local_addr().context("inspect listening socket")?;
     tracing::info!(%listen, "mdstore listening");
     let sync = Arc::clone(&store).synchronize();
@@ -71,9 +71,53 @@ async fn health(State(store): State<Arc<Store>>) -> Response {
     }
 }
 
-async fn run_blocking<T>(
-    operation: impl FnOnce() -> Result<T> + Send + 'static,
-) -> Result<T>
+async fn raw_root(State(store): State<Arc<Store>>) -> Response {
+    raw_document(&store, "/")
+}
+
+async fn raw_path(State(store): State<Arc<Store>>, Path(path): Path<String>) -> Response {
+    raw_document(&store, &path)
+}
+
+fn raw_document(store: &Store, path: &str) -> Response {
+    let result = if path.ends_with('/') {
+        store
+            .get_directory(path)
+            .map(|children| (Some(rooted_directory(children)), None))
+    } else {
+        store
+            .get_source(path)
+            .map(|source| (source.text, source.template))
+    };
+    let (status, body, template) = match result {
+        Ok((Some(text), template)) => (StatusCode::OK, text, template),
+        Ok((None, template)) => (StatusCode::NOT_FOUND, String::new(), template),
+        Err(error) => (StatusCode::NOT_FOUND, error.to_string(), None),
+    };
+    let mut response = (status, [(header::CACHE_CONTROL, "no-store")], body).into_response();
+    if let Some(template) = template {
+        let mut url = reqwest::Url::parse("http://mdstore.invalid/path").expect("static URL");
+        url.path_segments_mut()
+            .expect("hierarchical URL")
+            .extend(template.trim_start_matches('/').split('/'));
+        let link = format!("<{}>; rel=\"describedby\"", url.path());
+        response.headers_mut().insert(
+            header::LINK,
+            HeaderValue::from_str(&link).expect("encoded URL"),
+        );
+    }
+    response
+}
+
+fn rooted_directory(children: Vec<String>) -> String {
+    children
+        .into_iter()
+        .map(|path| format!("/{path}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn run_blocking<T>(operation: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
 where
     T: Send + 'static,
 {
@@ -164,7 +208,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "read",
-            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns a plain-text list of direct child paths, with trailing / for directories. Append ** for all descendants or **/ for descendant directories only (for example /notes/** and /notes/**/). Subtree listings exclude the starting directory and are complete, sorted and deduplicated. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Default file reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Pass a non-empty path array for ordered batch reads with a shared format. Hashline batches return one text block per path; raw file batches return structured results under results. An invalid read rejects the whole batch. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for structured results containing exact source text (including line endings) for whole-page replacements. Directories support plain-text output only. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
+            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns a plain-text list of direct child paths, with trailing / for directories. Append ** for all descendants or **/ for descendant directories only (for example /notes/** and /notes/**/). Subtree listings exclude the starting directory and are complete, sorted and deduplicated. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. File reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Pass a non-empty path array for ordered batch reads, with one text block per path. An invalid read rejects the whole batch. Anchors must match at the supplied line number; stale anchors require a fresh read. Directories support plain-text output only. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns a missing-file message and its schema path for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -174,8 +218,7 @@ fn tools() -> Vec<Value> {
                             {"type": "string", "minLength": 1},
                             {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
                         ]
-                    },
-                    "format": {"type": "string", "enum": ["hashlines", "raw"], "default": "hashlines"}
+                    }
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -314,14 +357,6 @@ struct SearchArguments {
     variants: Vec<String>,
 }
 
-#[derive(Default, Deserialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-enum PageFormat {
-    #[default]
-    Hashlines,
-    Raw,
-}
-
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum PagePaths {
@@ -333,8 +368,6 @@ enum PagePaths {
 #[serde(deny_unknown_fields)]
 struct GetArguments {
     path: PagePaths,
-    #[serde(default)]
-    format: PageFormat,
 }
 
 fn split_page_path(path: &str) -> Result<(String, Option<(usize, usize)>)> {
@@ -360,7 +393,7 @@ fn split_page_path(path: &str) -> Result<(String, Option<(usize, usize)>)> {
     Ok((path.to_owned(), Some((start, end))))
 }
 
-fn read_page(store: &Store, path: &str, format: PageFormat) -> Result<(Value, bool)> {
+fn read_page(store: &Store, path: &str) -> Result<String> {
     let (mut path, window) = split_page_path(path)?;
     let subtree = path
         .strip_suffix("/**/")
@@ -380,88 +413,41 @@ fn read_page(store: &Store, path: &str, format: PageFormat) -> Result<(Value, bo
         if window.is_some() {
             bail!("line windows are only supported for files");
         }
-        if matches!(format, PageFormat::Raw) {
-            bail!("raw format is only supported for files");
-        }
         let children = match directories_only {
             Some(only) => store.get_subtree(&path, only)?,
             None => store.get_directory(&path)?,
         };
-        return Ok((json!({"path": path, "children": children}), true));
-    }
-    if matches!(format, PageFormat::Raw) && window.is_some() {
-        bail!("raw format requires a full-page read");
+        return Ok(rooted_directory(children));
     }
     let page = store.get_page(&path, window)?;
-    let mut value = serde_json::to_value(&page)?;
-    if matches!(format, PageFormat::Raw) {
-        value["content"] = json!(page.text);
-    }
-    Ok((value, matches!(format, PageFormat::Hashlines)))
+    let template = page.template.as_deref().unwrap_or("none");
+    let content = page.content.as_deref().unwrap_or("File does not exist.");
+    Ok(format!("Path: /{path}\nSchema: {template}\n\n{content}"))
 }
 
-fn read_pages(store: &Store, arguments: GetArguments) -> Result<(Value, bool)> {
-    match arguments.path {
-        PagePaths::Single(path) => read_page(store, &path, arguments.format)
-            .map(|(value, plain)| (rooted_page_paths(value), plain)),
-        PagePaths::Multiple(paths) => {
-            if paths.is_empty() {
-                bail!("path arrays must contain at least one path");
-            }
-            let pages: Vec<_> = paths
-                .iter()
-                .map(|path| {
-                    read_page(store, path, arguments.format)
-                        .map(|(value, plain)| (rooted_page_paths(value), plain))
-                        .map_err(|error| anyhow::anyhow!("read {path:?}: {error}"))
-                })
-                .collect::<Result<_>>()?;
-            let plain = pages.iter().all(|(_, plain)| *plain);
-            let results: Vec<_> = pages.into_iter().map(|(value, _)| value).collect();
-            Ok((json!({"results": results}), plain))
-        }
+fn read_pages(store: &Store, arguments: GetArguments) -> Result<Value> {
+    let paths = match arguments.path {
+        PagePaths::Single(path) => vec![path],
+        PagePaths::Multiple(paths) => paths,
+    };
+    if paths.is_empty() {
+        bail!("path arrays must contain at least one path");
     }
+    let content: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            read_page(store, path)
+                .map(|text| json!({"type": "text", "text": text}))
+                .map_err(|error| anyhow::anyhow!("read {path:?}: {error}"))
+        })
+        .collect::<Result<_>>()?;
+    Ok(json!(content))
 }
 
 fn strip_root_prefix(path: &mut String) {
     if path.starts_with('/') {
         path.remove(0);
     }
-}
-
-fn root_path_value(value: &mut Value) {
-    if let Some(path) = value.as_str() {
-        if !path.starts_with('/') {
-            *value = json!(format!("/{path}"));
-        }
-    }
-}
-
-fn rooted_page_paths(mut value: Value) -> Value {
-    root_path_value(&mut value["path"]);
-    if let Some(template) = value.get_mut("template") {
-        root_path_value(template);
-    }
-    if let Some(children) = value.get_mut("children").and_then(Value::as_array_mut) {
-        for child in children {
-            root_path_value(child);
-        }
-    }
-    value
-}
-
-fn page_text(value: &Value) -> String {
-    if let Some(children) = value.get("children").and_then(Value::as_array) {
-        return children
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-    let path = value["path"].as_str().unwrap_or_default();
-    let template = value["template"].as_str().unwrap_or("none");
-    let content = value["content"].as_str().unwrap_or("File does not exist.");
-    format!("Path: {path}\nSchema: {template}\n\n{content}")
 }
 
 fn error_location(path: &str, line: Option<usize>) -> String {
@@ -494,7 +480,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
         Ok(value) => value,
         Err(error) => return rpc_error(id, -32602, &format!("invalid tool call: {error}")),
     };
-    let mut plain_page = false;
+    let plain_page = params.name == "read";
     let result = match params.name.as_str() {
         "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
             Ok(arguments) => store
@@ -504,10 +490,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             Err(error) => Err(error.into()),
         },
         "read" => match serde_json::from_value::<GetArguments>(params.arguments) {
-            Ok(arguments) => read_pages(store, arguments).map(|(value, plain)| {
-                plain_page = plain;
-                value
-            }),
+            Ok(arguments) => read_pages(store, arguments),
             Err(error) => Err(error.into()),
         },
         "edit" => match serde_json::from_value::<ApplyArguments>(params.arguments)
@@ -527,17 +510,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
     match result {
         Ok(value) => {
             let result = if plain_page {
-                let pages = value.get("results").and_then(Value::as_array);
-                let content: Vec<_> = pages.map_or_else(
-                    || vec![json!({"type": "text", "text": page_text(&value)})],
-                    |pages| {
-                        pages
-                            .iter()
-                            .map(|page| json!({"type": "text", "text": page_text(page)}))
-                            .collect()
-                    },
-                );
-                json!({"content": content, "isError": false})
+                json!({"content": value, "isError": false})
             } else {
                 json!({"content": [], "structuredContent": value, "isError": false})
             };

@@ -5,26 +5,16 @@ afterEach(() => vi.unstubAllGlobals());
 
 it('requests exact source once and receives only the schema path', async () => {
   const source = '---\r\nname: Alice\r\n---\r\n# Notes\r\n';
-  const template = '/schema.md';
   const fetch = vi.fn().mockResolvedValue({
     ok: true,
-    json: async () => ({
-      result: {
-        isError: false,
-        structuredContent: {
-          path: '/alice.md',
-          content: source,
-          template
-        }
-      }
-    })
+    status: 200,
+    headers: new Headers({ Link: '</path/schema.md>; rel="describedby"' }),
+    text: async () => source
   });
   vi.stubGlobal('fetch', fetch);
   const page = await api.page('alice.md');
-  expect(JSON.parse(fetch.mock.calls[0][1].body).params).toEqual({
-    name: 'read',
-    arguments: { path: 'alice.md', format: 'raw' }
-  });
+  expect(fetch.mock.calls[0][0]).toBe('/path/alice.md');
+  expect(fetch.mock.calls[0][1].cache).toBe('no-store');
   expect(page.text).toBe(source);
   expect(page.exists).toBe(true);
   expect(page.path).toBe('alice.md');
@@ -37,17 +27,10 @@ it('distinguishes missing files from empty files without an exists field', async
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          result: {
-            isError: false,
-            structuredContent: {
-              path: 'new.md',
-              template: null,
-              content
-            }
-          }
-        })
+        ok: content !== null,
+        status: content === null ? 404 : 200,
+        headers: new Headers(),
+        text: async () => content ?? ''
       })
     );
     const page = await api.page('new.md');
@@ -61,12 +44,8 @@ it('normalizes repository-rooted directory paths for the editor', async () => {
     'fetch',
     vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({
-        result: {
-          isError: false,
-          content: [{ type: 'text', text: '/notes/a.md\n/notes/nested/' }]
-        }
-      })
+      status: 200,
+      text: async () => '/notes/a.md\n/notes/nested/'
     })
   );
   const directory = await api.directory('notes/');

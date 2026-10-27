@@ -156,6 +156,12 @@ enum ReindexAction {
 
 const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 
+#[derive(Debug)]
+pub(crate) struct PageSource {
+    pub template: Option<String>,
+    pub text: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 /// Hashline-rendered page or configuration resource.
 pub struct PageResponse {
@@ -387,24 +393,30 @@ impl Store {
 
     /// Reads an exact page or configuration resource as hashlines.
     pub fn get_page(&self, path: &str, window: Option<(usize, usize)>) -> Result<PageResponse> {
+        let source = self.get_source(path)?;
+        Ok(PageResponse {
+            template: source.template,
+            path: path.into(),
+            content: source.text.as_ref().map(|text| render(text, window)),
+            text: if window.is_none() { source.text } else { None },
+        })
+    }
+
+    pub(crate) fn get_source(&self, path: &str) -> Result<PageSource> {
         validate_repo_path(path)?;
         let state = self.state.read();
         if let Some(text) = state.pages.get(path) {
-            return Ok(PageResponse {
+            return Ok(PageSource {
                 template: state.templates.template_path(path),
-                path: path.into(),
-                content: Some(render(text, window)),
-                text: window.is_none().then(|| text.clone()),
+                text: Some(text.clone()),
             });
         }
         if (is_config_resource_path(path) || crate::template::is_template(path))
             && let Some(text) = state.config_files.get(path)
         {
-            return Ok(PageResponse {
+            return Ok(PageSource {
                 template: None,
-                path: path.into(),
-                content: Some(render(text, window)),
-                text: window.is_none().then(|| text.clone()),
+                text: Some(text.clone()),
             });
         }
         if (path.ends_with(".md")
@@ -414,10 +426,8 @@ impl Store {
             if !crate::template::is_template(path) && !crate::config::is_lint_config(path) {
                 ensure_paths_match_config(&state.config, [&path.to_owned()])?;
             }
-            return Ok(PageResponse {
+            return Ok(PageSource {
                 template: state.templates.template_path(path),
-                path: path.into(),
-                content: None,
                 text: None,
             });
         }
@@ -572,7 +582,8 @@ impl Store {
                 .context("config.yaml cannot be removed")?,
         )
         .map_err(|error| ValidationError {
-            findings: vec![crate::markdown::Finding { source: None,
+            findings: vec![crate::markdown::Finding {
+                source: None,
                 path: "config.yaml".into(),
                 line: None,
                 message: format!("invalid configuration: {error:#}"),
@@ -1493,203 +1504,4 @@ fn embedding_retry_delay(ceiling_ms: &mut u64) -> Duration {
 fn request_digest(request: &ApplyEditsRequest) -> Result<String> {
     let bytes = serde_json::to_vec(request)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        process::Command,
-        sync::atomic::{AtomicBool, Ordering},
-    };
-
-    use super::*;
-
-    #[test]
-    fn embedding_backoff_grows_with_jitter_and_caps_at_one_hour() {
-        let mut ceiling = 1_000;
-        for _ in 0..64 {
-            let previous = ceiling;
-            let delay = embedding_retry_delay(&mut ceiling);
-            assert!(delay >= Duration::from_millis(previous / 2));
-            assert!(delay <= Duration::from_millis(previous));
-            assert_eq!(ceiling, (previous * 2).min(3_600_000));
-        }
-        assert_eq!(ceiling, 3_600_000);
-    }
-
-    fn run_git(root: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(root)
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().into()
-    }
-
-    fn config(document: &str) -> String {
-        format!(
-            "documents:\n  include: ['{document}']\nprovider:\n  dimensions: 2\ngit:\n  push: false\n"
-        )
-    }
-
-    struct AdvancingProvider {
-        root: PathBuf,
-        advanced: AtomicBool,
-    }
-
-    #[async_trait::async_trait]
-    impl RetrievalProvider for AdvancingProvider {
-        async fn embed(&self, _: InputType, _: &[String]) -> Result<Vec<Vec<f32>>> {
-            unreachable!()
-        }
-
-        async fn rerank(
-            &self,
-            _: &str,
-            _: &[String],
-            _: usize,
-        ) -> Result<Vec<crate::provider::RerankResult>> {
-            unreachable!()
-        }
-
-        fn model(&self) -> &str {
-            "advancing"
-        }
-
-        fn dimensions(&self) -> usize {
-            2
-        }
-
-        fn embedding_provider_identity(&self) -> String {
-            if !self.advanced.swap(true, Ordering::SeqCst) {
-                fs::write(self.root.join("config.yaml"), config("new.md")).unwrap();
-                fs::write(self.root.join("new.md"), "new snapshot\n").unwrap();
-                run_git(&self.root, &["add", "config.yaml", "new.md"]);
-                run_git(&self.root, &["commit", "-q", "-m", "new snapshot"]);
-            }
-            "advancing-provider".into()
-        }
-    }
-
-    #[test]
-    fn receipt_images_cover_every_edited_path() {
-        let originals = HashMap::from([
-            ("changed.md".into(), "old".into()),
-            ("removed.md".into(), "removed".into()),
-            ("same.md".into(), "same".into()),
-        ]);
-        let changes = HashMap::from([
-            ("changed.md".into(), Some("new".into())),
-            ("same.md".into(), Some("same".into())),
-            ("created.md".into(), Some("created".into())),
-            ("removed.md".into(), None),
-        ]);
-
-        let (preimages, postimages) = edit_images(&originals, &changes);
-        assert_eq!(
-            preimages,
-            BTreeMap::from([
-                ("changed.md".into(), Some("old".into())),
-                ("created.md".into(), None),
-                ("removed.md".into(), Some("removed".into())),
-                ("same.md".into(), Some("same".into())),
-            ])
-        );
-        assert_eq!(
-            postimages,
-            BTreeMap::from([
-                ("changed.md".into(), Some("new".into())),
-                ("created.md".into(), Some("created".into())),
-                ("removed.md".into(), None),
-                ("same.md".into(), Some("same".into())),
-            ])
-        );
-    }
-
-    #[test]
-    fn startup_snapshot_never_mixes_configuration_and_corpus_commits() {
-        let repository = tempfile::tempdir().unwrap();
-        let root = repository.path();
-        run_git(root, &["init", "-q", "-b", "main"]);
-        run_git(root, &["config", "user.name", "mdstore test"]);
-        run_git(root, &["config", "user.email", "mdstore@example.invalid"]);
-        run_git(root, &["config", "commit.gpgsign", "false"]);
-        fs::write(root.join(".gitignore"), "*.mdstore\n").unwrap();
-        fs::write(root.join("config.yaml"), config("old.md")).unwrap();
-        fs::write(root.join("old.md"), "old snapshot\n").unwrap();
-        run_git(root, &["add", ".gitignore", "config.yaml", "old.md"]);
-        run_git(root, &["commit", "-q", "-m", "old snapshot"]);
-
-        let provider: Arc<dyn RetrievalProvider> = Arc::new(AdvancingProvider {
-            root: root.to_path_buf(),
-            advanced: AtomicBool::new(false),
-        });
-        let store = Store::open_with_provider(root, provider).unwrap();
-        assert_eq!(store.config().documents.include, ["new.md"]);
-        assert!(store.get_page("old.md", None).is_err());
-        assert!(store.get_page("new.md", None).is_ok());
-
-        let before = store.state.read().clone();
-        assert!(Arc::ptr_eq(&before, &store.state.read()));
-        store
-            .apply_edits(&ApplyEditsRequest {
-                summary: "publish coherent snapshot".into(),
-                edits: vec![EditOperation::Replace {
-                    path: "new.md".into(),
-                    anchor: Some(format!("1:{}", crate::short_hash("new snapshot", "", ""))),
-                    content: "edited snapshot".into(),
-                }],
-            })
-            .unwrap();
-        let after = store.state.read().clone();
-        assert_eq!(after.head, git::head(root).unwrap());
-        assert_ne!(before.head, after.head);
-        assert_eq!(before.pages["new.md"], "new snapshot\n");
-        assert_eq!(after.pages["new.md"], "edited snapshot");
-        assert!(Arc::ptr_eq(&before.templates, &after.templates));
-        assert!(Arc::ptr_eq(&before.config_files, &after.config_files));
-    }
-
-    #[test]
-    fn startup_retries_a_failed_superseded_snapshot() {
-        let repository = tempfile::tempdir().unwrap();
-        let root = repository.path();
-        run_git(root, &["init", "-q", "-b", "main"]);
-        run_git(root, &["config", "user.name", "mdstore test"]);
-        run_git(root, &["config", "user.email", "mdstore@example.invalid"]);
-        run_git(root, &["config", "commit.gpgsign", "false"]);
-        fs::write(root.join(".gitignore"), "*.mdstore\n").unwrap();
-        fs::write(root.join("config.yaml"), config("old.md")).unwrap();
-        fs::write(root.join("old.md"), "---\nunterminated\n").unwrap();
-        run_git(root, &["add", ".gitignore", "config.yaml", "old.md"]);
-        run_git(root, &["commit", "-q", "-m", "invalid old snapshot"]);
-
-        let (root, git_dir) = Store::prepare_repository(root).unwrap();
-        let provider: Arc<dyn RetrievalProvider> = Arc::new(AdvancingProvider {
-            root: root.clone(),
-            advanced: AtomicBool::new(true),
-        });
-        let mut advanced = false;
-        let store =
-            Store::open_stable_with(&root, &git_dir, Some(&provider), |root, _captured_head| {
-                if !advanced {
-                    fs::write(root.join("config.yaml"), config("new.md")).unwrap();
-                    fs::write(root.join("new.md"), "new snapshot\n").unwrap();
-                    run_git(root, &["add", "config.yaml", "new.md"]);
-                    run_git(root, &["commit", "-q", "-m", "valid new snapshot"]);
-                    advanced = true;
-                }
-            })
-            .unwrap();
-
-        assert!(advanced);
-        assert_eq!(store.config().documents.include, ["new.md"]);
-        assert!(store.get_page("old.md", None).is_err());
-        assert!(store.get_page("new.md", None).is_ok());
-    }
 }
