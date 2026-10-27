@@ -1801,11 +1801,14 @@ test('document selection changes remain incomplete locally but can be submitted'
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'get_page', arguments: { path: 'config.yaml' } }
+      params: {
+        name: 'get_page',
+        arguments: { path: 'config.yaml', format: 'raw' }
+      }
     }
   });
   const source = (await response.json()).result.structuredContent
-    .text as string;
+    .content as string;
   // Adding an unused exclusion changes selection without changing the current corpus.
   await replaceDocument(
     page,
@@ -1921,11 +1924,11 @@ test('task renames rewrite dependency paths offline and preserve workload arrows
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'get_page', arguments: { path: old } }
+      params: { name: 'get_page', arguments: { path: old, format: 'raw' } }
     }
   });
   const original = (await originalResponse.json()).result.structuredContent
-    .text;
+    .content;
   const unsafeResponse = await page.request.post('/mcp', {
     data: {
       jsonrpc: '2.0',

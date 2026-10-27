@@ -368,7 +368,7 @@ fn exact_page_move_commits_atomically() {
 fn reciprocal_links_are_caller_authored_and_atomic() {
     let repository = Repository::new();
     let store = repository.store();
-    let notes = format!("5:{}", short_hash("# Notes"));
+    let notes = format!("4:{}", short_hash("# Notes", "---", ""));
     let one_sided = ApplyEditsRequest {
         edit_summary: "add one-sided link".into(),
         edits: vec![EditOperation::InsertAfter {
@@ -428,7 +428,7 @@ fn superseded_replacement_requires_fresh_edits() {
         edit_summary: "first Alice edit".into(),
         edits: vec![EditOperation::Replace {
             path: "alice.md".into(),
-            anchor: format!("6:{}", short_hash("Alice profile.")),
+            anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
             content: "Alice first.".into(),
         }],
     };
@@ -438,7 +438,7 @@ fn superseded_replacement_requires_fresh_edits() {
             edit_summary: "second Alice edit".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice first.")),
+                anchor: format!("6:{}", short_hash("Alice first.", "", "")),
                 content: "Alice current.".into(),
             }],
         })
@@ -456,7 +456,7 @@ fn changed_postimage_requires_fresh_edits() {
         edit_summary: "append Alice note".into(),
         edits: vec![EditOperation::InsertAfter {
             path: "alice.md".into(),
-            anchor: format!("6:{}", short_hash("Alice profile.")),
+            anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
             content: "Remember this.".into(),
         }],
     };
@@ -519,7 +519,7 @@ fn reverted_request_can_be_applied_again() {
         edit_summary: "apply Alice edit".into(),
         edits: vec![EditOperation::Replace {
             path: "alice.md".into(),
-            anchor: format!("6:{}", short_hash("Alice profile.")),
+            anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
             content: "Alice changed.".into(),
         }],
     };
@@ -554,12 +554,12 @@ fn partially_reverted_batch_requires_fresh_atomic_edits() {
         edits: vec![
             EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "Alice changed.".into(),
             },
             EditOperation::Replace {
                 path: "bob.md".into(),
-                anchor: format!("6:{}", short_hash("Bob profile.")),
+                anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
                 content: "Bob changed.".into(),
             },
         ],
@@ -619,7 +619,7 @@ fn no_op_edit_reports_queued_pushes_without_network() {
             edit_summary: "retry queued push".into(),
             edits: vec![EditOperation::Replace {
                 path: "bob.md".into(),
-                anchor: format!("6:{}", short_hash("Bob profile.")),
+                anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
                 content: "Bob profile.".into(),
             }],
         })
@@ -643,7 +643,7 @@ fn rejects_mixed_configuration_and_content_batch() {
         edits: vec![
             EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "Changed.".into(),
             },
             EditOperation::CreatePage {
@@ -690,7 +690,7 @@ section("Notes", required=True, content="paragraphs", paragraphs={"minimum": 1, 
     for edits in [
         vec![EditOperation::Replace {
             path: "schema.md".into(),
-            anchor: format!("1:{}", short_hash("Keep notes concise.")),
+            anchor: format!("1:{}", short_hash("Keep notes concise.", "", "")),
             content: "Weaken rules\n\n```starlark\n```\n".into(),
         }],
         vec![EditOperation::CreatePage {
@@ -700,12 +700,12 @@ section("Notes", required=True, content="paragraphs", paragraphs={"minimum": 1, 
         vec![
             EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "One.\n\nTwo.".into(),
             },
             EditOperation::Replace {
                 path: "bob.md".into(),
-                anchor: format!("6:{}", short_hash("Bob profile.")),
+                anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
                 content: "Valid.".into(),
             },
         ],
@@ -819,7 +819,7 @@ section("Notes", level=1, required=True, list={{"minimum_items": 1, "date_order"
                 .iter()
                 .map(|(path, content)| EditOperation::Replace {
                     path: (*path).into(),
-                    anchor: format!("6:{}", short_hash("- 2024-01-01 Created")),
+                    anchor: format!("6:{}", short_hash("- 2024-01-01 Created", "", "")),
                     content: (*content).into(),
                 })
                 .collect(),
@@ -875,7 +875,7 @@ fn markdown_lint_activation_and_edits_are_atomic() {
             .iter()
             .map(|(path, old, content)| EditOperation::Replace {
                 path: (*path).into(),
-                anchor: format!("6:{}", short_hash(old)),
+                anchor: format!("6:{}", short_hash(old, "", "")),
                 content: (*content).into(),
             })
             .collect(),
@@ -954,7 +954,7 @@ fn configured_markdown_under_mdstore_is_editable_content() {
             edit_summary: "update internal note".into(),
             edits: vec![EditOperation::Replace {
                 path: ".mdstore/note.md".into(),
-                anchor: format!("6:{}", short_hash("Internal profile.")),
+                anchor: format!("6:{}", short_hash("Internal profile.", "", "")),
                 content: "Internal updated.".into(),
             }],
         })
@@ -988,7 +988,7 @@ fn rejects_edits_to_tracked_markdown_outside_the_configured_corpus() {
         edit_summary: "remove excluded file".into(),
         edits: vec![EditOperation::RemovePage {
             path: "excluded.md".into(),
-            anchor: format!("1:{}", short_hash("private")),
+            anchor: format!("1:{}", short_hash("private", "", "")),
         }],
     };
 
@@ -1062,7 +1062,7 @@ fn reopened_state_reads_canonical_blobs_not_smudged_worktree_text() {
             edit_summary: "preserve mixed case".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "MiXeD profile.".into(),
             }],
         })
@@ -1236,7 +1236,7 @@ fn configuration_resources_are_hashline_readable() {
                     edit_summary: "weaken configuration".into(),
                     edits: vec![EditOperation::Replace {
                         path: path.into(),
-                        anchor: format!("1:{}", short_hash(first)),
+                        anchor: format!("1:{}", short_hash(first, "", "")),
                         content: "{}".into()
                     }],
                 })
@@ -1474,7 +1474,7 @@ fn valid_external_commit_is_loaded_before_the_next_write() {
         edit_summary: "edit Bob after external commit".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.")),
+            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
             content: "Bob updated.".into(),
         }],
     };
@@ -1503,7 +1503,7 @@ fn edit_interface_cannot_change_server_configuration() {
             edit_summary: "change live server address".into(),
             edits: vec![EditOperation::Replace {
                 path: "config.yaml".into(),
-                anchor: format!("{line}:{}", short_hash("  listen: 127.0.0.1:3131")),
+                anchor: format!("{line}:{}", short_hash("  listen: 127.0.0.1:3131", "", "")),
                 content: "  listen: 127.0.0.1:4141".into(),
             }],
         })
@@ -1535,7 +1535,7 @@ fn external_server_configuration_change_requires_restart() {
             edit_summary: "write after server change".into(),
             edits: vec![EditOperation::Replace {
                 path: "bob.md".into(),
-                anchor: format!("6:{}", short_hash("Bob profile.")),
+                anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
                 content: "Bob updated.".into(),
             }],
         })
@@ -1618,7 +1618,7 @@ fn invalid_external_commit_blocks_writes() {
         edit_summary: "attempt write".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.")),
+            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
             content: "Bob updated.".into(),
         }],
     };
@@ -1664,7 +1664,7 @@ fn external_failures_never_replace_a_divergence_block() {
         edit_summary: "attempt write".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.")),
+            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
             content: "Bob updated.".into(),
         }],
     };
@@ -1705,7 +1705,7 @@ fn fresh_hashlines_cover_middle_edits() {
             edit_summary: "edit middle line".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("{line}:{}", short_hash("line 30")),
+                anchor: format!("{line}:{}", short_hash("line 30", "line 29", "line 31")),
                 content: "changed middle".into(),
             }],
         })
@@ -1728,7 +1728,11 @@ fn edit_interface_cannot_remove_templates() {
         edit_summary: "remove active schema".into(),
         edits: vec![EditOperation::RemovePage {
             path: "schema.md".into(),
-            anchor: format!("1:{}..{count}:{}", short_hash(first), short_hash(last)),
+            anchor: format!(
+                "1:{}..{count}:{}",
+                short_hash(first, "", ""),
+                short_hash(last, "", "")
+            ),
         }],
     };
     assert!(store.apply_edits(&request).is_err());
@@ -1745,7 +1749,7 @@ fn a_late_materialization_failure_rolls_back_earlier_paths() {
         edits: vec![
             EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "Alice changed.".into(),
             },
             EditOperation::CreatePage {
@@ -1781,7 +1785,7 @@ fn persisted_write_blocks_survive_restart() {
         edit_summary: "blocked edit".into(),
         edits: vec![EditOperation::Replace {
             path: "alice.md".into(),
-            anchor: format!("6:{}", short_hash("Alice profile.")),
+            anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
             content: "Alice changed.".into(),
         }],
     };
@@ -1795,7 +1799,7 @@ fn pending_tree_receipts_recover_committed_requests() {
         edit_summary: "recover committed edit".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.")),
+            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
             content: "Bob recovered.".into(),
         }],
     };
@@ -1876,7 +1880,7 @@ async fn post_edit_reindex_reuses_still_valid_sidecars() {
             edit_summary: "repeat unchanged document edit".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "Alice profile.".into(),
             }],
         })
@@ -1904,7 +1908,7 @@ async fn stale_reindex_work_is_discarded_after_an_edit() {
             edit_summary: "edit during reindex".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "Alice changed.".into(),
             }],
         })
@@ -1960,7 +1964,7 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
                 "edits": [{
                     "op": "replace",
                     "path": "alice.md",
-                    "anchor": format!("6:{}", short_hash("Alice profile.")),
+                    "anchor": format!("6:{}", short_hash("Alice profile.", "", "")),
                     "content": "Alice updated."
                 }]
             }
@@ -2001,7 +2005,7 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
                 edit_summary: "edit while push is stalled".into(),
                 edits: vec![EditOperation::Replace {
                     path: "bob.md".into(),
-                    anchor: format!("6:{}", short_hash("Bob profile.")),
+                    anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
                     content: "Bob updated concurrently.".into(),
                 }],
             })
@@ -2163,7 +2167,7 @@ fn synchronization_divergence_blocks_writes_without_rewriting_history() {
         edit_summary: "local edit".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.")),
+            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
             content: "Local edit.".into(),
         }],
     };
@@ -2288,7 +2292,7 @@ fn staged_restart_never_overwrites_a_later_local_edit() {
             edit_summary: "later local edit".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "Preserve this edit.".into(),
             }],
         })
@@ -2359,7 +2363,7 @@ async fn background_sync_retries_an_outage_without_another_edit() {
             edit_summary: "offline edit".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "Offline edit.".into(),
             }],
         })
@@ -2476,7 +2480,7 @@ async fn cancelling_a_reindex_waiter_does_not_release_the_job_lock() {
             edit_summary: "change Alice during reindex".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "Alice changed during reindex.".into(),
             }],
         })
@@ -2593,7 +2597,7 @@ async fn new_edits_interrupt_embedding_backoff() {
             edit_summary: "wake embedding retry".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.")),
+                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
                 content: "Alice updated during backoff.".into(),
             }],
         })
@@ -2627,7 +2631,7 @@ async fn daemon_embedding_worker_coalesces_edits_and_observes_direct_store_write
                 edit_summary: format!("revision {index}"),
                 edits: vec![EditOperation::Replace {
                     path: "alice.md".into(),
-                    anchor: format!("6:{}", short_hash(&content)),
+                    anchor: format!("6:{}", short_hash(&content, "", "")),
                     content: next.clone(),
                 }],
             })
@@ -2658,7 +2662,7 @@ async fn daemon_embedding_worker_coalesces_edits_and_observes_direct_store_write
             edit_summary: "direct store edit while serving".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash(&content)),
+                anchor: format!("6:{}", short_hash(&content, "", "")),
                 content: "Alice's final revision.".into(),
             }],
         })
@@ -2812,13 +2816,16 @@ fn literate_template_concurrent_creates_and_failed_changes_preserve_state() {
     let request = |state: &str, timeline: bool| {
         let mut edits = vec![EditOperation::Replace {
             path: path.clone(),
-            anchor: format!("3:{}", short_hash("state: inbox")),
+            anchor: format!("2:{}", short_hash("state: inbox", "---", "---")),
             content: format!("state: {state}"),
         }];
         if timeline {
             edits.push(EditOperation::InsertAfter {
                 path: path.clone(),
-                anchor: format!("8:{}", short_hash("- 2026-09-09T10:00:00Z — Captured.")),
+                anchor: format!(
+                    "7:{}",
+                    short_hash("- 2026-09-09T10:00:00Z — Captured.", "## Timeline", "")
+                ),
                 content: "- 2026-09-09T11:00:00Z — Clarified.".into(),
             });
         }
@@ -2898,7 +2905,7 @@ fn stale_hash_collision_cannot_overwrite_a_concurrent_edit() {
     command(&repository.root, &["add", "."]);
     command(&repository.root, &["commit", "-qm", "concurrent edit"]);
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
-    for hash in [short_hash(original), "96".into()] {
+    for hash in [short_hash(original, "", ""), "96".into()] {
         let result = store.apply_edits(&ApplyEditsRequest {
             edit_summary: "stale overwrite".into(),
             edits: vec![EditOperation::Replace {
@@ -2917,7 +2924,7 @@ fn stale_hash_collision_cannot_overwrite_a_concurrent_edit() {
             .content
             .contains(concurrent)
     );
-    assert_ne!(short_hash("Text"), short_hash("Text  "));
+    assert_ne!(short_hash("Text", "", ""), short_hash("Text  ", "", ""));
 }
 
 #[test]
@@ -2976,12 +2983,12 @@ fn nested_timeline_cannot_satisfy_the_task_transition_rule() {
         edits: vec![
             EditOperation::Replace {
                 path: path.into(),
-                anchor: format!("3:{}", short_hash("state: inbox")),
+                anchor: format!("2:{}", short_hash("state: inbox", "---", "---")),
                 content: "state: ready".into(),
             },
             EditOperation::InsertAfter {
                 path: path.into(),
-                anchor: format!("12:{}", short_hash("- Unrelated note.")),
+                anchor: format!("11:{}", short_hash("- Unrelated note.", "### Timeline", "")),
                 content: "- No task timestamp or explanation.".into(),
             },
         ],
@@ -2989,6 +2996,88 @@ fn nested_timeline_cannot_satisfy_the_task_transition_rule() {
     let error = result.unwrap_err();
     assert!(error.to_string().contains("Timeline"), "{error:#}");
     assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
+}
+
+#[tokio::test]
+async fn mcp_page_content_is_single_and_schema_is_a_path() {
+    let repository = Repository::new();
+    let source = page("Alice").replace('\n', "\r\n");
+    fs::write(repository.root.join("alice.md"), &source).unwrap();
+    command(&repository.root, &["add", "."]);
+    command(&repository.root, &["commit", "-qm", "CRLF source"]);
+    let store = repository.store();
+    let (base_url, server) = start_daemon(store).await;
+    let client = reqwest::Client::new();
+    for (arguments, raw, expanded, error) in [
+        (serde_json::json!({"path": "alice.md"}), false, false, false),
+        (
+            serde_json::json!({"path": "alice.md", "format": "raw"}),
+            true,
+            false,
+            false,
+        ),
+        (
+            serde_json::json!({"path": "alice.md", "format": "raw", "include_template": true}),
+            true,
+            true,
+            false,
+        ),
+        (
+            serde_json::json!({"path": "alice.md", "start_line": 4, "end_line": 6}),
+            false,
+            false,
+            false,
+        ),
+        (serde_json::json!({"path": "new.md"}), false, false, false),
+        (
+            serde_json::json!({"path": "alice.md", "format": "raw", "start_line": 1}),
+            true,
+            false,
+            true,
+        ),
+        (
+            serde_json::json!({"path": "alice.md", "format": "raw", "end_line": 1}),
+            true,
+            false,
+            true,
+        ),
+    ] {
+        let response: serde_json::Value = client
+            .post(format!("{base_url}/mcp"))
+            .json(
+                &serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "get_page", "arguments": arguments}}),
+            )
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(response["result"]["isError"], error, "{response}");
+        if error {
+            continue;
+        }
+        let value = &response["result"]["structuredContent"];
+        assert!(value.get("text").is_none());
+        if expanded {
+            assert_eq!(value["template"]["path"], "schema.md");
+        } else {
+            assert_eq!(value["template"], "schema.md");
+        }
+        if raw {
+            assert_eq!(value["content"], source);
+        } else if arguments["path"] == "new.md" {
+            assert_eq!(value["exists"], false);
+            assert_eq!(value["content"], "");
+        } else {
+            for line in value["content"].as_str().unwrap().lines() {
+                let (anchor, _) = line.split_once('|').unwrap();
+                assert_eq!(anchor.split_once(':').unwrap().1.len(), 4);
+            }
+        }
+    }
+    server.abort();
 }
 
 #[tokio::test]

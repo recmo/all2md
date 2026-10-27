@@ -18,14 +18,6 @@ pub(crate) enum HashlineError {
         /// Current nearby hashlines for recovery.
         context: String,
     },
-    /// More than one current line matches the anchor.
-    #[error("ambiguous anchor {anchor}; matches lines {lines:?}")]
-    AmbiguousAnchor {
-        /// Anchor supplied by the caller.
-        anchor: String,
-        /// One-based matching line numbers.
-        lines: Vec<usize>,
-    },
     /// The inclusive range syntax or ordering is invalid.
     #[error("invalid range {0:?}")]
     InvalidRange(String),
@@ -125,9 +117,23 @@ impl EditOperation {
 }
 
 #[must_use]
-/// Computes the 128-bit SHA-256 prefix used in a hashline anchor.
-pub fn short_hash(line: &str) -> String {
-    format!("{:x}", Sha256::digest(line.as_bytes()))[..32].to_owned()
+/// Computes a four-character SHA-256 prefix over a line and its immediate neighbors.
+/// Missing neighbors are empty strings. Length prefixes preserve field boundaries.
+pub fn short_hash(line: &str, prev: &str, next: &str) -> String {
+    let mut hash = Sha256::new();
+    for part in [prev, line, next] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    format!("{:x}", hash.finalize())[..4].to_owned()
+}
+
+fn line_hash<S: AsRef<str>>(lines: &[S], index: usize) -> String {
+    short_hash(
+        lines[index].as_ref(),
+        index.checked_sub(1).map_or("", |i| lines[i].as_ref()),
+        lines.get(index + 1).map_or("", AsRef::as_ref),
+    )
 }
 
 #[must_use]
@@ -143,7 +149,10 @@ pub(crate) fn render(text: &str, window: Option<(usize, usize)>) -> String {
     lines[start - 1..end]
         .iter()
         .enumerate()
-        .map(|(offset, line)| format!("{}:{}|{line}", start + offset, short_hash(line)))
+        .map(|(offset, line)| {
+            let index = start - 1 + offset;
+            format!("{}:{}|{line}", index + 1, line_hash(&lines, index))
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -496,43 +505,14 @@ fn resolve_line(anchor: &str, lines: &[String]) -> Result<usize, HashlineError> 
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| HashlineError::InvalidAnchor(anchor.into()))?;
-    if expected.len() != 32 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if expected.len() != 4 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(HashlineError::InvalidAnchor(anchor.into()));
     }
     if lines
         .get(number - 1)
-        .is_some_and(|line| short_hash(line) == expected)
+        .is_some_and(|_| line_hash(lines, number - 1) == expected)
     {
         return Ok(number - 1);
-    }
-    let matches: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| (short_hash(line) == expected).then_some(index))
-        .collect();
-    if matches.len() == 1 {
-        return Ok(matches[0]);
-    }
-    let nearby: Vec<(usize, usize)> = matches
-        .iter()
-        .copied()
-        .map(|index| (index, index.abs_diff(number - 1)))
-        .filter(|(_, distance)| *distance <= 3)
-        .collect();
-    if let Some(minimum) = nearby.iter().map(|(_, distance)| *distance).min() {
-        let closest: Vec<usize> = nearby
-            .iter()
-            .filter_map(|(index, distance)| (*distance == minimum).then_some(*index))
-            .collect();
-        if closest.len() == 1 {
-            return Ok(closest[0]);
-        }
-    }
-    if !matches.is_empty() {
-        return Err(HashlineError::AmbiguousAnchor {
-            anchor: anchor.into(),
-            lines: matches.into_iter().map(|index| index + 1).collect(),
-        });
     }
     let start = number.saturating_sub(3).max(1);
     let end = number.saturating_add(2).min(lines.len());
@@ -567,12 +547,15 @@ mod tests {
     }
 
     #[test]
-    fn render_and_edit_with_shifted_anchor() {
+    fn shifted_anchor_is_rejected_even_with_a_unique_match() {
         let text = "alpha\nbeta\ngamma\n";
-        let anchor = format!("2:{}", short_hash("beta"));
-        let mut original = HashMap::new();
-        original.insert("note.md".into(), format!("prefix\n{text}"));
-        let changed = apply_operations(
+        let anchor = render(text, Some((2, 2)))
+            .split('|')
+            .next()
+            .unwrap()
+            .to_owned();
+        let original = HashMap::from([("note.md".into(), format!("prefix\n{text}"))]);
+        let error = apply_operations(
             &original,
             &[EditOperation::Replace {
                 path: "note.md".into(),
@@ -580,19 +563,16 @@ mod tests {
                 content: "BETA".into(),
             }],
         )
-        .unwrap();
-        assert_eq!(
-            changed["note.md"].as_deref(),
-            Some("prefix\nalpha\nBETA\ngamma\n")
-        );
+        .unwrap_err();
+        assert!(matches!(error, HashlineError::StaleAnchor { .. }));
     }
 
     #[test]
     fn batch_uses_one_snapshot_and_rejects_overlap() {
         let mut original = HashMap::new();
         original.insert("note.md".into(), "one\ntwo\nthree\n".into());
-        let one = format!("1:{}", short_hash("one"));
-        let two = format!("2:{}", short_hash("two"));
+        let one = format!("1:{}", short_hash("one", "", "two"));
+        let two = format!("2:{}", short_hash("two", "one", "three"));
         let error = apply_operations(
             &original,
             &[
@@ -645,12 +625,12 @@ mod tests {
             &[
                 EditOperation::Replace {
                     path: "note.md".into(),
-                    anchor: format!("2:{}", short_hash("two")),
+                    anchor: format!("2:{}", short_hash("two", "one", "three")),
                     content: String::new(),
                 },
                 EditOperation::InsertAfter {
                     path: "note.md".into(),
-                    anchor: format!("3:{}", short_hash("three")),
+                    anchor: format!("3:{}", short_hash("three", "two", "")),
                     content: "\n".into(),
                 },
             ],
@@ -668,7 +648,7 @@ mod tests {
             &original,
             &[EditOperation::Replace {
                 path: "one.md".into(),
-                anchor: format!("1:{}", short_hash("one")),
+                anchor: format!("1:{}", short_hash("one", "", "")),
                 content: String::new(),
             }],
         )
@@ -677,19 +657,36 @@ mod tests {
     }
 
     #[test]
-    fn shifted_anchor_uses_unique_closest_match() {
-        let repeated = "same";
-        let lines = vec!["zero", repeated, "two", "three", "four", repeated, "six"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let anchor = format!("3:{}", short_hash(repeated));
-        assert_eq!(resolve_line(&anchor, &lines).unwrap(), 1);
+    fn hashes_include_neighbors_and_preserve_field_boundaries() {
+        assert_ne!(short_hash("same", "a", "b"), short_hash("same", "c", "b"));
+        assert_ne!(short_hash("same", "a", "b"), short_hash("same", "a", "c"));
+        assert_ne!(short_hash("bc", "a", ""), short_hash("c", "ab", ""));
+        let text = "first\nsame\nlast\n";
+        let full = render(text, None);
+        let window = render(text, Some((2, 2)));
+        assert_eq!(window, full.lines().nth(1).unwrap());
+        assert_eq!(
+            window
+                .split('|')
+                .next()
+                .unwrap()
+                .split(':')
+                .nth(1)
+                .unwrap()
+                .len(),
+            4
+        );
+        assert!(full.starts_with(&format!("1:{}|first", short_hash("first", "", "same"))));
+        assert!(full.ends_with(&format!("3:{}|last", short_hash("last", "same", ""))));
+    }
 
-        let tied = format!("4:{}", short_hash(repeated));
+    #[test]
+    fn changed_neighbors_invalidate_anchor() {
+        let lines = vec!["new neighbor".to_owned(), "same".into(), "last".into()];
+        let anchor = format!("2:{}", short_hash("same", "old neighbor", "last"));
         assert!(matches!(
-            resolve_line(&tied, &lines),
-            Err(HashlineError::AmbiguousAnchor { .. })
+            resolve_line(&anchor, &lines),
+            Err(HashlineError::StaleAnchor { .. })
         ));
     }
 }

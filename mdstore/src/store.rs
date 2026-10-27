@@ -192,19 +192,30 @@ pub struct PageResponse {
     pub hash: Option<String>,
     /// Whether the requested file exists in the published tree.
     pub exists: bool,
-    /// Applicable directory template, including guidance and hard rules.
+    /// Applicable directory template; serialized as its repository-relative path.
+    #[serde(serialize_with = "serialize_template_path")]
     pub template: Option<serde_json::Value>,
     /// Exact repository-relative path.
     pub path: String,
     /// Raw Markdown or configuration text with hashline prefixes.
     pub content: String,
     /// Exact source text for full-page reads, absent for line windows.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub text: Option<String>,
     /// Repository-configured projected frontmatter metadata.
     pub metadata: serde_json::Value,
     /// Typed relations authored by this page.
     pub relations: Vec<Edge>,
+}
+
+fn serialize_template_path<S: serde::Serializer>(
+    template: &Option<serde_json::Value>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    template
+        .as_ref()
+        .and_then(|value| value.get("path"))
+        .serialize(serializer)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1767,7 +1778,7 @@ mod tests {
                 edit_summary: "publish coherent snapshot".into(),
                 edits: vec![EditOperation::Replace {
                     path: "new.md".into(),
-                    anchor: format!("1:{}", crate::short_hash("new snapshot")),
+                    anchor: format!("1:{}", crate::short_hash("new snapshot", "", "")),
                     content: "edited snapshot".into(),
                 }],
             })

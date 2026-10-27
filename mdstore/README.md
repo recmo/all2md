@@ -238,7 +238,21 @@ inventory. Client-specific caches, validation baselines, and previews are built
 by clients. `apply_edits` always validates changes before committing.
 
 An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
-32 hexadecimal characters (128 bits of SHA-256) and include trailing whitespace:
+four hexadecimal characters (16 bits of SHA-256). Each hash covers the line and
+its immediate previous and next lines, with length-prefixed fields and empty
+strings for missing neighbors. Trailing whitespace is significant. The numbered
+line must match: stale anchors fail without relocation or merging. All operations
+in a batch validate against the same pre-edit snapshot.
+
+`get_page` returns page content once, in `content`, with hashline prefixes by
+default. `template` is the repository-relative schema path (or `null`); read that
+path separately for its instructions and rules. Use `format: "raw"` for exact
+full-page source, including line endings, when preparing `replace_page` or
+`delete_page`. Raw reads cannot specify a line window. Editors needing compiled
+schema information can explicitly request `include_template: true` to expand
+`template` to its path, source and definition.
+
+Example edit:
 
 ```json
 {
@@ -247,13 +261,13 @@ An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
     {
       "op": "insert_after",
       "path": "people/alice.md",
-      "anchor": "12:89f234b172385da91ba4cb0c4a7d3abf",
+      "anchor": "12:89f2",
       "content": "- [Bob](bob.md)"
     },
     {
       "op": "insert_after",
       "path": "people/bob.md",
-      "anchor": "9:ce55a9a1d046372186e540e350b2d975",
+      "anchor": "9:ce55",
       "content": "- [Alice](alice.md)"
     }
   ]

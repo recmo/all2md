@@ -102,8 +102,13 @@ async function mcp<T>(name: string, args: unknown): Promise<T> {
 }
 
 export const api = {
-  page(path: string) {
-    return mcp<Page>('get_page', { path });
+  async page(path: string): Promise<Page> {
+    const page = await mcp<Omit<Page, 'text'> & { content: string }>(
+      'get_page',
+      { path, format: 'raw', include_template: true }
+    );
+    const { content, ...metadata } = page;
+    return { ...metadata, text: content };
   },
   directory(path = '/') {
     return mcp<Directory>('get_page', { path });
