@@ -70,7 +70,7 @@ impl fmt::Display for WriteBlock {
 }
 
 #[derive(Clone)]
-struct StoreState {
+pub(crate) struct StoreState {
     head: String,
     templates: Arc<crate::template::Templates>,
     config: Config,
@@ -337,110 +337,9 @@ impl Store {
         validate_corpus(&state.pages, &state.templates).map(|_| ())
     }
 
-    /// Lists direct children of a directory in the published document tree.
-    /// Root is `/`; other directory paths must end with `/`.
-    pub fn get_directory(&self, path: &str) -> Result<Vec<String>> {
-        self.get_directory_source(path).map(|(_, paths)| paths)
-    }
-
-    /// Lists all descendants, excluding the starting directory itself.
-    pub fn get_subtree(&self, path: &str, directories_only: bool) -> Result<Vec<String>> {
-        self.list_directory(path, true, directories_only)
-            .map(|(_, paths)| paths)
-    }
-
-    pub(crate) fn get_directory_source(&self, path: &str) -> Result<(String, Vec<String>)> {
-        self.list_directory(path, false, false)
-    }
-
-    fn list_directory(
-        &self,
-        path: &str,
-        recursive: bool,
-        directories_only: bool,
-    ) -> Result<(String, Vec<String>)> {
-        let prefix = if path == "/" {
-            ""
-        } else {
-            let directory = path
-                .strip_suffix('/')
-                .context("directory path must end with /")?;
-            validate_repo_path(directory)?;
-            path
-        };
-        let state = self.state.read();
-        let mut children = std::collections::BTreeSet::new();
-        let mut found = prefix.is_empty();
-        for file in state.pages.keys().chain(state.config_files.keys()) {
-            let Some(relative) = file.strip_prefix(prefix) else {
-                continue;
-            };
-            found = true;
-            if recursive {
-                for (index, _) in relative.match_indices('/') {
-                    children.insert(format!("{prefix}{}", &relative[..=index]));
-                }
-                if !directories_only {
-                    children.insert(file.clone());
-                }
-            } else {
-                let child = relative.split_once('/').map_or_else(
-                    || file.clone(),
-                    |(directory, _)| format!("{prefix}{directory}/"),
-                );
-                children.insert(child);
-            }
-        }
-        if !found {
-            bail!("directory not found: {path}");
-        }
-        Ok((state.head.clone(), children.into_iter().collect()))
-    }
-
-    /// Reads an exact page or configuration resource as hashlines.
-    pub fn get_page(&self, path: &str, window: Option<(usize, usize)>) -> Result<PageResponse> {
-        let source = self.get_source(path)?;
-        Ok(PageResponse {
-            template: source.template,
-            path: path.into(),
-            content: source.text.as_ref().map(|text| render(text, window)),
-            text: if window.is_none() { source.text } else { None },
-        })
-    }
-
-    pub(crate) fn get_source(&self, path: &str) -> Result<PageSource> {
-        validate_repo_path(path)?;
-        let state = self.state.read();
-        if let Some(text) = state.pages.get(path) {
-            return Ok(PageSource {
-                revision: state.head.clone(),
-                template: state.templates.template_path(path),
-                text: Some(text.clone()),
-            });
-        }
-        if (is_config_resource_path(path) || crate::template::is_template(path))
-            && let Some(text) = state.config_files.get(path)
-        {
-            return Ok(PageSource {
-                revision: state.head.clone(),
-                template: None,
-                text: Some(text.clone()),
-            });
-        }
-        if (path.ends_with(".md")
-            || (crate::config::is_lint_config(path) && state.config.server.allow_config_edits))
-            && (!crate::template::is_template(path) || state.config.server.allow_template_edits)
-        {
-            if !crate::template::is_template(path) && !crate::config::is_lint_config(path) {
-                ensure_paths_match_config(&state.config, [&path.to_owned()])?;
-            }
-            return Ok(PageSource {
-                revision: state.head.clone(),
-                template: state.templates.template_path(path),
-                text: None,
-            });
-        }
-        bail!("page or configuration resource not found: {path}")
+    /// Retains one published state without holding the lock during the read.
+    pub(crate) fn read_state(&self) -> Arc<StoreState> {
+        Arc::clone(&self.state.read())
     }
 
     /// Searches one published snapshot and returns anchored source excerpts.
@@ -1513,4 +1412,114 @@ fn embedding_retry_delay(ceiling_ms: &mut u64) -> Duration {
 fn request_digest(request: &ApplyEditsRequest) -> Result<String> {
     let bytes = serde_json::to_vec(request)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+impl StoreState {
+    /// Lists direct children of a directory in the published document tree.
+    /// Root is `/`; other directory paths must end with `/`.
+    pub(crate) fn get_directory(&self, path: &str) -> Result<Vec<String>> {
+        self.get_directory_source(path).map(|(_, paths)| paths)
+    }
+
+    /// Lists all descendants, excluding the starting directory itself.
+    pub(crate) fn get_subtree(&self, path: &str, directories_only: bool) -> Result<Vec<String>> {
+        self.list_directory(path, true, directories_only)
+            .map(|(_, paths)| paths)
+    }
+
+    pub(crate) fn get_directory_source(&self, path: &str) -> Result<(String, Vec<String>)> {
+        self.list_directory(path, false, false)
+    }
+
+    fn list_directory(
+        &self,
+        path: &str,
+        recursive: bool,
+        directories_only: bool,
+    ) -> Result<(String, Vec<String>)> {
+        let prefix = if path == "/" {
+            ""
+        } else {
+            let directory = path
+                .strip_suffix('/')
+                .context("directory path must end with /")?;
+            validate_repo_path(directory)?;
+            path
+        };
+        let mut children = std::collections::BTreeSet::new();
+        let mut found = prefix.is_empty();
+        for file in self.pages.keys().chain(self.config_files.keys()) {
+            let Some(relative) = file.strip_prefix(prefix) else {
+                continue;
+            };
+            found = true;
+            if recursive {
+                for (index, _) in relative.match_indices('/') {
+                    children.insert(format!("{prefix}{}", &relative[..=index]));
+                }
+                if !directories_only {
+                    children.insert(file.clone());
+                }
+            } else {
+                let child = relative.split_once('/').map_or_else(
+                    || file.clone(),
+                    |(directory, _)| format!("{prefix}{directory}/"),
+                );
+                children.insert(child);
+            }
+        }
+        if !found {
+            bail!("directory not found: {path}");
+        }
+        Ok((self.head.clone(), children.into_iter().collect()))
+    }
+
+    /// Reads an exact page or configuration resource as hashlines.
+    pub(crate) fn get_page(
+        &self,
+        path: &str,
+        window: Option<(usize, usize)>,
+    ) -> Result<PageResponse> {
+        let source = self.get_source(path)?;
+        Ok(PageResponse {
+            template: source.template,
+            path: path.into(),
+            content: source.text.as_ref().map(|text| render(text, window)),
+            text: if window.is_none() { source.text } else { None },
+        })
+    }
+
+    pub(crate) fn get_source(&self, path: &str) -> Result<PageSource> {
+        validate_repo_path(path)?;
+        if let Some(text) = self.pages.get(path) {
+            return Ok(PageSource {
+                revision: self.head.clone(),
+                template: self.templates.template_path(path),
+                text: Some(text.clone()),
+            });
+        }
+        if (is_config_resource_path(path) || crate::template::is_template(path))
+            && let Some(text) = self.config_files.get(path)
+        {
+            return Ok(PageSource {
+                revision: self.head.clone(),
+                template: None,
+                text: Some(text.clone()),
+            });
+        }
+        if (path.ends_with(".md")
+            || (crate::config::is_lint_config(path) && self.config.server.allow_config_edits))
+            && (!crate::template::is_template(path) || self.config.server.allow_template_edits)
+        {
+            if !crate::template::is_template(path) && !crate::config::is_lint_config(path) {
+                ensure_paths_match_config(&self.config, [&path.to_owned()])?;
+            }
+            return Ok(PageSource {
+                revision: self.head.clone(),
+                template: self.templates.template_path(path),
+                text: None,
+            });
+        }
+        bail!("page or configuration resource not found: {path}")
+    }
 }

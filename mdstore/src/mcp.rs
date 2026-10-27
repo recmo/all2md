@@ -13,7 +13,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tower_http::trace::TraceLayer;
 
-use crate::{ApplyEditsRequest, Store, hashline::HashlineEditError, store::ValidationError};
+use crate::{
+    ApplyEditsRequest, Store,
+    hashline::HashlineEditError,
+    store::{StoreState, ValidationError},
+};
 
 /// Preferred MCP protocol revision.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -84,12 +88,13 @@ async fn raw_path(
 }
 
 fn raw_document(store: &Store, path: &str, headers: &HeaderMap) -> Response {
+    let state = store.read_state();
     let result = if path.ends_with('/') {
-        store
+        state
             .get_directory_source(path)
             .map(|(revision, children)| (revision, Some(rooted_directory(children)), None))
     } else {
-        store
+        state
             .get_source(path)
             .map(|source| (source.revision, source.text, source.template))
     };
@@ -429,7 +434,7 @@ fn split_page_path(path: &str) -> Result<(String, Option<(usize, usize)>)> {
     Ok((path.to_owned(), Some((start, end))))
 }
 
-fn read_page(store: &Store, path: &str) -> Result<String> {
+fn read_page(state: &StoreState, path: &str) -> Result<String> {
     let (mut path, window) = split_page_path(path)?;
     let subtree = path
         .strip_suffix("/**/")
@@ -450,12 +455,12 @@ fn read_page(store: &Store, path: &str) -> Result<String> {
             bail!("line windows are only supported for files");
         }
         let children = match directories_only {
-            Some(only) => store.get_subtree(&path, only)?,
-            None => store.get_directory(&path)?,
+            Some(only) => state.get_subtree(&path, only)?,
+            None => state.get_directory(&path)?,
         };
         return Ok(rooted_directory(children));
     }
-    let page = store.get_page(&path, window)?;
+    let page = state.get_page(&path, window)?;
     let template = page.template.as_deref().unwrap_or("none");
     let content = page.content.as_deref().unwrap_or("File does not exist.");
     Ok(format!("Path: /{path}\nSchema: {template}\n\n{content}"))
@@ -469,10 +474,11 @@ fn read_pages(store: &Store, arguments: GetArguments) -> Result<Value> {
     if paths.is_empty() {
         bail!("path arrays must contain at least one path");
     }
+    let state = store.read_state();
     let content: Vec<_> = paths
         .iter()
         .map(|path| {
-            read_page(store, path)
+            read_page(&state, path)
                 .map(|text| json!({"type": "text", "text": text}))
                 .map_err(|error| anyhow::anyhow!("read {path:?}: {error}"))
         })

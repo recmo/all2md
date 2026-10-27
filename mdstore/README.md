@@ -316,8 +316,9 @@ separately for its instructions and rules.
 
 `path` also accepts a non-empty array, for example `{"path": ["/alice.md",
 "/bob.md:10-20"]}`. Results preserve input order, including repeated paths, with
-one text block per path, including plain directory lists. An invalid read
-rejects the complete batch; a missing Markdown page returns a missing-page
+one text block per path, including plain directory lists. All paths in a batch
+use the same published state, even if a concurrent edit commits during rendering.
+An invalid read rejects the complete batch; a missing Markdown page returns a missing-page
 message and the applicable schema path.
 
 For browser clients, `GET /path/alice.md` returns exact source as
