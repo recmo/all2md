@@ -3025,34 +3025,39 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
     let (base_url, server) = start_daemon(store).await;
     let client = reqwest::Client::new();
     for (arguments, raw, expanded, error) in [
-        (serde_json::json!({"path": "alice.md"}), false, false, false),
         (
-            serde_json::json!({"path": "alice.md", "format": "raw"}),
+            serde_json::json!({"path": "/alice.md"}),
+            false,
+            false,
+            false,
+        ),
+        (
+            serde_json::json!({"path": "/alice.md", "format": "raw"}),
             true,
             false,
             false,
         ),
         (
-            serde_json::json!({"path": "alice.md", "format": "raw", "include_template": true}),
+            serde_json::json!({"path": "/alice.md", "format": "raw", "include_template": true}),
             true,
             true,
             false,
         ),
         (
-            serde_json::json!({"path": "alice.md", "start_line": 4, "end_line": 6}),
+            serde_json::json!({"path": "/alice.md", "start_line": 4, "end_line": 6}),
             false,
             false,
             false,
         ),
         (serde_json::json!({"path": "new.md"}), false, false, false),
         (
-            serde_json::json!({"path": "alice.md", "format": "raw", "start_line": 1}),
+            serde_json::json!({"path": "/alice.md", "format": "raw", "start_line": 1}),
             true,
             false,
             true,
         ),
         (
-            serde_json::json!({"path": "alice.md", "format": "raw", "end_line": 1}),
+            serde_json::json!({"path": "/alice.md", "format": "raw", "end_line": 1}),
             true,
             false,
             true,
@@ -3075,6 +3080,7 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
             continue;
         }
         let value = &response["result"]["structuredContent"];
+        assert!(value["path"].as_str().unwrap().starts_with('/'));
         assert!(value.get("text").is_none());
         assert!(value.get("metadata").is_none());
         assert!(value.get("relations").is_none());
@@ -3082,9 +3088,9 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
         assert!(value.get("hash").is_none());
         assert!(value.get("exists").is_none());
         if expanded {
-            assert_eq!(value["template"]["path"], "schema.md");
+            assert_eq!(value["template"]["path"], "/schema.md");
         } else {
-            assert_eq!(value["template"], "schema.md");
+            assert_eq!(value["template"], "/schema.md");
         }
         if raw {
             assert_eq!(value["content"], source);
@@ -3117,7 +3123,7 @@ async fn document_batches_validate_and_submit_through_mcp() {
             .is_none()
     );
     let changed = original.replace("Alice profile.", "Updated Alice profile.");
-    let batch = serde_json::json!({"edit_summary": "Web edit", "edits": [{"op": "replace_page", "path": "alice.md", "base": original, "content": changed}]});
+    let batch = serde_json::json!({"edit_summary": "Web edit", "edits": [{"op": "replace_page", "path": "/alice.md", "base": original, "content": changed}]});
     let mut without_summary = batch.clone();
     without_summary["edit_summary"] = serde_json::json!("");
     assert_eq!(
@@ -3425,20 +3431,21 @@ async fn mcp_directory_reads_expose_snapshot_identity_and_replace_auxiliary_rout
     let store = repository.store();
     let (url, server) = start_daemon(store.clone()).await;
     let client = reqwest::Client::new();
-    for path in ["/", "notes/", "notes/nested/"] {
+    for path in ["/", "/notes/", "notes/nested/"] {
         let response: serde_json::Value = client.post(format!("{url}/mcp"))
             .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"get_page", "arguments":{"path":path}}}))
             .send().await.unwrap().json().await.unwrap();
         assert_eq!(response["result"]["isError"], false, "{response}");
         let directory = &response["result"]["structuredContent"];
         assert_eq!(directory["kind"], "directory");
+        assert!(directory["path"].as_str().unwrap().starts_with('/'));
         assert_eq!(
             directory["revision"],
             command(&repository.root, &["rev-parse", "HEAD"]).trim()
         );
         let expected = match path {
             "/" => "notes/",
-            "notes/" => "notes/nested/",
+            "/notes/" => "notes/nested/",
             _ => "notes/nested/carol.md",
         };
         assert!(
@@ -3446,7 +3453,7 @@ async fn mcp_directory_reads_expose_snapshot_identity_and_replace_auxiliary_rout
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|entry| entry["path"] == expected)
+                .any(|entry| entry["path"] == format!("/{expected}"))
         );
         if path == "notes/nested/" {
             assert_eq!(

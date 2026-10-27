@@ -233,8 +233,9 @@ The daemon exposes `/mcp` for document operations and `/health` for operational
 status. `get_page` accepts `/` or a directory path ending in `/` to list direct
 children of the published document tree. Directory reads include permissions,
 repository identity, and the Git revision. File reads contain only `path`,
-`template` and `content`; missing files have `content: null`. Paths are relative
-to the repository root. Empty directories are not persisted by Git.
+`template` and `content`; missing files have `content: null`. Returned paths
+start with `/` and are rooted at the repository root. Reads and edits accept
+paths with or without the leading `/`. Empty directories are not persisted by Git.
 Clients can traverse directories and check revisions to obtain a consistent
 inventory. Client-specific caches, validation baselines, and previews are built
 by clients. `apply_edits` always validates changes before committing.
@@ -248,8 +249,8 @@ in a batch validate against the same pre-edit snapshot.
 
 `get_page` returns page content once, in `content`, with hashline prefixes by
 default. It omits revision, file hash, existence flags, derived metadata and
-relations. `template` is the repository-relative schema path (or `null`); read
-that path separately for its instructions and rules. Use `format: "raw"` for exact
+relations. `template` is the repository-rooted schema path, such as `/schema.md`
+(or `null`); read that path separately for its instructions and rules. Use `format: "raw"` for exact
 full-page source, including line endings, when preparing `replace_page` or
 `delete_page`. Raw reads cannot specify a line window. Editors needing compiled
 schema information can explicitly request `include_template: true` to expand

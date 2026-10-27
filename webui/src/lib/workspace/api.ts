@@ -107,10 +107,27 @@ export const api = {
       Pick<Page, 'path' | 'template'> & { content: string | null }
     >('get_page', { path, format: 'raw', include_template: true });
     const { content, ...metadata } = page;
-    return { ...metadata, exists: content !== null, text: content ?? '' };
+    const relative = (path: string) => path.replace(/^\//, '');
+    return {
+      ...metadata,
+      path: relative(metadata.path),
+      template: metadata.template
+        ? { ...metadata.template, path: relative(metadata.template.path) }
+        : null,
+      exists: content !== null,
+      text: content ?? ''
+    };
   },
-  directory(path = '/') {
-    return mcp<Directory>('get_page', { path });
+  async directory(path = '/'): Promise<Directory> {
+    const directory = await mcp<Directory>('get_page', { path });
+    return {
+      ...directory,
+      path: directory.path === '/' ? '/' : directory.path.replace(/^\//, ''),
+      children: directory.children.map((child) => ({
+        ...child,
+        path: child.path.replace(/^\//, '')
+      }))
+    };
   },
   search(query: string, variants: string[]) {
     return mcp<{ results: SearchResult[]; degraded: string[] }>('search', {

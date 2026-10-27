@@ -6,7 +6,7 @@ afterEach(() => vi.unstubAllGlobals());
 it('requests exact source once and expanded schema for the editor', async () => {
   const source = '---\r\nname: Alice\r\n---\r\n# Notes\r\n';
   const template = {
-    path: 'schema.md',
+    path: '/schema.md',
     content: 'Schema instructions',
     definition: { frontmatter: { type: 'object' } }
   };
@@ -16,7 +16,7 @@ it('requests exact source once and expanded schema for the editor', async () => 
       result: {
         isError: false,
         structuredContent: {
-          path: 'alice.md',
+          path: '/alice.md',
           content: source,
           template
         }
@@ -31,7 +31,8 @@ it('requests exact source once and expanded schema for the editor', async () => 
   });
   expect(page.text).toBe(source);
   expect(page.exists).toBe(true);
-  expect(page.template).toEqual(template);
+  expect(page.path).toBe('alice.md');
+  expect(page.template).toEqual({ ...template, path: 'schema.md' });
   expect(page).not.toHaveProperty('content');
 });
 
@@ -57,4 +58,32 @@ it('distinguishes missing files from empty files without an exists field', async
     expect(page.exists).toBe(content !== null);
     expect(page.text).toBe('');
   }
+});
+
+it('normalizes repository-rooted directory paths for the editor', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        result: {
+          isError: false,
+          structuredContent: {
+            path: '/notes/',
+            kind: 'directory',
+            children: [
+              { path: '/notes/a.md', kind: 'file' },
+              { path: '/notes/nested/', kind: 'directory' }
+            ]
+          }
+        }
+      })
+    })
+  );
+  const directory = await api.directory('notes/');
+  expect(directory.path).toBe('notes/');
+  expect(directory.children.map((child) => child.path)).toEqual([
+    'notes/a.md',
+    'notes/nested/'
+  ]);
 });

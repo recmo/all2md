@@ -100,6 +100,20 @@ pub enum EditOperation {
 }
 
 impl EditOperation {
+    /// Returns the target path for protocol-level path normalization.
+    pub(crate) fn path_mut(&mut self) -> &mut String {
+        match self {
+            Self::DeletePage { path, .. }
+            | Self::Replace { path, .. }
+            | Self::ReplacePage { path, .. }
+            | Self::InsertBefore { path, .. }
+            | Self::InsertAfter { path, .. }
+            | Self::Delete { path, .. }
+            | Self::CreatePage { path, .. }
+            | Self::RemovePage { path, .. } => path,
+        }
+    }
+
     /// Returns the repository-relative target path.
     #[must_use]
     pub fn path(&self) -> &str {

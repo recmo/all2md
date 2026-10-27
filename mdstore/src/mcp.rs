@@ -174,7 +174,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read a file or directory from the published document tree. Use / for the root or a relative path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return only path, template and content, with four-character neighbor-based hashline anchors by default. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for exact source text (including line endings) for whole-page replacements. Markdown responses identify the nearest schema by its repository-relative template path; read that path separately for instructions and rules. Editors can explicitly request include_template=true for the expanded template. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
+            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Content is rendered with four-character neighbor-based hashline anchors by default. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for exact source text (including line endings) for whole-page replacements. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. Editors can explicitly request include_template=true for the expanded template. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -287,6 +287,35 @@ struct GetArguments {
     include_template: bool,
 }
 
+fn strip_root_prefix(path: &mut String) {
+    if path.starts_with('/') {
+        path.remove(0);
+    }
+}
+
+fn root_path_value(value: &mut Value) {
+    if let Some(path) = value.as_str() {
+        if !path.starts_with('/') {
+            *value = json!(format!("/{path}"));
+        }
+    }
+}
+
+fn rooted_page_paths(mut value: Value) -> Value {
+    root_path_value(&mut value["path"]);
+    if value.get("template").is_some_and(Value::is_object) {
+        root_path_value(&mut value["template"]["path"]);
+    } else if let Some(template) = value.get_mut("template") {
+        root_path_value(template);
+    }
+    if let Some(children) = value.get_mut("children").and_then(Value::as_array_mut) {
+        for child in children {
+            root_path_value(&mut child["path"]);
+        }
+    }
+    value
+}
+
 async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
     let params: CallParams = match serde_json::from_value(params) {
         Ok(value) => value,
@@ -301,7 +330,10 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             Err(error) => Err(error.into()),
         },
         "get_page" => match serde_json::from_value::<GetArguments>(params.arguments) {
-            Ok(arguments) => {
+            Ok(mut arguments) => {
+                if arguments.path != "/" {
+                    strip_root_prefix(&mut arguments.path);
+                }
                 let window = arguments
                     .start_line
                     .map(|start| (start, arguments.end_line.unwrap_or(start)));
@@ -333,7 +365,10 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             Err(error) => Err(error.into()),
         },
         "apply_edits" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
-            Ok(arguments) => {
+            Ok(mut arguments) => {
+                for edit in &mut arguments.edits {
+                    strip_root_prefix(edit.path_mut());
+                }
                 let blocking_store = Arc::clone(store);
                 match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
                     Ok(value) => serde_json::to_value(value).map_err(Into::into),
@@ -343,6 +378,11 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             Err(error) => Err(error.into()),
         },
         _ => return rpc_error(id, -32602, "unknown tool"),
+    };
+    let result = if params.name == "get_page" {
+        result.map(rooted_page_paths)
+    } else {
+        result
     };
     match result {
         Ok(value) => rpc_result(

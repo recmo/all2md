@@ -1785,8 +1785,8 @@ async function directoryPaths(page: Page, path: string): Promise<string[]> {
   });
   const result = (await response.json()).result;
   expect(result.isError).toBe(false);
-  return result.structuredContent.children.map(
-    (child: { path: string }) => child.path
+  return result.structuredContent.children.map((child: { path: string }) =>
+    child.path.replace(/^\//, '')
   );
 }
 
