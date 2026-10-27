@@ -144,7 +144,7 @@ fn initialize(id: Value, params: &Value) -> Response {
 #[must_use]
 /// Returns the exact public MCP tool allowlist.
 pub fn tool_names() -> [&'static str; 3] {
-    ["search", "get_page", "edit"]
+    ["search", "read", "edit"]
 }
 
 fn tools() -> Vec<Value> {
@@ -163,7 +163,7 @@ fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "get_page",
+            "name": "read",
             "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns a plain-text list of direct child paths, with trailing / for directories. Append ** for all descendants or **/ for descendant directories only (for example /notes/** and /notes/**/). Subtree listings exclude the starting directory and are complete, sorted and deduplicated. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Default file reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Pass a non-empty path array for ordered batch reads with a shared format. Hashline batches return one text block per path; raw file batches return structured results under results. An invalid read rejects the whole batch. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for structured results containing exact source text (including line endings) for whole-page replacements. Directories support plain-text output only. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
@@ -533,7 +533,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             }
             Err(error) => Err(error.into()),
         },
-        "get_page" => match serde_json::from_value::<GetArguments>(params.arguments) {
+        "read" => match serde_json::from_value::<GetArguments>(params.arguments) {
             Ok(arguments) => read_pages(store, arguments).map(|(value, plain)| {
                 plain_page = plain;
                 value

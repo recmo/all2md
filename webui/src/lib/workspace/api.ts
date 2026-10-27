@@ -155,7 +155,7 @@ export const api = {
       path: string;
       template: string | null;
       content: string | null;
-    }>('get_page', { path, format: 'raw' });
+    }>('read', { path, format: 'raw' });
     const { content, ...metadata } = page;
     const relative = (path: string) => path.replace(/^\//, '');
     return {
@@ -169,7 +169,7 @@ export const api = {
     };
   },
   async directory(path = '/'): Promise<Directory> {
-    const text = await mcp<string>('get_page', { path }, 'text');
+    const text = await mcp<string>('read', { path }, 'text');
     return {
       path: path === '/' ? '/' : path.replace(/^\//, ''),
       children: text

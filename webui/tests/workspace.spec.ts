@@ -91,7 +91,7 @@ test('Back cancels an outstanding document read without losing Forward history',
   });
   await page.route('**/mcp', async (route) => {
     const { params } = route.request().postDataJSON();
-    if (params?.name === 'get_page' && params.arguments.path === 'other.md') {
+    if (params?.name === 'read' && params.arguments.path === 'other.md') {
       requested();
       await gate;
     }
@@ -108,7 +108,7 @@ test('Back cancels an outstanding document read without losing Forward history',
   const response = page.waitForResponse((res) => {
     if (!res.url().endsWith('/mcp')) return false;
     const { params } = res.request().postDataJSON();
-    return params?.name === 'get_page' && params.arguments.path === 'other.md';
+    return params?.name === 'read' && params.arguments.path === 'other.md';
   });
   release();
   await response;
@@ -212,7 +212,7 @@ test('offline editing survives reload and search uses the MCP API online', async
   await page.locator('#search').press('Enter');
   await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
   expect(calls).toContain('search');
-  expect(calls).toContain('get_page');
+  expect(calls).toContain('read');
 });
 
 test('configuration is read-only YAML and template fences are highlighted', async ({
@@ -573,7 +573,7 @@ test('WASM catches an unchanged document losing its reciprocal link without fetc
   await page.route('**/mcp', async (route) => {
     const request = route.request().postDataJSON();
     if (
-      request.params?.name === 'get_page' &&
+      request.params?.name === 'read' &&
       request.params.arguments.path === 'reciprocal/b.md'
     )
       fetchedB = true;
@@ -613,7 +613,7 @@ test('WASM template changes validate the cached corpus offline', async ({
   await page.route('**/mcp', async (route) => {
     const request = route.request().postDataJSON();
     if (
-      request.params?.name === 'get_page' &&
+      request.params?.name === 'read' &&
       request.params.arguments.path === 'reciprocal/b.md'
     )
       fetchedB = true;
@@ -1790,7 +1790,7 @@ async function directoryPaths(page: Page, path: string): Promise<string[]> {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'get_page', arguments: { path } }
+      params: { name: 'read', arguments: { path } }
     }
   });
   const result = (await response.json()).result;
@@ -1813,7 +1813,7 @@ test('document selection changes remain incomplete locally but can be submitted'
       id: 1,
       method: 'tools/call',
       params: {
-        name: 'get_page',
+        name: 'read',
         arguments: { path: 'config.yaml', format: 'raw' }
       }
     }
@@ -1935,7 +1935,7 @@ test('task renames rewrite dependency paths offline and preserve workload arrows
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'get_page', arguments: { path: old, format: 'raw' } }
+      params: { name: 'read', arguments: { path: old, format: 'raw' } }
     }
   });
   const original = (await originalResponse.json()).result.structuredContent

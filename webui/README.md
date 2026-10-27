@@ -34,8 +34,8 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 
 ## Data flow
 
-- Search, reads, and submissions call `/mcp` (`search`, `get_page`, `edit`).
-- `get_page` reads directories as well as files. Webui traverses `/`, reuses
+- Search, reads, and submissions call `/mcp` (`search`, `read`, `edit`).
+- `read` reads directories as well as files. Webui traverses `/`, reuses
   cached sources with matching hashes, and retries if revisions change during
   traversal. It builds its validation baseline locally in a WASM worker.
 - Shared Rust validation runs incrementally in WASM while editing. The server
@@ -91,7 +91,7 @@ before bundling the SPA; Nix builds it as a separate dependency. Generated binar
 and bindings are not committed. Run `pnpm build:wasm` before
 standalone frontend type checks in a fresh checkout.
 
-Webui builds its own versioned baseline from ordinary `get_page` reads: source
+Webui builds its own versioned baseline from ordinary `read` reads: source
 hashes, parsed document facts, relation edges, and configuration/template sources.
 The first connection downloads the published document inventory; subsequent
 refreshes reuse unchanged sources unless schema/configuration changes require

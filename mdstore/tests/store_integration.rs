@@ -1233,7 +1233,7 @@ metadata(project_code="/code")
 
 #[test]
 fn mcp_allowlist_is_exact() {
-    assert_eq!(tool_names(), ["search", "get_page", "edit"]);
+    assert_eq!(tool_names(), ["search", "read", "edit"]);
 }
 
 #[test]
@@ -1320,12 +1320,12 @@ async fn mcp_lists_only_three_tools() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["search", "get_page", "edit"]);
+    assert_eq!(names, ["search", "read", "edit"]);
     let get_page = value["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|tool| tool["name"] == "get_page")
+        .find(|tool| tool["name"] == "read")
         .unwrap();
     assert!(
         get_page["inputSchema"]["properties"]
@@ -3121,7 +3121,7 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
             .post(format!("{base_url}/mcp"))
             .json(
                 &serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": "get_page", "arguments": arguments}}),
+                "params": {"name": "read", "arguments": arguments}}),
             )
             .send()
             .await
@@ -3193,7 +3193,7 @@ async fn mcp_batch_page_reads_preserve_order_and_do_not_duplicate_content() {
             .post(format!("{url}/mcp"))
             .json(
                 &serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": "get_page", "arguments": arguments}}),
+                "params": {"name": "read", "arguments": arguments}}),
             )
             .send()
             .await
@@ -3647,7 +3647,7 @@ async fn mcp_directory_reads_return_only_plain_paths_and_replace_auxiliary_route
     let client = reqwest::Client::new();
     for path in ["/", "/notes/", "notes/nested/"] {
         let response: serde_json::Value = client.post(format!("{url}/mcp"))
-            .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"get_page", "arguments":{"path":path}}}))
+            .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"read", "arguments":{"path":path}}}))
             .send().await.unwrap().json().await.unwrap();
         assert_eq!(response["result"]["isError"], false, "{response}");
         assert!(response["result"].get("structuredContent").is_none());

@@ -22,7 +22,7 @@ it('requests exact source once and receives only the schema path', async () => {
   vi.stubGlobal('fetch', fetch);
   const page = await api.page('alice.md');
   expect(JSON.parse(fetch.mock.calls[0][1].body).params).toEqual({
-    name: 'get_page',
+    name: 'read',
     arguments: { path: 'alice.md', format: 'raw' }
   });
   expect(page.text).toBe(source);

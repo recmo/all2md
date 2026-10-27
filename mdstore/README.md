@@ -105,7 +105,7 @@ Starlark callback validation remain separate from Markdown linting.
 Place `schema.md` beside the documents it governs. The nearest ancestor
 template applies recursively and replaces its parent. Use directories such as
 `tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
-Templates are readable through `get_page`, protected from `edit`, and
+Templates are readable through `read`, protected from `edit`, and
 excluded from search and embeddings.
 
 Markdown supplies instructions and examples. Only top-level fences labelled
@@ -177,7 +177,7 @@ or repeated placeholders and placeholders on other edit operations are rejected.
 Allocation changes only the path, and retries consult durable receipts first.
 Read the parent directory after a successful edit to discover allocated paths.
 
-`get_page` returns the governing schema path in `template`, also for proposed
+`read` returns the governing schema path in `template`, also for proposed
 paths with `content: null`. Read that path separately for its rules and original
 Markdown. Template updates are authored externally and activated through
 validated Git synchronization.
@@ -233,7 +233,7 @@ mdstore --root /path/to/brain serve
 ```
 
 The daemon exposes `/mcp` for document operations and `/health` for operational
-status. `get_page` accepts `/` or a directory path ending in `/` to list direct
+status. `read` accepts `/` or a directory path ending in `/` to list direct
 children of the published document tree. Use `/notes/**` for all descendants
 (files and directories), or `/notes/**/` for descendant directories only; root
 forms are `/**` and `/**/`. Subtree listings exclude the starting directory,
@@ -263,7 +263,7 @@ The MCP endpoint supports protocol version `2025-06-18`. Older `2025-03-26`
 requests are no longer accepted; initialization advertises the supported
 version.
 
-An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are four
+An edit request uses `LINE:HASH` anchors returned by `read`. Hashes are four
 hexadecimal characters (16 bits of SHA-256). Each hash covers the line and its
 immediate previous and next lines, with length-prefixed fields and empty strings
 for missing neighbors. Trailing whitespace is significant. The numbered line
@@ -304,7 +304,7 @@ Only `replace` and `append` are accepted:
 
 `base` is not accepted. `summary` is required and must be non-empty.
 
-`get_page` returns page content once as a plain-text MCP content block, with a
+`read` returns page content once as a plain-text MCP content block, with a
 path/schema header and hashline prefixes by default. Append `:10` to read one
 line or `:10-20` to read an inclusive line range. Separate line-number arguments
 are not accepted. Raw file reads, searches and edit results use
@@ -361,7 +361,7 @@ server:
 ```
 
 These permissions apply to every caller that can reach the daemon. The UI
-discovers them from root-directory `get_page` reads. Root configuration cannot be deleted. Template changes
+discovers them from root-directory `read` reads. Root configuration cannot be deleted. Template changes
 compile the proposed Starlark and validate the entire proposed corpus; documents
 can be updated in the same atomic batch to satisfy new rules. Transition checks
 from both the old and proposed templates remain enforced. Configuration changes
