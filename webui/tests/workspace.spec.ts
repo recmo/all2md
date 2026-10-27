@@ -1,3 +1,4 @@
+import { completeAnchor } from '../src/lib/workspace/api';
 import { type Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 
@@ -711,7 +712,15 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
         name: 'apply_edits',
         arguments: {
           summary: 'Check rumdl',
-          edits: { '/other.md': [{ op: 'replace', base, content: text }] }
+          edits: {
+            '/other.md': [
+              {
+                op: 'replace',
+                anchor: await completeAnchor(base),
+                content: text
+              }
+            ]
+          }
         }
       }
     }
@@ -1331,7 +1340,7 @@ async function remoteEdit(
             [path]: [
               base === undefined
                 ? { op: 'replace', content }
-                : { op: 'replace', base, content }
+                : { op: 'replace', anchor: await completeAnchor(base), content }
             ]
           }
         }
@@ -1941,7 +1950,13 @@ test('task renames rewrite dependency paths offline and preserve workload arrows
         arguments: {
           summary: 'Reject dangling dependency',
           edits: {
-            [old]: [{ op: 'replace', base: original, content: '' }],
+            [old]: [
+              {
+                op: 'replace',
+                anchor: await completeAnchor(original),
+                content: ''
+              }
+            ],
             [renamed]: [{ op: 'replace', content: original }]
           }
         }

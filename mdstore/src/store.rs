@@ -1770,7 +1770,7 @@ mod tests {
         assert_eq!(after.head, git::head(root).unwrap());
         assert_ne!(before.head, after.head);
         assert_eq!(before.pages["new.md"], "new snapshot\n");
-        assert_eq!(after.pages["new.md"], "edited snapshot\n");
+        assert_eq!(after.pages["new.md"], "edited snapshot");
         assert!(Arc::ptr_eq(&before.templates, &after.templates));
         assert!(Arc::ptr_eq(&before.config_files, &after.config_files));
     }

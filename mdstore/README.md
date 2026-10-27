@@ -20,7 +20,6 @@ The daemon serves document APIs; it does not host a UI or interpret app definiti
 Use MCP directly or run the separate [web interface](../webui/README.md).
 `cargo build --manifest-path mdstore/Cargo.toml` needs only Rust dependencies.
 
-
 ## Repository configuration
 
 Every served repository tracks a root `config.yaml` with operational settings
@@ -284,17 +283,17 @@ The former flat operation array is not accepted.
 Only `replace` and `append` are accepted:
 
 - `replace` with `anchor` replaces an inclusive line/range. Empty `content`
-  deletes those lines; deleting every line deletes the file.
-- `replace` without `anchor` replaces a whole file when exact original `base`
-  is supplied. Empty `content` deletes it. Omit both `anchor` and `base` to
-  create a missing file; an existing file or empty creation content is rejected.
+  deletes those lines. Deleting a file requires a single operation whose anchor
+  covers its complete contents; multiple partial deletions cannot delete it.
+- `replace` without `anchor` creates a missing file. An existing file or empty
+  creation content is rejected. To replace a whole existing file, supply its
+  complete anchor range; for an existing empty file use `0:` with non-empty
+  content. Replacing empty with empty is an error. Whole-file replacement
+  preserves the supplied content exactly, including line endings.
 - `append` inserts non-empty `content` after an anchor. Omit `anchor` for EOF,
   or use `0:` for the start of the file. The file must already exist.
 
-`anchor` and `base` cannot be combined. Whole-file edits must be the only
-operation for their path. `summary` is required and must be non-empty.
-
-
+`base` is not accepted. `summary` is required and must be non-empty.
 
 `get_page` returns page content once as a plain-text MCP content block, with a
 path/schema header and hashline prefixes by default. Append `:10` to read one
@@ -305,8 +304,8 @@ serialized JSON copy for older clients. File reads omit revision, file hash,
 existence flags, derived metadata and relations. `template` is the
 repository-rooted schema path, such as `/schema.md` (or `null`); read that path
 separately for its instructions and rules. Use `format: "raw"` for structured
-output containing exact full-page source, including line endings, when preparing
-whole-file `replace`. Raw reads support files only and cannot specify
+output containing exact full-page source, including line endings. Existing-file
+edits still require anchors. Raw reads support files only and cannot specify
 a line window. The schema is always a path; the web editor compiles property
 schemas locally from the schema sources it reads.
 

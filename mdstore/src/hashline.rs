@@ -312,9 +312,41 @@ pub(crate) fn apply_operations_with_ranges(
             return Err(HashlineError::Incompatible(path.into()));
         }
 
+        if text.is_empty()
+            && let [
+                (
+                    ..,
+                    EditOperation::Replace {
+                        anchor, content, ..
+                    },
+                ),
+            ] = ops.as_slice()
+            && anchor == "0:"
+            && !content.is_empty()
+        {
+            output.insert(path.into(), Some(content.clone()));
+            changed_ranges.insert(
+                path.into(),
+                vec![ChangedRange {
+                    start_line: 1,
+                    end_line: content.lines().count().max(1),
+                }],
+            );
+            continue;
+        }
+        if text.is_empty()
+            && ops
+                .iter()
+                .any(|(_, op)| matches!(op, EditOperation::Delete { .. }))
+        {
+            return Err(HashlineError::Incompatible(format!(
+                "{path}: cannot replace an empty file with empty content"
+            )));
+        }
         let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
         let separator = if text.contains("\r\n") { "\r\n" } else { "\n" };
         let trailing_newline = text.ends_with('\n');
+        let operation_count = ops.len();
         let mut resolved = Vec::new();
         for (request_index, operation) in ops {
             let item = match operation {
@@ -382,6 +414,23 @@ pub(crate) fn apply_operations_with_ranges(
             resolved.push(item);
         }
         reject_overlaps(path, &resolved)?;
+        if let [edit] = resolved.as_slice()
+            && edit.span.start == 0
+            && edit.span.end + 1 == lines.len()
+            && let ResolvedKind::Replace(content) = &edit.kind
+            && !content.is_empty()
+        {
+            output.insert(path.into(), Some(content.clone()));
+            changed_ranges.insert(
+                path.into(),
+                vec![ChangedRange {
+                    start_line: 1,
+                    end_line: content.lines().count().max(1),
+                }],
+            );
+            continue;
+        }
+
         let mut ordered_ranges: Vec<&Resolved> = resolved.iter().collect();
         ordered_ranges.sort_by(|a, b| {
             a.span
@@ -428,6 +477,11 @@ pub(crate) fn apply_operations_with_ranges(
             }
         }
         if lines.is_empty() {
+            if operation_count != 1 {
+                return Err(HashlineError::Incompatible(format!(
+                    "{path}: deleting a file requires one complete-file anchor"
+                )));
+            }
             output.insert(path.into(), None);
             continue;
         }
@@ -622,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_anchor_inserts_into_and_removes_empty_page() {
+    fn zero_anchor_inserts_into_empty_page_but_empty_deletion_fails() {
         let mut original = HashMap::new();
         original.insert("empty.md".into(), String::new());
         let inserted = apply_operations(
@@ -637,13 +691,13 @@ mod tests {
         assert_eq!(inserted["empty.md"].as_deref(), Some("first"));
         let removed = apply_operations(
             &original,
-            &[EditOperation::RemovePage {
+            &[EditOperation::Delete {
                 path: "empty.md".into(),
                 anchor: "0:".into(),
             }],
         )
-        .unwrap();
-        assert_eq!(removed["empty.md"], None);
+        .unwrap_err();
+        assert!(removed.to_string().contains("cannot replace an empty file with empty content"));
     }
 
     #[test]

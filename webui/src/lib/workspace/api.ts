@@ -122,6 +122,36 @@ async function mcp<T>(
     : result.structuredContent;
 }
 
+export async function completeAnchor(text: string): Promise<string> {
+  if (text === '') return '0:';
+  const lines = text.split(/\r?\n/);
+  if (text.endsWith('\n')) lines.pop();
+  const hash = async (index: number) => {
+    const encoder = new TextEncoder();
+    const fields = [
+      lines[index - 1] ?? '',
+      lines[index],
+      lines[index + 1] ?? ''
+    ].map((line) => encoder.encode(line));
+    const bytes = new Uint8Array(
+      fields.reduce((length, field) => length + 8 + field.length, 0)
+    );
+    const view = new DataView(bytes.buffer);
+    let offset = 0;
+    for (const field of fields) {
+      view.setBigUint64(offset, BigInt(field.length));
+      bytes.set(field, offset + 8);
+      offset += 8 + field.length;
+    }
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return `${index + 1}:${Array.from(digest.slice(0, 2), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  };
+  const first = await hash(0);
+  return lines.length === 1
+    ? first
+    : `${first}..${await hash(lines.length - 1)}`;
+}
+
 export const api = {
   async page(path: string): Promise<Page> {
     const page = await mcp<{
@@ -160,15 +190,17 @@ export const api = {
       variants
     });
   },
-  apply(request: EditRequest) {
+  async apply(request: EditRequest) {
     const edits: Record<
       string,
-      { op: 'replace'; base?: string; content: string }[]
+      { op: 'replace'; anchor?: string; content: string }[]
     > = Object.create(null);
     for (const edit of request.edits) {
       const operation = {
         op: 'replace' as const,
-        ...(edit.op !== 'create_page' ? { base: edit.base } : {}),
+        ...(edit.op !== 'create_page'
+          ? { anchor: await completeAnchor(edit.base) }
+          : {}),
         content: edit.op === 'delete_page' ? '' : edit.content
       };
       (edits[`/${edit.path.replace(/^\//, '')}`] ??= []).push(operation);

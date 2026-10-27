@@ -3323,7 +3323,10 @@ async fn document_batches_validate_and_submit_through_mcp() {
             .is_none()
     );
     let changed = original.replace("Alice profile.", "Updated Alice profile.");
-    let batch = serde_json::json!({"summary": "Web edit", "edits": {"/alice.md": [{"op": "replace", "base": original, "content": changed}]}});
+    let rendered = store.get_page("alice.md", None).unwrap().content.unwrap();
+    let anchors: Vec<_> = rendered.lines().map(|line| line.split('|').next().unwrap()).collect();
+    let anchor = format!("{}..{}", anchors.first().unwrap(), anchors.last().unwrap());
+    let batch = serde_json::json!({"summary": "Web edit", "edits": {"/alice.md": [{"op": "replace", "anchor": anchor, "content": changed}]}});
     let mut without_summary = batch.clone();
     without_summary["summary"] = serde_json::json!("");
     assert_eq!(

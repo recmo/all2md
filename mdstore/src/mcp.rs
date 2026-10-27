@@ -183,7 +183,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "apply_edits",
-            "description": "Atomically validate and locally commit an edit batch. Supply edits as an object mapping each file path to a non-empty operation array; operations omit path. All anchors refer to the pre-edit snapshot. Use replace with an anchor for a line or inclusive range, with exact original base text for a whole existing file, or without either to create a missing file. Empty replacement content deletes the selected lines; removing every line deletes the file. Use append to insert after an anchor, 0: for file start, or omit anchor for EOF; the file must exist. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
+            "description": "Atomically validate and locally commit an edit batch. Supply edits as an object mapping each file path to a non-empty operation array; operations omit path. All anchors refer to the pre-edit snapshot. Use replace with an anchor for a line or inclusive range, with the complete anchor range for a whole existing file, or without an anchor to create a missing file. Use 0: to replace an existing empty file with non-empty content. Empty-to-empty replacement is an error. Empty replacement content deletes the selected lines; deleting the file requires a single complete-file anchor. Use append to insert after an anchor, 0: for file start, or omit anchor for EOF; the file must exist. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -212,12 +212,10 @@ fn edit_operation_schemas() -> Vec<Value> {
             "type": "object",
             "properties": {
                 "op": {"const": "replace"},
-                "anchor": {"type": "string", "description": "LINE:HASH or START:HASH..END:HASH; omit for whole-file edits."},
-                "base": {"type": "string", "description": "Exact original text for whole-file replacement; omit to require a missing file."},
+                "anchor": {"type": "string", "description": "LINE:HASH or START:HASH..END:HASH. Use the complete range for whole-file replacement/deletion, 0: for an existing empty file, or omit to create a missing file."},
                 "content": {"type": "string", "description": "Replacement text; empty deletes the selected lines or whole file."}
             },
             "required": ["op", "content"],
-            "not": {"required": ["anchor", "base"]},
             "additionalProperties": false
         }),
         json!({
@@ -238,7 +236,6 @@ fn edit_operation_schemas() -> Vec<Value> {
 enum ApplyOperation {
     Replace {
         anchor: Option<String>,
-        base: Option<String>,
         content: String,
     },
     Append {
@@ -252,13 +249,6 @@ impl ApplyOperation {
         use crate::EditOperation;
         Ok(match self {
             Self::Replace {
-                anchor: Some(_),
-                base: Some(_),
-                ..
-            } => {
-                bail!("replace accepts anchor or base, not both");
-            }
-            Self::Replace {
                 anchor: Some(anchor),
                 content,
                 ..
@@ -269,21 +259,6 @@ impl ApplyOperation {
                     EditOperation::Replace {
                         path,
                         anchor,
-                        content,
-                    }
-                }
-            }
-            Self::Replace {
-                base: Some(base),
-                content,
-                ..
-            } => {
-                if content.is_empty() {
-                    EditOperation::DeletePage { path, base }
-                } else {
-                    EditOperation::ReplacePage {
-                        path,
-                        base,
                         content,
                     }
                 }
