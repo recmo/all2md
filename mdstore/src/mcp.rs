@@ -183,7 +183,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "apply_edits",
-            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}; validation errors include file and line locations when available.",
+            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -410,6 +410,31 @@ fn page_text(value: &Value) -> String {
     format!("Path: {path}\nSchema: {template}\n\n{content}")
 }
 
+fn error_location(path: &str, line: Option<usize>) -> String {
+    let path = format!("/{}", path.trim_start_matches('/'));
+    match line {
+        Some(line) => format!("{path}:{line}"),
+        None => path,
+    }
+}
+
+fn validation_errors(validation: &ValidationError) -> Vec<Value> {
+    validation
+        .findings
+        .iter()
+        .map(|finding| {
+            let mut error = json!({
+                "location": error_location(&finding.path, finding.line),
+                "message": finding.message,
+            });
+            if let Some(source) = &finding.source {
+                error["schema"] = json!(error_location(&source.path, Some(source.line)));
+            }
+            error
+        })
+        .collect()
+}
+
 async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
     let params: CallParams = match serde_json::from_value(params) {
         Ok(value) => value,
@@ -468,7 +493,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
         Err(error) => {
             if params.name == "apply_edits" {
                 let errors = match error.downcast_ref::<ValidationError>() {
-                    Some(validation) => json!(validation.findings),
+                    Some(validation) => json!(validation_errors(validation)),
                     None => json!([{"message": error.to_string()}]),
                 };
                 return rpc_result(id, json!({

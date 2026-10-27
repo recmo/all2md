@@ -40,6 +40,18 @@ export class ApiError extends Error {
     super(message);
   }
 }
+type EditError = { message: string; location?: string; schema?: string };
+function errorLocation(location: string): { path: string; line?: number } {
+  const match = location.match(/:(\d+)$/);
+  return {
+    path: (match ? location.slice(0, match.index) : location).replace(
+      /^\//,
+      ''
+    ),
+    ...(match ? { line: Number(match[1]) } : {})
+  };
+}
+
 async function mcp<T>(
   name: string,
   args: unknown,
@@ -82,7 +94,7 @@ async function mcp<T>(
   if (result.isError) {
     const errors = (
       result.structuredContent as {
-        errors?: (Partial<ValidationFinding> & { message: string })[];
+        errors?: EditError[];
       }
     )?.errors;
     throw new ApiError(
@@ -90,9 +102,19 @@ async function mcp<T>(
         ? errors.map((error) => error.message).join('\n')
         : result.content.map((c) => c.text).join('\n'),
       422,
-      errors?.filter(
-        (error): error is ValidationFinding => typeof error.path === 'string'
-      ) || []
+      errors?.flatMap((error): ValidationFinding[] => {
+        if (error.location === undefined) return [];
+        const source = error.schema ? errorLocation(error.schema) : undefined;
+        return [
+          {
+            ...errorLocation(error.location),
+            message: error.message,
+            ...(source
+              ? { source: { path: source.path, line: source.line! } }
+              : {})
+          }
+        ];
+      }) || []
     );
   }
   return format === 'text'

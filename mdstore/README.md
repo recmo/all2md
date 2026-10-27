@@ -188,9 +188,11 @@ validated Git synchronization.
 An accepted edit is committed locally before it returns. It never waits for a
 network request, including when retrying an already-applied batch. The MCP
 `apply_edits` response contains only `{"success": true}` or `{"errors": [...]}`.
-Errors carry a message and, for validation findings, file and line locations when
-available. Results use `structuredContent` without a duplicate text copy; failures
-set `isError: true`. Embedding rebuilds and Git synchronization are independent
+Errors carry a message and, for validation findings, a repository-rooted `location`
+such as `/notes/page.md:5`. Without a line number, the path is `/notes/page.md`.
+An optional `schema` uses the same `/schema.md:12` syntax for the governing rule.
+Absent schema locations are omitted; there is no separate `line` field. Results
+use `structuredContent` without a duplicate text copy; failures set `isError: true`. Embedding rebuilds and Git synchronization are independent
 background activities.
 
 With `git.push: true`, the running daemon synchronizes at startup, after edits,

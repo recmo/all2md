@@ -721,8 +721,7 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
   const findings = result.structuredContent.errors;
   expect(findings).toEqual([
     expect.objectContaining({
-      path: 'other.md',
-      line: 5,
+      location: '/other.md:5',
       message: expect.stringMatching(/^MD012:/)
     })
   ]);

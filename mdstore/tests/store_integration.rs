@@ -1495,7 +1495,7 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding["path"] == "invalid.md")
+            .any(|finding| finding["location"].as_str().unwrap().split(':').next() == Some("/invalid.md"))
     );
     server.abort();
 }
