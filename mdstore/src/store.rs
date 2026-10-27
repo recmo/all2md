@@ -186,19 +186,13 @@ const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 #[derive(Debug, Clone, Serialize)]
 /// Hashline-rendered page or configuration resource.
 pub struct PageResponse {
-    /// Published Git revision shared by all fields in this response.
-    pub revision: String,
-    /// SHA-256 of exact source, absent for a missing page.
-    pub hash: Option<String>,
-    /// Whether the requested file exists in the published tree.
-    pub exists: bool,
     /// Applicable directory template; serialized as its repository-relative path.
     #[serde(serialize_with = "serialize_template_path")]
     pub template: Option<serde_json::Value>,
     /// Exact repository-relative path.
     pub path: String,
-    /// Raw Markdown or configuration text with hashline prefixes.
-    pub content: String,
+    /// Markdown or configuration text with hashline prefixes; absent for a missing file.
+    pub content: Option<String>,
     /// Exact source text for full-page reads, absent for line windows.
     #[serde(skip_serializing)]
     pub text: Option<String>,
@@ -432,12 +426,9 @@ impl Store {
         let state = self.state.read();
         if let Some(text) = state.pages.get(path) {
             return Ok(PageResponse {
-                revision: state.head.clone(),
-                hash: Some(crate::validation::source_hash(text)),
-                exists: true,
                 template: state.templates.discovery(path),
                 path: path.into(),
-                content: render(text, window),
+                content: Some(render(text, window)),
                 text: window.is_none().then(|| text.clone()),
             });
         }
@@ -445,12 +436,9 @@ impl Store {
             && let Some(text) = state.config_files.get(path)
         {
             return Ok(PageResponse {
-                revision: state.head.clone(),
-                hash: Some(crate::validation::source_hash(text)),
-                exists: true,
                 template: None,
                 path: path.into(),
-                content: render(text, window),
+                content: Some(render(text, window)),
                 text: window.is_none().then(|| text.clone()),
             });
         }
@@ -462,13 +450,10 @@ impl Store {
                 ensure_paths_match_config(&state.config, [&path.to_owned()])?;
             }
             return Ok(PageResponse {
-                revision: state.head.clone(),
-                hash: None,
-                exists: false,
                 template: state.templates.discovery(path),
                 path: path.into(),
-                content: String::new(),
-                text: Some(String::new()),
+                content: None,
+                text: None,
             });
         }
         bail!("page or configuration resource not found: {path}")

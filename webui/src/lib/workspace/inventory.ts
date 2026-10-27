@@ -46,9 +46,12 @@ export async function readInventory(
             const page =
               !policyChanged && prior?.hash && prior.hash === file.hash
                 ? { ...prior, revision: root.revision }
-                : await api.page(file.path);
-            if (!page.exists || page.revision !== root.revision)
-              consistent = false;
+                : {
+                    ...(await api.page(file.path)),
+                    revision: root.revision,
+                    hash: file.hash
+                  };
+            if (!page.exists) consistent = false;
             pages[file.path] = page;
           }
         })

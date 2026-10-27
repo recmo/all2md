@@ -179,7 +179,7 @@ Allocation changes only the path, and retries consult durable receipts first.
 Resolved paths are returned in `touched_paths` and `fresh_hashlines`.
 
 `get_page` returns the governing schema path in `template`, also for proposed
-paths with `exists: false`. Read that path separately for its rules and original
+paths with `content: null`. Read that path separately for its rules and original
 Markdown, or explicitly request `include_template: true` for the expanded
 template. Template updates are authored externally and activated through
 validated Git synchronization.
@@ -232,8 +232,9 @@ mdstore --root /path/to/brain serve
 The daemon exposes `/mcp` for document operations and `/health` for operational
 status. `get_page` accepts `/` or a directory path ending in `/` to list direct
 children of the published document tree. Directory reads include permissions,
-repository identity, and the Git revision; file reads include the same revision
-and an exact source hash. Empty directories are not persisted by Git.
+repository identity, and the Git revision. File reads contain only `path`,
+`template` and `content`; missing files have `content: null`. Paths are relative
+to the repository root. Empty directories are not persisted by Git.
 Clients can traverse directories and check revisions to obtain a consistent
 inventory. Client-specific caches, validation baselines, and previews are built
 by clients. `apply_edits` always validates changes before committing.
@@ -246,8 +247,9 @@ line must match: stale anchors fail without relocation or merging. All operation
 in a batch validate against the same pre-edit snapshot.
 
 `get_page` returns page content once, in `content`, with hashline prefixes by
-default. It omits derived metadata and relations. `template` is the
-repository-relative schema path (or `null`); read that path separately for its instructions and rules. Use `format: "raw"` for exact
+default. It omits revision, file hash, existence flags, derived metadata and
+relations. `template` is the repository-relative schema path (or `null`); read
+that path separately for its instructions and rules. Use `format: "raw"` for exact
 full-page source, including line endings, when preparing `replace_page` or
 `delete_page`. Raw reads cannot specify a line window. Editors needing compiled
 schema information can explicitly request `include_template: true` to expand

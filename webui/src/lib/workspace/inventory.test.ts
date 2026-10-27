@@ -40,7 +40,12 @@ describe('MCP document inventory', () => {
             ])
           : directory(path, 'b', [entry('notes/b.md')])
       ),
-      page: vi.fn(async (path: string) => file(path, 'b'))
+      page: vi.fn(async (path: string) => ({
+        path,
+        exists: true,
+        text: path,
+        template: null
+      }))
     };
     const result = await readInventory(api, {
       'a.md': file('a.md')
@@ -48,9 +53,11 @@ describe('MCP document inventory', () => {
     expect(result.paths).toEqual(['a.md', 'notes/b.md']);
     expect(api.page.mock.calls).toEqual([['notes/b.md']]);
     expect(result.root.revision).toBe('b');
+    expect(result.pages['notes/b.md'].hash).toBe('notes/b.md');
+    expect(result.pages['notes/b.md'].revision).toBe('b');
   });
 
-  it('retries the entire read when a file has a different revision', async () => {
+  it('retries the entire read when the repository changes while reading a file', async () => {
     let revision = 'a';
     const api = {
       directory: vi.fn(async () => directory('/', revision, [entry('a.md')])),
@@ -102,10 +109,10 @@ describe('MCP document inventory', () => {
     ]);
   });
 
-  it('fails rather than returning an inventory assembled across revisions', async () => {
+  it('fails rather than returning an inventory when files keep disappearing', async () => {
     const api = {
       directory: vi.fn(async () => directory('/', 'a', [entry('a.md')])),
-      page: vi.fn(async (path: string) => file(path, 'b'))
+      page: vi.fn(async (path: string) => ({ ...file(path), exists: false }))
     };
     await expect(readInventory(api, {})).rejects.toThrow('Repository changed');
     expect(api.page).toHaveBeenCalledTimes(3);

@@ -174,7 +174,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read a file or directory from the published document tree. Use / for the root or a relative path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return that revision, source hash and content once, with four-character neighbor-based hashline anchors by default. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for exact source text (including line endings) for whole-page replacements. Markdown responses identify the nearest schema by its repository-relative template path; read that path separately for instructions and rules. Editors can explicitly request include_template=true for the expanded template. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
+            "description": "Read a file or directory from the published document tree. Use / for the root or a relative path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return only path, template and content, with four-character neighbor-based hashline anchors by default. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for exact source text (including line endings) for whole-page replacements. Markdown responses identify the nearest schema by its repository-relative template path; read that path separately for instructions and rules. Editors can explicitly request include_template=true for the expanded template. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -320,7 +320,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                         store.get_page(&arguments.path, window).and_then(|page| {
                             let mut value = serde_json::to_value(&page)?;
                             if matches!(arguments.format, PageFormat::Raw) {
-                                value["content"] = json!(page.text.unwrap_or_default());
+                                value["content"] = json!(page.text);
                             }
                             if arguments.include_template {
                                 value["template"] = json!(page.template);

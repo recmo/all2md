@@ -674,16 +674,17 @@ section("Notes", required=True, content="paragraphs", paragraphs={"minimum": 1, 
     command(&repository.root, &["commit", "-qm", "add template"]);
     let store = repository.store();
     let existing = store.get_page("alice.md", None).unwrap();
-    assert!(existing.exists);
+    assert!(existing.content.is_some());
     assert_eq!(existing.template.unwrap()["path"], "schema.md");
     let proposed = store.get_page("people/new.md", None).unwrap();
-    assert!(!proposed.exists);
+    assert!(proposed.content.is_none());
     assert_eq!(proposed.template.unwrap()["content"], template);
     assert!(
         store
             .get_page("schema.md", None)
             .unwrap()
             .content
+            .unwrap()
             .contains("Keep notes concise.")
     );
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
@@ -947,6 +948,7 @@ fn configured_markdown_under_mdstore_is_editable_content() {
             .get_page(".mdstore/note.md", None)
             .unwrap()
             .content
+            .unwrap()
             .contains("Internal profile.")
     );
     store
@@ -1075,6 +1077,7 @@ fn reopened_state_reads_canonical_blobs_not_smudged_worktree_text() {
             .get_page("alice.md", None)
             .unwrap()
             .content
+            .unwrap()
             .contains("MiXeD profile.")
     );
 }
@@ -1231,7 +1234,7 @@ fn configuration_resources_are_hashline_readable() {
     let store = repository.store();
     for path in ["config.yaml", "schema.md"] {
         let response = store.get_page(path, Some((1, 2))).unwrap();
-        assert!(response.content.starts_with("1:"));
+        assert!(response.content.unwrap().starts_with("1:"));
         let text = fs::read_to_string(repository.root.join(path)).unwrap();
         let first = text.lines().next().unwrap();
         assert!(
@@ -1488,6 +1491,7 @@ fn valid_external_commit_is_loaded_before_the_next_write() {
             .get_page("alice.md", None)
             .unwrap()
             .content
+            .unwrap()
             .contains("external profile")
     );
 }
@@ -1597,6 +1601,7 @@ fn manual_push_refreshes_external_configuration_before_selecting_push_settings()
             .get_page("schema.md", None)
             .unwrap()
             .content
+            .unwrap()
             .lines()
             .next()
             .unwrap()
@@ -2096,6 +2101,7 @@ fn incoming_commits_are_validated_before_live_activation() {
             .get_page("alice.md", None)
             .unwrap()
             .content
+            .unwrap()
             .contains("Alice profile.")
     );
     assert!(store.status().unwrap().replication.last_error.is_some());
@@ -2131,6 +2137,7 @@ fn incoming_commits_are_validated_before_live_activation() {
             .get_page("alice.md", None)
             .unwrap()
             .content
+            .unwrap()
             .contains("Alice from upstream.")
     );
     assert_eq!(
@@ -2311,6 +2318,7 @@ fn staged_restart_never_overwrites_a_later_local_edit() {
             .get_page("alice.md", None)
             .unwrap()
             .content
+            .unwrap()
             .contains("Preserve this edit.")
     );
     assert_eq!(restarted.push().unwrap(), PushState::Diverged);
@@ -2753,6 +2761,7 @@ fn literate_templates_allocate_atomically_and_replay_after_restart() {
             .get_page("tasks/v1/schema.md", None)
             .unwrap()
             .content
+            .unwrap()
             .contains("starlark")
     );
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
@@ -2847,6 +2856,7 @@ fn literate_template_concurrent_creates_and_failed_changes_preserve_state() {
             .get_page(path, None)
             .unwrap()
             .content
+            .unwrap()
             .contains("state: ready")
     );
 }
@@ -2883,6 +2893,7 @@ fn literate_template_import_validates_the_final_snapshot() {
             .get_page(&path, None)
             .unwrap()
             .content
+            .unwrap()
             .contains("state: completed")
     );
 }
@@ -2926,6 +2937,7 @@ fn stale_hash_collision_cannot_overwrite_a_concurrent_edit() {
             .get_page("alice.md", None)
             .unwrap()
             .content
+            .unwrap()
             .contains(concurrent)
     );
     assert_ne!(short_hash("Text", "", ""), short_hash("Text  ", "", ""));
@@ -3066,6 +3078,9 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
         assert!(value.get("text").is_none());
         assert!(value.get("metadata").is_none());
         assert!(value.get("relations").is_none());
+        assert!(value.get("revision").is_none());
+        assert!(value.get("hash").is_none());
+        assert!(value.get("exists").is_none());
         if expanded {
             assert_eq!(value["template"]["path"], "schema.md");
         } else {
@@ -3074,8 +3089,7 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
         if raw {
             assert_eq!(value["content"], source);
         } else if arguments["path"] == "new.md" {
-            assert_eq!(value["exists"], false);
-            assert_eq!(value["content"], "");
+            assert!(value["content"].is_null());
         } else {
             for line in value["content"].as_str().unwrap().lines() {
                 let (anchor, _) = line.split_once('|').unwrap();
@@ -3402,7 +3416,7 @@ fn document_markers_do_not_bypass_schema_rules() {
 }
 
 #[tokio::test]
-async fn mcp_directory_reads_share_file_revisions_and_replace_auxiliary_routes() {
+async fn mcp_directory_reads_expose_snapshot_identity_and_replace_auxiliary_routes() {
     let repository = Repository::new();
     fs::create_dir_all(repository.root.join("notes/nested")).unwrap();
     fs::write(repository.root.join("notes/nested/carol.md"), page("Carol")).unwrap();
@@ -3418,11 +3432,29 @@ async fn mcp_directory_reads_share_file_revisions_and_replace_auxiliary_routes()
         assert_eq!(response["result"]["isError"], false, "{response}");
         let directory = &response["result"]["structuredContent"];
         assert_eq!(directory["kind"], "directory");
-        assert_eq!(directory["revision"], store.get_page("alice.md", None).unwrap().revision);
-        let expected = match path { "/" => "notes/", "notes/" => "notes/nested/", _ => "notes/nested/carol.md" };
-        assert!(directory["children"].as_array().unwrap().iter().any(|entry| entry["path"] == expected));
+        assert_eq!(
+            directory["revision"],
+            command(&repository.root, &["rev-parse", "HEAD"]).trim()
+        );
+        let expected = match path {
+            "/" => "notes/",
+            "notes/" => "notes/nested/",
+            _ => "notes/nested/carol.md",
+        };
+        assert!(
+            directory["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["path"] == expected)
+        );
         if path == "notes/nested/" {
-            assert_eq!(directory["children"][0]["hash"], store.get_page(expected, None).unwrap().hash.unwrap());
+            assert_eq!(
+                directory["children"][0]["hash"],
+                mdstore::validation::source_hash(
+                    &fs::read_to_string(repository.root.join(expected)).unwrap()
+                )
+            );
         }
     }
     for path in ["../", "/notes/", "missing/"] { assert!(store.get_directory(path).is_err()); }

@@ -17,7 +17,6 @@ it('requests exact source once and expanded schema for the editor', async () => 
         isError: false,
         structuredContent: {
           path: 'alice.md',
-          exists: true,
           content: source,
           template
         }
@@ -31,6 +30,31 @@ it('requests exact source once and expanded schema for the editor', async () => 
     arguments: { path: 'alice.md', format: 'raw', include_template: true }
   });
   expect(page.text).toBe(source);
+  expect(page.exists).toBe(true);
   expect(page.template).toEqual(template);
   expect(page).not.toHaveProperty('content');
+});
+
+it('distinguishes missing files from empty files without an exists field', async () => {
+  for (const content of [null, '']) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          result: {
+            isError: false,
+            structuredContent: {
+              path: 'new.md',
+              template: null,
+              content
+            }
+          }
+        })
+      })
+    );
+    const page = await api.page('new.md');
+    expect(page.exists).toBe(content !== null);
+    expect(page.text).toBe('');
+  }
 });
