@@ -382,6 +382,20 @@ impl Store {
     /// Lists direct children of a directory in the published document tree.
     /// Root is `/`; other directory paths must end with `/`.
     pub fn get_directory(&self, path: &str) -> Result<Vec<String>> {
+        self.list_directory(path, false, false)
+    }
+
+    /// Lists all descendants, excluding the starting directory itself.
+    pub fn get_subtree(&self, path: &str, directories_only: bool) -> Result<Vec<String>> {
+        self.list_directory(path, true, directories_only)
+    }
+
+    fn list_directory(
+        &self,
+        path: &str,
+        recursive: bool,
+        directories_only: bool,
+    ) -> Result<Vec<String>> {
         let prefix = if path == "/" {
             ""
         } else {
@@ -393,17 +407,28 @@ impl Store {
         };
         let state = self.state.read();
         let mut children = std::collections::BTreeSet::new();
+        let mut found = prefix.is_empty();
         for file in state.pages.keys().chain(state.config_files.keys()) {
             let Some(relative) = file.strip_prefix(prefix) else {
                 continue;
             };
-            let child = relative.split_once('/').map_or_else(
-                || file.clone(),
-                |(directory, _)| format!("{prefix}{directory}/"),
-            );
-            children.insert(child);
+            found = true;
+            if recursive {
+                for (index, _) in relative.match_indices('/') {
+                    children.insert(format!("{prefix}{}", &relative[..=index]));
+                }
+                if !directories_only {
+                    children.insert(file.clone());
+                }
+            } else {
+                let child = relative.split_once('/').map_or_else(
+                    || file.clone(),
+                    |(directory, _)| format!("{prefix}{directory}/"),
+                );
+                children.insert(child);
+            }
         }
-        if !prefix.is_empty() && children.is_empty() {
+        if !found {
             bail!("directory not found: {path}");
         }
         Ok(children.into_iter().collect())

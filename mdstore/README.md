@@ -230,7 +230,11 @@ mdstore --root /path/to/brain serve
 
 The daemon exposes `/mcp` for document operations and `/health` for operational
 status. `get_page` accepts `/` or a directory path ending in `/` to list direct
-children of the published document tree. Directory reads return only newline-
+children of the published document tree. Use `/notes/**` for all descendants
+(files and directories), or `/notes/**/` for descendant directories only; root
+forms are `/**` and `/**/`. Subtree listings exclude the starting directory,
+are sorted and deduplicated, and return the complete listing without truncation.
+These paths also work in batch reads. Directory reads return only newline-
 separated paths, with trailing `/` for directories. No hashes, revision,
 repository ID or configuration flags are included. Default file reads return
 plain text containing the path, schema path and hashline content. Raw file reads

@@ -164,12 +164,12 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns a plain-text list of direct child paths, with trailing / for directories. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Default file reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Pass a non-empty path array for ordered batch reads with a shared format. Hashline batches return one text block per path; raw file batches return structured results under results. An invalid read rejects the whole batch. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for structured results containing exact source text (including line endings) for whole-page replacements. Directories support plain-text output only. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
+            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns a plain-text list of direct child paths, with trailing / for directories. Append ** for all descendants or **/ for descendant directories only (for example /notes/** and /notes/**/). Subtree listings exclude the starting directory and are complete, sorted and deduplicated. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Default file reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Pass a non-empty path array for ordered batch reads with a shared format. Hashline batches return one text block per path; raw file batches return structured results under results. An invalid read rejects the whole batch. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for structured results containing exact source text (including line endings) for whole-page replacements. Directories support plain-text output only. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {
-                        "description": "Repository-rooted path or non-empty array of paths. Each may end in :LINE or :START-END (one-based, inclusive). Use a trailing / for directories.",
+                        "description": "Repository-rooted path or non-empty array of paths. Each may end in :LINE or :START-END (one-based, inclusive). Use a trailing / for direct children, /** for all descendants, or /**/ for descendant directories only.",
                         "oneOf": [
                             {"type": "string", "minLength": 1},
                             {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
@@ -308,6 +308,17 @@ fn split_page_path(path: &str) -> Result<(String, Option<(usize, usize)>)> {
 
 fn read_page(store: &Store, path: &str, format: PageFormat) -> Result<(Value, bool)> {
     let (mut path, window) = split_page_path(path)?;
+    let subtree = path
+        .strip_suffix("/**/")
+        .map(|base| (format!("{base}/"), true))
+        .or_else(|| {
+            path.strip_suffix("/**")
+                .map(|base| (format!("{base}/"), false))
+        });
+    let directories_only = subtree.as_ref().map(|(_, only)| *only);
+    if let Some((directory, _)) = subtree {
+        path = directory;
+    }
     if path != "/" {
         strip_root_prefix(&mut path);
     }
@@ -318,10 +329,11 @@ fn read_page(store: &Store, path: &str, format: PageFormat) -> Result<(Value, bo
         if matches!(format, PageFormat::Raw) {
             bail!("raw format is only supported for files");
         }
-        return Ok((
-            json!({"path": path, "children": store.get_directory(&path)?}),
-            true,
-        ));
+        let children = match directories_only {
+            Some(only) => store.get_subtree(&path, only)?,
+            None => store.get_directory(&path)?,
+        };
+        return Ok((json!({"path": path, "children": children}), true));
     }
     if matches!(format, PageFormat::Raw) && window.is_some() {
         bail!("raw format requires a full-page read");
