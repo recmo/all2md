@@ -28,7 +28,7 @@ it('restores exact draft bases and commit summaries, isolated per repository', (
     }
   ]);
 });
-it('offline search is limited to cached text and is explicitly identified', () => {
+it('offline search is limited to cached text', () => {
   const cache = emptyCache('repo');
   cache.paths = ['cached.md', 'unread.md'];
   cache.pages['cached.md'] = {
@@ -37,8 +37,8 @@ it('offline search is limited to cached text and is explicitly identified', () =
     exists: true,
     template: null
   };
-  expect(cachedSearch(cache, 'garden')[0].matched_arms).toEqual([
-    'offline text'
+  expect(cachedSearch(cache, 'garden')).toEqual([
+    { path: 'cached.md', excerpt: 'Knowledge garden' }
   ]);
   expect(cachedSearch(cache, 'unread')).toEqual([]);
 });

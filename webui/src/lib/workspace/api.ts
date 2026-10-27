@@ -20,9 +20,6 @@ export type EditRequest = {
 export type SearchResult = {
   path: string;
   excerpt: string;
-  matched_arms: string[];
-  start_line: number;
-  end_line: number;
 };
 export type ValidationFinding = {
   source?: { path: string; line: number } | null;
@@ -184,11 +181,21 @@ export const api = {
         }))
     };
   },
-  search(query: string, variants: string[]) {
-    return mcp<{ results: SearchResult[]; degraded: string[] }>('search', {
-      query,
-      variants
-    });
+  async search(query: string, variants: string[] = []) {
+    const response = await mcp<{ results: SearchResult[]; degraded: string[] }>(
+      'search',
+      {
+        query,
+        ...(variants.length ? { variants } : {})
+      }
+    );
+    return {
+      ...response,
+      results: response.results.map((result) => ({
+        path: result.path.replace(/:\d+-\d+$/, '').replace(/^\//, ''),
+        excerpt: result.excerpt.replace(/^\d+:[0-9a-f]{4}\|/gm, '')
+      }))
+    };
   },
   async apply(request: EditRequest) {
     const edits: Record<

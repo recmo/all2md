@@ -475,20 +475,55 @@ impl Store {
 
     /// Searches the published exact, vector, and graph index.
     pub async fn search(&self, query: &str, variants: &[String]) -> Result<SearchResponse> {
+        self.search_snapshot(query, variants)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// Returns compact search results with anchors from the same published snapshot.
+    pub(crate) async fn search_content(
+        &self,
+        query: &str,
+        variants: &[String],
+    ) -> Result<serde_json::Value> {
+        let (response, pages) = self.search_snapshot(query, variants).await?;
+        let results: Vec<_> = response
+            .results
+            .iter()
+            .map(|result| {
+                let text = pages
+                    .get(&result.path)
+                    .context("search result source is missing")?;
+                Ok(serde_json::json!({
+                    "path": format!("/{}:{}-{}", result.path, result.start_line, result.end_line),
+                    "excerpt": render(text, Some((result.start_line, result.end_line))),
+                }))
+            })
+            .collect::<Result<_>>()?;
+        Ok(serde_json::json!({"results": results, "degraded": response.degraded}))
+    }
+
+    async fn search_snapshot(
+        &self,
+        query: &str,
+        variants: &[String],
+    ) -> Result<(SearchResponse, Arc<HashMap<String, String>>)> {
         if query.trim().is_empty() {
             bail!("query must be non-empty");
         }
-        let (config, index, provider) = {
+        let (config, index, provider, pages) = {
             let state = self.state.read();
             (
                 state.config.clone(),
                 state.index.clone(),
                 state.provider.clone(),
+                state.pages.clone(),
             )
         };
-        index
+        let response = index
             .search(&config, provider.as_ref(), query, variants)
-            .await
+            .await?;
+        Ok((response, pages))
     }
 
     /// Validates and commits one atomic hashline edit batch, then notifies replication.

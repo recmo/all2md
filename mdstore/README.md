@@ -250,6 +250,15 @@ sources to build inventories, content fingerprints, validation baselines and
 previews locally. The web editor reads edit permissions from `config.yaml`.
 `edit` always validates changes before committing.
 
+`search` requires `query` and accepts optional `variants` (default `[]`). Each
+ranked result contains only `path` in `/path:start-end` form and `excerpt` with
+four-character neighbor-based hashline anchors, ready for use with `edit`.
+Anchors use the same published source snapshot as retrieval, including neighbors
+outside the excerpt. Results omit metadata, heading breadcrumbs, scores,
+retrieval-arm details and vector coverage. Top-level `degraded` warnings report
+retrieval failures. The editor displays ordinary excerpt text and opens the
+underlying file path.
+
 The MCP endpoint supports protocol version `2025-06-18`. Older `2025-03-26`
 requests are no longer accepted; initialization advertises the supported
 version.

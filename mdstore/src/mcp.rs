@@ -151,14 +151,14 @@ fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "search",
-            "description": "Hybrid exact, embedding, graph-assisted, and reranked search. Query expansion belongs to the caller.",
+            "description": "Hybrid exact, embedding, graph-assisted, and reranked search. Optional variants supply alternative query formulations. Returns ranked results containing only a repository-rooted /path:start-end and a hashline-anchored excerpt, plus degraded retrieval warnings. Excerpt anchors can be used directly with edit.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "minLength": 1},
                     "variants": {"type": "array", "items": {"type": "string"}}
                 },
-                "required": ["query", "variants"],
+                "required": ["query"],
                 "additionalProperties": false
             }
         }),
@@ -339,6 +339,7 @@ struct CallParams {
 #[serde(deny_unknown_fields)]
 struct SearchArguments {
     query: String,
+    #[serde(default)]
     variants: Vec<String>,
 }
 
@@ -525,10 +526,11 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
     let mut plain_page = false;
     let result = match params.name.as_str() {
         "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
-            Ok(arguments) => store
-                .search(&arguments.query, &arguments.variants)
-                .await
-                .and_then(|value| serde_json::to_value(value).map_err(Into::into)),
+            Ok(arguments) => {
+                store
+                    .search_content(&arguments.query, &arguments.variants)
+                    .await
+            }
             Err(error) => Err(error.into()),
         },
         "get_page" => match serde_json::from_value::<GetArguments>(params.arguments) {

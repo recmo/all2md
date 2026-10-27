@@ -1153,17 +1153,25 @@ async fn rebuilds_adjacent_sidecars_and_searches() {
     assert!(repository.root.join("bob.mdstore").is_file());
     let status = store.status().unwrap();
     assert_eq!(status.vectors_ready, status.vectors_total);
-    let response = store
-        .search("Alice", &["person Alice".into()])
-        .await
-        .unwrap();
-    assert_eq!(response.results[0].path, "alice.md");
-    assert!(
-        response.results[0]
-            .matched_arms
-            .iter()
-            .any(|arm| arm.starts_with("exact:"))
-    );
+    let (url, server) = start_daemon(store.clone()).await;
+    let response: serde_json::Value = reqwest::Client::new()
+        .post(format!("{url}/mcp"))
+        .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call",
+            "params":{"name":"search", "arguments":{"query":"Alice"}}}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(response["result"]["content"], serde_json::json!([]));
+    let response = &response["result"]["structuredContent"];
+    assert_eq!(response.as_object().unwrap().len(), 2);
+    let result = &response["results"][0];
+    assert_eq!(result.as_object().unwrap().len(), 2);
+    let path = result["path"].as_str().unwrap();
+    assert!(path.starts_with("/alice.md:"), "{path}");
+    let range = path.split_once(':').unwrap().1;
+    let (start, end) = range.split_once('-').unwrap();
+    let expected = store.get_page("alice.md", Some((start.parse().unwrap(), end.parse().unwrap()))).unwrap();
+    assert_eq!(result["excerpt"], expected.content.unwrap());
+    server.abort();
 }
 
 #[tokio::test]
