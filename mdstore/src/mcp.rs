@@ -144,7 +144,7 @@ fn initialize(id: Value, params: &Value) -> Response {
 #[must_use]
 /// Returns the exact public MCP tool allowlist.
 pub fn tool_names() -> [&'static str; 3] {
-    ["search", "get_page", "apply_edits"]
+    ["search", "get_page", "edit"]
 }
 
 fn tools() -> Vec<Value> {
@@ -182,7 +182,7 @@ fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "apply_edits",
+            "name": "edit",
             "description": "Atomically validate and locally commit an edit batch. Supply edits as an object mapping each file path to a non-empty operation array; operations omit path. All anchors refer to the pre-edit snapshot. Use replace with an anchor for a line or inclusive range, with the complete anchor range for a whole existing file, or without an anchor to create a missing file. Use 0: to replace an existing empty file with non-empty content. Empty-to-empty replacement is an error. Empty replacement content deletes the selected lines; deleting the file requires a single complete-file anchor. Use append to insert after an anchor, 0: for file start, or omit anchor for EOF; the file must exist. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
             "inputSchema": {
                 "type": "object",
@@ -538,7 +538,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             }),
             Err(error) => Err(error.into()),
         },
-        "apply_edits" => match serde_json::from_value::<ApplyArguments>(params.arguments)
+        "edit" => match serde_json::from_value::<ApplyArguments>(params.arguments)
             .map_err(anyhow::Error::from)
             .and_then(ApplyArguments::into_request)
         {
@@ -572,7 +572,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             rpc_result(id, result)
         }
         Err(error) => {
-            if params.name == "apply_edits" {
+            if params.name == "edit" {
                 let errors = match error.downcast_ref::<ValidationError>() {
                     Some(validation) => json!(validation_errors(validation)),
                     None => json!([{"message": error.to_string()}]),

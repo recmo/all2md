@@ -205,7 +205,7 @@ export const api = {
       };
       (edits[`/${edit.path.replace(/^\//, '')}`] ??= []).push(operation);
     }
-    return mcp<{ success: true }>('apply_edits', {
+    return mcp<{ success: true }>('edit', {
       summary: request.summary,
       edits
     });

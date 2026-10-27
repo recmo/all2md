@@ -709,7 +709,7 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
       id: 1,
       method: 'tools/call',
       params: {
-        name: 'apply_edits',
+        name: 'edit',
         arguments: {
           summary: 'Check rumdl',
           edits: {
@@ -1023,7 +1023,7 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   const applied = page.waitForRequest(
     (request) =>
       request.url().endsWith('/mcp') &&
-      request.postDataJSON()?.params?.name === 'apply_edits'
+      request.postDataJSON()?.params?.name === 'edit'
   );
   await page.locator('#submit').click();
   expect((await applied).postDataJSON().params.arguments.edits).toHaveLength(3);
@@ -1067,7 +1067,7 @@ test('server rejection preserves staged edits and description', async ({
   await expect(page.locator('#submit')).toBeEnabled();
   await page.route('**/mcp', async (route) => {
     const body = route.request().postDataJSON();
-    if (body?.params?.name !== 'apply_edits') return route.continue();
+    if (body?.params?.name !== 'edit') return route.continue();
     await route.fulfill({
       json: {
         jsonrpc: '2.0',
@@ -1333,7 +1333,7 @@ async function remoteEdit(
       id: 1,
       method: 'tools/call',
       params: {
-        name: 'apply_edits',
+        name: 'edit',
         arguments: {
           summary: 'Concurrent client edit',
           edits: {
@@ -1378,7 +1378,7 @@ test('reconciliation merges remote changes before validated submission', async (
   const applied = page.waitForRequest(
     (r) =>
       r.url().endsWith('/mcp') &&
-      r.postDataJSON()?.params?.name === 'apply_edits'
+      r.postDataJSON()?.params?.name === 'edit'
   );
   await page.locator('#submit').click();
   const edit = (await applied).postDataJSON().params.arguments.edits[0];
@@ -1946,7 +1946,7 @@ test('task renames rewrite dependency paths offline and preserve workload arrows
       id: 2,
       method: 'tools/call',
       params: {
-        name: 'apply_edits',
+        name: 'edit',
         arguments: {
           summary: 'Reject dangling dependency',
           edits: {
@@ -2012,7 +2012,7 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
       id: 1,
       method: 'tools/call',
       params: {
-        name: 'apply_edits',
+        name: 'edit',
         arguments: {
           summary: 'Create wiki fixture',
           edits: {

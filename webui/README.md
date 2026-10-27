@@ -34,12 +34,12 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 
 ## Data flow
 
-- Search, reads, and submissions call `/mcp` (`search`, `get_page`, `apply_edits`).
+- Search, reads, and submissions call `/mcp` (`search`, `get_page`, `edit`).
 - `get_page` reads directories as well as files. Webui traverses `/`, reuses
   cached sources with matching hashes, and retries if revisions change during
   traversal. It builds its validation baseline locally in a WASM worker.
 - Shared Rust validation runs incrementally in WASM while editing. The server
-  independently validates every submission through `apply_edits`.
+  independently validates every submission through `edit`.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
   the editor stays mounted across view switches to preserve undo and selection.
   Markdown-it and DOMPurify render prose locally; Pierre File renders fenced and

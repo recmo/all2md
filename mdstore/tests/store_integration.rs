@@ -1225,7 +1225,7 @@ metadata(project_code="/code")
 
 #[test]
 fn mcp_allowlist_is_exact() {
-    assert_eq!(tool_names(), ["search", "get_page", "apply_edits"]);
+    assert_eq!(tool_names(), ["search", "get_page", "edit"]);
 }
 
 #[test]
@@ -1312,7 +1312,7 @@ async fn mcp_lists_only_three_tools() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["search", "get_page", "apply_edits"]);
+    assert_eq!(names, ["search", "get_page", "edit"]);
     let get_page = value["result"]["tools"]
         .as_array()
         .unwrap()
@@ -1345,7 +1345,7 @@ async fn mcp_lists_only_three_tools() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|tool| tool["name"] == "apply_edits")
+        .find(|tool| tool["name"] == "edit")
         .unwrap();
     let variants = apply["inputSchema"]["properties"]["edits"]["additionalProperties"]["items"]["oneOf"]
         .as_array()
@@ -1470,7 +1470,7 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "apply_edits",
+            "name": "edit",
             "arguments": {
                 "summary": "create invalid page",
                 "edits": {"/invalid.md": [{
@@ -2003,7 +2003,7 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "apply_edits",
+            "name": "edit",
             "arguments": {
                 "summary": "exercise delayed push",
                 "edits": {"/alice.md": [{
@@ -3341,7 +3341,7 @@ async fn document_batches_validate_and_submit_through_mcp() {
         .post(format!("{base_url}/mcp"))
         .json(
             &serde_json::json!({"jsonrpc": "2.0", "id": 99, "method": "tools/call",
-            "params": {"name": "apply_edits", "arguments": without_summary}}),
+            "params": {"name": "edit", "arguments": without_summary}}),
         )
         .send()
         .await
@@ -3358,7 +3358,7 @@ async fn document_batches_validate_and_submit_through_mcp() {
     let invalid_request: ApplyEditsRequest = serde_json::from_value(invalid).unwrap();
     let rejected = store.apply_edits(&invalid_request).unwrap_err();
     assert!(rejected.downcast_ref::<mdstore::ValidationError>().is_some());
-    let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "apply_edits", "arguments": batch}});
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "edit", "arguments": batch}});
     for _ in 0..2 {
         let result: serde_json::Value = client
             .post(format!("{base_url}/mcp"))
@@ -3385,7 +3385,7 @@ async fn document_batches_validate_and_submit_through_mcp() {
     );
     let mut stale = batch;
     stale["summary"] = serde_json::json!("Stale overwrite");
-    let stale_call = serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"apply_edits", "arguments":stale}});
+    let stale_call = serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"edit", "arguments":stale}});
     let rejected: serde_json::Value = client
         .post(format!("{base_url}/mcp"))
         .json(&stale_call)

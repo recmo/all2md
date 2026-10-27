@@ -24,7 +24,7 @@ Use MCP directly or run the separate [web interface](../webui/README.md).
 
 Every served repository tracks a root `config.yaml` with operational settings
 only. Document rules belong exclusively in directory templates. Both kinds of
-configuration are readable but cannot be changed through `apply_edits`.
+configuration are readable but cannot be changed through `edit`.
 
 ```yaml
 documents:
@@ -105,7 +105,7 @@ Starlark callback validation remain separate from Markdown linting.
 Place `schema.md` beside the documents it governs. The nearest ancestor
 template applies recursively and replaces its parent. Use directories such as
 `tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
-Templates are readable through `get_page`, protected from `apply_edits`, and
+Templates are readable through `get_page`, protected from `edit`, and
 excluded from search and embeddings.
 
 Markdown supplies instructions and examples. Only top-level fences labelled
@@ -186,7 +186,7 @@ validated Git synchronization.
 
 An accepted edit is committed locally before it returns. It never waits for a
 network request, including when retrying an already-applied batch. The MCP
-`apply_edits` response contains only `{"success": true}` or `{"errors": [...]}`.
+`edit` response contains only `{"success": true}` or `{"errors": [...]}`.
 Errors carry a message and, for validation findings, a repository-rooted `location`
 such as `/notes/page.md:5`. Without a line number, the path is `/notes/page.md`.
 An optional `schema` uses the same `/schema.md:12` syntax for the governing rule.
@@ -248,7 +248,7 @@ root. Reads and edits accept paths with or without the leading `/`. Empty
 directories are not persisted by Git. Clients traverse directory lists and read
 sources to build inventories, content fingerprints, validation baselines and
 previews locally. The web editor reads edit permissions from `config.yaml`.
-`apply_edits` always validates changes before committing.
+`edit` always validates changes before committing.
 
 The MCP endpoint supports protocol version `2025-06-18`. Older `2025-03-26`
 requests are no longer accepted; initialization advertises the supported
@@ -261,7 +261,7 @@ for missing neighbors. Trailing whitespace is significant. The numbered line
 must match: stale anchors fail without relocation or merging. All operations in
 a batch validate against the same pre-edit snapshot.
 
-`apply_edits` groups operations by path; individual operations have no `path`:
+`edit` groups operations by path; individual operations have no `path`:
 
 ```json
 {
