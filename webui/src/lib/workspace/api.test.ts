@@ -3,13 +3,9 @@ import { api } from './api';
 
 afterEach(() => vi.unstubAllGlobals());
 
-it('requests exact source once and expanded schema for the editor', async () => {
+it('requests exact source once and receives only the schema path', async () => {
   const source = '---\r\nname: Alice\r\n---\r\n# Notes\r\n';
-  const template = {
-    path: '/schema.md',
-    content: 'Schema instructions',
-    definition: { frontmatter: { type: 'object' } }
-  };
+  const template = '/schema.md';
   const fetch = vi.fn().mockResolvedValue({
     ok: true,
     json: async () => ({
@@ -27,12 +23,12 @@ it('requests exact source once and expanded schema for the editor', async () => 
   const page = await api.page('alice.md');
   expect(JSON.parse(fetch.mock.calls[0][1].body).params).toEqual({
     name: 'get_page',
-    arguments: { path: 'alice.md', format: 'raw', include_template: true }
+    arguments: { path: 'alice.md', format: 'raw' }
   });
   expect(page.text).toBe(source);
   expect(page.exists).toBe(true);
   expect(page.path).toBe('alice.md');
-  expect(page.template).toEqual({ ...template, path: 'schema.md' });
+  expect(page.template).toEqual({ path: 'schema.md' });
   expect(page).not.toHaveProperty('content');
 });
 

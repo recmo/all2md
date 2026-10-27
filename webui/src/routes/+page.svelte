@@ -246,7 +246,8 @@
     if (inventory.root.repository !== cache.repository)
       throw Error('Repository changed. Reconnect before validating.');
     const snapshot =
-      cache.validationSnapshot?.revision === inventory.root.revision
+      cache.validationSnapshot?.revision === inventory.root.revision &&
+      cache.validationSnapshot.property_schemas
         ? cache.validationSnapshot
         : await buildSnapshot(
             inventory.root.revision,
@@ -1529,7 +1530,11 @@
                     text: current.text,
                     paths: cache.paths,
                     sourcePath: current.path,
-                    schema: current.template?.definition?.frontmatter
+                    schema: current.template
+                      ? cache.validationSnapshot?.property_schemas?.[
+                          current.template.path
+                        ]
+                      : undefined
                   }}
                 ></article>
               {/if}

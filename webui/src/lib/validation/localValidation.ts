@@ -6,6 +6,10 @@ export type ValidationSnapshot = {
   files: Record<string, string>;
   documents: Record<string, { hash: string; parsed: unknown }>;
   edges: unknown[];
+  property_schemas?: Record<
+    string,
+    import('../documents/markdown').PropertySchema
+  >;
 };
 export type LocalValidationResult = {
   valid: boolean;

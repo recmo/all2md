@@ -180,8 +180,7 @@ Resolved paths are returned in `touched_paths` and `fresh_hashlines`.
 
 `get_page` returns the governing schema path in `template`, also for proposed
 paths with `content: null`. Read that path separately for its rules and original
-Markdown, or explicitly request `include_template: true` for the expanded
-template. Template updates are authored externally and activated through
+Markdown. Template updates are authored externally and activated through
 validated Git synchronization.
 
 ## Local durability and background Git synchronization
@@ -252,16 +251,17 @@ line must match: stale anchors fail without relocation or merging. All operation
 in a batch validate against the same pre-edit snapshot.
 
 `get_page` returns page content once as a plain-text MCP content block, with a
-path/schema header and hashline prefixes by default. Raw/editor reads, directory
-reads, searches and edit results use `structuredContent` with an empty `content`
+path/schema header and hashline prefixes by default. Append `:10` to read one
+line or `:10-20` to read an inclusive line range. Separate line-number arguments
+are not accepted. Raw/editor reads, directory reads, searches and edit results use `structuredContent` with an empty `content`
 array. No response includes a serialized JSON copy for older clients. File reads
 omit revision, file hash, existence flags, derived metadata and relations.
 `template` is the repository-rooted schema path, such as `/schema.md`
 (or `null`); read that path separately for its instructions and rules. Use
 `format: "raw"` for structured output containing exact full-page source, including
-line endings, when preparing `replace_page` or `delete_page`. Raw reads cannot specify a line window. Editors needing compiled
-schema information can explicitly request `include_template: true` to expand
-`template` to its path, source and definition.
+line endings, when preparing `replace_page` or `delete_page`. Raw reads cannot
+specify a line window. The schema is always a path; the web editor compiles
+property schemas locally from the schema sources it reads.
 
 Example edit:
 

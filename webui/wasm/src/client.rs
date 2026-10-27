@@ -57,6 +57,14 @@ pub fn build_snapshot(input: &str) -> Result<String> {
         Templates::compile(&files).map_err(|e| anyhow!("Invalid baseline templates: {e:?}"))?;
     let (parsed, edges) = validate_corpus(&pages, &templates)
         .map_err(|e| anyhow!("Invalid baseline documents: {e:?}"))?;
+    let property_schemas: HashMap<_, _> = pages
+        .keys()
+        .filter_map(|path| {
+            let schema_path = templates.template_path(path)?;
+            let schema = templates.frontmatter_schema(path)?.clone();
+            Some((schema_path.trim_start_matches('/').to_owned(), schema))
+        })
+        .collect();
     let snapshot = ValidationSnapshot {
         version: SNAPSHOT_VERSION,
         revision: input.revision,
@@ -70,12 +78,28 @@ pub fn build_snapshot(input: &str) -> Result<String> {
             })
             .collect(),
     };
-    Ok(serde_json::to_string(&snapshot)?)
+    let mut output = serde_json::to_value(snapshot)?;
+    output["property_schemas"] = serde_json::to_value(property_schemas)?;
+    Ok(serde_json::to_string(&output)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshot_compiles_property_schemas_from_schema_sources() {
+        let input = serde_json::json!({"revision":"r1", "sources":{
+            "schema.md":"```starlark\nfrontmatter(state=enum(['todo', 'done']))\n```\n",
+            "a.md":"---\nstate: todo\n---\n# Task\n"
+        }});
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&build_snapshot(&input.to_string()).unwrap()).unwrap();
+        assert_eq!(
+            snapshot["property_schemas"]["schema.md"]["properties"]["state"]["enum"],
+            serde_json::json!(["todo", "done"])
+        );
+    }
+
     #[test]
     fn ordinary_reads_build_a_usable_validation_baseline() {
         let input = serde_json::json!({"revision":"r1", "sources":{

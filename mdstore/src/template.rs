@@ -203,6 +203,11 @@ impl Templates {
         self.applicable(path).map(|(path, _)| format!("/{path}"))
     }
 
+    /// Returns the governing frontmatter schema for client-side property rendering.
+    pub fn frontmatter_schema(&self, path: &str) -> Option<&serde_json::Value> {
+        self.policy(path).frontmatter.as_ref()
+    }
+
     pub(crate) fn discovery(&self, path: &str) -> Option<serde_json::Value> {
         self.applicable(path).map(|(path, entry)| {
             serde_json::json!({

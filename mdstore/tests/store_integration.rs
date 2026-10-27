@@ -1313,6 +1313,34 @@ async fn mcp_lists_only_three_tools() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["search", "get_page", "apply_edits"]);
+    let get_page = value["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "get_page")
+        .unwrap();
+    assert!(
+        get_page["inputSchema"]["properties"]
+            .get("include_template")
+            .is_none()
+    );
+    assert_eq!(
+        get_page["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        get_page["inputSchema"]["properties"]
+            .get("start_line")
+            .is_none()
+    );
+    assert!(
+        get_page["inputSchema"]["properties"]
+            .get("end_line")
+            .is_none()
+    );
     let apply = value["result"]["tools"]
         .as_array()
         .unwrap()
@@ -3033,48 +3061,54 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
     let store = repository.store();
     let (base_url, server) = start_daemon(store).await;
     let client = reqwest::Client::new();
-    for (arguments, raw, expanded, error) in [
-        (
-            serde_json::json!({"path": "/alice.md"}),
-            false,
-            false,
-            false,
-        ),
+    for (arguments, raw, error) in [
+        (serde_json::json!({"path": "/alice.md"}), false, false),
         (
             serde_json::json!({"path": "/alice.md", "format": "raw"}),
             true,
             false,
-            false,
         ),
+        (serde_json::json!({"path": "/alice.md:4-6"}), false, false),
+        (serde_json::json!({"path": "new.md"}), false, false),
         (
-            serde_json::json!({"path": "/alice.md", "format": "raw", "include_template": true}),
-            true,
-            true,
-            false,
-        ),
-        (
-            serde_json::json!({"path": "/alice.md", "include_template": true}),
-            false,
+            serde_json::json!({"path": "/new.md", "format": "raw"}),
             true,
             false,
         ),
-        (
-            serde_json::json!({"path": "/alice.md", "start_line": 4, "end_line": 6}),
-            false,
-            false,
-            false,
-        ),
-        (serde_json::json!({"path": "new.md"}), false, false, false),
         (
             serde_json::json!({"path": "/alice.md", "format": "raw", "start_line": 1}),
             true,
-            false,
             true,
         ),
         (
             serde_json::json!({"path": "/alice.md", "format": "raw", "end_line": 1}),
             true,
+            true,
+        ),
+        (
+            serde_json::json!({"path": "/alice.md", "include_template": true}),
             false,
+            true,
+        ),
+        (
+            serde_json::json!({"path": "/alice.md", "format": "raw", "include_template": true}),
+            true,
+            true,
+        ),
+        (serde_json::json!({"path": "/alice.md:5"}), false, false),
+        (serde_json::json!({"path": "/alice.md:0"}), false, true),
+        (serde_json::json!({"path": "/alice.md:6-4"}), false, true),
+        (serde_json::json!({"path": "/alice.md:4-"}), false, true),
+        (serde_json::json!({"path": "/alice.md:-1"}), false, true),
+        (
+            serde_json::json!({"path": "/alice.md:999999999999999999999999999999"}),
+            false,
+            true,
+        ),
+        (serde_json::json!({"path": "/:1"}), false, true),
+        (
+            serde_json::json!({"path": "/alice.md:5", "format": "raw"}),
+            true,
             true,
         ),
     ] {
@@ -3094,17 +3128,28 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
         if error {
             continue;
         }
-        if !raw && !expanded {
+        if !raw {
             assert!(response["result"].get("structuredContent").is_none());
             let blocks = response["result"]["content"].as_array().unwrap();
             assert_eq!(blocks.len(), 1);
             assert_eq!(blocks[0]["type"], "text");
             let text = blocks[0]["text"].as_str().unwrap();
-            let path = arguments["path"].as_str().unwrap().trim_start_matches('/');
+            let requested = arguments["path"].as_str().unwrap();
+            let path = requested.split(':').next().unwrap().trim_start_matches('/');
             assert!(text.starts_with(&format!("Path: /{path}\nSchema: /schema.md\n\n")));
             if path == "new.md" {
                 assert!(text.ends_with("File does not exist."));
             } else {
+                if requested.ends_with(":5") {
+                    let lines: Vec<_> = text.split_once("\n\n").unwrap().1.lines().collect();
+                    assert_eq!(lines.len(), 1);
+                    assert!(lines[0].starts_with("5:"));
+                } else if requested.ends_with(":4-6") {
+                    let lines: Vec<_> = text.split_once("\n\n").unwrap().1.lines().collect();
+                    assert_eq!(lines.len(), 3);
+                    assert!(lines[0].starts_with("4:"));
+                    assert!(lines[2].starts_with("6:"));
+                }
                 assert!(!text.contains("\\n"));
                 for line in text.split_once("\n\n").unwrap().1.lines() {
                     let (anchor, _) = line.split_once('|').unwrap();
@@ -3122,20 +3167,11 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
         assert!(value.get("revision").is_none());
         assert!(value.get("hash").is_none());
         assert!(value.get("exists").is_none());
-        if expanded {
-            assert_eq!(value["template"]["path"], "/schema.md");
-        } else {
-            assert_eq!(value["template"], "/schema.md");
-        }
-        if raw {
-            assert_eq!(value["content"], source);
-        } else if arguments["path"] == "new.md" {
+        assert_eq!(value["template"], "/schema.md");
+        if arguments["path"] == "/new.md" {
             assert!(value["content"].is_null());
         } else {
-            for line in value["content"].as_str().unwrap().lines() {
-                let (anchor, _) = line.split_once('|').unwrap();
-                assert_eq!(anchor.split_once(':').unwrap().1.len(), 4);
-            }
+            assert_eq!(value["content"], source);
         }
     }
     server.abort();

@@ -164,15 +164,12 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Default file reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for structured results containing exact source text (including line endings) for whole-page replacements. Directory reads and expanded-template requests also return structured results. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. Editors can explicitly request include_template=true for the expanded template. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
+            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Default file reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for structured results containing exact source text (including line endings) for whole-page replacements. Directory reads also return structured results. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "minLength": 1},
-                    "start_line": {"type": "integer", "minimum": 1},
-                    "end_line": {"type": "integer", "minimum": 1},
-                    "format": {"type": "string", "enum": ["hashlines", "raw"], "default": "hashlines"},
-                    "include_template": {"type": "boolean", "default": false}
+                    "path": {"type": "string", "minLength": 1, "description": "Repository-rooted path, optionally followed by :LINE or :START-END (one-based, inclusive). Use a trailing / for directories."},
+                    "format": {"type": "string", "enum": ["hashlines", "raw"], "default": "hashlines"}
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -269,12 +266,53 @@ enum PageFormat {
 #[serde(deny_unknown_fields)]
 struct GetArguments {
     path: String,
-    start_line: Option<usize>,
-    end_line: Option<usize>,
     #[serde(default)]
     format: PageFormat,
-    #[serde(default)]
-    include_template: bool,
+}
+
+fn split_page_path(path: &str) -> Result<(String, Option<(usize, usize)>)> {
+    let Some((path, range)) = path.rsplit_once(':').filter(|(_, suffix)| {
+        suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-')
+    }) else {
+        return Ok((path.to_owned(), None));
+    };
+    let (start, end) = range.split_once('-').unwrap_or((range, range));
+    let positive_line = |value: &str| {
+        value
+            .parse::<usize>()
+            .ok()
+            .filter(|line| *line > 0)
+            .context("line ranges must use positive integers: :LINE or :START-END")
+    };
+    let (start, end) = (positive_line(start)?, positive_line(end)?);
+    if start > end {
+        bail!("line range start must not exceed its end");
+    }
+    Ok((path.to_owned(), Some((start, end))))
+}
+
+fn read_page(store: &Store, arguments: GetArguments) -> Result<(Value, bool)> {
+    let (mut path, window) = split_page_path(&arguments.path)?;
+    if path != "/" {
+        strip_root_prefix(&mut path);
+    }
+    if path.ends_with('/') {
+        if window.is_some() {
+            bail!("line windows are only supported for files");
+        }
+        return Ok((store.get_directory(&path)?, false));
+    }
+    if matches!(arguments.format, PageFormat::Raw) && window.is_some() {
+        bail!("raw format requires a full-page read");
+    }
+    let page = store.get_page(&path, window)?;
+    let mut value = serde_json::to_value(&page)?;
+    if matches!(arguments.format, PageFormat::Raw) {
+        value["content"] = json!(page.text);
+    }
+    Ok((value, matches!(arguments.format, PageFormat::Hashlines)))
 }
 
 fn strip_root_prefix(path: &mut String) {
@@ -293,9 +331,7 @@ fn root_path_value(value: &mut Value) {
 
 fn rooted_page_paths(mut value: Value) -> Value {
     root_path_value(&mut value["path"]);
-    if value.get("template").is_some_and(Value::is_object) {
-        root_path_value(&mut value["template"]["path"]);
-    } else if let Some(template) = value.get_mut("template") {
+    if let Some(template) = value.get_mut("template") {
         root_path_value(template);
     }
     if let Some(children) = value.get_mut("children").and_then(Value::as_array_mut) {
@@ -328,41 +364,10 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             Err(error) => Err(error.into()),
         },
         "get_page" => match serde_json::from_value::<GetArguments>(params.arguments) {
-            Ok(mut arguments) => {
-                if arguments.path != "/" {
-                    strip_root_prefix(&mut arguments.path);
-                }
-                plain_page = matches!(arguments.format, PageFormat::Hashlines)
-                    && !arguments.include_template
-                    && !arguments.path.ends_with('/');
-                let window = arguments
-                    .start_line
-                    .map(|start| (start, arguments.end_line.unwrap_or(start)));
-                if arguments.path.ends_with('/') {
-                    if arguments.start_line.is_some() || arguments.end_line.is_some() {
-                        Err(anyhow::anyhow!("line windows are only supported for files"))
-                    } else {
-                        store.get_directory(&arguments.path)
-                    }
-                } else {
-                    if matches!(arguments.format, PageFormat::Raw)
-                        && (arguments.start_line.is_some() || arguments.end_line.is_some())
-                    {
-                        Err(anyhow::anyhow!("raw format requires a full-page read"))
-                    } else {
-                        store.get_page(&arguments.path, window).and_then(|page| {
-                            let mut value = serde_json::to_value(&page)?;
-                            if matches!(arguments.format, PageFormat::Raw) {
-                                value["content"] = json!(page.text);
-                            }
-                            if arguments.include_template {
-                                value["template"] = json!(page.template);
-                            }
-                            Ok(value)
-                        })
-                    }
-                }
-            }
+            Ok(arguments) => read_page(store, arguments).map(|(value, plain)| {
+                plain_page = plain;
+                value
+            }),
             Err(error) => Err(error.into()),
         },
         "apply_edits" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {

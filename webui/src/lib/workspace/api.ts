@@ -4,13 +4,7 @@ export type Page = {
   hash?: string | null;
   exists: boolean;
   text: string;
-  template: {
-    path: string;
-    content: string;
-    definition?: {
-      frontmatter?: import('../documents/markdown').PropertySchema;
-    };
-  } | null;
+  template: { path: string } | null;
 };
 export type Directory = {
   path: string;
@@ -103,16 +97,18 @@ async function mcp<T>(name: string, args: unknown): Promise<T> {
 
 export const api = {
   async page(path: string): Promise<Page> {
-    const page = await mcp<
-      Pick<Page, 'path' | 'template'> & { content: string | null }
-    >('get_page', { path, format: 'raw', include_template: true });
+    const page = await mcp<{
+      path: string;
+      template: string | null;
+      content: string | null;
+    }>('get_page', { path, format: 'raw' });
     const { content, ...metadata } = page;
     const relative = (path: string) => path.replace(/^\//, '');
     return {
       ...metadata,
       path: relative(metadata.path),
       template: metadata.template
-        ? { ...metadata.template, path: relative(metadata.template.path) }
+        ? { path: relative(metadata.template) }
         : null,
       exists: content !== null,
       text: content ?? ''
