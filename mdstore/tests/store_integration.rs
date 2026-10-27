@@ -3178,6 +3178,137 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
 }
 
 #[tokio::test]
+async fn mcp_batch_page_reads_preserve_order_and_do_not_duplicate_content() {
+    async fn get(
+        client: &reqwest::Client,
+        url: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let response: serde_json::Value = client
+            .post(format!("{url}/mcp"))
+            .json(
+                &serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "get_page", "arguments": arguments}}),
+            )
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        response["result"].clone()
+    }
+    let repository = Repository::new();
+    let (url, server) = start_daemon(repository.store()).await;
+    let client = reqwest::Client::new();
+
+    let result = get(
+        &client,
+        &url,
+        serde_json::json!({"path": ["/bob.md:6", "/alice.md:4-6", "/new.md", "/bob.md:4"]}),
+    )
+    .await;
+    assert_eq!(result["isError"], false, "{result}");
+    assert!(result.get("structuredContent").is_none());
+    let blocks = result["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 4);
+    for (block, path) in blocks
+        .iter()
+        .zip(["bob.md", "alice.md", "new.md", "bob.md"])
+    {
+        assert_eq!(block["type"], "text");
+        assert!(
+            block["text"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("Path: /{path}\n"))
+        );
+    }
+    assert!(blocks[0]["text"].as_str().unwrap().contains("6:"));
+    assert!(
+        blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("|Bob profile.")
+    );
+    assert_eq!(
+        blocks[1]["text"]
+            .as_str()
+            .unwrap()
+            .split_once("\n\n")
+            .unwrap()
+            .1
+            .lines()
+            .count(),
+        3
+    );
+    assert!(
+        blocks[2]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("File does not exist.")
+    );
+    assert!(blocks[3]["text"].as_str().unwrap().ends_with("|# Notes"));
+
+    let result = get(&client, &url, serde_json::json!({"path": ["/alice.md"]})).await;
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(result["content"].as_array().unwrap().len(), 1);
+    assert!(result.get("structuredContent").is_none());
+
+    let result = get(
+        &client,
+        &url,
+        serde_json::json!({"path": ["/bob.md", "/alice.md", "/new.md"], "format": "raw"}),
+    )
+    .await;
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(result["content"], serde_json::json!([]));
+    let pages = result["structuredContent"]["results"].as_array().unwrap();
+    assert_eq!(pages.len(), 3);
+    assert_eq!(pages[0]["path"], "/bob.md");
+    assert_eq!(pages[0]["content"], page("Bob"));
+    assert_eq!(pages[1]["path"], "/alice.md");
+    assert_eq!(pages[1]["content"], page("Alice"));
+    assert_eq!(pages[2]["path"], "/new.md");
+    assert!(pages[2]["content"].is_null());
+
+    let result = get(
+        &client,
+        &url,
+        serde_json::json!({"path": ["/bob.md:6", "/", "/alice.md:4"]}),
+    )
+    .await;
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(result["content"], serde_json::json!([]));
+    let pages = result["structuredContent"]["results"].as_array().unwrap();
+    assert_eq!(pages.len(), 3);
+    assert_eq!(pages[0]["path"], "/bob.md");
+    assert!(
+        pages[0]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("|Bob profile.")
+    );
+    assert_eq!(pages[1]["path"], "/");
+    assert_eq!(pages[1]["kind"], "directory");
+    assert_eq!(pages[2]["path"], "/alice.md");
+    assert!(pages[2]["content"].as_str().unwrap().ends_with("|# Notes"));
+
+    for arguments in [
+        serde_json::json!({"path": []}),
+        serde_json::json!({"path": ["/alice.md", 1]}),
+        serde_json::json!({"path": [""]}),
+        serde_json::json!({"path": ["/alice.md", "/bob.md:0"]}),
+        serde_json::json!({"path": ["/alice.md", "/bob.md:6"], "format": "raw"}),
+    ] {
+        let result = get(&client, &url, arguments).await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(result.get("structuredContent").is_none());
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn document_batches_validate_and_submit_through_mcp() {
     let repository = Repository::new();
     let store = repository.store();

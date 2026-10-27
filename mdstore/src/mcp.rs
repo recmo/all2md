@@ -164,11 +164,17 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Default file reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for structured results containing exact source text (including line endings) for whole-page replacements. Directory reads also return structured results. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
+            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Default file reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Pass a non-empty path array for ordered batch reads with a shared format. File-only hashline batches return one text block per path; raw batches or batches containing directories return structured results under results. An invalid read rejects the whole batch. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for structured results containing exact source text (including line endings) for whole-page replacements. Directory reads also return structured results. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "minLength": 1, "description": "Repository-rooted path, optionally followed by :LINE or :START-END (one-based, inclusive). Use a trailing / for directories."},
+                    "path": {
+                        "description": "Repository-rooted path or non-empty array of paths. Each may end in :LINE or :START-END (one-based, inclusive). Use a trailing / for directories.",
+                        "oneOf": [
+                            {"type": "string", "minLength": 1},
+                            {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+                        ]
+                    },
                     "format": {"type": "string", "enum": ["hashlines", "raw"], "default": "hashlines"}
                 },
                 "required": ["path"],
@@ -254,7 +260,7 @@ struct SearchArguments {
     variants: Vec<String>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum PageFormat {
     #[default]
@@ -263,9 +269,16 @@ enum PageFormat {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum PagePaths {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GetArguments {
-    path: String,
+    path: PagePaths,
     #[serde(default)]
     format: PageFormat,
 }
@@ -293,8 +306,8 @@ fn split_page_path(path: &str) -> Result<(String, Option<(usize, usize)>)> {
     Ok((path.to_owned(), Some((start, end))))
 }
 
-fn read_page(store: &Store, arguments: GetArguments) -> Result<(Value, bool)> {
-    let (mut path, window) = split_page_path(&arguments.path)?;
+fn read_page(store: &Store, path: &str, format: PageFormat) -> Result<(Value, bool)> {
+    let (mut path, window) = split_page_path(path)?;
     if path != "/" {
         strip_root_prefix(&mut path);
     }
@@ -304,15 +317,38 @@ fn read_page(store: &Store, arguments: GetArguments) -> Result<(Value, bool)> {
         }
         return Ok((store.get_directory(&path)?, false));
     }
-    if matches!(arguments.format, PageFormat::Raw) && window.is_some() {
+    if matches!(format, PageFormat::Raw) && window.is_some() {
         bail!("raw format requires a full-page read");
     }
     let page = store.get_page(&path, window)?;
     let mut value = serde_json::to_value(&page)?;
-    if matches!(arguments.format, PageFormat::Raw) {
+    if matches!(format, PageFormat::Raw) {
         value["content"] = json!(page.text);
     }
-    Ok((value, matches!(arguments.format, PageFormat::Hashlines)))
+    Ok((value, matches!(format, PageFormat::Hashlines)))
+}
+
+fn read_pages(store: &Store, arguments: GetArguments) -> Result<(Value, bool)> {
+    match arguments.path {
+        PagePaths::Single(path) => read_page(store, &path, arguments.format)
+            .map(|(value, plain)| (rooted_page_paths(value), plain)),
+        PagePaths::Multiple(paths) => {
+            if paths.is_empty() {
+                bail!("path arrays must contain at least one path");
+            }
+            let pages: Vec<_> = paths
+                .iter()
+                .map(|path| {
+                    read_page(store, path, arguments.format)
+                        .map(|(value, plain)| (rooted_page_paths(value), plain))
+                        .map_err(|error| anyhow::anyhow!("read {path:?}: {error}"))
+                })
+                .collect::<Result<_>>()?;
+            let plain = pages.iter().all(|(_, plain)| *plain);
+            let results: Vec<_> = pages.into_iter().map(|(value, _)| value).collect();
+            Ok((json!({"results": results}), plain))
+        }
+    }
 }
 
 fn strip_root_prefix(path: &mut String) {
@@ -364,7 +400,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             Err(error) => Err(error.into()),
         },
         "get_page" => match serde_json::from_value::<GetArguments>(params.arguments) {
-            Ok(arguments) => read_page(store, arguments).map(|(value, plain)| {
+            Ok(arguments) => read_pages(store, arguments).map(|(value, plain)| {
                 plain_page = plain;
                 value
             }),
@@ -385,18 +421,20 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
         },
         _ => return rpc_error(id, -32602, "unknown tool"),
     };
-    let result = if params.name == "get_page" {
-        result.map(rooted_page_paths)
-    } else {
-        result
-    };
     match result {
         Ok(value) => {
             let result = if plain_page {
-                json!({
-                    "content": [{"type": "text", "text": page_text(&value)}],
-                    "isError": false
-                })
+                let pages = value.get("results").and_then(Value::as_array);
+                let content: Vec<_> = pages.map_or_else(
+                    || vec![json!({"type": "text", "text": page_text(&value)})],
+                    |pages| {
+                        pages
+                            .iter()
+                            .map(|page| json!({"type": "text", "text": page_text(page)}))
+                            .collect()
+                    },
+                );
+                json!({"content": content, "isError": false})
             } else {
                 json!({"content": [], "structuredContent": value, "isError": false})
             };

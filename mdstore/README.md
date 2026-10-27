@@ -263,6 +263,14 @@ line endings, when preparing `replace_page` or `delete_page`. Raw reads cannot
 specify a line window. The schema is always a path; the web editor compiles
 property schemas locally from the schema sources it reads.
 
+`path` also accepts a non-empty array, for example
+`{"path": ["/alice.md", "/bob.md:10-20"]}`. Results preserve input order, including
+repeated paths. `format` applies to every path. File-only hashline batches return
+one text block per path; raw batches and batches containing directories return
+`structuredContent: {"results": [...]}` without a text copy. Single-path calls
+keep their existing response shape. An invalid read rejects the complete batch;
+a missing Markdown page remains an ordinary missing-page result.
+
 Example edit:
 
 ```json
