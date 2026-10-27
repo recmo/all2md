@@ -17,7 +17,6 @@ Nix selects the wasm-bindgen CLI version from `wasm/Cargo.lock`.
 pnpm install --frozen-lockfile
 pnpm build
 pnpm check
-pnpm test
 cargo build --manifest-path ../mdstore/Cargo.toml
 # In separate terminals, run mdstore serve and:
 MDSTORE_URL=http://127.0.0.1:3131 pnpm preview
@@ -31,9 +30,10 @@ server-side development setting, not a browser-selectable destination.
 daemon for each test on port 43133, with a separate UI proxy on port 43132. Install Playwright Chromium or set `CHROME_EXECUTABLE` to an
 installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 
-Keep the committed tests to a small smoke suite. Run the frontend checks and
-browser smoke tests before merging. Use temporary targeted checks for individual
-changes and discard them after verification.
+The only committed tests are three broad browser end-to-end workflows. Run these
+and the frontend checks before merging. Test individual changes locally with
+temporary checks or reproduction scripts; do not commit those tests, or remove
+them before merging.
 
 ## Data flow
 

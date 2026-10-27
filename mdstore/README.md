@@ -399,12 +399,9 @@ schema; they do not bypass ordinary Markdown parsing or link validation.
 
 ## Validation before merging
 
-Keep the committed tests to a small smoke suite for hashline editing and the
-main repository/API workflows. Run it before merging:
-
-```sh
-nix develop .#mdstore --command cargo test --manifest-path mdstore/Cargo.toml
-```
-
-Use temporary targeted checks when developing or debugging a change, then discard
-those checks after verification rather than growing the committed suite.
+Develop and test changes locally before merging. Focused tests and reproduction
+scripts are temporary development tools: do not commit them, or remove them
+before merging. Keep only the broad browser end-to-end checks in
+[`webui/tests`](../webui/tests), covering navigation, offline editing/search, and
+validated submission against a disposable daemon and repository. See the
+[webui instructions](../webui/README.md) for running them.
