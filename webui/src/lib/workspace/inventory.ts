@@ -2,77 +2,53 @@ import type { api, Directory, Page } from './api';
 
 type InventoryApi = Pick<typeof api, 'directory' | 'page'>;
 
-export async function readInventory(
-  api: InventoryApi,
-  cached: Record<string, Page>
-) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const root = await api.directory();
-    try {
-      const directories: Directory[] = [root];
-      const files: Directory['children'] = [];
-      let consistent = true;
-      for (let index = 0; index < directories.length; index++) {
-        const directory = directories[index];
-        if (directory.revision !== root.revision) {
-          consistent = false;
-          break;
-        }
-        for (const child of directory.children) {
-          if (child.kind === 'directory')
-            directories.push(await api.directory(child.path));
-          else files.push(child);
-        }
+export async function readInventory(api: InventoryApi) {
+  async function paths() {
+    const directories: Directory[] = [await api.directory()];
+    const files: string[] = [];
+    for (let index = 0; index < directories.length; index++) {
+      for (const child of directories[index].children) {
+        if (child.kind === 'directory')
+          directories.push(await api.directory(child.path));
+        else files.push(child.path);
       }
-      if (!consistent) continue;
-      // Schema/config changes also change the template projection on unchanged pages.
-      const policy = (path: string) =>
-        path === 'config.yaml' ||
-        /(^|\/)(schema\.md|\.?rumdl\.toml)$/.test(path);
-      const policies = files.filter((file) => policy(file.path));
-      const policyChanged =
-        policies.some((file) => cached[file.path]?.hash !== file.hash) ||
-        Object.keys(cached).some(
-          (path) => policy(path) && !policies.some((file) => file.path === path)
-        );
+    }
+    return files.sort();
+  }
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const before = await paths();
       const pages: Record<string, Page> = {};
       let next = 0;
       await Promise.all(
-        Array.from({ length: Math.min(8, files.length) }, async () => {
-          while (next < files.length) {
-            const file = files[next++];
-            const prior = cached[file.path];
-            // A matching hash permits reuse, even when an unrelated file changed.
-            const page =
-              !policyChanged && prior?.hash && prior.hash === file.hash
-                ? { ...prior, revision: root.revision }
-                : {
-                    ...(await api.page(file.path)),
-                    revision: root.revision,
-                    hash: file.hash
-                  };
-            if (!page.exists) consistent = false;
-            pages[file.path] = page;
+        Array.from({ length: Math.min(8, before.length) }, async () => {
+          while (next < before.length) {
+            const path = before[next++];
+            pages[path] = await api.page(path);
           }
         })
       );
-      const latest = await api.directory();
-      if (
-        consistent &&
-        latest.revision === root.revision &&
-        latest.repository === root.repository
-      )
-        return { root, pages, paths: files.map((file) => file.path).sort() };
+      if (Object.values(pages).some((page) => !page.exists)) continue;
+      const after = await paths();
+      if (JSON.stringify(before) !== JSON.stringify(after)) continue;
+      const source = JSON.stringify(
+        before.map((path) => [path, pages[path].text, pages[path].template])
+      );
+      const digest = await crypto.subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(source)
+      );
+      const revision = Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, '0')
+      ).join('');
+      return { pages, paths: before, revision };
     } catch (error) {
-      const latest = await api.directory();
-      if (
-        latest.revision === root.revision &&
-        latest.repository === root.repository
-      )
-        throw error;
+      lastError = error;
     }
   }
+  if (lastError) throw lastError;
   throw Error(
-    'Repository changed while reading documents. Retry once changes settle.'
+    'Document tree changed while reading. Retry once changes settle.'
   );
 }

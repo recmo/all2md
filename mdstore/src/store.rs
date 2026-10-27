@@ -381,7 +381,7 @@ impl Store {
 
     /// Lists direct children of a directory in the published document tree.
     /// Root is `/`; other directory paths must end with `/`.
-    pub fn get_directory(&self, path: &str) -> Result<serde_json::Value> {
+    pub fn get_directory(&self, path: &str) -> Result<Vec<String>> {
         let prefix = if path == "/" {
             ""
         } else {
@@ -392,32 +392,21 @@ impl Store {
             path
         };
         let state = self.state.read();
-        let mut children = std::collections::BTreeMap::new();
-        for (file, text) in state.pages.iter().chain(state.config_files.iter()) {
+        let mut children = std::collections::BTreeSet::new();
+        for file in state.pages.keys().chain(state.config_files.keys()) {
             let Some(relative) = file.strip_prefix(prefix) else {
                 continue;
             };
-            if let Some((directory, _)) = relative.split_once('/') {
-                let child = format!("{prefix}{directory}/");
-                children.insert(
-                    child.clone(),
-                    serde_json::json!({"path": child, "kind": "directory"}),
-                );
-            } else {
-                children.insert(file.clone(), serde_json::json!({"path": file, "kind": "file", "hash": crate::validation::source_hash(text)}));
-            }
+            let child = relative.split_once('/').map_or_else(
+                || file.clone(),
+                |(directory, _)| format!("{prefix}{directory}/"),
+            );
+            children.insert(child);
         }
         if !prefix.is_empty() && children.is_empty() {
             bail!("directory not found: {path}");
         }
-        Ok(serde_json::json!({
-            "path": path, "kind": "directory", "revision": state.head,
-            "repository": format!("{:x}", Sha256::digest(self.root.to_string_lossy().as_bytes())),
-            "children": children.into_values().collect::<Vec<_>>(),
-            "allow_template_edits": state.config.server.allow_template_edits,
-            "allow_config_edits": state.config.server.allow_config_edits,
-            "restart_required": self.restart_required(&state.config),
-        }))
+        Ok(children.into_iter().collect())
     }
 
     /// Reads an exact page or configuration resource as hashlines.

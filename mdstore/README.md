@@ -230,47 +230,50 @@ mdstore --root /path/to/brain serve
 
 The daemon exposes `/mcp` for document operations and `/health` for operational
 status. `get_page` accepts `/` or a directory path ending in `/` to list direct
-children of the published document tree. Directory reads include permissions,
-repository identity, and the Git revision. Default file reads return plain text
-containing the path, schema path and hashline content. Raw file reads return structured `path`, `template` and
-`content` fields; missing files have `content: null`. Returned paths
-start with `/` and are rooted at the repository root. Reads and edits accept
-paths with or without the leading `/`. Empty directories are not persisted by Git.
-Clients can traverse directories and check revisions to obtain a consistent
-inventory. Client-specific caches, validation baselines, and previews are built
-by clients. `apply_edits` always validates changes before committing.
+children of the published document tree. Directory reads return only newline-
+separated paths, with trailing `/` for directories. No hashes, revision,
+repository ID or configuration flags are included. Default file reads return
+plain text containing the path, schema path and hashline content. Raw file reads
+return structured `path`, `template` and `content` fields; missing files have
+`content: null`. Returned paths start with `/` and are rooted at the repository
+root. Reads and edits accept paths with or without the leading `/`. Empty
+directories are not persisted by Git. Clients traverse directory lists and read
+sources to build inventories, content fingerprints, validation baselines and
+previews locally. The web editor reads edit permissions from `config.yaml`.
+`apply_edits` always validates changes before committing.
 
 The MCP endpoint supports protocol version `2025-06-18`. Older `2025-03-26`
-requests are no longer accepted; initialization advertises the supported version.
+requests are no longer accepted; initialization advertises the supported
+version.
 
-An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
-four hexadecimal characters (16 bits of SHA-256). Each hash covers the line and
-its immediate previous and next lines, with length-prefixed fields and empty
-strings for missing neighbors. Trailing whitespace is significant. The numbered
-line must match: stale anchors fail without relocation or merging. All operations
-in a batch validate against the same pre-edit snapshot.
+An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are four
+hexadecimal characters (16 bits of SHA-256). Each hash covers the line and its
+immediate previous and next lines, with length-prefixed fields and empty strings
+for missing neighbors. Trailing whitespace is significant. The numbered line
+must match: stale anchors fail without relocation or merging. All operations in
+a batch validate against the same pre-edit snapshot.
 
 `get_page` returns page content once as a plain-text MCP content block, with a
 path/schema header and hashline prefixes by default. Append `:10` to read one
 line or `:10-20` to read an inclusive line range. Separate line-number arguments
-are not accepted. Raw/editor reads, directory reads, searches and edit results use `structuredContent` with an empty `content`
-array. No response includes a serialized JSON copy for older clients. File reads
-omit revision, file hash, existence flags, derived metadata and relations.
-`template` is the repository-rooted schema path, such as `/schema.md`
-(or `null`); read that path separately for its instructions and rules. Use
-`format: "raw"` for structured output containing exact full-page source, including
-line endings, when preparing `replace_page` or `delete_page`. Raw reads cannot
-specify a line window. The schema is always a path; the web editor compiles
-property schemas locally from the schema sources it reads.
+are not accepted. Raw file reads, searches and edit results use
+`structuredContent` with an empty `content` array. No response includes a
+serialized JSON copy for older clients. File reads omit revision, file hash,
+existence flags, derived metadata and relations. `template` is the
+repository-rooted schema path, such as `/schema.md` (or `null`); read that path
+separately for its instructions and rules. Use `format: "raw"` for structured
+output containing exact full-page source, including line endings, when preparing
+`replace_page` or `delete_page`. Raw reads support files only and cannot specify
+a line window. The schema is always a path; the web editor compiles property
+schemas locally from the schema sources it reads.
 
-`path` also accepts a non-empty array, for example
-`{"path": ["/alice.md", "/bob.md:10-20"]}`. Results preserve input order, including
-repeated paths. `format` applies to every path. File-only hashline batches return
-one text block per path; raw batches and batches containing directories return
-`structuredContent: {"results": [...]}` without a text copy. Single-path calls
-keep their existing response shape. An invalid read rejects the complete batch;
-a missing Markdown page remains an ordinary missing-page result.
-
+`path` also accepts a non-empty array, for example `{"path": ["/alice.md",
+"/bob.md:10-20"]}`. Results preserve input order, including repeated paths.
+`format` applies to every path. Hashline batches return one text block per path,
+including plain directory lists. Raw file batches return `structuredContent:
+{"results": [...]}` without a text copy. Single-path calls keep their existing
+response shape. An invalid read rejects the complete batch; a missing Markdown
+page remains an ordinary missing-page result.
 Example edit:
 
 ```json

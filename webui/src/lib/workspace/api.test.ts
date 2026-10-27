@@ -64,14 +64,7 @@ it('normalizes repository-rooted directory paths for the editor', async () => {
       json: async () => ({
         result: {
           isError: false,
-          structuredContent: {
-            path: '/notes/',
-            kind: 'directory',
-            children: [
-              { path: '/notes/a.md', kind: 'file' },
-              { path: '/notes/nested/', kind: 'directory' }
-            ]
-          }
+          content: [{ type: 'text', text: '/notes/a.md\n/notes/nested/' }]
         }
       })
     })

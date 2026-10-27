@@ -3279,20 +3279,20 @@ async fn mcp_batch_page_reads_preserve_order_and_do_not_duplicate_content() {
     )
     .await;
     assert_eq!(result["isError"], false, "{result}");
-    assert_eq!(result["content"], serde_json::json!([]));
-    let pages = result["structuredContent"]["results"].as_array().unwrap();
-    assert_eq!(pages.len(), 3);
-    assert_eq!(pages[0]["path"], "/bob.md");
+    assert!(result.get("structuredContent").is_none());
+    let blocks = result["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 3);
     assert!(
-        pages[0]["content"]
+        blocks[0]["text"]
             .as_str()
             .unwrap()
             .ends_with("|Bob profile.")
     );
-    assert_eq!(pages[1]["path"], "/");
-    assert_eq!(pages[1]["kind"], "directory");
-    assert_eq!(pages[2]["path"], "/alice.md");
-    assert!(pages[2]["content"].as_str().unwrap().ends_with("|# Notes"));
+    assert_eq!(
+        blocks[1]["text"],
+        "/alice.md\n/bob.md\n/config.yaml\n/schema.md"
+    );
+    assert!(blocks[2]["text"].as_str().unwrap().ends_with("|# Notes"));
 
     for arguments in [
         serde_json::json!({"path": []}),
@@ -3300,6 +3300,7 @@ async fn mcp_batch_page_reads_preserve_order_and_do_not_duplicate_content() {
         serde_json::json!({"path": [""]}),
         serde_json::json!({"path": ["/alice.md", "/bob.md:0"]}),
         serde_json::json!({"path": ["/alice.md", "/bob.md:6"], "format": "raw"}),
+        serde_json::json!({"path": ["/alice.md", "/"], "format": "raw"}),
     ] {
         let result = get(&client, &url, arguments).await;
         assert_eq!(result["isError"], true, "{result}");
@@ -3625,7 +3626,7 @@ fn document_markers_do_not_bypass_schema_rules() {
 }
 
 #[tokio::test]
-async fn mcp_directory_reads_expose_snapshot_identity_and_replace_auxiliary_routes() {
+async fn mcp_directory_reads_return_only_plain_paths_and_replace_auxiliary_routes() {
     let repository = Repository::new();
     fs::create_dir_all(repository.root.join("notes/nested")).unwrap();
     fs::write(repository.root.join("notes/nested/carol.md"), page("Carol")).unwrap();
@@ -3639,38 +3640,37 @@ async fn mcp_directory_reads_expose_snapshot_identity_and_replace_auxiliary_rout
             .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"get_page", "arguments":{"path":path}}}))
             .send().await.unwrap().json().await.unwrap();
         assert_eq!(response["result"]["isError"], false, "{response}");
-        let directory = &response["result"]["structuredContent"];
-        assert_eq!(directory["kind"], "directory");
-        assert!(directory["path"].as_str().unwrap().starts_with('/'));
-        assert_eq!(
-            directory["revision"],
-            command(&repository.root, &["rev-parse", "HEAD"]).trim()
-        );
+        assert!(response["result"].get("structuredContent").is_none());
+        assert_eq!(response["result"]["content"].as_array().unwrap().len(), 1);
         let expected = match path {
-            "/" => "notes/",
-            "/notes/" => "notes/nested/",
-            _ => "notes/nested/carol.md",
+            "/" => "/alice.md\n/bob.md\n/config.yaml\n/notes/\n/schema.md",
+            "/notes/" => "/notes/nested/",
+            _ => "/notes/nested/carol.md",
         };
-        assert!(
-            directory["children"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["path"] == format!("/{expected}"))
-        );
-        if path == "notes/nested/" {
-            assert_eq!(
-                directory["children"][0]["hash"],
-                mdstore::validation::source_hash(
-                    &fs::read_to_string(repository.root.join(expected)).unwrap()
-                )
-            );
-        }
+        assert_eq!(response["result"]["content"][0]["text"], expected);
     }
-    for path in ["../", "/notes/", "missing/"] { assert!(store.get_directory(path).is_err()); }
+    for path in ["../", "/notes/", "missing/"] {
+        assert!(store.get_directory(path).is_err());
+    }
     for path in ["/documents", "/validation-snapshot", "/validate", "/cli"] {
-        assert_eq!(client.post(format!("{url}{path}")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
-        assert_eq!(client.get(format!("{url}{path}")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            client
+                .post(format!("{url}{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            client
+                .get(format!("{url}{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
     }
     server.abort();
 }

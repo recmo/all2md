@@ -12,6 +12,7 @@
   import { readInventory } from '$lib/workspace/inventory';
   import { buildSnapshot } from '$lib/validation/localValidation';
   import { onMount, tick } from 'svelte';
+  import { parse as parseYaml } from 'yaml';
   import { pushState, replaceState } from '$app/navigation';
   import { navigationDrawer } from '$lib/navigation/navigationDrawer';
   let mobile = $state(false);
@@ -242,15 +243,14 @@
   let baselineVersion = 0;
   async function refreshValidationSnapshot() {
     const version = ++baselineVersion;
-    const inventory = await readInventory(api, cache.pages);
-    if (inventory.root.repository !== cache.repository)
-      throw Error('Repository changed. Reconnect before validating.');
+    const repository = cache.repository;
+    const inventory = await readInventory(api);
     const snapshot =
-      cache.validationSnapshot?.revision === inventory.root.revision &&
+      cache.validationSnapshot?.revision === inventory.revision &&
       cache.validationSnapshot.property_schemas
         ? cache.validationSnapshot
         : await buildSnapshot(
-            inventory.root.revision,
+            inventory.revision,
             Object.fromEntries(
               Object.entries(inventory.pages).map(([path, page]) => [
                 path,
@@ -258,13 +258,8 @@
               ])
             )
           );
-    if (
-      version !== baselineVersion ||
-      inventory.root.repository !== cache.repository
-    )
-      return;
-    allowTemplateEdits = inventory.root.allow_template_edits;
-    allowConfigEdits = inventory.root.allow_config_edits;
+    if (version !== baselineVersion || repository !== cache.repository) return;
+    updatePermissions(inventory.pages['config.yaml']?.text ?? '');
     cache = {
       ...cache,
       allowTemplateEdits,
@@ -391,21 +386,19 @@
       busy = false;
     }
   }
+  function updatePermissions(source: string) {
+    const server = parseYaml(source)?.server;
+    allowTemplateEdits = server?.allow_template_edits === true;
+    allowConfigEdits = server?.allow_config_edits === true;
+  }
   async function refresh() {
-    const listing = await api.directory();
-    allowTemplateEdits = listing.allow_template_edits === true;
-    allowConfigEdits = listing.allow_config_edits === true;
-    const changed = cache.repository !== listing.repository;
-    if (changed) {
-      cache = await restoreCache(listing.repository);
-
+    await api.directory();
+    updatePermissions((await api.page('config.yaml')).text);
+    if (!cache.repository) {
+      cache = await restoreCache(location.origin);
       validated = '';
     }
-    cache = {
-      ...cache,
-      allowTemplateEdits,
-      allowConfigEdits
-    };
+    cache = { ...cache, allowTemplateEdits, allowConfigEdits };
     online = true;
     await syncDrafts();
     if (view === 'document' && !current && cache.selected)

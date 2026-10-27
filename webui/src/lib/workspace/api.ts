@@ -1,19 +1,12 @@
 export type Page = {
   path: string;
-  revision?: string;
-  hash?: string | null;
   exists: boolean;
   text: string;
   template: { path: string } | null;
 };
 export type Directory = {
   path: string;
-  kind: 'directory';
-  revision: string;
-  repository: string;
-  children: { path: string; kind: 'file' | 'directory'; hash?: string }[];
-  allow_template_edits: boolean;
-  allow_config_edits: boolean;
+  children: { path: string; kind: 'file' | 'directory' }[];
 };
 export type Draft = Page & { base: string };
 export type EditRequest = {
@@ -47,7 +40,11 @@ export class ApiError extends Error {
     super(message);
   }
 }
-async function mcp<T>(name: string, args: unknown): Promise<T> {
+async function mcp<T>(
+  name: string,
+  args: unknown,
+  format: 'structured' | 'text' = 'structured'
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch('/mcp', {
@@ -92,7 +89,9 @@ async function mcp<T>(name: string, args: unknown): Promise<T> {
         }
       )?.validation_findings || []
     );
-  return result.structuredContent;
+  return format === 'text'
+    ? (result.content.map((block) => block.text).join('\n') as T)
+    : result.structuredContent;
 }
 
 export const api = {
@@ -115,14 +114,16 @@ export const api = {
     };
   },
   async directory(path = '/'): Promise<Directory> {
-    const directory = await mcp<Directory>('get_page', { path });
+    const text = await mcp<string>('get_page', { path }, 'text');
     return {
-      ...directory,
-      path: directory.path === '/' ? '/' : directory.path.replace(/^\//, ''),
-      children: directory.children.map((child) => ({
-        ...child,
-        path: child.path.replace(/^\//, '')
-      }))
+      path: path === '/' ? '/' : path.replace(/^\//, ''),
+      children: text
+        .split('\n')
+        .filter(Boolean)
+        .map((path) => ({
+          path: path.replace(/^\//, ''),
+          kind: path.endsWith('/') ? 'directory' : 'file'
+        }))
     };
   },
   search(query: string, variants: string[]) {

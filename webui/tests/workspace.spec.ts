@@ -1785,9 +1785,10 @@ async function directoryPaths(page: Page, path: string): Promise<string[]> {
   });
   const result = (await response.json()).result;
   expect(result.isError).toBe(false);
-  return result.structuredContent.children.map((child: { path: string }) =>
-    child.path.replace(/^\//, '')
-  );
+  return result.content[0].text
+    .split('\n')
+    .filter(Boolean)
+    .map((path: string) => path.replace(/^\//, ''));
 }
 
 test('document selection changes remain incomplete locally but can be submitted', async ({

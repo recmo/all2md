@@ -1,120 +1,90 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { webcrypto } from 'node:crypto';
 import { type Directory, type Page } from './api';
 import { readInventory } from './inventory';
 
-const file = (path: string, revision = 'a', hash = path): Page => ({
+beforeEach(() => vi.stubGlobal('crypto', webcrypto));
+afterEach(() => vi.unstubAllGlobals());
+const file = (path: string, text = path): Page => ({
   path,
-  revision,
-  hash,
+  text,
   exists: true,
-  text: path,
   template: null
 });
 const directory = (
   path: string,
-  revision: string,
   children: Directory['children']
-): Directory => ({
+): Directory => ({ path, children });
+const entry = (path: string): Directory['children'][number] => ({
   path,
-  revision,
-  children,
-  kind: 'directory',
-  repository: 'repo',
-  allow_template_edits: false,
-  allow_config_edits: false
-});
-const entry = (path: string, hash = path): Directory['children'][number] => ({
-  path,
-  hash,
   kind: 'file'
 });
 
 describe('MCP document inventory', () => {
-  it('traverses directories and reuses unchanged sources across revisions', async () => {
+  it('traverses plain directory listings and reads every source', async () => {
     const api = {
       directory: vi.fn(async (path = '/') =>
         path === '/'
-          ? directory('/', 'b', [
+          ? directory('/', [
               entry('a.md'),
               { path: 'notes/', kind: 'directory' }
             ])
-          : directory(path, 'b', [entry('notes/b.md')])
+          : directory(path, [entry('notes/b.md')])
       ),
-      page: vi.fn(async (path: string) => ({
-        path,
-        exists: true,
-        text: path,
-        template: null
-      }))
+      page: vi.fn(async (path: string) => file(path))
     };
-    const result = await readInventory(api, {
-      'a.md': file('a.md')
-    });
+    const result = await readInventory(api);
     expect(result.paths).toEqual(['a.md', 'notes/b.md']);
-    expect(api.page.mock.calls).toEqual([['notes/b.md']]);
-    expect(result.root.revision).toBe('b');
-    expect(result.pages['notes/b.md'].hash).toBe('notes/b.md');
-    expect(result.pages['notes/b.md'].revision).toBe('b');
+    expect(api.page.mock.calls).toEqual([['a.md'], ['notes/b.md']]);
+    expect(result.revision).toMatch(/^[a-f0-9]{64}$/);
   });
-
-  it('retries the entire read when the repository changes while reading a file', async () => {
-    let revision = 'a';
+  it('detects changed content even when the path list is unchanged', async () => {
+    let text = 'original';
     const api = {
-      directory: vi.fn(async () => directory('/', revision, [entry('a.md')])),
-      page: vi.fn(async (path: string) => {
-        revision = 'b';
-        return file(path, revision);
-      })
+      directory: vi.fn(async () => directory('/', [entry('a.md')])),
+      page: vi.fn(async (path: string) => file(path, text))
     };
-    const result = await readInventory(api, {});
-    expect(result.root.revision).toBe('b');
-    expect(api.page).toHaveBeenCalledTimes(2);
+    const first = await readInventory(api);
+    text = 'changed';
+    const second = await readInventory(api);
+    expect(second.revision).not.toBe(first.revision);
+    expect(second.pages['a.md'].text).toBe('changed');
   });
-
   it('retries if a directory disappears during traversal', async () => {
-    let revision = 'a';
+    let removed = false;
     const api = {
       directory: vi.fn(async (path = '/') => {
         if (path !== '/') {
-          revision = 'b';
+          removed = true;
           throw Error('directory not found');
         }
         return directory(
           '/',
-          revision,
-          revision === 'a' ? [{ path: 'old/', kind: 'directory' }] : []
+          removed ? [] : [{ path: 'old/', kind: 'directory' }]
         );
       }),
       page: vi.fn()
     };
-    expect((await readInventory(api, {})).paths).toEqual([]);
+    expect((await readInventory(api)).paths).toEqual([]);
   });
-
-  it('refreshes template projections when policy source changes', async () => {
+  it('retries when paths change during a read', async () => {
+    let path = 'a.md';
     const api = {
-      directory: vi.fn(async () =>
-        directory('/', 'b', [entry('a.md'), entry('schema.md', 'new')])
-      ),
-      page: vi.fn(async (path: string) =>
-        file(path, 'b', path === 'schema.md' ? 'new' : path)
-      )
+      directory: vi.fn(async () => directory('/', [entry(path)])),
+      page: vi.fn(async (requested: string) => {
+        path = 'b.md';
+        return file(requested);
+      })
     };
-    await readInventory(api, {
-      'a.md': file('a.md'),
-      'schema.md': file('schema.md')
-    });
-    expect(api.page.mock.calls.map(([path]) => path).sort()).toEqual([
-      'a.md',
-      'schema.md'
-    ]);
+    expect((await readInventory(api)).paths).toEqual(['b.md']);
+    expect(api.page).toHaveBeenCalledTimes(2);
   });
-
-  it('fails rather than returning an inventory when files keep disappearing', async () => {
+  it('fails if listed files keep disappearing', async () => {
     const api = {
-      directory: vi.fn(async () => directory('/', 'a', [entry('a.md')])),
+      directory: vi.fn(async () => directory('/', [entry('a.md')])),
       page: vi.fn(async (path: string) => ({ ...file(path), exists: false }))
     };
-    await expect(readInventory(api, {})).rejects.toThrow('Repository changed');
+    await expect(readInventory(api)).rejects.toThrow('Document tree changed');
     expect(api.page).toHaveBeenCalledTimes(3);
   });
 });
