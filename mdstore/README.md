@@ -178,9 +178,10 @@ or repeated placeholders and placeholders on other edit operations are rejected.
 Allocation changes only the path, and retries consult durable receipts first.
 Resolved paths are returned in `touched_paths` and `fresh_hashlines`.
 
-`get_page` returns `template: {path, definition, content}`, also for proposed paths
-with `exists: false`. The definition contains declared rules; content is the
-original Markdown. Template updates are authored externally and activated through
+`get_page` returns the governing schema path in `template`, also for proposed
+paths with `exists: false`. Read that path separately for its rules and original
+Markdown, or explicitly request `include_template: true` for the expanded
+template. Template updates are authored externally and activated through
 validated Git synchronization.
 
 ## Local durability and background Git synchronization
@@ -245,8 +246,8 @@ line must match: stale anchors fail without relocation or merging. All operation
 in a batch validate against the same pre-edit snapshot.
 
 `get_page` returns page content once, in `content`, with hashline prefixes by
-default. `template` is the repository-relative schema path (or `null`); read that
-path separately for its instructions and rules. Use `format: "raw"` for exact
+default. It omits derived metadata and relations. `template` is the
+repository-relative schema path (or `null`); read that path separately for its instructions and rules. Use `format: "raw"` for exact
 full-page source, including line endings, when preparing `replace_page` or
 `delete_page`. Raw reads cannot specify a line window. Editors needing compiled
 schema information can explicitly request `include_template: true` to expand

@@ -1180,8 +1180,8 @@ async fn reindex_removes_sidecars_without_a_current_page() {
     assert!(!sidecar.exists());
 }
 
-#[test]
-fn schemas_are_repository_configuration_not_rust_fields() {
+#[tokio::test]
+async fn schemas_are_repository_configuration_not_rust_fields() {
     let repository = Repository::new();
     fs::create_dir(repository.root.join("projects")).unwrap();
     fs::write(
@@ -1196,7 +1196,7 @@ metadata(project_code="/code")
     .unwrap();
     fs::write(
         repository.root.join("projects/a.md"),
-        "---\ncode: A\n---\n# Project\n",
+        "---\ncode: A\n---\n# Project\n\nProject details.\n",
     )
     .unwrap();
     command(&repository.root, &["add", "."]);
@@ -1205,14 +1205,19 @@ metadata(project_code="/code")
         &["commit", "-qm", "different folder schema"],
     );
     let store = repository.store();
-    assert_eq!(
-        store.get_page("alice.md", None).unwrap().metadata["display_name"],
-        "Alice"
-    );
-    assert_eq!(
-        store.get_page("projects/a.md", None).unwrap().metadata["project_code"],
-        "A"
-    );
+    store.reindex().await.unwrap();
+    for (query, path, field, expected) in [
+        ("Alice", "alice.md", "display_name", "Alice"),
+        ("Project", "projects/a.md", "project_code", "A"),
+    ] {
+        let response = store.search(query, &[]).await.unwrap();
+        let result = response
+            .results
+            .iter()
+            .find(|result| result.path == path)
+            .unwrap();
+        assert_eq!(result.metadata[field], expected);
+    }
 }
 
 #[test]
@@ -1227,7 +1232,6 @@ fn configuration_resources_are_hashline_readable() {
     for path in ["config.yaml", "schema.md"] {
         let response = store.get_page(path, Some((1, 2))).unwrap();
         assert!(response.content.starts_with("1:"));
-        assert_eq!(response.metadata, serde_json::json!({}));
         let text = fs::read_to_string(repository.root.join(path)).unwrap();
         let first = text.lines().next().unwrap();
         assert!(
@@ -3060,6 +3064,8 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
         }
         let value = &response["result"]["structuredContent"];
         assert!(value.get("text").is_none());
+        assert!(value.get("metadata").is_none());
+        assert!(value.get("relations").is_none());
         if expanded {
             assert_eq!(value["template"]["path"], "schema.md");
         } else {

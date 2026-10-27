@@ -202,10 +202,6 @@ pub struct PageResponse {
     /// Exact source text for full-page reads, absent for line windows.
     #[serde(skip_serializing)]
     pub text: Option<String>,
-    /// Repository-configured projected frontmatter metadata.
-    pub metadata: serde_json::Value,
-    /// Typed relations authored by this page.
-    pub relations: Vec<Edge>,
 }
 
 fn serialize_template_path<S: serde::Serializer>(
@@ -435,7 +431,6 @@ impl Store {
         validate_repo_path(path)?;
         let state = self.state.read();
         if let Some(text) = state.pages.get(path) {
-            let page = state.parsed.get(path).context("page was not parsed")?;
             return Ok(PageResponse {
                 revision: state.head.clone(),
                 hash: Some(crate::validation::source_hash(text)),
@@ -444,13 +439,6 @@ impl Store {
                 path: path.into(),
                 content: render(text, window),
                 text: window.is_none().then(|| text.clone()),
-                metadata: page.metadata.clone(),
-                relations: state
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.source == path || edge.target == path)
-                    .cloned()
-                    .collect(),
             });
         }
         if (is_config_resource_path(path) || crate::template::is_template(path))
@@ -464,8 +452,6 @@ impl Store {
                 path: path.into(),
                 content: render(text, window),
                 text: window.is_none().then(|| text.clone()),
-                metadata: serde_json::json!({}),
-                relations: Vec::new(),
             });
         }
         if (path.ends_with(".md")
@@ -483,8 +469,6 @@ impl Store {
                 path: path.into(),
                 content: String::new(),
                 text: Some(String::new()),
-                metadata: serde_json::json!({}),
-                relations: Vec::new(),
             });
         }
         bail!("page or configuration resource not found: {path}")
