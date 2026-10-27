@@ -711,7 +711,7 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
         name: 'apply_edits',
         arguments: {
           edit_summary: 'Check rumdl',
-          edits: [{ op: 'replace_page', path: 'other.md', base, content: text }]
+          edits: { '/other.md': [{ op: 'replace_page', base, content: text }] }
         }
       }
     }
@@ -1327,11 +1327,13 @@ async function remoteEdit(
         name: 'apply_edits',
         arguments: {
           edit_summary: 'Concurrent client edit',
-          edits: [
-            base === undefined
-              ? { op: 'create_page', path, content }
-              : { op: 'replace_page', path, base, content }
-          ]
+          edits: {
+            [path]: [
+              base === undefined
+                ? { op: 'create_page', content }
+                : { op: 'replace_page', base, content }
+            ]
+          }
         }
       }
     }
@@ -1938,10 +1940,10 @@ test('task renames rewrite dependency paths offline and preserve workload arrows
         name: 'apply_edits',
         arguments: {
           edit_summary: 'Reject dangling dependency',
-          edits: [
-            { op: 'delete_page', path: old, base: original },
-            { op: 'create_page', path: renamed, content: original }
-          ]
+          edits: {
+            [old]: [{ op: 'delete_page', base: original }],
+            [renamed]: [{ op: 'create_page', content: original }]
+          }
         }
       }
     }
@@ -1998,30 +2000,21 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
         name: 'apply_edits',
         arguments: {
           edit_summary: 'Create wiki fixture',
-          edits: [
-            { op: 'create_page', path: 'wiki/schema.md', content: schema },
-            {
-              op: 'create_page',
-              path: 'target.md',
-              content: '# Root target\n'
-            },
-            {
-              op: 'create_page',
-              path: 'other/target.md',
-              content: '# Other target\n'
-            },
-            {
-              op: 'create_page',
-              path: 'wiki/target.md',
-              content: '# Target\n'
-            },
-            {
-              op: 'create_page',
-              path: 'wiki/source.md',
-              content:
-                '# 😀 Source\n\n[[target#part|Label]] and `[[target]]`.\n'
-            }
-          ]
+          edits: {
+            '/wiki/schema.md': [{ op: 'create_page', content: schema }],
+            '/target.md': [{ op: 'create_page', content: '# Root target\n' }],
+            '/other/target.md': [
+              { op: 'create_page', content: '# Other target\n' }
+            ],
+            '/wiki/target.md': [{ op: 'create_page', content: '# Target\n' }],
+            '/wiki/source.md': [
+              {
+                op: 'create_page',
+                content:
+                  '# 😀 Source\n\n[[target#part|Label]] and `[[target]]`.\n'
+              }
+            ]
+          }
         }
       }
     }

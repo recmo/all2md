@@ -161,7 +161,15 @@ export const api = {
     });
   },
   apply(request: EditRequest) {
-    return mcp<{ success: true }>('apply_edits', request);
+    const edits: Record<string, Omit<EditRequest['edits'][number], 'path'>[]> =
+      Object.create(null);
+    for (const { path, ...operation } of request.edits) {
+      (edits[`/${path.replace(/^\//, '')}`] ??= []).push(operation);
+    }
+    return mcp<{ success: true }>('apply_edits', {
+      edit_summary: request.edit_summary,
+      edits
+    });
   }
 };
 export function editRequest(

@@ -183,15 +183,20 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "apply_edits",
-            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
+            "description": "Atomically validate and locally commit an edit batch. Supply edits as an object mapping each file path to a non-empty operation array; operations omit path. All anchors refer to the pre-edit snapshot. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "edit_summary": {"type": "string", "minLength": 1},
                     "edits": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": {"oneOf": edit_operation_schemas()}
+                        "type": "object",
+                        "minProperties": 1,
+                        "propertyNames": {"minLength": 1},
+                        "additionalProperties": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"oneOf": edit_operation_schemas()}
+                        }
                     }
                 },
                 "required": ["edit_summary", "edits"],
@@ -212,11 +217,9 @@ fn edit_operation_schemas() -> Vec<Value> {
     ]
     .into_iter()
     .map(|(operation, anchor, content)| {
-        let mut properties = serde_json::Map::from_iter([
-            ("op".into(), json!({"const": operation})),
-            ("path".into(), json!({"type": "string", "minLength": 1})),
-        ]);
-        let mut required = vec!["op", "path"];
+        let mut properties =
+            serde_json::Map::from_iter([("op".into(), json!({"const": operation}))]);
+        let mut required = vec!["op"];
         if anchor {
             properties.insert("anchor".into(), json!({"type": "string", "minLength": 2}));
             required.push("anchor");
@@ -235,15 +238,64 @@ fn edit_operation_schemas() -> Vec<Value> {
     .collect();
     schemas.push(json!({
         "type": "object",
-        "properties": {"op": {"const": "replace_page"}, "path": {"type": "string"}, "base": {"type": "string"}, "content": {"type": "string"}},
-        "required": ["op", "path", "base", "content"], "additionalProperties": false
+        "properties": {"op": {"const": "replace_page"}, "base": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["op", "base", "content"], "additionalProperties": false
     }));
     schemas.push(json!({
         "type": "object",
-        "properties": {"op": {"const": "delete_page"}, "path": {"type": "string"}, "base": {"type": "string"}},
-        "required": ["op", "path", "base"], "additionalProperties": false
+        "properties": {"op": {"const": "delete_page"}, "base": {"type": "string"}},
+        "required": ["op", "base"], "additionalProperties": false
     }));
     schemas
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyArguments {
+    edit_summary: String,
+    edits: std::collections::BTreeMap<String, Vec<Value>>,
+}
+
+impl ApplyArguments {
+    fn into_request(self) -> Result<ApplyEditsRequest> {
+        if self.edits.is_empty() {
+            bail!("edits must contain at least one path");
+        }
+        let mut paths = std::collections::BTreeMap::new();
+        for (mut path, operations) in self.edits {
+            strip_root_prefix(&mut path);
+            if path.is_empty() {
+                bail!("edit paths must be non-empty");
+            }
+            if paths.insert(path.clone(), operations).is_some() {
+                bail!("duplicate edit path after normalization: /{path}");
+            }
+        }
+        let mut edits = Vec::new();
+        for (path, operations) in paths {
+            if operations.is_empty() {
+                bail!("edits for /{path} must contain at least one operation");
+            }
+            for operation in operations {
+                let mut operation = operation
+                    .as_object()
+                    .context("edit operations must be objects")?
+                    .clone();
+                if operation.contains_key("path") {
+                    bail!("operation path must be supplied as the edits object key");
+                }
+                operation.insert("path".into(), json!(path));
+                edits.push(
+                    serde_json::from_value(Value::Object(operation))
+                        .map_err(|error| anyhow::anyhow!("invalid edit for /{path}: {error}"))?,
+                );
+            }
+        }
+        Ok(ApplyEditsRequest {
+            edit_summary: self.edit_summary,
+            edits,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -456,18 +508,17 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             }),
             Err(error) => Err(error.into()),
         },
-        "apply_edits" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
-            Ok(mut arguments) => {
-                for edit in &mut arguments.edits {
-                    strip_root_prefix(edit.path_mut());
-                }
+        "apply_edits" => match serde_json::from_value::<ApplyArguments>(params.arguments)
+            .map_err(anyhow::Error::from)
+            .and_then(ApplyArguments::into_request)
+        {
+            Ok(arguments) => {
                 let blocking_store = Arc::clone(store);
-                match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
-                    Ok(_) => Ok(json!({"success": true})),
-                    Err(error) => Err(error),
-                }
+                run_blocking(move || blocking_store.apply_edits(&arguments))
+                    .await
+                    .map(|_| json!({"success": true}))
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         },
         _ => return rpc_error(id, -32602, "unknown tool"),
     };

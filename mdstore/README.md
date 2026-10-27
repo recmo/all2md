@@ -262,6 +262,26 @@ for missing neighbors. Trailing whitespace is significant. The numbered line
 must match: stale anchors fail without relocation or merging. All operations in
 a batch validate against the same pre-edit snapshot.
 
+`apply_edits` groups operations by path; individual operations have no `path`:
+
+```json
+{
+  "edit_summary": "Update notes",
+  "edits": {
+    "/notes/example.md": [
+      {"op": "replace", "anchor": "10:abcd", "content": "Updated paragraph."},
+      {"op": "insert_after", "anchor": "20:1234", "content": "Another paragraph."}
+    ]
+  }
+}
+```
+
+The path map and every operation array must be non-empty. Paths accept an
+optional leading `/`, but aliases such as `/notes/a.md` and `notes/a.md` in the
+same request are rejected. The whole request remains atomic across files.
+The former flat operation array is not accepted.
+
+
 `get_page` returns page content once as a plain-text MCP content block, with a
 path/schema header and hashline prefixes by default. Append `:10` to read one
 line or `:10-20` to read an inclusive line range. Separate line-number arguments
