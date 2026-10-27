@@ -41,6 +41,9 @@ them before merging.
 - Raw document reads use `GET /path/document.md`; `GET /path/directory/` lists
   child paths. Webui traverses the tree and builds its validation baseline
   locally in a WASM worker. Schema paths arrive in the HTTP `Link` header.
+  GET `ETag` values identify the published commit: cached files are reused only
+  at that commit, and traversal retries if revisions differ. HTTP caching
+  revalidates reads and permits 304 responses without downloading the body.
 - Shared Rust validation runs incrementally in WASM while editing. The server
   independently validates every submission through `edit`.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
@@ -97,7 +100,8 @@ standalone frontend type checks in a fresh checkout.
 Webui builds its own versioned baseline from raw HTTP reads: source
 hashes, parsed document facts, relation edges, and configuration/template sources.
 The first connection downloads the published document inventory; subsequent
-refreshes fetch current sources and update template projections. Validation uses that cached baseline offline.
+refreshes reuse files at the same commit and fetch fresh sources when the commit
+changes, including updated template projections. Validation uses that cached baseline offline.
 When document-selection globs change, the current client marks local validation
 incomplete and permits submission for authoritative checks; it never labels
 those edits valid based on an incomplete inventory.

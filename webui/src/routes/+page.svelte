@@ -244,7 +244,7 @@
   async function refreshValidationSnapshot() {
     const version = ++baselineVersion;
     const repository = cache.repository;
-    const inventory = await readInventory(api);
+    const inventory = await readInventory(api, cache.pages);
     const snapshot =
       cache.validationSnapshot?.revision === inventory.revision &&
       cache.validationSnapshot.property_schemas

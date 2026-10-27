@@ -158,6 +158,7 @@ const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 
 #[derive(Debug)]
 pub(crate) struct PageSource {
+    pub revision: String,
     pub template: Option<String>,
     pub text: Option<String>,
 }
@@ -339,12 +340,17 @@ impl Store {
     /// Lists direct children of a directory in the published document tree.
     /// Root is `/`; other directory paths must end with `/`.
     pub fn get_directory(&self, path: &str) -> Result<Vec<String>> {
-        self.list_directory(path, false, false)
+        self.get_directory_source(path).map(|(_, paths)| paths)
     }
 
     /// Lists all descendants, excluding the starting directory itself.
     pub fn get_subtree(&self, path: &str, directories_only: bool) -> Result<Vec<String>> {
         self.list_directory(path, true, directories_only)
+            .map(|(_, paths)| paths)
+    }
+
+    pub(crate) fn get_directory_source(&self, path: &str) -> Result<(String, Vec<String>)> {
+        self.list_directory(path, false, false)
     }
 
     fn list_directory(
@@ -352,7 +358,7 @@ impl Store {
         path: &str,
         recursive: bool,
         directories_only: bool,
-    ) -> Result<Vec<String>> {
+    ) -> Result<(String, Vec<String>)> {
         let prefix = if path == "/" {
             ""
         } else {
@@ -388,7 +394,7 @@ impl Store {
         if !found {
             bail!("directory not found: {path}");
         }
-        Ok(children.into_iter().collect())
+        Ok((state.head.clone(), children.into_iter().collect()))
     }
 
     /// Reads an exact page or configuration resource as hashlines.
@@ -407,6 +413,7 @@ impl Store {
         let state = self.state.read();
         if let Some(text) = state.pages.get(path) {
             return Ok(PageSource {
+                revision: state.head.clone(),
                 template: state.templates.template_path(path),
                 text: Some(text.clone()),
             });
@@ -415,6 +422,7 @@ impl Store {
             && let Some(text) = state.config_files.get(path)
         {
             return Ok(PageSource {
+                revision: state.head.clone(),
                 template: None,
                 text: Some(text.clone()),
             });
@@ -427,6 +435,7 @@ impl Store {
                 ensure_paths_match_config(&state.config, [&path.to_owned()])?;
             }
             return Ok(PageSource {
+                revision: state.head.clone(),
                 template: state.templates.template_path(path),
                 text: None,
             });

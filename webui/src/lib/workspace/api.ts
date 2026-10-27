@@ -1,10 +1,12 @@
 export type Page = {
+  revision?: string;
   path: string;
   exists: boolean;
   text: string;
   template: { path: string } | null;
 };
 export type Directory = {
+  revision: string;
   path: string;
   children: { path: string; kind: 'file' | 'directory' }[];
 };
@@ -150,7 +152,7 @@ async function rawRead(path: string): Promise<Response> {
   let response: Response;
   try {
     response = await fetch(url, {
-      cache: 'no-store',
+      cache: 'no-cache',
       signal: AbortSignal.timeout(15000)
     });
   } catch {
@@ -162,6 +164,16 @@ async function rawRead(path: string): Promise<Response> {
     throw new ApiError(await response.text(), response.status);
   }
   return response;
+}
+
+function readRevision(response: Response): string {
+  const etag = response.headers.get('etag');
+  if (!etag)
+    throw new ApiError(
+      'Document response is missing its repository revision.',
+      502
+    );
+  return etag;
 }
 
 export const api = {
@@ -179,6 +191,7 @@ export const api = {
       : null;
     return {
       path: path.replace(/^\//, ''),
+      revision: readRevision(response),
       template: template ? { path: template } : null,
       exists: response.ok,
       text: response.ok ? await response.text() : ''
@@ -191,6 +204,7 @@ export const api = {
     const text = await response.text();
     return {
       path: path === '/' ? '/' : path.replace(/^\//, ''),
+      revision: readRevision(response),
       children: text
         .split('\n')
         .filter(Boolean)

@@ -71,30 +71,66 @@ async fn health(State(store): State<Arc<Store>>) -> Response {
     }
 }
 
-async fn raw_root(State(store): State<Arc<Store>>) -> Response {
-    raw_document(&store, "/")
+async fn raw_root(State(store): State<Arc<Store>>, headers: HeaderMap) -> Response {
+    raw_document(&store, "/", &headers)
 }
 
-async fn raw_path(State(store): State<Arc<Store>>, Path(path): Path<String>) -> Response {
-    raw_document(&store, &path)
+async fn raw_path(
+    State(store): State<Arc<Store>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    raw_document(&store, &path, &headers)
 }
 
-fn raw_document(store: &Store, path: &str) -> Response {
+fn raw_document(store: &Store, path: &str, headers: &HeaderMap) -> Response {
     let result = if path.ends_with('/') {
         store
-            .get_directory(path)
-            .map(|children| (Some(rooted_directory(children)), None))
+            .get_directory_source(path)
+            .map(|(revision, children)| (revision, Some(rooted_directory(children)), None))
     } else {
         store
             .get_source(path)
-            .map(|source| (source.text, source.template))
+            .map(|source| (source.revision, source.text, source.template))
     };
-    let (status, body, template) = match result {
-        Ok((Some(text), template)) => (StatusCode::OK, text, template),
-        Ok((None, template)) => (StatusCode::NOT_FOUND, String::new(), template),
-        Err(error) => (StatusCode::NOT_FOUND, error.to_string(), None),
+    let (revision, text, template) = match result {
+        Ok(source) => source,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                [(header::CACHE_CONTROL, "no-store")],
+                error.to_string(),
+            )
+                .into_response();
+        }
     };
-    let mut response = (status, [(header::CACHE_CONTROL, "no-store")], body).into_response();
+    let etag = format!("\"{revision}\"");
+    let unchanged = text.is_some()
+        && headers.get_all(header::IF_NONE_MATCH).iter().any(|value| {
+            value.to_str().is_ok_and(|value| {
+                value.split(',').any(|tag| {
+                    let tag = tag.trim();
+                    tag == "*" || tag.strip_prefix("W/").unwrap_or(tag) == etag
+                })
+            })
+        });
+    let status = if unchanged {
+        StatusCode::NOT_MODIFIED
+    } else if text.is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    };
+    let body = if unchanged {
+        String::new()
+    } else {
+        text.unwrap_or_default()
+    };
+    let mut response = (status, [(header::CACHE_CONTROL, "no-cache")], body).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).expect("Git object ID"),
+    );
     if let Some(template) = template {
         let mut url = reqwest::Url::parse("http://mdstore.invalid/path").expect("static URL");
         url.path_segments_mut()
