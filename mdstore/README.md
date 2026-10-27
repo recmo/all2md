@@ -133,11 +133,14 @@ Declarations register rules checked by Rust:
 | `structure(level=None, order="unrestricted", additional_sections=True)` | Set root heading policy before declaring sections. |
 | `preamble(**rules)` | Constrain content before the declared sections. |
 
-Wiki targets first resolve relative to the source document's directory. If no
-local document matches, they fall back to repository paths, then unique short
-names. Explicit `./` and `../` targets stay relative; paths cannot escape the
-repository. For example, `[[meeting]]` in `work/page.md` prefers
-`work/meeting.md` over `personal/meeting.md` or `meeting.md`.
+Markdown and wiki link paths resolve relative to the source document's directory.
+A leading `/` selects the repository root: `[[meeting]]` in `work/page.md` means
+`work/meeting.md`, while `[[/meeting]]` means `meeting.md` at the root. Use `../`
+for parent directories; paths cannot escape the repository. The `.md` extension
+is optional, and wiki labels/fragments remain supported (`[[/work/meeting#Notes|Notes]]`).
+There is no repository-wide short-name search or implicit root fallback. Missing
+destinations are broken links. Frontmatter relation fields continue to store
+repository paths such as `tasks/v1/2026/09/task.md`.
 
 Section rules include `required`, `nonempty`, `include_subsections`, and `content`
 (`paragraphs`, `list`, `table`, `code`, `blockquotes`, `empty`, or `dated_list()`).
@@ -390,7 +393,7 @@ checks still run against before/after content, and reciprocity is checked on the
 resulting graph so removing a backlink can invalidate an unchanged document.
 
 Adding or removing document paths re-resolves authored targets across the graph:
-even adding a document can make an existing short-name target ambiguous. This
+a destination can become available or disappear. This
 reuses cached parsing and does not rerun unchanged document policies. Startup,
 external snapshot activation, and explicit full validation retain complete
 validation as the baseline.

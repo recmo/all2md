@@ -114,7 +114,7 @@ export function moveTree(
         `Cache ${path} before moving offline so its links can be updated.`
       );
     const destination = moves.get(path) || path;
-    const text = rewriteLinks(source.text, path, destination, moves, all);
+    const text = rewriteLinks(source.text, path, destination, moves);
     if (text === source.text) continue;
     if (readonly(path, allowTemplates, allowConfig))
       throw Error(`Updating links in ${path} requires edit permission.`);

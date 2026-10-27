@@ -206,7 +206,7 @@ textarea {
   font-family: sans-serif;
   font-size: 0.75em;
 }
-.markdown .ambiguous-link {
+.markdown .broken-link {
   text-decoration: underline wavy;
   text-underline-offset: 3px;
 }

@@ -461,7 +461,7 @@ fn validate_with_baseline(
     let mut parsed = HashMap::new();
     let mut policies = HashMap::new();
     let mut affected = std::collections::HashSet::new();
-    // Adding a path can make a previously unique short-name target ambiguous.
+    // Inventory changes can add or remove the exact destination of an authored link.
     // Inventory changes therefore re-resolve all authored targets, without reparsing.
     let inventory_changed = baseline.as_ref().is_none_or(|base| {
         base.pages.len() != pages.len() || base.pages.keys().any(|path| !pages.contains_key(path))
@@ -608,7 +608,7 @@ fn validate_with_baseline(
                                 });
                                 continue;
                             };
-                            match resolver.resolve(source, target, LinkSyntax::Wiki) {
+                            match resolver.resolve_reference(target) {
                                 Ok(Some(target)) => edges.push(Edge {
                                     source: source.clone(),
                                     relation: rule.name.clone(),
@@ -673,29 +673,18 @@ fn validate_reciprocals(
 
 struct TargetResolver {
     exact: std::collections::HashSet<String>,
-    stems: HashMap<String, Vec<String>>,
 }
 
 impl TargetResolver {
     fn new<'a>(paths: impl Iterator<Item = &'a String>) -> Self {
-        let mut exact = std::collections::HashSet::new();
-        let mut stems: HashMap<String, Vec<String>> = HashMap::new();
-        for path in paths {
-            exact.insert(path.clone());
-            let without_extension = path.strip_suffix(".md").unwrap_or(path);
-            stems
-                .entry(without_extension.into())
-                .or_default()
-                .push(path.clone());
-            if let Some(name) = Path::new(without_extension)
-                .file_name()
-                .and_then(|v| v.to_str())
-                .filter(|name| *name != without_extension)
-            {
-                stems.entry(name.into()).or_default().push(path.clone());
-            }
+        Self {
+            exact: paths.cloned().collect(),
         }
-        Self { exact, stems }
+    }
+
+    // Frontmatter relation fields store repository paths, not authored links.
+    fn resolve_reference(&self, raw: &str) -> Result<Option<String>, String> {
+        self.resolve("", raw, LinkSyntax::Wiki)
     }
 
     fn resolve(
@@ -724,43 +713,21 @@ impl TargetResolver {
         } else {
             raw
         };
-        if target.starts_with('/') {
-            return Err(format!("absolute internal link is not allowed: {target}"));
-        }
-        if matches!(syntax, LinkSyntax::Wiki) {
-            let parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
-            let relative = normalize_path(&parent.join(target))?;
-            let relative = if relative.ends_with(".md") {
-                relative
-            } else {
-                format!("{relative}.md")
-            };
-            if self.exact.contains(&relative) {
-                return Ok(Some(relative));
-            }
-            if target.starts_with("./") || target.starts_with("../") {
-                return Err(format!("dangling internal target {raw:?}"));
-            }
-        }
-        let candidate = if matches!(syntax, LinkSyntax::Markdown) {
+        let candidate = if let Some(root_path) = target.strip_prefix('/') {
+            normalize_path(Path::new(root_path))?
+        } else {
             let parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
             normalize_path(&parent.join(target))?
-        } else {
-            normalize_path(Path::new(target))?
         };
         let with_extension = if candidate.ends_with(".md") {
-            candidate.clone()
+            candidate
         } else {
             format!("{candidate}.md")
         };
         if self.exact.contains(&with_extension) {
-            return Ok(Some(with_extension));
-        }
-        let stem = candidate.strip_suffix(".md").unwrap_or(&candidate);
-        match self.stems.get(stem).map(Vec::as_slice) {
-            Some([only]) => Ok(Some(only.clone())),
-            Some(many) => Err(format!("ambiguous internal target {raw:?}: {many:?}")),
-            None => Err(format!("dangling internal target {raw:?}")),
+            Ok(Some(with_extension))
+        } else {
+            Err(format!("dangling internal target {raw:?}"))
         }
     }
 }
@@ -889,11 +856,14 @@ pub fn document_references(
         let policy = templates.policy(path);
         let page = parse_page(text, &policy.links)?;
         let mut found = Vec::new();
-        let mut add = |raw: &str, range, pointer| -> Result<()> {
-            if let Some(target) = resolver
-                .resolve(path, raw, LinkSyntax::Wiki)
-                .map_err(anyhow::Error::msg)
-                .with_context(|| format!("{path}: cannot resolve reference"))?
+        let mut add = |raw: &str, range, pointer: Option<String>| -> Result<()> {
+            if let Some(target) = (if pointer.is_some() {
+                resolver.resolve_reference(raw)
+            } else {
+                resolver.resolve(path, raw, LinkSyntax::Wiki)
+            })
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("{path}: cannot resolve reference"))?
             {
                 found.push(DocumentReference {
                     target,
