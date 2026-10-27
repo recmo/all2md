@@ -125,7 +125,7 @@ mod reference_tests {
     use super::*;
     #[test]
     fn references_follow_schema_scope_and_preserve_precise_locations() {
-        let source = "---\nrefs:\n  - target: target#part\n    kind: task\n  - target: ignored\n    kind: other\n---\n# 😀 Note\n\n[[ target#part | label ]] and `[[target]]` and \\[[target]].\n\n```\n[[target]]\n```\n";
+        let source = "---\nrefs:\n  - target: target#part\n    kind: task\n  - target: ignored\n    kind: other\n---\n# 😀 Note\n\n[[ /target#part | label ]] and `[[target]]` and \\[[target]].\n\n```\n[[target]]\n```\n";
         let schema = "```starlark\nlinks(wiki=[r'\\[\\[(?P<target>[^|\\]]+)(?:\\|[^\\]]*)?\\]\\]'])\nrelation('references', selector={'kind':'frontmatter','array_pointer':'/refs','target_pointer':'/target','type_pointer':'/kind','type_value':'task'})\n```\n";
         let sources = serde_json::json!({"schema.md":schema,"notes/source.md":source,"target.md":"# Target\n"});
         let refs: serde_json::Value =
@@ -133,12 +133,12 @@ mod reference_tests {
         let refs = refs["notes/source.md"].as_array().unwrap();
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0]["target"], "target.md");
-        assert_eq!(refs[0]["raw"], "target#part");
+        assert_eq!(refs[0]["raw"], "/target#part");
         let start = refs[0]["range"]["start"].as_u64().unwrap() as usize;
         let end = refs[0]["range"]["end"].as_u64().unwrap() as usize;
         assert_eq!(
             String::from_utf16(&source.encode_utf16().collect::<Vec<_>>()[start..end]).unwrap(),
-            "target#part"
+            "/target#part"
         );
         assert_eq!(refs[1]["pointer"], "/refs/0/target");
     }

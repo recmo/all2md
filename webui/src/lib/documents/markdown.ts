@@ -24,7 +24,7 @@ function wikiPath(path: string): string | undefined {
   return normalized.endsWith('.md') ? normalized : normalized + '.md';
 }
 
-// Prefer a destination beside the source before repository paths or short names.
+// Wiki paths are source-relative unless a leading slash selects the repository root.
 parser.inline.ruler.before('link', 'wiki_links', (state, silent) => {
   // Label lookahead must leave brackets to Markdown's own nesting scanner.
   if (
@@ -40,66 +40,77 @@ parser.inline.ruler.before('link', 'wiki_links', (state, silent) => {
   const separator = content.indexOf('|');
   const target = (separator < 0 ? content : content.slice(0, separator)).trim();
   const label = separator < 0 ? target : content.slice(separator + 1).trim();
-  if (!target || /^(?:[a-z][a-z\d+.-]*:|\/)|[\\\x00-\x1f]/i.test(target))
+  if (!target || /^(?:[a-z][a-z\d+.-]*:|\/\/)|[\\\x00-\x1f]/i.test(target))
     return false;
   const boundary = target.search(/[?#]/);
   const rawPath = boundary < 0 ? target : target.slice(0, boundary);
   const suffix = boundary < 0 ? '' : target.slice(boundary);
   const { paths, sourcePath = '' } = state.env as LinkContext;
   const parent = sourcePath.split('/').slice(0, -1).join('/');
-  const relative = wikiPath([parent, rawPath].filter(Boolean).join('/'));
-  if (!relative) return false;
-  const explicitRelative = /^\.\.?\//.test(rawPath);
-  const candidate = explicitRelative ? relative : wikiPath(rawPath);
-  const exact = paths?.includes(relative)
-    ? relative
-    : candidate && paths?.includes(candidate)
-      ? candidate
-      : undefined;
-  const stem = candidate?.replace(/\.md$/, '');
-  const matches = explicitRelative
-    ? []
-    : paths?.filter(
-        (p) =>
-          p.replace(/\.md$/, '') === stem ||
-          p.replace(/\.md$/, '').split('/').pop() === stem
-      );
-  const ambiguous = !exact && matches && matches.length > 1;
-  const resolved = exact || matches?.[0] || relative;
-  const open = state.push(
-    ambiguous ? 'span_open' : 'link_open',
-    ambiguous ? 'span' : 'a',
-    1
+  const resolved = wikiPath(
+    rawPath.startsWith('/')
+      ? rawPath.slice(1)
+      : [parent, rawPath].filter(Boolean).join('/')
   );
-  if (ambiguous) {
-    open.attrSet('class', 'ambiguous-link');
-    open.attrSet('title', `Ambiguous document: ${target}`);
-  } else {
-    open.attrSet(
-      'href',
-      rawPath
-        ? '/' + resolved.split('/').map(encodeURIComponent).join('/') + suffix
-        : suffix
-    );
-  }
+  if (!resolved) return false;
+  const open = state.push('link_open', 'a', 1);
+  open.attrSet(
+    'href',
+    rawPath
+      ? '/' + resolved.split('/').map(encodeURIComponent).join('/') + suffix
+      : suffix
+  );
   state.push('text', '', 0).content = label;
-  state.push(
-    ambiguous ? 'span_close' : 'link_close',
-    ambiguous ? 'span' : 'a',
-    -1
-  );
+  state.push('link_close', 'a', -1);
   state.pos = end + 2;
   return true;
 });
-parser.renderer.rules.link_open = (tokens, index, options, _env, renderer) => {
+parser.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
+  const context = (env || {}) as LinkContext;
   const token = tokens[index];
-  const external = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(
-    String(token.attrGet('href') || '')
-  );
+  const href = String(token.attrGet('href') || '');
+  const external = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href);
   token.attrJoin('class', external ? 'external-link' : 'internal-link');
   if (external) {
     token.attrSet('rel', 'noopener noreferrer');
     token.attrSet('title', 'Opens externally');
+  } else if (href && !/^[#?]/.test(href)) {
+    try {
+      const boundary = href.search(/[?#]/);
+      const rawPath = boundary < 0 ? href : href.slice(0, boundary);
+      const suffix = boundary < 0 ? '' : href.slice(boundary);
+      const components = rawPath.split('/').map(decodeURIComponent);
+      if (components.some((part) => /[/\\\x00-\x1f]/.test(part)))
+        throw Error('Invalid path component');
+      const path = components.join('/');
+      const name = components.at(-1) || '';
+      if (!name.includes('.') || name.endsWith('.md')) {
+        const parent = (context.sourcePath || '')
+          .split('/')
+          .slice(0, -1)
+          .join('/');
+        const target = wikiPath(
+          path.startsWith('/')
+            ? path.slice(1)
+            : [parent, path].filter(Boolean).join('/')
+        );
+        if (!target) throw Error('Path escapes the repository');
+        token.attrSet(
+          'href',
+          '/' + target.split('/').map(encodeURIComponent).join('/') + suffix
+        );
+        if (context.paths && !context.paths.includes(target)) {
+          token.attrJoin('class', 'broken-link');
+          token.attrSet('aria-invalid', 'true');
+          token.attrSet('title', `Missing document: ${target}`);
+        }
+      }
+    } catch {
+      token.attrSet('href', '');
+      token.attrJoin('class', 'broken-link');
+      token.attrSet('aria-invalid', 'true');
+      token.attrSet('title', 'Invalid document path');
+    }
   }
   return renderer.renderToken(tokens, index, options);
 };

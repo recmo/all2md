@@ -22,22 +22,26 @@ describe('local Markdown', () => {
     );
   });
 
-  it('resolves unique wiki short names and marks ambiguous destinations', () => {
+  it('marks exact missing paths as broken instead of searching the repository', () => {
     const el = document.createElement('div');
     el.innerHTML = renderMarkdown(
-      '[[unique]] [[shared]] [[a/shared]]',
+      '[[unique]] [[/notes/unique]] [[shared]]',
       undefined,
       {
+        sourcePath: 'work/source.md',
         paths: ['notes/unique.md', 'a/shared.md', 'b/shared.md']
       }
     );
     expect(
       [...el.querySelectorAll('a')].map((a) => a.getAttribute('href'))
-    ).toEqual(['/notes/unique.md', '/a/shared.md']);
-    expect(el.querySelector('.ambiguous-link')?.textContent).toBe('shared');
+    ).toEqual(['/work/unique.md', '/notes/unique.md', '/work/shared.md']);
+    expect(el.querySelectorAll('a.broken-link')).toHaveLength(2);
+    expect(
+      el.querySelector('a.broken-link')?.getAttribute('aria-invalid')
+    ).toBe('true');
   });
 
-  it('prefers wiki links relative to the current document over repository matches', () => {
+  it('resolves wiki links relative to the current document', () => {
     const el = document.createElement('div');
     const paths = [
       'meeting.md',
@@ -60,13 +64,13 @@ describe('local Markdown', () => {
       '/work/meeting.md#Notes',
       '/work/notes/detail.md'
     ]);
-    expect(el.querySelector('.ambiguous-link')).toBeNull();
+    expect(el.querySelector('.broken-link')).toBeNull();
   });
 
-  it('supports explicit relative wiki paths and keeps repository fallback for other targets', () => {
+  it('supports explicit root and parent paths without implicit fallback', () => {
     const el = document.createElement('div');
     el.innerHTML = renderMarkdown(
-      '[[../meeting]] [[companies/example]] [[unique]] [[./missing]] [[../../../escape]]',
+      '[[../meeting]] [[/companies/example]] [[unique]] [[./missing]] [[../../../escape]]',
       undefined,
       {
         sourcePath: 'work/notes/page.md',
@@ -83,10 +87,26 @@ describe('local Markdown', () => {
     ).toEqual([
       '/work/meeting.md',
       '/companies/example.md',
-      '/archive/unique.md',
+      '/work/notes/unique.md',
       '/work/notes/missing.md'
     ]);
     expect(el.textContent).toContain('[[../../../escape]]');
+  });
+
+  it('uses the same exact relative and root paths for Markdown links', () => {
+    const el = document.createElement('div');
+    el.innerHTML = renderMarkdown(
+      '[Local](meeting) [Root](/meeting.md) [Missing](unique)',
+      undefined,
+      {
+        sourcePath: 'work/source.md',
+        paths: ['work/meeting.md', 'meeting.md', 'notes/unique.md']
+      }
+    );
+    expect(
+      [...el.querySelectorAll('a')].map((a) => a.getAttribute('href'))
+    ).toEqual(['/work/meeting.md', '/meeting.md', '/work/unique.md']);
+    expect(el.querySelector('a.broken-link')?.textContent).toBe('Missing');
   });
 
   it('preserves wiki examples in code, escaped text, and existing links', () => {

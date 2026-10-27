@@ -116,6 +116,69 @@ test('Back cancels an outstanding document read without losing Forward history',
   await expect(page.locator('.document-breadcrumb')).toHaveText('other.md');
 });
 
+test('Back during startup refresh keeps the restored route', async ({
+  page
+}) => {
+  await page.addInitScript(() => {
+    const state = window as unknown as { pendingMcp: number };
+    state.pendingMcp = 0;
+    const fetch = window.fetch.bind(window);
+    window.fetch = async (...args: Parameters<typeof fetch>) => {
+      if (args[0] !== '/mcp') return fetch(...args);
+      state.pendingMcp++;
+      try {
+        const response = await fetch(...args);
+        await response.clone().arrayBuffer();
+        return response;
+      } finally {
+        state.pendingMcp--;
+      }
+    };
+  });
+  await page.goto('/#welcome.md');
+  await expect(page.locator('#preview')).toContainText('Welcome');
+  await page
+    .locator('#preview')
+    .getByRole('link', { name: 'Other note' })
+    .click();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('other.md');
+  let release!: () => void;
+  let requested!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    requested = resolve;
+  });
+  let first = true;
+  await page.route('**/mcp', async (route) => {
+    const { params } = route.request().postDataJSON();
+    if (first && params?.name === 'get_page' && params.arguments.path === '/') {
+      first = false;
+      requested();
+      await gate;
+    }
+    await route.continue();
+  });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await started;
+  await expect(page.locator('.document-breadcrumb')).toHaveText('other.md');
+  await page.goBack();
+  await expect(page.locator('.document-breadcrumb')).toHaveText('welcome.md');
+  release();
+  await page.waitForFunction(
+    () => (window as unknown as { pendingMcp: number }).pendingMcp === 0
+  );
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      )
+  );
+  await expect(page.locator('.document-breadcrumb')).toHaveText('welcome.md');
+  await expect(page).toHaveURL(/#welcome\.md$/);
+});
+
 test('language fences retain highlighting through preview, editing and offline reload', async ({
   page,
   context
@@ -1997,6 +2060,7 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
           edit_summary: 'Create wiki fixture',
           edits: [
             { op: 'create_page', path: 'wiki/schema.md', content: schema },
+            { op: 'create_page', path: 'other/schema.md', content: schema },
             {
               op: 'create_page',
               path: 'target.md',
@@ -2016,7 +2080,7 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
               op: 'create_page',
               path: 'wiki/source.md',
               content:
-                '# 😀 Source\n\n[[target#part|Label]] and `[[target]]`.\n'
+                '# 😀 Source\n\n[[target#part|Label]] and `[[target]]`.\n\n[[/target|Root]]\n'
             }
           ]
         }
@@ -2029,6 +2093,9 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
     .locator('#preview')
     .getByRole('link', { name: 'Label', exact: true });
   await expect(link).toHaveAttribute('href', '/wiki/target.md#part');
+  await expect(
+    page.locator('#preview').getByRole('link', { name: 'Root', exact: true })
+  ).toHaveAttribute('href', '/target.md');
   await link.click();
   await expect(page.locator('.document-breadcrumb')).toHaveText(
     /wiki\s*\/\s*target.md/
@@ -2044,6 +2111,23 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
   await expect(
     page.locator('[data-item-path="wiki/renamed.md"]')
   ).toBeVisible();
+  await page
+    .locator('[data-item-path="wiki/source.md"]')
+    .click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+  await page.getByLabel('Destination path').fill('other/source.md');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('dialog')).not.toBeVisible();
+  await page
+    .getByRole('treeitem', { name: 'other', exact: true })
+    .press('ArrowRight');
+  await page.locator('[data-item-path="other/source.md"]').click();
+  await expect(
+    page.locator('#preview').getByRole('link', { name: 'Label', exact: true })
+  ).toHaveAttribute('href', '/wiki/renamed.md#part');
+  await expect(
+    page.locator('#preview').getByRole('link', { name: 'Root', exact: true })
+  ).toHaveAttribute('href', '/target.md');
   await page.getByRole('treeitem', { name: 'Submit', exact: true }).click();
   await page.getByLabel('Description').fill('Preserve wiki backlinks');
   await expect(page.locator('#submit')).toBeEnabled();
@@ -2051,11 +2135,52 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
     const key = Object.keys(localStorage).find((k) =>
       k.startsWith('mdstore:workspace:')
     )!;
-    return JSON.parse(localStorage.getItem(key)!).drafts['wiki/source.md'].text;
+    return JSON.parse(localStorage.getItem(key)!).drafts['other/source.md']
+      .text;
   });
-  expect(staged).toContain('[[wiki/renamed.md#part|Label]] and `[[target]]`.');
+  expect(staged).toContain(
+    '[[../wiki/renamed.md#part|Label]] and `[[target]]`.'
+  );
+  expect(staged).toContain('[[/target|Root]]');
   await page.locator('#submit').click();
   await expect(page.locator('.submit-notice')).toContainText(
     'Changes committed successfully'
   );
+});
+
+test('wiki paths include local drafts and never fall back to a root short name', async ({
+  page
+}) => {
+  await page.goto('/#welcome.md');
+  await expect(page.locator('#preview')).toContainText('Welcome');
+  await page
+    .getByRole('treeitem', { name: 'notes / guides', exact: true })
+    .click({ button: 'right' });
+  await page
+    .getByRole('menuitem', { name: 'New document here…', exact: true })
+    .click();
+  await page.getByLabel('New document path').fill('notes/guides/other.md');
+  await page.getByRole('button', { name: 'Create draft', exact: true }).click();
+  await replaceDocument(page, '# Local target draft\n');
+  await page.locator('[data-item-path="notes/guides/tasks.md"]').click();
+  await replaceDocument(
+    page,
+    '# Tasks\n\n[[other|Local]] [[/other|Root]] [[welcome|Missing]]\n'
+  );
+  await page.getByRole('radio', { name: 'Render', exact: true }).click();
+  const local = page
+    .locator('#preview')
+    .getByRole('link', { name: 'Local', exact: true });
+  await expect(local).toHaveAttribute('href', '/notes/guides/other.md');
+  await expect(local).not.toHaveClass(/broken-link/);
+  await expect(
+    page.locator('#preview').getByRole('link', { name: 'Root', exact: true })
+  ).toHaveAttribute('href', '/other.md');
+  const missing = page
+    .locator('#preview')
+    .getByRole('link', { name: 'Missing', exact: true });
+  await expect(missing).toHaveAttribute('href', '/notes/guides/welcome.md');
+  await expect(missing).toHaveClass(/broken-link/);
+  await local.click();
+  await expect(page.locator('#preview')).toContainText('Local target draft');
 });

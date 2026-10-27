@@ -390,7 +390,7 @@
       busy = false;
     }
   }
-  async function refresh() {
+  async function refresh(restoreSelection = true) {
     const listing = await api.directory();
     allowTemplateEdits = listing.allow_template_edits === true;
     allowConfigEdits = listing.allow_config_edits === true;
@@ -407,7 +407,7 @@
     };
     online = true;
     await syncDrafts();
-    if (view === 'document' && !current && cache.selected)
+    if (restoreSelection && view === 'document' && !current && cache.selected)
       await openPage(cache.selected, 'replace');
   }
   async function openPage(path: string, historyMode: HistoryMode = 'push') {
@@ -985,6 +985,7 @@
     window.addEventListener('offline', offline);
     window.addEventListener('online', connect);
     window.addEventListener('beforeunload', unload);
+    const requestedHash = location.hash;
     const requestedPath = location.hash
       ? decodeURIComponent(location.hash.slice(1))
       : cache.selected;
@@ -999,10 +1000,12 @@
       allowTemplateEdits = cache.allowTemplateEdits === true;
       allowConfigEdits = cache.allowConfigEdits === true;
       try {
-        await refresh();
+        await refresh(false);
       } catch (e) {
         failure(e);
       }
+      // Startup must not reopen the original route after Back or another visit.
+      if (location.hash !== requestedHash) return;
       const path = requestedPath || cache.selected;
       if (view === 'document' && path) await openPage(path, 'replace');
       routeHash = location.hash;
@@ -1527,7 +1530,7 @@
                   use:renderedLinks
                   use:markdownView={{
                     text: current.text,
-                    paths: cache.paths,
+                    paths: paths.filter((path) => !path.endsWith('/')),
                     sourcePath: current.path,
                     schema: current.template?.definition?.frontmatter
                   }}

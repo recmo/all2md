@@ -70,16 +70,15 @@ it('rewrites parsed Markdown links and reference definitions, preserving code an
   );
 });
 
-it('updates extensionless and unique short links when their target is renamed', () => {
+it('rewrites exact extensionless and root links without matching unrelated short names', () => {
   expect(
     rewriteLinks(
-      '[b](b) [b](b.md)',
+      '[missing](b) [root](/notes/b.md) [relative](notes/b)',
       'a.md',
       'a.md',
-      new Map([['notes/b.md', 'new/c.md']]),
-      ['a.md', 'notes/b.md']
+      new Map([['notes/b.md', 'new/c.md']])
     )
-  ).toBe('[b](new/c.md) [b](new/c.md)');
+  ).toBe('[missing](b) [root](/new/c.md) [relative](new/c.md)');
 });
 
 it('deletes whole folders atomically using original bases, including local-only drafts', async () => {

@@ -64,7 +64,11 @@ Service workers require localhost or HTTPS. An insecure non-local HTTP deploymen
 can keep drafts in localStorage but cannot reload the application shell offline.
 
 The document library uses @pierre/trees through its vanilla API, hosted by a Svelte component. It provides virtualized rows, compact folder chains, keyboard navigation, and offline status badges: cached, not cached, downloading, local draft awaiting submission, or local-save failure. Folder badges aggregate offline availability. Cached does not imply up to date with the server. Folder/file context menus support creation, renaming, moving, and staged deletion.
-Renames and moves update local Markdown links. MCP search retains ranked results.
+Markdown and wiki links use source-relative paths; a leading `/` selects the
+repository root. There is no global name search or implicit root fallback.
+Missing targets are marked as broken, including against local drafts and staged
+deletions. Renames and moves preserve relative/rooted link styles and rebase
+outgoing links when their source document moves. MCP search retains ranked results.
 
 
 Flagged app documents (`mdstore: app` in frontmatter) evaluate bounded Starlark

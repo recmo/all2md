@@ -12,8 +12,7 @@ export function rewriteLinks(
   text: string,
   oldPath: string,
   newPath: string,
-  moves: Map<string, string>,
-  inventory: string[] = [...moves.keys()]
+  moves: Map<string, string>
 ): string {
   const lines = text.split('\n');
   const excluded = new Set<number>();
@@ -36,21 +35,8 @@ export function rewriteLinks(
     } catch {
       return raw;
     }
-    // Match the server's extensionless and unique short-name resolution.
-    if (!/\.[^/]+$/.test(target) || target.endsWith('.md')) {
-      const exact = target.endsWith('.md') ? target : target + '.md';
-      if (inventory.includes(exact)) target = exact;
-      else {
-        const stem = target.replace(/\.md$/, '');
-        const matches = inventory.filter(
-          (path) =>
-            path.endsWith('.md') &&
-            (path.slice(0, -3) === stem ||
-              path.split('/').at(-1)!.slice(0, -3) === stem)
-        );
-        if (matches.length === 1) target = matches[0];
-      }
-    }
+    // Only this exact path can match, with an optional Markdown extension.
+    if (!/\.[^/]+$/.test(target)) target += '.md';
     const moved = moves.get(target) ?? target;
     if (moved === target && oldPath === newPath) return raw;
     // Fragment-only links continue to refer to the same moved document.
