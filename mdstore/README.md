@@ -266,11 +266,11 @@ a batch validate against the same pre-edit snapshot.
 
 ```json
 {
-  "edit_summary": "Update notes",
+  "summary": "Update notes",
   "edits": {
     "/notes/example.md": [
       {"op": "replace", "anchor": "10:abcd", "content": "Updated paragraph."},
-      {"op": "insert_after", "anchor": "20:1234", "content": "Another paragraph."}
+      {"op": "append", "anchor": "20:1234", "content": "Another paragraph."}
     ]
   }
 }
@@ -280,6 +280,20 @@ The path map and every operation array must be non-empty. Paths accept an
 optional leading `/`, but aliases such as `/notes/a.md` and `notes/a.md` in the
 same request are rejected. The whole request remains atomic across files.
 The former flat operation array is not accepted.
+
+Only `replace` and `append` are accepted:
+
+- `replace` with `anchor` replaces an inclusive line/range. Empty `content`
+  deletes those lines; deleting every line deletes the file.
+- `replace` without `anchor` replaces a whole file when exact original `base`
+  is supplied. Empty `content` deletes it. Omit both `anchor` and `base` to
+  create a missing file; an existing file or empty creation content is rejected.
+- `append` inserts non-empty `content` after an anchor. Omit `anchor` for EOF,
+  or use `0:` for the start of the file. The file must already exist.
+
+`anchor` and `base` cannot be combined. Whole-file edits must be the only
+operation for their path. `summary` is required and must be non-empty.
+
 
 
 `get_page` returns page content once as a plain-text MCP content block, with a
@@ -292,7 +306,7 @@ existence flags, derived metadata and relations. `template` is the
 repository-rooted schema path, such as `/schema.md` (or `null`); read that path
 separately for its instructions and rules. Use `format: "raw"` for structured
 output containing exact full-page source, including line endings, when preparing
-`replace_page` or `delete_page`. Raw reads support files only and cannot specify
+whole-file `replace`. Raw reads support files only and cannot specify
 a line window. The schema is always a path; the web editor compiles property
 schemas locally from the schema sources it reads.
 
@@ -307,26 +321,20 @@ Example edit:
 
 ```json
 {
-  "edit_summary": "Link Alice and Bob",
-  "edits": [
-    {
-      "op": "insert_after",
-      "path": "people/alice.md",
-      "anchor": "12:89f2",
-      "content": "- [Bob](bob.md)"
-    },
-    {
-      "op": "insert_after",
-      "path": "people/bob.md",
-      "anchor": "9:ce55",
-      "content": "- [Alice](alice.md)"
-    }
-  ]
+  "summary": "Link Alice and Bob",
+  "edits": {
+    "/people/alice.md": [
+      {"op": "append", "anchor": "12:89f2", "content": "- [Bob](bob.md)"}
+    ],
+    "/people/bob.md": [
+      {"op": "append", "anchor": "9:ce55", "content": "- [Alice](alice.md)"}
+    ]
+  }
 }
 ```
 
-All anchors in a request resolve against the same pre-edit snapshot. Stale,
-ambiguous, or overlapping edits fail before any worktree file changes.
+All anchors in a request resolve against the same pre-edit snapshot. Stale
+or overlapping edits fail before any worktree file changes.
 
 The MCP endpoint is `/mcp`; health and indexing coverage are available from
 `/health`. Access control belongs to the deployment firewall or reverse proxy.

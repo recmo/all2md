@@ -653,7 +653,7 @@
           : 'Server changes merged. Review the updated diff while validation runs, then submit again.';
         return;
       }
-      const request = { ...batch, edit_summary: cache.summary.trim() };
+      const request = { ...batch, summary: cache.summary.trim() };
       // apply_edits validates the entire batch against the current repository
       // and commits it atomically; local validation is only the preview.
       await api.apply(request);

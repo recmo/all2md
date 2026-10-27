@@ -76,6 +76,15 @@ pub enum EditOperation {
         /// Text to insert.
         content: String,
     },
+    /// Appends to an existing file, using an anchor or the current EOF.
+    Append {
+        /// Repository-relative target path.
+        path: String,
+        /// Anchor to insert after, or EOF when absent.
+        anchor: Option<String>,
+        /// Text to append.
+        content: String,
+    },
     /// Deletes an anchored line or inclusive range.
     Delete {
         /// Repository-relative target path.
@@ -109,6 +118,7 @@ impl EditOperation {
             | Self::ReplacePage { path, .. }
             | Self::InsertBefore { path, .. }
             | Self::InsertAfter { path, .. }
+            | Self::Append { path, .. }
             | Self::Delete { path, .. }
             | Self::CreatePage { path, .. }
             | Self::RemovePage { path, .. } => path,
@@ -346,6 +356,22 @@ pub(crate) fn apply_operations_with_ranges(
                         kind: ResolvedKind::Insert(content.clone()),
                     }
                 }
+                EditOperation::Append {
+                    anchor, content, ..
+                } => {
+                    let line = match anchor {
+                        Some(anchor) => resolve_insert_position(anchor, &lines, true)?,
+                        None => lines.len(),
+                    };
+                    Resolved {
+                        index: request_index,
+                        span: Span {
+                            start: line,
+                            end: line,
+                        },
+                        kind: ResolvedKind::Insert(content.clone()),
+                    }
+                }
                 EditOperation::CreatePage { .. }
                 | EditOperation::DeletePage { .. }
                 | EditOperation::RemovePage { .. }
@@ -400,6 +426,10 @@ pub(crate) fn apply_operations_with_ranges(
                     lines.splice(edit.span.start..=edit.span.end, Vec::<String>::new());
                 }
             }
+        }
+        if lines.is_empty() {
+            output.insert(path.into(), None);
+            continue;
         }
         let mut updated = lines.join(separator);
         if trailing_newline || lines.last().is_some_and(String::is_empty) {
@@ -597,9 +627,9 @@ mod tests {
         original.insert("empty.md".into(), String::new());
         let inserted = apply_operations(
             &original,
-            &[EditOperation::InsertAfter {
+            &[EditOperation::Append {
                 path: "empty.md".into(),
-                anchor: "0:".into(),
+                anchor: Some("0:".into()),
                 content: "first".into(),
             }],
         )

@@ -710,8 +710,8 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
       params: {
         name: 'apply_edits',
         arguments: {
-          edit_summary: 'Check rumdl',
-          edits: { '/other.md': [{ op: 'replace_page', base, content: text }] }
+          summary: 'Check rumdl',
+          edits: { '/other.md': [{ op: 'replace', base, content: text }] }
         }
       }
     }
@@ -1326,12 +1326,12 @@ async function remoteEdit(
       params: {
         name: 'apply_edits',
         arguments: {
-          edit_summary: 'Concurrent client edit',
+          summary: 'Concurrent client edit',
           edits: {
             [path]: [
               base === undefined
-                ? { op: 'create_page', content }
-                : { op: 'replace_page', base, content }
+                ? { op: 'replace', content }
+                : { op: 'replace', base, content }
             ]
           }
         }
@@ -1939,10 +1939,10 @@ test('task renames rewrite dependency paths offline and preserve workload arrows
       params: {
         name: 'apply_edits',
         arguments: {
-          edit_summary: 'Reject dangling dependency',
+          summary: 'Reject dangling dependency',
           edits: {
-            [old]: [{ op: 'delete_page', base: original }],
-            [renamed]: [{ op: 'create_page', content: original }]
+            [old]: [{ op: 'replace', base: original, content: '' }],
+            [renamed]: [{ op: 'replace', content: original }]
           }
         }
       }
@@ -1999,17 +1999,17 @@ test('configured wiki targets rewrite with labels and code examples preserved', 
       params: {
         name: 'apply_edits',
         arguments: {
-          edit_summary: 'Create wiki fixture',
+          summary: 'Create wiki fixture',
           edits: {
-            '/wiki/schema.md': [{ op: 'create_page', content: schema }],
-            '/target.md': [{ op: 'create_page', content: '# Root target\n' }],
+            '/wiki/schema.md': [{ op: 'replace', content: schema }],
+            '/target.md': [{ op: 'replace', content: '# Root target\n' }],
             '/other/target.md': [
-              { op: 'create_page', content: '# Other target\n' }
+              { op: 'replace', content: '# Other target\n' }
             ],
-            '/wiki/target.md': [{ op: 'create_page', content: '# Target\n' }],
+            '/wiki/target.md': [{ op: 'replace', content: '# Target\n' }],
             '/wiki/source.md': [
               {
-                op: 'create_page',
+                op: 'replace',
                 content:
                   '# 😀 Source\n\n[[target#part|Label]] and `[[target]]`.\n'
               }

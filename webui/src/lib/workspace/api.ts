@@ -10,7 +10,7 @@ export type Directory = {
 };
 export type Draft = Page & { base: string };
 export type EditRequest = {
-  edit_summary: string;
+  summary: string;
   edits: (
     | { op: 'replace_page'; path: string; base: string; content: string }
     | { op: 'create_page'; path: string; content: string }
@@ -161,13 +161,20 @@ export const api = {
     });
   },
   apply(request: EditRequest) {
-    const edits: Record<string, Omit<EditRequest['edits'][number], 'path'>[]> =
-      Object.create(null);
-    for (const { path, ...operation } of request.edits) {
-      (edits[`/${path.replace(/^\//, '')}`] ??= []).push(operation);
+    const edits: Record<
+      string,
+      { op: 'replace'; base?: string; content: string }[]
+    > = Object.create(null);
+    for (const edit of request.edits) {
+      const operation = {
+        op: 'replace' as const,
+        ...(edit.op !== 'create_page' ? { base: edit.base } : {}),
+        content: edit.op === 'delete_page' ? '' : edit.content
+      };
+      (edits[`/${edit.path.replace(/^\//, '')}`] ??= []).push(operation);
     }
     return mcp<{ success: true }>('apply_edits', {
-      edit_summary: request.edit_summary,
+      summary: request.summary,
       edits
     });
   }
@@ -178,7 +185,7 @@ export function editRequest(
   deletions: Record<string, string> = {}
 ): EditRequest {
   return {
-    edit_summary: summary,
+    summary: summary,
     edits: [
       ...Object.entries(deletions).map(([path, base]) => ({
         op: 'delete_page' as const,
@@ -189,12 +196,14 @@ export function editRequest(
         .sort((a, b) => a.path.localeCompare(b.path))
         .map((d) =>
           d.exists
-            ? {
-                op: 'replace_page' as const,
-                path: d.path,
-                base: d.base,
-                content: d.text
-              }
+            ? d.text === ''
+              ? { op: 'delete_page' as const, path: d.path, base: d.base }
+              : {
+                  op: 'replace_page' as const,
+                  path: d.path,
+                  base: d.base,
+                  content: d.text
+                }
             : { op: 'create_page' as const, path: d.path, content: d.text }
         )
     ]

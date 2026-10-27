@@ -183,11 +183,11 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "apply_edits",
-            "description": "Atomically validate and locally commit an edit batch. Supply edits as an object mapping each file path to a non-empty operation array; operations omit path. All anchors refer to the pre-edit snapshot. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
+            "description": "Atomically validate and locally commit an edit batch. Supply edits as an object mapping each file path to a non-empty operation array; operations omit path. All anchors refer to the pre-edit snapshot. Use replace with an anchor for a line or inclusive range, with exact original base text for a whole existing file, or without either to create a missing file. Empty replacement content deletes the selected lines; removing every line deletes the file. Use append to insert after an anchor, 0: for file start, or omit anchor for EOF; the file must exist. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "edit_summary": {"type": "string", "minLength": 1},
+                    "summary": {"type": "string", "minLength": 1},
                     "edits": {
                         "type": "object",
                         "minProperties": 1,
@@ -199,7 +199,7 @@ fn tools() -> Vec<Value> {
                         }
                     }
                 },
-                "required": ["edit_summary", "edits"],
+                "required": ["summary", "edits"],
                 "additionalProperties": false
             }
         }),
@@ -207,57 +207,119 @@ fn tools() -> Vec<Value> {
 }
 
 fn edit_operation_schemas() -> Vec<Value> {
-    let mut schemas: Vec<Value> = [
-        ("replace", true, true),
-        ("insert_before", true, true),
-        ("insert_after", true, true),
-        ("delete", true, false),
-        ("create_page", false, true),
-        ("remove_page", true, false),
-    ]
-    .into_iter()
-    .map(|(operation, anchor, content)| {
-        let mut properties =
-            serde_json::Map::from_iter([("op".into(), json!({"const": operation}))]);
-        let mut required = vec!["op"];
-        if anchor {
-            properties.insert("anchor".into(), json!({"type": "string", "minLength": 2}));
-            required.push("anchor");
-        }
-        if content {
-            properties.insert("content".into(), json!({"type": "string"}));
-            required.push("content");
-        }
+    vec![
         json!({
             "type": "object",
-            "properties": properties,
-            "required": required,
+            "properties": {
+                "op": {"const": "replace"},
+                "anchor": {"type": "string", "description": "LINE:HASH or START:HASH..END:HASH; omit for whole-file edits."},
+                "base": {"type": "string", "description": "Exact original text for whole-file replacement; omit to require a missing file."},
+                "content": {"type": "string", "description": "Replacement text; empty deletes the selected lines or whole file."}
+            },
+            "required": ["op", "content"],
+            "not": {"required": ["anchor", "base"]},
             "additionalProperties": false
+        }),
+        json!({
+            "type": "object",
+            "properties": {
+                "op": {"const": "append"},
+                "anchor": {"type": "string", "description": "LINE:HASH to insert after; 0: for file start; omit for EOF. File must exist."},
+                "content": {"type": "string", "minLength": 1}
+            },
+            "required": ["op", "content"],
+            "additionalProperties": false
+        }),
+    ]
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum ApplyOperation {
+    Replace {
+        anchor: Option<String>,
+        base: Option<String>,
+        content: String,
+    },
+    Append {
+        anchor: Option<String>,
+        content: String,
+    },
+}
+
+impl ApplyOperation {
+    fn into_edit(self, path: String) -> Result<crate::EditOperation> {
+        use crate::EditOperation;
+        Ok(match self {
+            Self::Replace {
+                anchor: Some(_),
+                base: Some(_),
+                ..
+            } => {
+                bail!("replace accepts anchor or base, not both");
+            }
+            Self::Replace {
+                anchor: Some(anchor),
+                content,
+                ..
+            } => {
+                if content.is_empty() {
+                    EditOperation::Delete { path, anchor }
+                } else {
+                    EditOperation::Replace {
+                        path,
+                        anchor,
+                        content,
+                    }
+                }
+            }
+            Self::Replace {
+                base: Some(base),
+                content,
+                ..
+            } => {
+                if content.is_empty() {
+                    EditOperation::DeletePage { path, base }
+                } else {
+                    EditOperation::ReplacePage {
+                        path,
+                        base,
+                        content,
+                    }
+                }
+            }
+            Self::Replace { content, .. } => {
+                if content.is_empty() {
+                    bail!("cannot create a file with empty content");
+                }
+                EditOperation::CreatePage { path, content }
+            }
+            Self::Append { anchor, content } => {
+                if content.is_empty() {
+                    bail!("append content must be non-empty");
+                }
+                EditOperation::Append {
+                    path,
+                    anchor,
+                    content,
+                }
+            }
         })
-    })
-    .collect();
-    schemas.push(json!({
-        "type": "object",
-        "properties": {"op": {"const": "replace_page"}, "base": {"type": "string"}, "content": {"type": "string"}},
-        "required": ["op", "base", "content"], "additionalProperties": false
-    }));
-    schemas.push(json!({
-        "type": "object",
-        "properties": {"op": {"const": "delete_page"}, "base": {"type": "string"}},
-        "required": ["op", "base"], "additionalProperties": false
-    }));
-    schemas
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApplyArguments {
-    edit_summary: String,
-    edits: std::collections::BTreeMap<String, Vec<Value>>,
+    summary: String,
+    edits: std::collections::BTreeMap<String, Vec<ApplyOperation>>,
 }
 
 impl ApplyArguments {
     fn into_request(self) -> Result<ApplyEditsRequest> {
+        if self.summary.trim().is_empty() {
+            bail!("summary must be non-empty");
+        }
         if self.edits.is_empty() {
             bail!("edits must contain at least one path");
         }
@@ -277,22 +339,15 @@ impl ApplyArguments {
                 bail!("edits for /{path} must contain at least one operation");
             }
             for operation in operations {
-                let mut operation = operation
-                    .as_object()
-                    .context("edit operations must be objects")?
-                    .clone();
-                if operation.contains_key("path") {
-                    bail!("operation path must be supplied as the edits object key");
-                }
-                operation.insert("path".into(), json!(path));
                 edits.push(
-                    serde_json::from_value(Value::Object(operation))
+                    operation
+                        .into_edit(path.clone())
                         .map_err(|error| anyhow::anyhow!("invalid edit for /{path}: {error}"))?,
                 );
             }
         }
         Ok(ApplyEditsRequest {
-            edit_summary: self.edit_summary,
+            edit_summary: self.summary,
             edits,
         })
     }

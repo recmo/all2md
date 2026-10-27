@@ -1350,16 +1350,16 @@ async fn mcp_lists_only_three_tools() {
     let variants = apply["inputSchema"]["properties"]["edits"]["additionalProperties"]["items"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(variants.len(), 8);
-    let delete = variants.iter().find(|schema| schema["properties"]["op"]["const"] == "delete_page").unwrap();
-    assert_eq!(delete["required"], serde_json::json!(["op", "base"]));
+    assert_eq!(variants.len(), 2);
+    let append = variants.iter().find(|schema| schema["properties"]["op"]["const"] == "append").unwrap();
+    assert_eq!(append["required"], serde_json::json!(["op", "content"]));
     let replace = variants
         .iter()
         .find(|schema| schema["properties"]["op"]["const"] == "replace")
         .unwrap();
     assert_eq!(
         replace["required"],
-        serde_json::json!(["op", "anchor", "content"])
+        serde_json::json!(["op", "content"])
     );
 
     let health = client
@@ -1472,9 +1472,9 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
         "params": {
             "name": "apply_edits",
             "arguments": {
-                "edit_summary": "create invalid page",
+                "summary": "create invalid page",
                 "edits": {"/invalid.md": [{
-                    "op": "create_page",
+                    "op": "replace",
                     "content": "# Missing frontmatter\n"
                 }]}
             }
@@ -2005,10 +2005,9 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
         "params": {
             "name": "apply_edits",
             "arguments": {
-                "edit_summary": "exercise delayed push",
+                "summary": "exercise delayed push",
                 "edits": {"/alice.md": [{
-                    "op": "replace",
-                    "anchor": format!("6:{}", short_hash("Alice profile.", "", "")),
+                    "op": "append",
                     "content": "Alice updated."
                 }]}
             }
@@ -3324,9 +3323,9 @@ async fn document_batches_validate_and_submit_through_mcp() {
             .is_none()
     );
     let changed = original.replace("Alice profile.", "Updated Alice profile.");
-    let batch = serde_json::json!({"edit_summary": "Web edit", "edits": {"/alice.md": [{"op": "replace_page", "base": original, "content": changed}]}});
+    let batch = serde_json::json!({"summary": "Web edit", "edits": {"/alice.md": [{"op": "replace", "base": original, "content": changed}]}});
     let mut without_summary = batch.clone();
-    without_summary["edit_summary"] = serde_json::json!("");
+    without_summary["summary"] = serde_json::json!("");
     assert_eq!(
         command(&repository.root, &["rev-parse", "HEAD"]),
         initial_head
@@ -3382,7 +3381,7 @@ async fn document_batches_validate_and_submit_through_mcp() {
         "2"
     );
     let mut stale = batch;
-    stale["edit_summary"] = serde_json::json!("Stale overwrite");
+    stale["summary"] = serde_json::json!("Stale overwrite");
     let stale_call = serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"apply_edits", "arguments":stale}});
     let rejected: serde_json::Value = client
         .post(format!("{base_url}/mcp"))
