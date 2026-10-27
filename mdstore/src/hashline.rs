@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -24,87 +24,32 @@ pub(crate) enum HashlineError {
     /// Two operations modify overlapping source ranges.
     #[error("overlapping edits in {0}")]
     Overlap(String),
-    /// Operations on one path cannot be applied together.
-    #[error("operation {0} is incompatible with other operations on the same path")]
-    Incompatible(String),
+    /// An operation cannot be applied to the current source.
+    #[error("{0}")]
+    InvalidOperation(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 /// A hashline-anchored page edit.
 pub enum EditOperation {
-    /// Deletes a whole page only if the exact original text still matches.
-    DeletePage {
-        /// Repository-relative path.
-        path: String,
-        /// Exact original text.
-        base: String,
-    },
-    /// Replaces an anchored line or inclusive range.
+    /// Replaces anchored lines, or creates a missing file without an anchor.
     Replace {
         /// Repository-relative target path.
         path: String,
-        /// Hashline line or range anchor.
-        anchor: String,
-        /// Replacement text.
+        /// One line or inclusive range; absent only for creation.
+        anchor: Option<String>,
+        /// Replacement text; empty deletes the selected lines.
         content: String,
     },
-    /// Replaces an entire page only when its exact original text still matches.
-    ReplacePage {
-        /// Repository-relative existing page path.
-        path: String,
-        /// Exact original text, including line endings.
-        base: String,
-        /// Complete replacement text, including line endings.
-        content: String,
-    },
-    /// Inserts text before an anchored line or range.
-    InsertBefore {
-        /// Repository-relative target path.
-        path: String,
-        /// Hashline line or range anchor.
-        anchor: String,
-        /// Text to insert.
-        content: String,
-    },
-    /// Inserts text after an anchored line or range.
-    InsertAfter {
-        /// Repository-relative target path.
-        path: String,
-        /// Hashline line or range anchor.
-        anchor: String,
-        /// Text to insert.
-        content: String,
-    },
-    /// Appends to an existing file, using an anchor or the current EOF.
+    /// Inserts into an existing file after an anchor, or at EOF without one.
     Append {
         /// Repository-relative target path.
         path: String,
-        /// Anchor to insert after, or EOF when absent.
+        /// One line, `0:` for BOF, or absent for EOF.
         anchor: Option<String>,
-        /// Text to append.
+        /// Non-empty text to insert.
         content: String,
-    },
-    /// Deletes an anchored line or inclusive range.
-    Delete {
-        /// Repository-relative target path.
-        path: String,
-        /// Hashline line or range anchor.
-        anchor: String,
-    },
-    /// Creates a page that does not yet exist.
-    CreatePage {
-        /// Repository-relative new page path.
-        path: String,
-        /// Complete page text.
-        content: String,
-    },
-    /// Removes a page anchored by its complete current contents.
-    RemovePage {
-        /// Repository-relative target path.
-        path: String,
-        /// Hashline range covering the complete page.
-        anchor: String,
     },
 }
 
@@ -113,15 +58,7 @@ impl EditOperation {
     #[must_use]
     pub fn path(&self) -> &str {
         match self {
-            Self::DeletePage { path, .. }
-            | Self::Replace { path, .. }
-            | Self::ReplacePage { path, .. }
-            | Self::InsertBefore { path, .. }
-            | Self::InsertAfter { path, .. }
-            | Self::Append { path, .. }
-            | Self::Delete { path, .. }
-            | Self::CreatePage { path, .. }
-            | Self::RemovePage { path, .. } => path,
+            Self::Replace { path, .. } | Self::Append { path, .. } => path,
         }
     }
 }
@@ -187,38 +124,11 @@ enum ResolvedKind {
     Delete,
 }
 
-#[derive(Debug, Clone, Copy)]
-/// Changed line bounds in the post-edit page.
-pub(crate) struct ChangedRange {
-    /// First changed line, one-based and inclusive.
-    pub start_line: usize,
-    /// Last changed line, one-based and inclusive.
-    pub end_line: usize,
-}
-
-#[derive(Debug)]
-/// Resulting page texts and their changed line ranges.
-pub(crate) struct AppliedOperations {
-    /// Complete resulting text, or `None` for removed pages.
-    pub changes: HashMap<String, Option<String>>,
-    /// Changed post-edit ranges keyed by path.
-    pub changed_ranges: HashMap<String, Vec<ChangedRange>>,
-}
-
-/// Applies a batch against one immutable pre-edit snapshot.
-#[cfg(test)]
-fn apply_operations(
+/// Applies all operations against one immutable pre-edit snapshot.
+pub(crate) fn apply_operations(
     original: &HashMap<String, String>,
     operations: &[EditOperation],
 ) -> Result<HashMap<String, Option<String>>, HashlineError> {
-    Ok(apply_operations_with_ranges(original, operations)?.changes)
-}
-
-/// Applies a batch and returns post-edit changed line ranges.
-pub(crate) fn apply_operations_with_ranges(
-    original: &HashMap<String, String>,
-    operations: &[EditOperation],
-) -> Result<AppliedOperations, HashlineError> {
     let mut grouped: BTreeMap<&str, Vec<(usize, &EditOperation)>> = BTreeMap::new();
     for (index, operation) in operations.iter().enumerate() {
         grouped
@@ -227,235 +137,119 @@ pub(crate) fn apply_operations_with_ranges(
             .push((index, operation));
     }
     let mut output = HashMap::new();
-    let mut changed_ranges = HashMap::new();
     for (path, ops) in grouped {
-        if let [(.., EditOperation::CreatePage { content, .. })] = ops.as_slice() {
+        if let [
+            (
+                ..,
+                EditOperation::Replace {
+                    anchor: None,
+                    content,
+                    ..
+                },
+            ),
+        ] = ops.as_slice()
+        {
+            if content.is_empty() {
+                return Err(HashlineError::InvalidOperation(format!(
+                    "{path}: cannot create a file with empty content"
+                )));
+            }
             if original.contains_key(path) {
-                return Err(HashlineError::Incompatible(path.into()));
-            }
-            output.insert(path.into(), Some(content.clone()));
-            let line_count = content.lines().count();
-            if line_count > 0 {
-                changed_ranges.insert(
-                    path.into(),
-                    vec![ChangedRange {
-                        start_line: 1,
-                        end_line: line_count,
-                    }],
-                );
-            }
-            continue;
-        }
-        let Some(text) = original.get(path) else {
-            return Err(HashlineError::Incompatible(path.into()));
-        };
-        if let [(.., EditOperation::DeletePage { base, .. })] = ops.as_slice() {
-            if text != base {
-                return Err(HashlineError::Incompatible(format!(
-                    "{path}: document changed; reload and reconcile your draft"
-                )));
-            }
-            output.insert(path.into(), None);
-            continue;
-        }
-        if ops
-            .iter()
-            .any(|(_, op)| matches!(op, EditOperation::DeletePage { .. }))
-        {
-            return Err(HashlineError::Incompatible(path.into()));
-        }
-        if let [(.., EditOperation::ReplacePage { base, content, .. })] = ops.as_slice() {
-            if text != base {
-                return Err(HashlineError::Incompatible(format!(
-                    "{path}: document changed; reload and reconcile your draft"
+                return Err(HashlineError::InvalidOperation(format!(
+                    "{path}: file exists; replacement requires an anchor"
                 )));
             }
             output.insert(path.into(), Some(content.clone()));
-            changed_ranges.insert(
-                path.into(),
-                vec![ChangedRange {
-                    start_line: 1,
-                    end_line: content.lines().count().max(1),
-                }],
-            );
             continue;
         }
-        if ops
-            .iter()
-            .any(|(_, op)| matches!(op, EditOperation::ReplacePage { .. }))
-        {
-            return Err(HashlineError::Incompatible(path.into()));
-        }
-        if ops
-            .iter()
-            .any(|(_, op)| matches!(op, EditOperation::CreatePage { .. }))
-        {
-            return Err(HashlineError::Incompatible(path.into()));
-        }
-        if let [(.., EditOperation::RemovePage { anchor, .. })] = ops.as_slice() {
-            let lines: Vec<String> = text.lines().map(str::to_owned).collect();
-            if lines.is_empty() && anchor == "0:" {
-                output.insert(path.into(), None);
-                continue;
-            }
-            let span = resolve_span(anchor, &lines)?;
-            if span.start != 0 || span.end != lines.len().saturating_sub(1) {
-                return Err(HashlineError::InvalidRange(anchor.clone()));
-            }
-            output.insert(path.into(), None);
-            continue;
-        }
-        if ops
-            .iter()
-            .any(|(_, op)| matches!(op, EditOperation::RemovePage { .. }))
-        {
-            return Err(HashlineError::Incompatible(path.into()));
-        }
-
-        if text.is_empty()
-            && let [
-                (
-                    ..,
-                    EditOperation::Replace {
-                        anchor, content, ..
-                    },
-                ),
-            ] = ops.as_slice()
+        let text = original.get(path).ok_or_else(|| {
+            HashlineError::InvalidOperation(format!("{path}: file does not exist"))
+        })?;
+        if let [
+            (
+                ..,
+                EditOperation::Replace {
+                    anchor: Some(anchor),
+                    content,
+                    ..
+                },
+            ),
+        ] = ops.as_slice()
+            && text.is_empty()
             && anchor == "0:"
-            && !content.is_empty()
         {
+            if content.is_empty() {
+                return Err(HashlineError::InvalidOperation(format!(
+                    "{path}: cannot replace an empty file with empty content"
+                )));
+            }
             output.insert(path.into(), Some(content.clone()));
-            changed_ranges.insert(
-                path.into(),
-                vec![ChangedRange {
-                    start_line: 1,
-                    end_line: content.lines().count().max(1),
-                }],
-            );
             continue;
-        }
-        if text.is_empty()
-            && ops
-                .iter()
-                .any(|(_, op)| matches!(op, EditOperation::Delete { .. }))
-        {
-            return Err(HashlineError::Incompatible(format!(
-                "{path}: cannot replace an empty file with empty content"
-            )));
         }
         let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
         let separator = if text.contains("\r\n") { "\r\n" } else { "\n" };
         let trailing_newline = text.ends_with('\n');
-        let operation_count = ops.len();
         let mut resolved = Vec::new();
-        for (request_index, operation) in ops {
-            let item = match operation {
+        for (index, operation) in ops {
+            let (span, kind) = match operation {
                 EditOperation::Replace {
-                    anchor, content, ..
-                } => Resolved {
-                    index: request_index,
-                    span: resolve_span(anchor, &lines)?,
-                    kind: ResolvedKind::Replace(content.clone()),
-                },
-                EditOperation::Delete { anchor, .. } => Resolved {
-                    index: request_index,
-                    span: resolve_span(anchor, &lines)?,
-                    kind: ResolvedKind::Delete,
-                },
-                EditOperation::InsertBefore {
-                    anchor, content, ..
+                    anchor: Some(anchor),
+                    content,
+                    ..
                 } => {
-                    let line = resolve_insert_position(anchor, &lines, false)?;
-                    Resolved {
-                        index: request_index,
-                        span: Span {
-                            start: line,
-                            end: line,
-                        },
-                        kind: ResolvedKind::Insert(content.clone()),
-                    }
+                    let span = resolve_span(anchor, &lines)?;
+                    let kind = if content.is_empty() {
+                        ResolvedKind::Delete
+                    } else {
+                        ResolvedKind::Replace(content.clone())
+                    };
+                    (span, kind)
                 }
-                EditOperation::InsertAfter {
-                    anchor, content, ..
-                } => {
-                    let line = resolve_insert_position(anchor, &lines, true)?;
-                    Resolved {
-                        index: request_index,
-                        span: Span {
-                            start: line,
-                            end: line,
-                        },
-                        kind: ResolvedKind::Insert(content.clone()),
-                    }
+                EditOperation::Replace { anchor: None, .. } => {
+                    return Err(HashlineError::InvalidOperation(format!(
+                        "{path}: creation must be the only operation for its path"
+                    )));
                 }
                 EditOperation::Append {
                     anchor, content, ..
                 } => {
-                    let line = match anchor {
-                        Some(anchor) => resolve_insert_position(anchor, &lines, true)?,
+                    if content.is_empty() {
+                        return Err(HashlineError::InvalidOperation(format!(
+                            "{path}: append content must be non-empty"
+                        )));
+                    }
+                    let line = match anchor.as_deref() {
                         None => lines.len(),
+                        Some("0:") => 0,
+                        Some(anchor) => resolve_line(anchor, &lines)? + 1,
                     };
-                    Resolved {
-                        index: request_index,
-                        span: Span {
+                    (
+                        Span {
                             start: line,
                             end: line,
                         },
-                        kind: ResolvedKind::Insert(content.clone()),
-                    }
-                }
-                EditOperation::CreatePage { .. }
-                | EditOperation::DeletePage { .. }
-                | EditOperation::RemovePage { .. }
-                | EditOperation::ReplacePage { .. } => {
-                    unreachable!()
+                        ResolvedKind::Insert(content.clone()),
+                    )
                 }
             };
-            resolved.push(item);
+            resolved.push(Resolved { index, span, kind });
         }
         reject_overlaps(path, &resolved)?;
         if let [edit] = resolved.as_slice()
             && edit.span.start == 0
             && edit.span.end + 1 == lines.len()
-            && let ResolvedKind::Replace(content) = &edit.kind
-            && !content.is_empty()
         {
-            output.insert(path.into(), Some(content.clone()));
-            changed_ranges.insert(
-                path.into(),
-                vec![ChangedRange {
-                    start_line: 1,
-                    end_line: content.lines().count().max(1),
-                }],
-            );
-            continue;
-        }
-
-        let mut ordered_ranges: Vec<&Resolved> = resolved.iter().collect();
-        ordered_ranges.sort_by(|a, b| {
-            a.span
-                .start
-                .cmp(&b.span.start)
-                .then_with(|| a.index.cmp(&b.index))
-        });
-        let mut offset = 0_isize;
-        let mut ranges = Vec::new();
-        for edit in ordered_ranges {
-            let removed = match &edit.kind {
-                ResolvedKind::Insert(_) => 0,
-                ResolvedKind::Replace(_) | ResolvedKind::Delete => {
-                    edit.span.end - edit.span.start + 1
+            match &edit.kind {
+                ResolvedKind::Replace(content) => {
+                    output.insert(path.into(), Some(content.clone()));
+                    continue;
                 }
-            };
-            let inserted = match &edit.kind {
-                ResolvedKind::Insert(content) | ResolvedKind::Replace(content) => {
-                    split_content(content).len()
+                ResolvedKind::Delete => {
+                    output.insert(path.into(), None);
+                    continue;
                 }
-                ResolvedKind::Delete => 0,
-            };
-            let start = (edit.span.start as isize + offset).max(0) as usize;
-            ranges.push((start, inserted));
-            offset += inserted as isize - removed as isize;
+                ResolvedKind::Insert(_) => {}
+            }
         }
         resolved.sort_by(|a, b| {
             b.span
@@ -477,57 +271,17 @@ pub(crate) fn apply_operations_with_ranges(
             }
         }
         if lines.is_empty() {
-            if operation_count != 1 {
-                return Err(HashlineError::Incompatible(format!(
-                    "{path}: deleting a file requires one complete-file anchor"
-                )));
-            }
-            output.insert(path.into(), None);
-            continue;
+            return Err(HashlineError::InvalidOperation(format!(
+                "{path}: deleting a file requires one complete-file anchor"
+            )));
         }
         let mut updated = lines.join(separator);
         if trailing_newline || lines.last().is_some_and(String::is_empty) {
             updated.push_str(separator);
         }
-        let final_lines = lines.len();
-        let ranges: Vec<ChangedRange> = ranges
-            .into_iter()
-            .filter_map(|(start, inserted)| {
-                if final_lines == 0 {
-                    return None;
-                }
-                let start = start.min(final_lines - 1);
-                let end = if inserted == 0 {
-                    start
-                } else {
-                    (start + inserted - 1).min(final_lines - 1)
-                };
-                Some(ChangedRange {
-                    start_line: start + 1,
-                    end_line: end + 1,
-                })
-            })
-            .collect();
-        if !ranges.is_empty() {
-            changed_ranges.insert(path.into(), ranges);
-        }
         output.insert(path.into(), Some(updated));
     }
-    Ok(AppliedOperations {
-        changes: output,
-        changed_ranges,
-    })
-}
-
-fn resolve_insert_position(
-    anchor: &str,
-    lines: &[String],
-    insert_after: bool,
-) -> Result<usize, HashlineError> {
-    if anchor == "0:" {
-        return Ok(0);
-    }
-    Ok(resolve_line(anchor, lines)? + usize::from(insert_after))
+    Ok(output)
 }
 
 fn split_content(content: &str) -> Vec<String> {
@@ -610,17 +364,42 @@ fn resolve_line(anchor: &str, lines: &[String]) -> Result<usize, HashlineError> 
 mod tests {
     use super::*;
 
+    fn complete_anchor(text: &str) -> String {
+        let lines: Vec<_> = text.lines().collect();
+        if lines.is_empty() {
+            return "0:".into();
+        }
+        let anchor = |i: usize| {
+            format!(
+                "{}:{}",
+                i + 1,
+                short_hash(
+                    lines[i],
+                    i.checked_sub(1).map_or("", |j| lines[j]),
+                    lines.get(i + 1).copied().unwrap_or("")
+                )
+            )
+        };
+        if lines.len() == 1 {
+            anchor(0)
+        } else {
+            format!("{}..{}", anchor(0), anchor(lines.len() - 1))
+        }
+    }
+
     #[test]
-    fn exact_page_deletion_stages_atomic_move_and_rejects_stale_base() {
+    fn complete_anchor_deletion_stages_atomic_move_and_rejects_stale_source() {
         let original = HashMap::from([("old.md".into(), "original\n".into())]);
         let operations = vec![
-            EditOperation::DeletePage {
+            EditOperation::Replace {
                 path: "old.md".into(),
-                base: "original\n".into(),
+                anchor: Some(complete_anchor(&("original\n"))),
+                content: String::new(),
             },
-            EditOperation::CreatePage {
+            EditOperation::Replace {
                 path: "new.md".into(),
                 content: "modified\n".into(),
+                anchor: None,
             },
         ];
         let changes = apply_operations(&original, &operations).unwrap();
@@ -643,7 +422,7 @@ mod tests {
             &original,
             &[EditOperation::Replace {
                 path: "note.md".into(),
-                anchor,
+                anchor: Some(anchor),
                 content: "BETA".into(),
             }],
         )
@@ -662,12 +441,13 @@ mod tests {
             &[
                 EditOperation::Replace {
                     path: "note.md".into(),
-                    anchor: format!("{one}..{two}"),
+                    anchor: Some(format!("{one}..{two}")),
                     content: "both".into(),
                 },
-                EditOperation::Delete {
+                EditOperation::Replace {
                     path: "note.md".into(),
-                    anchor: two,
+                    anchor: Some(two),
+                    content: String::new(),
                 },
             ],
         )
@@ -691,40 +471,41 @@ mod tests {
         assert_eq!(inserted["empty.md"].as_deref(), Some("first"));
         let removed = apply_operations(
             &original,
-            &[EditOperation::Delete {
+            &[EditOperation::Replace {
                 path: "empty.md".into(),
-                anchor: "0:".into(),
+                anchor: Some("0:".into()),
+                content: String::new(),
             }],
         )
         .unwrap_err();
-        assert!(removed.to_string().contains("cannot replace an empty file with empty content"));
+        assert!(
+            removed
+                .to_string()
+                .contains("cannot replace an empty file with empty content")
+        );
     }
 
     #[test]
-    fn edits_preserve_crlf_and_empty_content_is_a_line() {
+    fn edits_preserve_crlf_and_empty_content_deletes_lines() {
         let mut original = HashMap::new();
         original.insert("note.md".into(), "one\r\ntwo\r\nthree\r\n".into());
-        let changed = apply_operations_with_ranges(
+        let changed = apply_operations(
             &original,
             &[
                 EditOperation::Replace {
                     path: "note.md".into(),
-                    anchor: format!("2:{}", short_hash("two", "one", "three")),
+                    anchor: Some(format!("2:{}", short_hash("two", "one", "three"))),
                     content: String::new(),
                 },
-                EditOperation::InsertAfter {
+                EditOperation::Append {
                     path: "note.md".into(),
-                    anchor: format!("3:{}", short_hash("three", "two", "")),
+                    anchor: Some(format!("3:{}", short_hash("three", "two", ""))),
                     content: "\n".into(),
                 },
             ],
         )
         .unwrap();
-        assert_eq!(
-            changed.changes["note.md"].as_deref(),
-            Some("one\r\n\r\nthree\r\n\r\n")
-        );
-        assert_eq!(changed.changed_ranges["note.md"].len(), 2);
+        assert_eq!(changed["note.md"].as_deref(), Some("one\r\nthree\r\n\r\n"));
 
         let mut original = HashMap::new();
         original.insert("one.md".into(), "one".into());
@@ -732,12 +513,12 @@ mod tests {
             &original,
             &[EditOperation::Replace {
                 path: "one.md".into(),
-                anchor: format!("1:{}", short_hash("one", "", "")),
+                anchor: Some(format!("1:{}", short_hash("one", "", ""))),
                 content: String::new(),
             }],
         )
         .unwrap();
-        assert_eq!(blank["one.md"].as_deref(), Some("\n"));
+        assert_eq!(blank["one.md"], None);
     }
 
     #[test]

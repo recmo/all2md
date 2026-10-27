@@ -24,7 +24,8 @@ Use MCP directly or run the separate [web interface](../webui/README.md).
 
 Every served repository tracks a root `config.yaml` with operational settings
 only. Document rules belong exclusively in directory templates. Both kinds of
-configuration are readable but cannot be changed through `edit`.
+configuration are readable. Editing is disabled by default; enable
+`server.allow_config_edits` or `server.allow_template_edits` as appropriate.
 
 ```yaml
 documents:
@@ -105,8 +106,8 @@ Starlark callback validation remain separate from Markdown linting.
 Place `schema.md` beside the documents it governs. The nearest ancestor
 template applies recursively and replaces its parent. Use directories such as
 `tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
-Templates are readable through `read`, protected from `edit`, and
-excluded from search and embeddings.
+Templates are readable through `read` and excluded from search and embeddings.
+Editing them requires `server.allow_template_edits`.
 
 Markdown supplies instructions and examples. Only top-level fences labelled
 exactly `starlark` execute; their contents form one module in document order.
@@ -179,8 +180,8 @@ Read the parent directory after a successful edit to discover allocated paths.
 
 `read` returns the governing schema path in `template`, also for proposed
 paths with `content: null`. Read that path separately for its rules and original
-Markdown. Template updates are authored externally and activated through
-validated Git synchronization.
+Markdown. Template updates use permission-enabled `edit` requests or validated
+Git synchronization.
 
 ## Local durability and background Git synchronization
 
@@ -346,8 +347,7 @@ or overlapping edits fail before any worktree file changes.
 
 The MCP endpoint is `/mcp`; health and indexing coverage are available from
 `/health`. Access control belongs to the deployment firewall or reverse proxy.
-Startup reuses valid sidecars and rebuilds only missing or stale vectors; the explicit `reindex` command forces a
-complete rebuild.
+Startup reuses valid sidecars and rebuilds missing, stale or invalid ones.
 
 ### Editing templates and configuration through the API
 
@@ -366,7 +366,7 @@ compile the proposed Starlark and validate the entire proposed corpus; documents
 can be updated in the same atomic batch to satisfy new rules. Transition checks
 from both the old and proposed templates remain enforced. Configuration changes
 must parse and pass configuration and corpus validation before publication.
-Listener changes return `restart_required: true`; the running listener remains
+Listener changes require a daemon restart; the running listener remains
 active until the daemon is restarted.
 
 ### Incremental validation

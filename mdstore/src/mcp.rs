@@ -245,41 +245,19 @@ enum ApplyOperation {
 }
 
 impl ApplyOperation {
-    fn into_edit(self, path: String) -> Result<crate::EditOperation> {
-        use crate::EditOperation;
-        Ok(match self {
-            Self::Replace {
-                anchor: Some(anchor),
+    fn into_edit(self, path: String) -> crate::EditOperation {
+        match self {
+            Self::Replace { anchor, content } => crate::EditOperation::Replace {
+                path,
+                anchor,
                 content,
-                ..
-            } => {
-                if content.is_empty() {
-                    EditOperation::Delete { path, anchor }
-                } else {
-                    EditOperation::Replace {
-                        path,
-                        anchor,
-                        content,
-                    }
-                }
-            }
-            Self::Replace { content, .. } => {
-                if content.is_empty() {
-                    bail!("cannot create a file with empty content");
-                }
-                EditOperation::CreatePage { path, content }
-            }
-            Self::Append { anchor, content } => {
-                if content.is_empty() {
-                    bail!("append content must be non-empty");
-                }
-                EditOperation::Append {
-                    path,
-                    anchor,
-                    content,
-                }
-            }
-        })
+            },
+            Self::Append { anchor, content } => crate::EditOperation::Append {
+                path,
+                anchor,
+                content,
+            },
+        }
     }
 }
 
@@ -292,9 +270,6 @@ struct ApplyArguments {
 
 impl ApplyArguments {
     fn into_request(self) -> Result<ApplyEditsRequest> {
-        if self.summary.trim().is_empty() {
-            bail!("summary must be non-empty");
-        }
         if self.edits.is_empty() {
             bail!("edits must contain at least one path");
         }
@@ -314,15 +289,11 @@ impl ApplyArguments {
                 bail!("edits for /{path} must contain at least one operation");
             }
             for operation in operations {
-                edits.push(
-                    operation
-                        .into_edit(path.clone())
-                        .map_err(|error| anyhow::anyhow!("invalid edit for /{path}: {error}"))?,
-                );
+                edits.push(operation.into_edit(path.clone()));
             }
         }
         Ok(ApplyEditsRequest {
-            edit_summary: self.summary,
+            summary: self.summary,
             edits,
         })
     }
@@ -526,11 +497,10 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
     let mut plain_page = false;
     let result = match params.name.as_str() {
         "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
-            Ok(arguments) => {
-                store
-                    .search_content(&arguments.query, &arguments.variants)
-                    .await
-            }
+            Ok(arguments) => store
+                .search(&arguments.query, &arguments.variants)
+                .await
+                .and_then(|response| serde_json::to_value(response).map_err(Into::into)),
             Err(error) => Err(error.into()),
         },
         "read" => match serde_json::from_value::<GetArguments>(params.arguments) {
@@ -579,22 +549,19 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                     Some(validation) => json!(validation_errors(validation)),
                     None => json!([{"message": error.to_string()}]),
                 };
-                return rpc_result(id, json!({
-                    "content": [],
-                    "structuredContent": {"errors": errors},
-                    "isError": true
-                }));
+                return rpc_result(
+                    id,
+                    json!({
+                        "content": [],
+                        "structuredContent": {"errors": errors},
+                        "isError": true
+                    }),
+                );
             }
-            let findings = error
-                .downcast_ref::<ValidationError>()
-                .map(|validation| validation.findings.clone());
-            let mut result = json!({
+            let result = json!({
                 "content": [{"type": "text", "text": error.to_string()}],
                 "isError": true
             });
-            if let Some(findings) = findings {
-                result["structuredContent"] = json!({"validation_findings": findings});
-            }
             rpc_result(id, result)
         }
     }

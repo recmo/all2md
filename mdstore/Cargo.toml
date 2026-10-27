@@ -58,10 +58,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 starlark = "=0.14.2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
-[dev-dependencies]
-http-body-util = "0.1"
-tower = { version = "0.5", features = ["util"] }
-
 [lints.rust]
 unsafe_code = "forbid"
 rust_2018_idioms = { level = "warn", priority = -1 }

@@ -122,7 +122,6 @@ struct CompiledTemplate {
     template: Template,
     schema: Option<jsonschema::Validator>,
     markdown: Option<crate::markdown_lint::MarkdownLint>,
-    definition: serde_json::Value,
     script: crate::template_script::Script,
     markdown_source: String,
 }
@@ -206,14 +205,6 @@ impl Templates {
     /// Returns the governing frontmatter schema for client-side property rendering.
     pub fn frontmatter_schema(&self, path: &str) -> Option<&serde_json::Value> {
         self.policy(path).frontmatter.as_ref()
-    }
-
-    pub(crate) fn discovery(&self, path: &str) -> Option<serde_json::Value> {
-        self.applicable(path).map(|(path, entry)| {
-            serde_json::json!({
-                "path": path, "definition": entry.definition, "content": entry.markdown_source
-            })
-        })
     }
 
     pub(crate) fn validate_page(
@@ -394,7 +385,7 @@ fn compile_definition(
     template_path: &str,
     files: &HashMap<String, String>,
 ) -> Result<CompiledTemplate> {
-    let template: Template = serde_json::from_value(definition.clone())?;
+    let template: Template = serde_json::from_value(definition)?;
     if let Some(rule) = &template.filename {
         let pattern = Regex::new(&rule.pattern)?;
         let names: HashSet<_> = pattern.capture_names().flatten().collect();
@@ -470,7 +461,6 @@ fn compile_definition(
         template,
         schema,
         markdown,
-        definition,
         script,
         markdown_source,
     })
@@ -943,13 +933,9 @@ section("Timeline", required=True, list={"minimum_items": 1, "date_order": "desc
             ),
         ]);
         let templates = Templates::compile(&files).unwrap();
-        let discovery = templates.discovery("people/new.md").unwrap();
-        assert_eq!(discovery["path"], "people/schema.md");
-        assert!(
-            discovery["content"]
-                .as_str()
-                .unwrap()
-                .starts_with("Different.")
+        assert_eq!(
+            templates.template_path("people/new.md").as_deref(),
+            Some("/people/schema.md")
         );
         assert!(
             crate::markdown::validate_corpus(
@@ -961,7 +947,7 @@ section("Timeline", required=True, list={"minimum_items": 1, "date_order": "desc
         assert!(
             Templates::compile(&HashMap::new())
                 .unwrap()
-                .discovery("new.md")
+                .template_path("new.md")
                 .is_none()
         );
     }

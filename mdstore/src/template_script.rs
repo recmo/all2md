@@ -522,7 +522,7 @@ validate_change(check)
         assert!(!check(source, "Anything.\n").is_empty());
         assert!(
             templates("# Timeline\nRequired in prose only.\n")
-                .discovery("tasks/a.md")
+                .template_path("tasks/a.md")
                 .is_some()
         );
         assert!(check("# Timeline\nRequired in prose only.\n", "Anything.\n").is_empty());

@@ -16,11 +16,34 @@ use anyhow::Result;
 use async_trait::async_trait;
 use fs2::FileExt;
 use mdstore::{
-    ApplyEditsRequest, ApplyStatus, Config, EditOperation, InputType, PushState, RerankResult,
+    ApplyEditsRequest, Config, EditOperation, InputType, PushState, RerankResult,
     RetrievalProvider, Store, serve_listener, short_hash, tool_names,
 };
 use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
+
+fn complete_anchor(text: &str) -> String {
+    let lines: Vec<_> = text.lines().collect();
+    if lines.is_empty() {
+        return "0:".into();
+    }
+    let anchor = |i: usize| {
+        format!(
+            "{}:{}",
+            i + 1,
+            short_hash(
+                lines[i],
+                i.checked_sub(1).map_or("", |j| lines[j]),
+                lines.get(i + 1).copied().unwrap_or("")
+            )
+        )
+    };
+    if lines.len() == 1 {
+        anchor(0)
+    } else {
+        format!("{}..{}", anchor(0), anchor(lines.len() - 1))
+    }
+}
 
 struct FakeProvider;
 
@@ -339,15 +362,17 @@ fn exact_page_move_commits_atomically() {
     let store = repository.store();
     let base = fs::read_to_string(repository.root.join("alice.md")).unwrap();
     let request = ApplyEditsRequest {
-        edit_summary: "move Alice".into(),
+        summary: "move Alice".into(),
         edits: vec![
-            EditOperation::DeletePage {
+            EditOperation::Replace {
                 path: "alice.md".into(),
-                base: base.clone(),
+                anchor: Some(complete_anchor(&(base.clone()))),
+                content: String::new(),
             },
-            EditOperation::CreatePage {
+            EditOperation::Replace {
                 path: "archive/alice.md".into(),
                 content: base.clone(),
+                anchor: None,
             },
         ],
     };
@@ -370,10 +395,10 @@ fn reciprocal_links_are_caller_authored_and_atomic() {
     let store = repository.store();
     let notes = format!("4:{}", short_hash("# Notes", "---", ""));
     let one_sided = ApplyEditsRequest {
-        edit_summary: "add one-sided link".into(),
-        edits: vec![EditOperation::InsertAfter {
+        summary: "add one-sided link".into(),
+        edits: vec![EditOperation::Append {
             path: "alice.md".into(),
-            anchor: notes.clone(),
+            anchor: Some(notes.clone()),
             content: "\n[Bob](bob.md)".into(),
         }],
     };
@@ -389,22 +414,22 @@ fn reciprocal_links_are_caller_authored_and_atomic() {
     );
 
     let request = ApplyEditsRequest {
-        edit_summary: "link Alice and Bob".into(),
+        summary: "link Alice and Bob".into(),
         edits: vec![
-            EditOperation::InsertAfter {
+            EditOperation::Append {
                 path: "alice.md".into(),
-                anchor: notes.clone(),
+                anchor: Some(notes.clone()),
                 content: "\n[Bob](bob.md)".into(),
             },
-            EditOperation::InsertAfter {
+            EditOperation::Append {
                 path: "bob.md".into(),
-                anchor: notes,
+                anchor: Some(notes),
                 content: "\n[Alice](alice.md)".into(),
             },
         ],
     };
     let response = store.apply_edits(&request).unwrap();
-    assert_eq!(response.touched_paths, ["alice.md", "bob.md"]);
+    assert_eq!(response, ["alice.md", "bob.md"]);
     assert!(
         fs::read_to_string(repository.root.join("alice.md"))
             .unwrap()
@@ -417,7 +442,7 @@ fn reciprocal_links_are_caller_authored_and_atomic() {
     assert!(command(&repository.root, &["status", "--porcelain"]).is_empty());
 
     let replay = store.apply_edits(&request).unwrap();
-    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
+    assert_eq!(replay, response);
 }
 
 #[test]
@@ -425,20 +450,20 @@ fn superseded_replacement_requires_fresh_edits() {
     let repository = Repository::new();
     let store = repository.store();
     let first = ApplyEditsRequest {
-        edit_summary: "first Alice edit".into(),
+        summary: "first Alice edit".into(),
         edits: vec![EditOperation::Replace {
             path: "alice.md".into(),
-            anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+            anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
             content: "Alice first.".into(),
         }],
     };
     store.apply_edits(&first).unwrap();
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "second Alice edit".into(),
+            summary: "second Alice edit".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice first.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice first.", "", ""))),
                 content: "Alice current.".into(),
             }],
         })
@@ -453,10 +478,10 @@ fn changed_postimage_requires_fresh_edits() {
     let repository = Repository::new();
     let store = repository.store();
     let request = ApplyEditsRequest {
-        edit_summary: "append Alice note".into(),
-        edits: vec![EditOperation::InsertAfter {
+        summary: "append Alice note".into(),
+        edits: vec![EditOperation::Append {
             path: "alice.md".into(),
-            anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+            anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
             content: "Remember this.".into(),
         }],
     };
@@ -490,10 +515,11 @@ fn recreated_page_requires_fresh_edits() {
     let repository = Repository::new();
     let store = repository.store();
     let request = ApplyEditsRequest {
-        edit_summary: "create Carol".into(),
-        edits: vec![EditOperation::CreatePage {
+        summary: "create Carol".into(),
+        edits: vec![EditOperation::Replace {
             path: "carol.md".into(),
             content: page("Carol"),
+            anchor: None,
         }],
     };
     store.apply_edits(&request).unwrap();
@@ -516,10 +542,10 @@ fn reverted_request_can_be_applied_again() {
     let repository = Repository::new();
     let store = repository.store();
     let request = ApplyEditsRequest {
-        edit_summary: "apply Alice edit".into(),
+        summary: "apply Alice edit".into(),
         edits: vec![EditOperation::Replace {
             path: "alice.md".into(),
-            anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+            anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
             content: "Alice changed.".into(),
         }],
     };
@@ -533,7 +559,7 @@ fn reverted_request_can_be_applied_again() {
     );
 
     let response = store.apply_edits(&request).unwrap();
-    assert!(matches!(response.status, ApplyStatus::Accepted));
+    assert!(!response.is_empty());
     assert!(
         fs::read_to_string(repository.root.join("alice.md"))
             .unwrap()
@@ -550,16 +576,16 @@ fn partially_reverted_batch_requires_fresh_atomic_edits() {
     let repository = Repository::new();
     let store = repository.store();
     let request = ApplyEditsRequest {
-        edit_summary: "change Alice and Bob".into(),
+        summary: "change Alice and Bob".into(),
         edits: vec![
             EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "Alice changed.".into(),
             },
             EditOperation::Replace {
                 path: "bob.md".into(),
-                anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
                 content: "Bob changed.".into(),
             },
         ],
@@ -616,17 +642,17 @@ fn no_op_edit_reports_queued_pushes_without_network() {
 
     let response = store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "retry queued push".into(),
+            summary: "retry queued push".into(),
             edits: vec![EditOperation::Replace {
                 path: "bob.md".into(),
-                anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
                 content: "Bob profile.".into(),
             }],
         })
         .unwrap();
 
-    assert!(matches!(response.status, ApplyStatus::AlreadyApplied));
-    assert_eq!(response.push, PushState::Queued);
+    assert!(!response.is_empty());
+    assert!(store.status().unwrap().unpushed);
     assert_eq!(store.push().unwrap(), PushState::Pushed);
     assert_eq!(
         command(&repository.root, &["rev-parse", "HEAD"]).trim(),
@@ -639,16 +665,17 @@ fn rejects_mixed_configuration_and_content_batch() {
     let repository = Repository::new();
     let store = repository.store();
     let request = ApplyEditsRequest {
-        edit_summary: "mixed batch".into(),
+        summary: "mixed batch".into(),
         edits: vec![
             EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "Changed.".into(),
             },
-            EditOperation::CreatePage {
+            EditOperation::Replace {
                 path: ".mdstore/other.json".into(),
                 content: "{}".into(),
+                anchor: None,
             },
         ],
     };
@@ -675,10 +702,10 @@ section("Notes", required=True, content="paragraphs", paragraphs={"minimum": 1, 
     let store = repository.store();
     let existing = store.get_page("alice.md", None).unwrap();
     assert!(existing.content.is_some());
-    assert_eq!(existing.template.unwrap()["path"], "schema.md");
+    assert_eq!(existing.template.as_deref(), Some("/schema.md"));
     let proposed = store.get_page("people/new.md", None).unwrap();
     assert!(proposed.content.is_none());
-    assert_eq!(proposed.template.unwrap()["content"], template);
+    assert_eq!(proposed.template.as_deref(), Some("/schema.md"));
     assert!(
         store
             .get_page("schema.md", None)
@@ -691,22 +718,23 @@ section("Notes", required=True, content="paragraphs", paragraphs={"minimum": 1, 
     for edits in [
         vec![EditOperation::Replace {
             path: "schema.md".into(),
-            anchor: format!("1:{}", short_hash("Keep notes concise.", "", "")),
+            anchor: Some(format!("1:{}", short_hash("Keep notes concise.", "", ""))),
             content: "Weaken rules\n\n```starlark\n```\n".into(),
         }],
-        vec![EditOperation::CreatePage {
+        vec![EditOperation::Replace {
             path: "people/schema.md".into(),
             content: "{}".into(),
+            anchor: None,
         }],
         vec![
             EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "One.\n\nTwo.".into(),
             },
             EditOperation::Replace {
                 path: "bob.md".into(),
-                anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
                 content: "Valid.".into(),
             },
         ],
@@ -714,7 +742,7 @@ section("Notes", required=True, content="paragraphs", paragraphs={"minimum": 1, 
         assert!(
             store
                 .apply_edits(&ApplyEditsRequest {
-                    edit_summary: "invalid update".into(),
+                    summary: "invalid update".into(),
                     edits
                 })
                 .is_err()
@@ -812,7 +840,7 @@ section("Notes", level=1, required=True, list={{"minimum_items": 1, "date_order"
     assert!(
         store
             .apply_edits(&ApplyEditsRequest {
-                edit_summary: "invalid dated batch".into(),
+                summary: "invalid dated batch".into(),
                 edits: [
                     ("alice.md", "- 2024-02-01 Valid"),
                     ("bob.md", "- 2024-02-30 Invalid")
@@ -820,8 +848,8 @@ section("Notes", level=1, required=True, list={{"minimum_items": 1, "date_order"
                 .iter()
                 .map(|(path, content)| EditOperation::Replace {
                     path: (*path).into(),
-                    anchor: format!("6:{}", short_hash("- 2024-01-01 Created", "", "")),
-                    content: (*content).into(),
+                    anchor: Some(format!("6:{}", short_hash("- 2024-01-01 Created", "", ""))),
+                    content: (*content).into()
                 })
                 .collect(),
             })
@@ -868,7 +896,7 @@ fn markdown_lint_activation_and_edits_are_atomic() {
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
     let error = store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "invalid multi-page style".into(),
+            summary: "invalid multi-page style".into(),
             edits: [
                 ("alice.md", "Alice profile.", "Valid."),
                 ("bob.md", "Bob profile.", "Invalid. "),
@@ -876,7 +904,7 @@ fn markdown_lint_activation_and_edits_are_atomic() {
             .iter()
             .map(|(path, old, content)| EditOperation::Replace {
                 path: (*path).into(),
-                anchor: format!("6:{}", short_hash(old, "", "")),
+                anchor: Some(format!("6:{}", short_hash(old, "", ""))),
                 content: (*content).into(),
             })
             .collect(),
@@ -902,10 +930,11 @@ fn edit_interface_preserves_untracked_non_markdown_files() {
 
     let error = store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "create config resource".into(),
-            edits: vec![EditOperation::CreatePage {
+            summary: "create config resource".into(),
+            edits: vec![EditOperation::Replace {
                 path: "local.json".into(),
                 content: "{}\n".into(),
+                anchor: None,
             }],
         })
         .unwrap_err();
@@ -953,10 +982,10 @@ fn configured_markdown_under_mdstore_is_editable_content() {
     );
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "update internal note".into(),
+            summary: "update internal note".into(),
             edits: vec![EditOperation::Replace {
                 path: ".mdstore/note.md".into(),
-                anchor: format!("6:{}", short_hash("Internal profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Internal profile.", "", ""))),
                 content: "Internal updated.".into(),
             }],
         })
@@ -987,10 +1016,11 @@ fn rejects_edits_to_tracked_markdown_outside_the_configured_corpus() {
     );
     let store = repository.store();
     let request = ApplyEditsRequest {
-        edit_summary: "remove excluded file".into(),
-        edits: vec![EditOperation::RemovePage {
+        summary: "remove excluded file".into(),
+        edits: vec![EditOperation::Replace {
             path: "excluded.md".into(),
-            anchor: format!("1:{}", short_hash("private", "", "")),
+            anchor: Some(format!("1:{}", short_hash("private", "", ""))),
+            content: String::new(),
         }],
     };
 
@@ -1061,10 +1091,10 @@ fn reopened_state_reads_canonical_blobs_not_smudged_worktree_text() {
     let store = Store::open(&repository.root).unwrap();
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "preserve mixed case".into(),
+            summary: "preserve mixed case".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "MiXeD profile.".into(),
             }],
         })
@@ -1116,10 +1146,11 @@ fn rejects_unignored_sidecar_paths_before_committing_a_new_page() {
     let before = command(&repository.root, &["rev-parse", "HEAD"]);
     let error = store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "create Charlie".into(),
-            edits: vec![EditOperation::CreatePage {
+            summary: "create Charlie".into(),
+            edits: vec![EditOperation::Replace {
                 path: "charlie.md".into(),
                 content: page("Charlie"),
+                anchor: None,
             }],
         })
         .unwrap_err()
@@ -1217,17 +1248,25 @@ metadata(project_code="/code")
     );
     let store = repository.store();
     store.reindex().await.unwrap();
-    for (query, path, field, expected) in [
+    for (_query, path, field, expected) in [
         ("Alice", "alice.md", "display_name", "Alice"),
         ("Project", "projects/a.md", "project_code", "A"),
     ] {
-        let response = store.search(query, &[]).await.unwrap();
+        let response = store.search(field, &[]).await.unwrap();
         let result = response
             .results
             .iter()
-            .find(|result| result.path == path)
+            .find(|result| result.path.starts_with(&format!("/{path}:")))
             .unwrap();
-        assert_eq!(result.metadata[field], expected);
+        assert!(result.path.starts_with(&format!("/{path}:")));
+        assert!(
+            store
+                .get_page(path, None)
+                .unwrap()
+                .text
+                .unwrap()
+                .contains(expected)
+        );
     }
 }
 
@@ -1248,10 +1287,10 @@ fn configuration_resources_are_hashline_readable() {
         assert!(
             store
                 .apply_edits(&ApplyEditsRequest {
-                    edit_summary: "weaken configuration".into(),
+                    summary: "weaken configuration".into(),
                     edits: vec![EditOperation::Replace {
                         path: path.into(),
-                        anchor: format!("1:{}", short_hash(first, "", "")),
+                        anchor: Some(format!("1:{}", short_hash(first, "", ""))),
                         content: "{}".into()
                     }],
                 })
@@ -1522,10 +1561,10 @@ fn valid_external_commit_is_loaded_before_the_next_write() {
         &["commit", "-q", "-m", "external valid edit"],
     );
     let request = ApplyEditsRequest {
-        edit_summary: "edit Bob after external commit".into(),
+        summary: "edit Bob after external commit".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+            anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
             content: "Bob updated.".into(),
         }],
     };
@@ -1552,10 +1591,13 @@ fn edit_interface_cannot_change_server_configuration() {
         + 1;
     let error = store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "change live server address".into(),
+            summary: "change live server address".into(),
             edits: vec![EditOperation::Replace {
                 path: "config.yaml".into(),
-                anchor: format!("{line}:{}", short_hash("  listen: 127.0.0.1:3131", "", "")),
+                anchor: Some(format!(
+                    "{line}:{}",
+                    short_hash("  listen: 127.0.0.1:3131", "", "")
+                )),
                 content: "  listen: 127.0.0.1:4141".into(),
             }],
         })
@@ -1584,10 +1626,10 @@ fn external_server_configuration_change_requires_restart() {
     );
     let error = store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "write after server change".into(),
+            summary: "write after server change".into(),
             edits: vec![EditOperation::Replace {
                 path: "bob.md".into(),
-                anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
                 content: "Bob updated.".into(),
             }],
         })
@@ -1668,10 +1710,10 @@ fn invalid_external_commit_blocks_writes() {
         &["commit", "-q", "-m", "external invalid edit"],
     );
     let request = ApplyEditsRequest {
-        edit_summary: "attempt write".into(),
+        summary: "attempt write".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+            anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
             content: "Bob updated.".into(),
         }],
     };
@@ -1714,10 +1756,10 @@ fn external_failures_never_replace_a_divergence_block() {
         &["commit", "-q", "-m", "external invalid edit"],
     );
     let request = ApplyEditsRequest {
-        edit_summary: "attempt write".into(),
+        summary: "attempt write".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+            anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
             content: "Bob updated.".into(),
         }],
     };
@@ -1742,7 +1784,7 @@ fn external_failures_never_replace_a_divergence_block() {
 }
 
 #[test]
-fn fresh_hashlines_cover_middle_edits() {
+fn reading_changed_windows_refreshes_hashlines() {
     let repository = Repository::new();
     let mut text = "---\nname: Alice\n---\n# Notes\n".to_owned();
     for number in 1..=50 {
@@ -1753,17 +1795,24 @@ fn fresh_hashlines_cover_middle_edits() {
     command(&repository.root, &["commit", "-q", "-m", "long page"]);
     let store = repository.store();
     let line = text.lines().position(|value| value == "line 30").unwrap() + 1;
-    let response = store
+    store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "edit middle line".into(),
+            summary: "edit middle line".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("{line}:{}", short_hash("line 30", "line 29", "line 31")),
+                anchor: Some(format!(
+                    "{line}:{}",
+                    short_hash("line 30", "line 29", "line 31")
+                )),
                 content: "changed middle".into(),
             }],
         })
         .unwrap();
-    let fresh = &response.fresh_hashlines["alice.md"];
+    let fresh = store
+        .get_page("alice.md", Some((line - 3, line + 3)))
+        .unwrap()
+        .content
+        .unwrap();
     assert!(fresh.contains(&format!("{line}:")));
     assert!(fresh.contains("changed middle"));
     assert!(!fresh.lines().any(|line| line.starts_with("1:")));
@@ -1778,14 +1827,15 @@ fn edit_interface_cannot_remove_templates() {
     let first = schema.lines().next().unwrap();
     let last = schema.lines().last().unwrap();
     let request = ApplyEditsRequest {
-        edit_summary: "remove active schema".into(),
-        edits: vec![EditOperation::RemovePage {
+        summary: "remove active schema".into(),
+        edits: vec![EditOperation::Replace {
             path: "schema.md".into(),
-            anchor: format!(
+            anchor: Some(format!(
                 "1:{}..{count}:{}",
                 short_hash(first, "", ""),
                 short_hash(last, "", "")
-            ),
+            )),
+            content: String::new(),
         }],
     };
     assert!(store.apply_edits(&request).is_err());
@@ -1798,16 +1848,17 @@ fn a_late_materialization_failure_rolls_back_earlier_paths() {
     fs::create_dir(repository.root.join("blocked.md")).unwrap();
     let store = repository.store();
     let request = ApplyEditsRequest {
-        edit_summary: "failing two page edit".into(),
+        summary: "failing two page edit".into(),
         edits: vec![
             EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "Alice changed.".into(),
             },
-            EditOperation::CreatePage {
+            EditOperation::Replace {
                 path: "blocked.md".into(),
                 content: page("Blocked"),
+                anchor: None,
             },
         ],
     };
@@ -1835,10 +1886,10 @@ fn persisted_write_blocks_survive_restart() {
         Some("remote history diverged")
     );
     let request = ApplyEditsRequest {
-        edit_summary: "blocked edit".into(),
+        summary: "blocked edit".into(),
         edits: vec![EditOperation::Replace {
             path: "alice.md".into(),
-            anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+            anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
             content: "Alice changed.".into(),
         }],
     };
@@ -1849,10 +1900,10 @@ fn persisted_write_blocks_survive_restart() {
 fn pending_tree_receipts_recover_committed_requests() {
     let repository = Repository::new();
     let request = ApplyEditsRequest {
-        edit_summary: "recover committed edit".into(),
+        summary: "recover committed edit".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+            anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
             content: "Bob recovered.".into(),
         }],
     };
@@ -1895,7 +1946,7 @@ fn pending_tree_receipts_recover_committed_requests() {
     );
     let store = repository.store();
     let response = store.apply_edits(&request).unwrap();
-    assert!(matches!(response.status, ApplyStatus::AlreadyApplied));
+    assert!(!response.is_empty());
     assert!(
         !repository
             .root
@@ -1930,10 +1981,10 @@ async fn post_edit_reindex_reuses_still_valid_sidecars() {
     let embedded = calls.load(Ordering::SeqCst);
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "repeat unchanged document edit".into(),
+            summary: "repeat unchanged document edit".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "Alice profile.".into(),
             }],
         })
@@ -1958,10 +2009,10 @@ async fn stale_reindex_work_is_discarded_after_an_edit() {
     started.notified().await;
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "edit during reindex".into(),
+            summary: "edit during reindex".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "Alice changed.".into(),
             }],
         })
@@ -2053,10 +2104,10 @@ async fn stalled_push_keeps_http_and_index_publication_responsive() {
         Duration::from_millis(500),
         tokio::task::spawn_blocking(move || {
             second_store.apply_edits(&ApplyEditsRequest {
-                edit_summary: "edit while push is stalled".into(),
+                summary: "edit while push is stalled".into(),
                 edits: vec![EditOperation::Replace {
                     path: "bob.md".into(),
-                    anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+                    anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
                     content: "Bob updated concurrently.".into(),
                 }],
             })
@@ -2217,24 +2268,26 @@ fn synchronization_divergence_blocks_writes_without_rewriting_history() {
     command(&external, &["commit", "-am", "remote edit"]);
     command(&external, &["push"]);
     let request = ApplyEditsRequest {
-        edit_summary: "local edit".into(),
+        summary: "local edit".into(),
         edits: vec![EditOperation::Replace {
             path: "bob.md".into(),
-            anchor: format!("6:{}", short_hash("Bob profile.", "", "")),
+            anchor: Some(format!("6:{}", short_hash("Bob profile.", "", ""))),
             content: "Local edit.".into(),
         }],
     };
-    assert_eq!(store.apply_edits(&request).unwrap().push, PushState::Queued);
+    store.apply_edits(&request).unwrap();
+    assert!(store.status().unwrap().unpushed);
     let local = command(&repository.root, &["rev-parse", "HEAD"]);
     assert_eq!(store.push().unwrap(), PushState::Diverged);
     assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), local);
     assert!(
         store
             .apply_edits(&ApplyEditsRequest {
-                edit_summary: "blocked edit".into(),
-                edits: vec![EditOperation::CreatePage {
+                summary: "blocked edit".into(),
+                edits: vec![EditOperation::Replace {
                     path: "new.md".into(),
-                    content: page("New")
+                    content: page("New"),
+                    anchor: None
                 }]
             })
             .is_err()
@@ -2342,10 +2395,10 @@ fn staged_restart_never_overwrites_a_later_local_edit() {
     assert!(store.push().is_err());
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "later local edit".into(),
+            summary: "later local edit".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "Preserve this edit.".into(),
             }],
         })
@@ -2390,10 +2443,11 @@ fn operational_config_rejects_document_rules() {
         assert!(
             store
                 .apply_edits(&ApplyEditsRequest {
-                    edit_summary: "change policy".into(),
-                    edits: vec![EditOperation::CreatePage {
+                    summary: "change policy".into(),
+                    edits: vec![EditOperation::Replace {
                         path: path.into(),
-                        content: "{}".into()
+                        content: "{}".into(),
+                        anchor: None
                     }]
                 })
                 .unwrap_err()
@@ -2412,17 +2466,17 @@ async fn background_sync_retries_an_outage_without_another_edit() {
         &["remote", "set-url", "origin", offline.to_str().unwrap()],
     );
     let store = repository.store();
-    let response = store
+    store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "offline edit".into(),
+            summary: "offline edit".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "Offline edit.".into(),
             }],
         })
         .unwrap();
-    assert_eq!(response.push, PushState::Queued);
+    assert!(store.status().unwrap().unpushed);
     let (_, server) = start_daemon(store.clone()).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         while store.status().unwrap().replication.last_error.is_none() {
@@ -2531,10 +2585,10 @@ async fn cancelling_a_reindex_waiter_does_not_release_the_job_lock() {
     fs::remove_file(&sidecar).unwrap();
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "change Alice during reindex".into(),
+            summary: "change Alice during reindex".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "Alice changed during reindex.".into(),
             }],
         })
@@ -2648,10 +2702,10 @@ async fn new_edits_interrupt_embedding_backoff() {
     .unwrap();
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "wake embedding retry".into(),
+            summary: "wake embedding retry".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash("Alice profile.", "", "")),
+                anchor: Some(format!("6:{}", short_hash("Alice profile.", "", ""))),
                 content: "Alice updated during backoff.".into(),
             }],
         })
@@ -2682,10 +2736,10 @@ async fn daemon_embedding_worker_coalesces_edits_and_observes_direct_store_write
         let next = format!("Alice revision {index}.");
         store
             .apply_edits(&ApplyEditsRequest {
-                edit_summary: format!("revision {index}"),
+                summary: format!("revision {index}"),
                 edits: vec![EditOperation::Replace {
                     path: "alice.md".into(),
-                    anchor: format!("6:{}", short_hash(&content, "", "")),
+                    anchor: Some(format!("6:{}", short_hash(&content, "", ""))),
                     content: next.clone(),
                 }],
             })
@@ -2713,10 +2767,10 @@ async fn daemon_embedding_worker_coalesces_edits_and_observes_direct_store_write
 
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "direct store edit while serving".into(),
+            summary: "direct store edit while serving".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{}", short_hash(&content, "", "")),
+                anchor: Some(format!("6:{}", short_hash(&content, "", ""))),
                 content: "Alice's final revision.".into(),
             }],
         })
@@ -2762,10 +2816,11 @@ fn task_content() -> String {
 
 fn task_create(slug: &str) -> ApplyEditsRequest {
     ApplyEditsRequest {
-        edit_summary: format!("Create {slug}"),
-        edits: vec![EditOperation::CreatePage {
+        summary: format!("Create {slug}"),
+        edits: vec![EditOperation::Replace {
             path: format!("tasks/v1/2026/09/09-{{serial:03}}-{slug}.md"),
             content: task_content(),
+            anchor: None,
         }],
     }
 }
@@ -2776,7 +2831,12 @@ fn tasks_use_h1_titles_and_reject_missing_or_duplicate_metadata_titles() {
     let store = repository.store();
     for content in [task_content().replace("# Task\n", ""), task_content().replace("state: inbox", "title: Duplicate\nstate: inbox")] {
         let mut request = task_create("invalid-title");
-        if let EditOperation::CreatePage { content: source, .. } = &mut request.edits[0] { *source = content; }
+        if let EditOperation::Replace {
+            content: source, ..
+        } = &mut request.edits[0]
+        {
+            *source = content;
+        }
         assert!(store.apply_edits(&request).is_err());
     }
     store.apply_edits(&task_create("heading-title")).unwrap();
@@ -2791,10 +2851,12 @@ fn literate_templates_allocate_atomically_and_replay_after_restart() {
         .unwrap()
         .template
         .unwrap();
-    assert_eq!(discovery["path"], "tasks/v1/schema.md");
+    assert_eq!(discovery, "/tasks/v1/schema.md");
     assert!(
-        discovery["content"]
-            .as_str()
+        store
+            .get_page("tasks/v1/schema.md", None)
+            .unwrap()
+            .text
             .unwrap()
             .contains("concrete intended outcome")
     );
@@ -2810,36 +2872,31 @@ fn literate_templates_allocate_atomically_and_replay_after_restart() {
     assert!(
         store
             .apply_edits(&ApplyEditsRequest {
-                edit_summary: "weaken policy".into(),
-                edits: vec![EditOperation::CreatePage {
+                summary: "weaken policy".into(),
+                edits: vec![EditOperation::Replace {
                     path: "tasks/v2/schema.md".into(),
-                    content: "# Empty".into()
+                    content: "# Empty".into(),
+                    anchor: None
                 }]
             })
             .is_err()
     );
     let mut invalid = task_create("invalid");
-    if let EditOperation::CreatePage { content, .. } = &mut invalid.edits[0] {
+    if let EditOperation::Replace { content, .. } = &mut invalid.edits[0] {
         *content = "# No metadata".into();
     }
     assert!(store.apply_edits(&invalid).is_err());
     assert_eq!(command(&repository.root, &["rev-parse", "HEAD"]), head);
     let request = task_create("review");
     let response = store.apply_edits(&request).unwrap();
-    assert_eq!(
-        response.touched_paths,
-        vec!["tasks/v1/2026/09/09-001-review.md"]
-    );
+    assert_eq!(response, vec!["tasks/v1/2026/09/09-001-review.md"]);
     drop(store);
     let store = repository.store();
     let replay = store.apply_edits(&request).unwrap();
-    assert!(matches!(replay.status, ApplyStatus::AlreadyApplied));
-    assert_eq!(replay.touched_paths, response.touched_paths);
+    assert_eq!(replay, response);
+    assert_eq!(replay, response);
     assert_eq!(
-        store
-            .apply_edits(&task_create("other"))
-            .unwrap()
-            .touched_paths,
+        store.apply_edits(&task_create("other")).unwrap(),
         vec!["tasks/v1/2026/09/09-002-other.md"]
     );
 }
@@ -2852,9 +2909,7 @@ fn literate_template_concurrent_creates_and_failed_changes_preserve_state() {
         .into_iter()
         .map(|slug| {
             let store = store.clone();
-            std::thread::spawn(move || {
-                store.apply_edits(&task_create(slug)).unwrap().touched_paths[0].clone()
-            })
+            std::thread::spawn(move || store.apply_edits(&task_create(slug)).unwrap()[0].clone())
         })
         .collect();
     let paths: Vec<_> = handles
@@ -2871,21 +2926,21 @@ fn literate_template_concurrent_creates_and_failed_changes_preserve_state() {
     let request = |state: &str, timeline: bool| {
         let mut edits = vec![EditOperation::Replace {
             path: path.clone(),
-            anchor: format!("2:{}", short_hash("state: inbox", "---", "---")),
+            anchor: Some(format!("2:{}", short_hash("state: inbox", "---", "---"))),
             content: format!("state: {state}"),
         }];
         if timeline {
-            edits.push(EditOperation::InsertAfter {
+            edits.push(EditOperation::Append {
                 path: path.clone(),
-                anchor: format!(
+                anchor: Some(format!(
                     "7:{}",
                     short_hash("- 2026-09-09T10:00:00Z — Captured.", "## Timeline", "")
-                ),
+                )),
                 content: "- 2026-09-09T11:00:00Z — Clarified.".into(),
             });
         }
         ApplyEditsRequest {
-            edit_summary: "transition".into(),
+            summary: "transition".into(),
             edits,
         }
     };
@@ -2907,11 +2962,7 @@ fn literate_template_concurrent_creates_and_failed_changes_preserve_state() {
 fn literate_template_import_validates_the_final_snapshot() {
     let repository = task_repository();
     let store = repository.store();
-    let path = store
-        .apply_edits(&task_create("review"))
-        .unwrap()
-        .touched_paths[0]
-        .clone();
+    let path = store.apply_edits(&task_create("review")).unwrap()[0].clone();
     fs::write(repository.root.join(&path), "# Invalid task\n").unwrap();
     command(&repository.root, &["add", "."]);
     command(
@@ -2964,10 +3015,10 @@ fn stale_hash_collision_cannot_overwrite_a_concurrent_edit() {
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
     for hash in [short_hash(original, "", ""), "96".into()] {
         let result = store.apply_edits(&ApplyEditsRequest {
-            edit_summary: "stale overwrite".into(),
+            summary: "stale overwrite".into(),
             edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                anchor: format!("6:{hash}"),
+                anchor: Some(format!("6:{hash}")),
                 content: "Overwrite".into(),
             }],
         });
@@ -3037,16 +3088,19 @@ fn nested_timeline_cannot_satisfy_the_task_transition_rule() {
     let store = repository.store();
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
     let result = store.apply_edits(&ApplyEditsRequest {
-        edit_summary: "skip task timeline".into(),
+        summary: "skip task timeline".into(),
         edits: vec![
             EditOperation::Replace {
                 path: path.into(),
-                anchor: format!("2:{}", short_hash("state: inbox", "---", "---")),
+                anchor: Some(format!("2:{}", short_hash("state: inbox", "---", "---"))),
                 content: "state: ready".into(),
             },
-            EditOperation::InsertAfter {
+            EditOperation::Append {
                 path: path.into(),
-                anchor: format!("11:{}", short_hash("- Unrelated note.", "### Timeline", "")),
+                anchor: Some(format!(
+                    "11:{}",
+                    short_hash("- Unrelated note.", "### Timeline", "")
+                )),
                 content: "- No task timestamp or explanation.".into(),
             },
         ],
@@ -3362,8 +3416,14 @@ async fn document_batches_validate_and_submit_through_mcp() {
         command(&repository.root, &["rev-parse", "HEAD"]),
         initial_head
     );
-    let invalid = serde_json::json!({"edit_summary": "Invalid", "edits": [{"op": "replace_page", "path": "alice.md", "base": original, "content": "# Missing required name\n"}]});
-    let invalid_request: ApplyEditsRequest = serde_json::from_value(invalid).unwrap();
+    let invalid_request = ApplyEditsRequest {
+        summary: "Invalid".into(),
+        edits: vec![EditOperation::Replace {
+            path: "alice.md".into(),
+            anchor: Some(complete_anchor(&original)),
+            content: "# Missing required name\n".into(),
+        }],
+    };
     let rejected = store.apply_edits(&invalid_request).unwrap_err();
     assert!(rejected.downcast_ref::<mdstore::ValidationError>().is_some());
     let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "edit", "arguments": batch}});
@@ -3419,11 +3479,11 @@ fn whole_page_edits_preserve_exact_text_and_remain_atomic() {
     let changed = original.trim_end().replace('\n', "\r\n");
     store
         .apply_edits(&ApplyEditsRequest {
-            edit_summary: "Exact text".into(),
-            edits: vec![EditOperation::ReplacePage {
+            summary: "Exact text".into(),
+            edits: vec![EditOperation::Replace {
                 path: "alice.md".into(),
-                base: original,
                 content: changed.clone(),
+                anchor: Some(complete_anchor(&(original))),
             }],
         })
         .unwrap();
@@ -3433,11 +3493,11 @@ fn whole_page_edits_preserve_exact_text_and_remain_atomic() {
     );
     let one_sided = format!("{changed}\r\n[Bob](bob.md)\r\n");
     let request = ApplyEditsRequest {
-        edit_summary: "Reciprocal batch".into(),
-        edits: vec![EditOperation::ReplacePage {
+        summary: "Reciprocal batch".into(),
+        edits: vec![EditOperation::Replace {
             path: "alice.md".into(),
-            base: changed.clone(),
             content: one_sided,
+            anchor: Some(complete_anchor(&(changed.clone()))),
         }],
     };
     assert!(store.apply_edits(&request).is_err());
@@ -3446,10 +3506,10 @@ fn whole_page_edits_preserve_exact_text_and_remain_atomic() {
         changed
     );
     let mut batch = request;
-    batch.edits.push(EditOperation::ReplacePage {
+    batch.edits.push(EditOperation::Replace {
         path: "bob.md".into(),
-        base: page("Bob"),
         content: format!("{}\n[Alice](alice.md)\n", page("Bob")),
+        anchor: Some(complete_anchor(&(page("Bob")))),
     });
     store.apply_edits(&batch).unwrap();
 }
@@ -3470,10 +3530,10 @@ async fn privileged_policy_edits_validate_before_publication() {
     let store = repository.store();
     let initial_head = command(&repository.root, &["rev-parse", "HEAD"]);
     let template = profile_template().to_owned();
-    let replace = |path: &str, base: &str, content: &str| EditOperation::ReplacePage {
+    let replace = |path: &str, base: &str, content: &str| EditOperation::Replace {
         path: path.into(),
-        base: base.into(),
         content: content.into(),
+        anchor: Some(complete_anchor(&(base))),
     };
     for edit in [
         replace("schema.md", &template, "```starlark\nnot_a_rule()\n```\n"),
@@ -3493,7 +3553,7 @@ async fn privileged_policy_edits_validate_before_publication() {
         ),
     ] {
         let request = ApplyEditsRequest {
-            edit_summary: "Invalid policy".into(),
+            summary: "Invalid policy".into(),
             edits: vec![edit],
         };
         assert!(store.apply_edits(&request).is_err());
@@ -3516,7 +3576,7 @@ async fn privileged_policy_edits_validate_before_publication() {
     );
     let config_next = format!("{config}\nsearch:\n  limit: 5\n");
     let request = ApplyEditsRequest {
-        edit_summary: "Update rules and matching documents atomically".into(),
+        summary: "Update rules and matching documents atomically".into(),
         edits: vec![
             replace("schema.md", &template, &stricter),
             replace(
@@ -3536,26 +3596,28 @@ async fn privileged_policy_edits_validate_before_publication() {
         command(&repository.root, &["rev-parse", "HEAD"]),
         initial_head
     );
-    assert!(!store.apply_edits(&request).unwrap().restart_required);
+    store.apply_edits(&request).unwrap();
+    assert_eq!(store.config().server.listen, "127.0.0.1:3131");
     assert_eq!(
         store.get_page("schema.md", None).unwrap().text.unwrap(),
         stricter
     );
     assert_eq!(
-        store.get_page("alice.md", None).unwrap().template.unwrap()["content"],
-        stricter
+        store.get_page("alice.md", None).unwrap().template.unwrap(),
+        "/schema.md"
     );
     let restarted = repository.store();
     assert!(restarted.validate().is_ok());
     let request = ApplyEditsRequest {
-        edit_summary: "Change listener".into(),
+        summary: "Change listener".into(),
         edits: vec![replace(
             "config.yaml",
             &config_next,
             &config_next.replace(":3131", ":3132"),
         )],
     };
-    assert!(store.apply_edits(&request).unwrap().restart_required);
+    store.apply_edits(&request).unwrap();
+    assert_eq!(store.config().server.listen, "127.0.0.1:3132");
 }
 
 #[test]
@@ -3588,11 +3650,11 @@ fn referenced_rumdl_config_edits_are_validated_atomically() {
     );
     let head = command(&repository.root, &["rev-parse", "HEAD"]);
     let edit = |text: &str| ApplyEditsRequest {
-        edit_summary: "Adjust lint policy".into(),
-        edits: vec![EditOperation::ReplacePage {
+        summary: "Adjust lint policy".into(),
+        edits: vec![EditOperation::Replace {
             path: "rumdl.toml".into(),
-            base: base.into(),
             content: text.into(),
+            anchor: Some(complete_anchor(&(base))),
         }],
     };
     assert!(
@@ -3629,9 +3691,14 @@ fn referenced_rumdl_config_edits_are_validated_atomically() {
 fn document_markers_do_not_bypass_schema_rules() {
     let repository = task_repository();
     let store = repository.store();
-    let request = ApplyEditsRequest { edit_summary: "Ordinary marked document".into(),
-        edits: vec![EditOperation::CreatePage { path: "tasks/v1/app.md".into(),
-            content: "---\nmdstore: app\n---\n# An ordinary document\n".into() }] };
+    let request = ApplyEditsRequest {
+        summary: "Ordinary marked document".into(),
+        edits: vec![EditOperation::Replace {
+            path: "tasks/v1/app.md".into(),
+            content: "---\nmdstore: app\n---\n# An ordinary document\n".into(),
+            anchor: None,
+        }],
+    };
     assert!(store.apply_edits(&request).is_err());
 }
 

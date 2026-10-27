@@ -21,17 +21,16 @@ use crate::{
         validate_repo_path,
     },
     git::{self, PushState},
-    hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
+    hashline::{EditOperation, apply_operations, render},
     markdown::{Edge, Finding, ParsedPage, validate_corpus},
     provider::{InputType, RetrievalProvider, ZeroEntropyProvider},
-    search::{PageChunks, SearchIndex, SearchResponse},
+    search::{PageChunks, SearchIndex, SearchResponse, SearchResult},
     sidecar::{self, Sidecar},
 };
 
 /// Daemon-owned coherent view of one Git-backed Markdown repository.
 pub struct Store {
     root: PathBuf,
-    startup_listen: String,
     state: RwLock<Arc<StoreState>>,
     provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     reindex_lock: tokio::sync::Mutex<()>,
@@ -84,29 +83,13 @@ struct StoreState {
     generation: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
 /// One required-summary atomic edit request.
 pub struct ApplyEditsRequest {
     /// Non-empty Git commit message.
-    pub edit_summary: String,
+    pub summary: String,
     /// Hashline operations resolved against one pre-edit snapshot.
     pub edits: Vec<EditOperation>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-/// Result of accepting or replaying an edit request.
-pub struct ApplyEditsResponse {
-    /// Whether a new commit was accepted or the request was already applied.
-    pub status: ApplyStatus,
-    /// Ordered push state after the request.
-    pub push: PushState,
-    /// Repository-relative paths addressed by the request.
-    pub touched_paths: Vec<String>,
-    /// Current hashline windows for changed regions.
-    pub fresh_hashlines: HashMap<String, String>,
-    /// Listener changes take effect after restarting the daemon.
-    pub restart_required: bool,
 }
 
 #[derive(Debug)]
@@ -127,16 +110,6 @@ impl fmt::Display for ValidationError {
 }
 
 impl Error for ValidationError {}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-/// Idempotency status of an edit request.
-pub enum ApplyStatus {
-    /// A new commit was created.
-    Accepted,
-    /// The exact request was already represented by repository history.
-    AlreadyApplied,
-}
 
 #[derive(Serialize, Deserialize)]
 struct PendingReceipt {
@@ -186,9 +159,8 @@ const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 #[derive(Debug, Clone, Serialize)]
 /// Hashline-rendered page or configuration resource.
 pub struct PageResponse {
-    /// Applicable directory template; serialized as its repository-relative path.
-    #[serde(serialize_with = "serialize_template_path")]
-    pub template: Option<serde_json::Value>,
+    /// Governing schema as a repository-rooted path.
+    pub template: Option<String>,
     /// Exact repository-relative path.
     pub path: String,
     /// Markdown or configuration text with hashline prefixes; absent for a missing file.
@@ -196,16 +168,6 @@ pub struct PageResponse {
     /// Exact source text for full-page reads, absent for line windows.
     #[serde(skip_serializing)]
     pub text: Option<String>,
-}
-
-fn serialize_template_path<S: serde::Serializer>(
-    template: &Option<serde_json::Value>,
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    template
-        .as_ref()
-        .and_then(|value| value.get("path"))
-        .serialize(serializer)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -344,7 +306,6 @@ impl Store {
         };
         Ok(Arc::new(Self {
             root,
-            startup_listen: snapshot.config.server.listen.clone(),
             state: RwLock::new(Arc::new(snapshot)),
             provider_factory,
             reindex_lock: tokio::sync::Mutex::new(()),
@@ -358,12 +319,6 @@ impl Store {
     }
 
     #[must_use]
-    /// Returns the canonical repository worktree root.
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    #[must_use]
     /// Returns the currently published repository configuration.
     pub fn config(&self) -> Config {
         self.state.read().config.clone()
@@ -373,10 +328,6 @@ impl Store {
     pub fn validate(&self) -> std::result::Result<(), Vec<Finding>> {
         let state = self.state.read();
         validate_corpus(&state.pages, &state.templates).map(|_| ())
-    }
-
-    fn restart_required(&self, config: &Config) -> bool {
-        config.server.listen != self.startup_listen
     }
 
     /// Lists direct children of a directory in the published document tree.
@@ -440,7 +391,7 @@ impl Store {
         let state = self.state.read();
         if let Some(text) = state.pages.get(path) {
             return Ok(PageResponse {
-                template: state.templates.discovery(path),
+                template: state.templates.template_path(path),
                 path: path.into(),
                 content: Some(render(text, window)),
                 text: window.is_none().then(|| text.clone()),
@@ -464,7 +415,7 @@ impl Store {
                 ensure_paths_match_config(&state.config, [&path.to_owned()])?;
             }
             return Ok(PageResponse {
-                template: state.templates.discovery(path),
+                template: state.templates.template_path(path),
                 path: path.into(),
                 content: None,
                 text: None,
@@ -473,63 +424,45 @@ impl Store {
         bail!("page or configuration resource not found: {path}")
     }
 
-    /// Searches the published exact, vector, and graph index.
+    /// Searches one published snapshot and returns anchored source excerpts.
     pub async fn search(&self, query: &str, variants: &[String]) -> Result<SearchResponse> {
-        self.search_snapshot(query, variants)
-            .await
-            .map(|(response, _)| response)
-    }
-
-    /// Returns compact search results with anchors from the same published snapshot.
-    pub(crate) async fn search_content(
-        &self,
-        query: &str,
-        variants: &[String],
-    ) -> Result<serde_json::Value> {
-        let (response, pages) = self.search_snapshot(query, variants).await?;
-        let results: Vec<_> = response
-            .results
-            .iter()
-            .map(|result| {
-                let text = pages
-                    .get(&result.path)
-                    .context("search result source is missing")?;
-                Ok(serde_json::json!({
-                    "path": format!("/{}:{}-{}", result.path, result.start_line, result.end_line),
-                    "excerpt": render(text, Some((result.start_line, result.end_line))),
-                }))
-            })
-            .collect::<Result<_>>()?;
-        Ok(serde_json::json!({"results": results, "degraded": response.degraded}))
-    }
-
-    async fn search_snapshot(
-        &self,
-        query: &str,
-        variants: &[String],
-    ) -> Result<(SearchResponse, Arc<HashMap<String, String>>)> {
         if query.trim().is_empty() {
             bail!("query must be non-empty");
         }
-        let (config, index, provider, pages) = {
-            let state = self.state.read();
-            (
-                state.config.clone(),
-                state.index.clone(),
-                state.provider.clone(),
-                state.pages.clone(),
+        let snapshot = self.state.read().clone();
+        let response = snapshot
+            .index
+            .search(
+                &snapshot.config,
+                snapshot.provider.as_ref(),
+                query,
+                variants,
             )
-        };
-        let response = index
-            .search(&config, provider.as_ref(), query, variants)
             .await?;
-        Ok((response, pages))
+        let results = response
+            .results
+            .into_iter()
+            .map(|result| {
+                let text = snapshot
+                    .pages
+                    .get(&result.path)
+                    .context("search result source is missing")?;
+                Ok(SearchResult {
+                    path: format!("/{}:{}-{}", result.path, result.start_line, result.end_line),
+                    excerpt: render(text, Some((result.start_line, result.end_line))),
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(SearchResponse {
+            results,
+            degraded: response.degraded,
+        })
     }
 
     /// Validates and commits one atomic hashline edit batch, then notifies replication.
-    pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<ApplyEditsResponse> {
-        if request.edit_summary.trim().is_empty() {
-            bail!("edit_summary must be non-empty");
+    pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<Vec<String>> {
+        if request.summary.trim().is_empty() {
+            bail!("summary must be non-empty");
         }
         if request.edits.is_empty() {
             bail!("edits must contain at least one operation");
@@ -552,7 +485,9 @@ impl Store {
         let mut existing: std::collections::HashSet<_> = current.pages.keys().cloned().collect();
         // Reserve explicitly named creates too, regardless of their position in the batch.
         for edit in &request.edits {
-            if let EditOperation::CreatePage { path, .. } = edit
+            if let EditOperation::Replace {
+                path, anchor: None, ..
+            } = edit
                 && !path.contains(['{', '}'])
             {
                 existing.insert(path.clone());
@@ -560,7 +495,10 @@ impl Store {
         }
         let mut edits = request.edits.clone();
         for edit in &mut edits {
-            if let EditOperation::CreatePage { path, .. } = edit {
+            if let EditOperation::Replace {
+                path, anchor: None, ..
+            } = edit
+            {
                 *path = current.templates.allocate_path(path, &existing)?;
                 existing.insert(path.clone());
             } else if edit.path().contains(['{', '}']) {
@@ -608,8 +546,8 @@ impl Store {
                 bail!("untracked repository path already exists: {path}");
             }
         }
-        let applied = apply_operations_with_ranges(&originals, &edits)?;
-        let changes = &applied.changes;
+        let applied = apply_operations(&originals, &edits)?;
+        let changes = &applied;
         let mut pages = (*current.pages).clone();
         let mut extra = (*current.config_files).clone();
         for (path, content) in changes {
@@ -707,7 +645,6 @@ impl Store {
             .collect();
         let path_list: Vec<String> = paths.iter().cloned().collect();
         let (preimages, postimages) = edit_images(&originals, changes);
-        let fresh_hashlines = fresh_windows(changes, &applied.changed_ranges);
         if let Err(error) = git::write_changes(&self.root, &ordered) {
             return Err(rollback_failure(&self.root, &path_list, error));
         }
@@ -717,7 +654,6 @@ impl Store {
                 return Err(rollback_failure(&self.root, &path_list, error));
             }
         };
-        let committed = tree.is_some();
         if let Some(tree) = tree {
             let pending = PendingReceipt {
                 base_head: base_head.clone(),
@@ -733,7 +669,7 @@ impl Store {
                 &self.root,
                 &pending.tree,
                 &pending.base_head,
-                &request.edit_summary,
+                &request.summary,
             ) {
                 Ok(commit) => commit,
                 Err(error) => {
@@ -782,23 +718,11 @@ impl Store {
             provider,
             generation: current.generation + 1,
         });
-        let push = self.current_push_state()?;
-        let response = ApplyEditsResponse {
-            restart_required: self.restart_required(&self.state.read().config),
-            status: if committed {
-                ApplyStatus::Accepted
-            } else {
-                ApplyStatus::AlreadyApplied
-            },
-            push,
-            touched_paths: path_list,
-            fresh_hashlines,
-        };
-        self.write_receipt(&digest, &response, &preimages, &postimages)?;
+        self.write_receipt(&digest, &path_list, &preimages, &postimages)?;
         self.remove_pending(&digest)?;
         self.sync_notify.notify_one();
         self.reindex_notify.notify_one();
-        Ok(response)
+        Ok(path_list)
     }
 
     /// Rebuilds every embedding sidecar and the search index.
@@ -1159,7 +1083,7 @@ impl Store {
             .join(format!("{digest}.json"))
     }
 
-    fn read_receipt(&self, digest: &str) -> Result<Option<ApplyEditsResponse>> {
+    fn read_receipt(&self, digest: &str) -> Result<Option<Vec<String>>> {
         let path = self.receipt_path(digest);
         if !path.exists() {
             return Ok(None);
@@ -1174,25 +1098,18 @@ impl Store {
                 )
             }
         }
-        let fresh_hashlines = self.current_hashlines(&stored.touched_paths);
-        Ok(Some(ApplyEditsResponse {
-            restart_required: self.restart_required(&self.state.read().config),
-            status: ApplyStatus::AlreadyApplied,
-            push: self.current_push_state()?,
-            touched_paths: stored.touched_paths,
-            fresh_hashlines,
-        }))
+        Ok(Some(stored.touched_paths))
     }
 
     fn write_receipt(
         &self,
         digest: &str,
-        response: &ApplyEditsResponse,
+        touched_paths: &[String],
         preimages: &Images,
         postimages: &Images,
     ) -> Result<()> {
         let stored = StoredReceipt {
-            touched_paths: response.touched_paths.clone(),
+            touched_paths: touched_paths.to_vec(),
             preimages: preimages.clone(),
             postimages: postimages.clone(),
         };
@@ -1211,7 +1128,7 @@ impl Store {
         Ok(())
     }
 
-    fn recover_pending(&self, digest: &str) -> Result<Option<ApplyEditsResponse>> {
+    fn recover_pending(&self, digest: &str) -> Result<Option<Vec<String>>> {
         let path = self.pending_path(digest);
         if !path.exists() {
             return Ok(None);
@@ -1233,31 +1150,14 @@ impl Store {
                 )
             }
         }
-        let push = self.current_push_state()?;
-        let response = ApplyEditsResponse {
-            restart_required: self.restart_required(&self.state.read().config),
-            status: ApplyStatus::AlreadyApplied,
-            push,
-            fresh_hashlines: self.current_hashlines(&pending.touched_paths),
-            touched_paths: pending.touched_paths,
-        };
-        self.write_receipt(digest, &response, &pending.preimages, &pending.postimages)?;
+        self.write_receipt(
+            digest,
+            &pending.touched_paths,
+            &pending.preimages,
+            &pending.postimages,
+        )?;
         self.remove_pending(digest)?;
-        Ok(Some(response))
-    }
-
-    fn current_hashlines(&self, paths: &[String]) -> HashMap<String, String> {
-        let state = self.state.read();
-        paths
-            .iter()
-            .filter_map(|path| {
-                state
-                    .pages
-                    .get(path)
-                    .or_else(|| state.config_files.get(path))
-                    .map(|text| (path.clone(), render(text, None)))
-            })
-            .collect()
+        Ok(Some(pending.touched_paths))
     }
 
     fn replay_state(&self, preimages: &Images, postimages: &Images) -> Result<ReplayState> {
@@ -1286,17 +1186,6 @@ impl Store {
         } else {
             ReplayState::Partial
         })
-    }
-
-    fn current_push_state(&self) -> Result<PushState> {
-        let push_enabled = self.state.read().config.git.push;
-        if !push_enabled {
-            Ok(PushState::Disabled)
-        } else if git::pending_commits(&self.root)? > 0 {
-            Ok(PushState::Queued)
-        } else {
-            Ok(PushState::Pushed)
-        }
     }
 
     fn current_replication(&self) -> ReplicationStatus {
@@ -1562,50 +1451,6 @@ fn embedding_context(config: &Config, page: &ParsedPage) -> Vec<String> {
         .collect()
 }
 
-fn fresh_windows(
-    changes: &HashMap<String, Option<String>>,
-    changed_ranges: &HashMap<String, Vec<ChangedRange>>,
-) -> HashMap<String, String> {
-    changes
-        .iter()
-        .filter_map(|(path, content)| {
-            let text = content.as_ref()?;
-            let line_count = text.lines().count();
-            if line_count == 0 {
-                return Some((path.clone(), String::new()));
-            }
-            let mut windows: Vec<(usize, usize)> = changed_ranges
-                .get(path)
-                .into_iter()
-                .flatten()
-                .map(|range| {
-                    (
-                        range.start_line.saturating_sub(3).max(1),
-                        (range.end_line + 3).min(line_count),
-                    )
-                })
-                .collect();
-            windows.sort_unstable();
-            let mut merged: Vec<(usize, usize)> = Vec::new();
-            for (start, end) in windows {
-                if let Some((_, previous_end)) = merged.last_mut()
-                    && start <= *previous_end + 1
-                {
-                    *previous_end = (*previous_end).max(end);
-                } else {
-                    merged.push((start, end));
-                }
-            }
-            let rendered = merged
-                .into_iter()
-                .map(|window| render(text, Some(window)))
-                .collect::<Vec<_>>()
-                .join("\n…\n");
-            Some((path.clone(), rendered))
-        })
-        .collect()
-}
-
 fn zeroentropy_provider(config: ProviderConfig) -> Arc<dyn RetrievalProvider> {
     Arc::new(ZeroEntropyProvider::new(config))
 }
@@ -1793,10 +1638,10 @@ mod tests {
         assert!(Arc::ptr_eq(&before, &store.state.read()));
         store
             .apply_edits(&ApplyEditsRequest {
-                edit_summary: "publish coherent snapshot".into(),
+                summary: "publish coherent snapshot".into(),
                 edits: vec![EditOperation::Replace {
                     path: "new.md".into(),
-                    anchor: format!("1:{}", crate::short_hash("new snapshot", "", "")),
+                    anchor: Some(format!("1:{}", crate::short_hash("new snapshot", "", ""))),
                     content: "edited snapshot".into(),
                 }],
             })
