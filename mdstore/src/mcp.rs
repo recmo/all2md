@@ -183,7 +183,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "apply_edits",
-            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
+            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}; validation errors include file and line locations when available.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -438,7 +438,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                 }
                 let blocking_store = Arc::clone(store);
                 match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
-                    Ok(value) => serde_json::to_value(value).map_err(Into::into),
+                    Ok(_) => Ok(json!({"success": true})),
                     Err(error) => Err(error),
                 }
             }
@@ -466,6 +466,17 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             rpc_result(id, result)
         }
         Err(error) => {
+            if params.name == "apply_edits" {
+                let errors = match error.downcast_ref::<ValidationError>() {
+                    Some(validation) => json!(validation.findings),
+                    None => json!([{"message": error.to_string()}]),
+                };
+                return rpc_result(id, json!({
+                    "content": [],
+                    "structuredContent": {"errors": errors},
+                    "isError": true
+                }));
+            }
             let findings = error
                 .downcast_ref::<ValidationError>()
                 .map(|validation| validation.findings.clone());

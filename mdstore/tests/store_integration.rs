@@ -1489,7 +1489,7 @@ async fn mcp_apply_errors_preserve_structured_validation_findings() {
         .unwrap();
     let value: serde_json::Value = response.json().await.unwrap();
     assert_eq!(value["result"]["isError"], true);
-    let findings = value["result"]["structuredContent"]["validation_findings"]
+    let findings = value["result"]["structuredContent"]["errors"]
         .as_array()
         .unwrap();
     assert!(
@@ -3371,7 +3371,9 @@ async fn document_batches_validate_and_submit_through_mcp() {
             .await
             .unwrap();
         assert_eq!(result["result"]["isError"], false, "{result}");
-        assert_eq!(result["result"]["content"], serde_json::json!([]));
+        assert_eq!(result["result"], serde_json::json!({
+            "content": [], "structuredContent": {"success": true}, "isError": false
+        }));
     }
     assert_eq!(
         fs::read_to_string(repository.root.join("alice.md")).unwrap(),

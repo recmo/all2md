@@ -656,7 +656,7 @@
       const request = { ...batch, edit_summary: cache.summary.trim() };
       // apply_edits validates the entire batch against the current repository
       // and commits it atomically; local validation is only the preview.
-      const result = await api.apply(request);
+      await api.apply(request);
       const pages = { ...cache.pages };
       const remainingPaths = new Set(cache.paths);
       for (const edit of request.edits) {
@@ -686,19 +686,7 @@
       findings = [];
       validated = '';
       persist();
-      submitNotice =
-        (result.status === 'already_applied'
-          ? 'This change set was already submitted.'
-          : 'Changes committed successfully.') +
-        ({
-          disabled: ' Remote push is disabled.',
-          pushed: ' Pushed to the remote.',
-          queued: ' Remote push is queued.',
-          diverged: ' Remote push is blocked by diverged history.'
-        }[result.push] || '') +
-        (result.restart_required
-          ? ' Restart the daemon to apply listener changes.'
-          : '');
+      submitNotice = 'Changes committed successfully.';
       try {
         await refresh();
       } catch (error) {

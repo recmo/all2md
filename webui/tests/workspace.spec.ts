@@ -718,7 +718,7 @@ test('rumdl reports the same blank-line finding in WASM offline and on the serve
   });
   const result = (await response.json()).result;
   expect(result.isError).toBe(true);
-  const findings = result.structuredContent.validation_findings;
+  const findings = result.structuredContent.errors;
   expect(findings).toEqual([
     expect.objectContaining({
       path: 'other.md',

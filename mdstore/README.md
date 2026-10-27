@@ -176,7 +176,7 @@ Under the repository lock, allocation chooses the greatest current serial in
 minimum width, capped at 12. Deleting the highest serial permits reuse. Unknown
 or repeated placeholders and placeholders on other edit operations are rejected.
 Allocation changes only the path, and retries consult durable receipts first.
-Resolved paths are returned in `touched_paths` and `fresh_hashlines`.
+Read the parent directory after a successful edit to discover allocated paths.
 
 `get_page` returns the governing schema path in `template`, also for proposed
 paths with `content: null`. Read that path separately for its rules and original
@@ -186,9 +186,12 @@ validated Git synchronization.
 ## Local durability and background Git synchronization
 
 An accepted edit is committed locally before it returns. It never waits for a
-network request, including when retrying an already-applied batch. The response's
-`push` state describes current replication, not edit success. Embedding rebuilds
-and Git synchronization are independent background activities.
+network request, including when retrying an already-applied batch. The MCP
+`apply_edits` response contains only `{"success": true}` or `{"errors": [...]}`.
+Errors carry a message and, for validation findings, file and line locations when
+available. Results use `structuredContent` without a duplicate text copy; failures
+set `isError: true`. Embedding rebuilds and Git synchronization are independent
+background activities.
 
 With `git.push: true`, the running daemon synchronizes at startup, after edits,
 and every 30 seconds while healthy. Failures retry with exponential backoff from

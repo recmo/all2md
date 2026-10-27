@@ -79,16 +79,22 @@ async function mcp<T>(
     content: { text: string }[];
     structuredContent: T;
   } = value.result;
-  if (result.isError)
+  if (result.isError) {
+    const errors = (
+      result.structuredContent as {
+        errors?: (Partial<ValidationFinding> & { message: string })[];
+      }
+    )?.errors;
     throw new ApiError(
-      result.content.map((c) => c.text).join('\n'),
+      errors
+        ? errors.map((error) => error.message).join('\n')
+        : result.content.map((c) => c.text).join('\n'),
       422,
-      (
-        result.structuredContent as {
-          validation_findings?: ValidationFinding[];
-        }
-      )?.validation_findings || []
+      errors?.filter(
+        (error): error is ValidationFinding => typeof error.path === 'string'
+      ) || []
     );
+  }
   return format === 'text'
     ? (result.content.map((block) => block.text).join('\n') as T)
     : result.structuredContent;
@@ -133,12 +139,7 @@ export const api = {
     });
   },
   apply(request: EditRequest) {
-    return mcp<{
-      touched_paths: string[];
-      push: 'disabled' | 'pushed' | 'queued' | 'diverged';
-      status: 'accepted' | 'already_applied';
-      restart_required?: boolean;
-    }>('apply_edits', request);
+    return mcp<{ success: true }>('apply_edits', request);
   }
 };
 export function editRequest(
