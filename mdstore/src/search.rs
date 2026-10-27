@@ -29,8 +29,6 @@ pub(crate) struct IndexedChunk {
     pub path: String,
     /// Source excerpt and embedding context.
     pub chunk: Chunk,
-    /// Repository-configured projected metadata.
-    pub metadata: serde_json::Value,
     /// Combined text used by exact retrieval.
     pub search_text: String,
     /// Exact-search term frequencies.
@@ -43,47 +41,34 @@ pub(crate) struct IndexedChunk {
 pub(crate) type PageChunks = HashMap<String, Vec<(Chunk, Option<Vec<f32>>)>>;
 
 #[derive(Debug, Clone, Serialize)]
-/// Ranked search results and any provider degradation.
+/// Ranked source excerpts and retrieval warnings.
 pub struct SearchResponse {
     /// Results in final rank order.
     pub results: Vec<SearchResult>,
-    /// Retrieval arms that failed or returned invalid data.
+    /// Retrieval components that failed or returned invalid data.
     pub degraded: Vec<String>,
-    /// Current vector availability across indexed chunks.
-    pub vector_coverage: VectorCoverage,
 }
 
 #[derive(Debug, Clone, Serialize)]
-/// Available and total indexed vectors.
-pub struct VectorCoverage {
-    /// Chunks with a valid vector.
-    pub ready: usize,
-    /// Total indexed chunks.
-    pub total: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-/// One ranked searchable excerpt.
+/// One ranked source excerpt, ready to read or edit.
 pub struct SearchResult {
-    /// Repository-relative page path.
+    /// Repository-rooted path with an inclusive line range.
     pub path: String,
-    /// Repository-configured projected metadata.
-    pub metadata: serde_json::Value,
-    /// Heading breadcrumb containing the excerpt.
-    pub heading: Vec<String>,
-    /// First excerpt line, one-based and inclusive.
-    pub start_line: usize,
-    /// Last excerpt line, one-based and inclusive.
-    pub end_line: usize,
-    /// Source excerpt without embedding-only context.
+    /// Source lines with neighbor-based hashline anchors.
     pub excerpt: String,
-    /// Exact, vector, or graph arms that contributed.
-    pub matched_arms: Vec<String>,
-    /// Reciprocal-rank-fusion score before reranking.
-    pub fused_score: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// Provider reranking score, when reranking succeeded.
-    pub rerank_score: Option<f64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RankedSearchResponse {
+    pub results: Vec<RankedSearchResult>,
+    pub degraded: Vec<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RankedSearchResult {
+    pub path: String,
+    pub start_line: usize,
+    pub end_line: usize,
 }
 
 impl SearchIndex {
@@ -119,7 +104,6 @@ impl SearchIndex {
                 chunks.push(IndexedChunk {
                     path: path.clone(),
                     chunk,
-                    metadata: metadata.clone(),
                     search_text,
                     terms,
                     vector,
@@ -168,7 +152,7 @@ impl SearchIndex {
         provider: &dyn RetrievalProvider,
         query: &str,
         variants: &[String],
-    ) -> anyhow::Result<SearchResponse> {
+    ) -> anyhow::Result<RankedSearchResponse> {
         let formulations: Vec<String> = std::iter::once(query.to_owned())
             .chain(
                 variants
@@ -180,10 +164,9 @@ impl SearchIndex {
         let exact_index = Arc::clone(self);
         let exact_config = config.clone();
         let exact_formulations = formulations.clone();
-        let (mut scores, mut arms) = retrieval_task(move || {
+        let mut scores = retrieval_task(move || {
             let mut scores: HashMap<usize, f64> = HashMap::new();
-            let mut arms: HashMap<usize, HashSet<String>> = HashMap::new();
-            for (formulation_index, formulation) in exact_formulations.iter().enumerate() {
+            for formulation in &exact_formulations {
                 for (rank, (index, _)) in exact_index
                     .bm25(formulation)
                     .into_iter()
@@ -192,12 +175,9 @@ impl SearchIndex {
                 {
                     *scores.entry(index).or_default() +=
                         1.0 / (exact_config.search.rrf_k + rank as f64 + 1.0);
-                    arms.entry(index)
-                        .or_default()
-                        .insert(format!("exact:{formulation_index}"));
                 }
             }
-            (scores, arms)
+            scores
         })
         .await?;
         let mut degraded = Vec::new();
@@ -222,9 +202,9 @@ impl SearchIndex {
         };
         let vector_index = Arc::clone(self);
         let vector_config = config.clone();
-        let (mut ranked, mut arms, documents) = retrieval_task(move || {
+        let (mut ranked, documents) = retrieval_task(move || {
             if let Some(query_vectors) = query_vectors {
-                for (formulation_index, vector) in query_vectors.iter().enumerate() {
+                for vector in &query_vectors {
                     for (rank, (index, _)) in vector_index
                         .vector(vector)
                         .into_iter()
@@ -233,13 +213,10 @@ impl SearchIndex {
                     {
                         *scores.entry(index).or_default() +=
                             1.0 / (vector_config.search.rrf_k + rank as f64 + 1.0);
-                        arms.entry(index)
-                            .or_default()
-                            .insert(format!("vector:{formulation_index}"));
                     }
                 }
             }
-            vector_index.add_graph_signals(&vector_config, &mut scores, &mut arms);
+            vector_index.add_graph_signals(&vector_config, &mut scores);
             let mut ranked: Vec<(usize, f64)> = scores.into_iter().collect();
             ranked.sort_by(|a, b| {
                 b.1.total_cmp(&a.1)
@@ -250,7 +227,7 @@ impl SearchIndex {
                 .iter()
                 .map(|(index, _)| vector_index.chunks[*index].chunk.text.clone())
                 .collect();
-            (ranked, arms, documents)
+            (ranked, documents)
         })
         .await?;
         let mut rerank_scores = HashMap::new();
@@ -288,39 +265,16 @@ impl SearchIndex {
         ranked.truncate(config.search.limit);
         let results = ranked
             .into_iter()
-            .map(|(index, fused_score)| {
+            .map(|(index, _)| {
                 let chunk = &self.chunks[index];
-                let mut matched_arms: Vec<String> = arms
-                    .remove(&index)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect();
-                matched_arms.sort();
-                SearchResult {
+                RankedSearchResult {
                     path: chunk.path.clone(),
-                    metadata: chunk.metadata.clone(),
-                    heading: chunk.chunk.heading.clone(),
                     start_line: chunk.chunk.start_line,
                     end_line: chunk.chunk.end_line,
-                    excerpt: chunk.chunk.text.clone(),
-                    matched_arms,
-                    fused_score,
-                    rerank_score: rerank_scores.get(&index).copied(),
                 }
             })
             .collect();
-        Ok(SearchResponse {
-            results,
-            degraded,
-            vector_coverage: VectorCoverage {
-                ready: self
-                    .chunks
-                    .iter()
-                    .filter(|chunk| chunk.vector.is_some())
-                    .count(),
-                total: self.chunks.len(),
-            },
-        })
+        Ok(RankedSearchResponse { results, degraded })
     }
 
     fn bm25(&self, query: &str) -> Vec<(usize, f64)> {
@@ -381,12 +335,7 @@ impl SearchIndex {
             .then_with(|| left.chunk.text.cmp(&right.chunk.text))
     }
 
-    fn add_graph_signals(
-        &self,
-        config: &Config,
-        scores: &mut HashMap<usize, f64>,
-        arms: &mut HashMap<usize, HashSet<String>>,
-    ) {
+    fn add_graph_signals(&self, config: &Config, scores: &mut HashMap<usize, f64>) {
         let page_scores: HashMap<String, f64> =
             scores
                 .iter()
@@ -411,7 +360,6 @@ impl SearchIndex {
         }
         for (index, score) in additions {
             *scores.entry(index).or_default() += score;
-            arms.entry(index).or_default().insert("graph".into());
         }
     }
 }
@@ -455,412 +403,5 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
         0.0
     } else {
         dot / left_norm.sqrt() / right_norm.sqrt()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        config::LinkConfig,
-        markdown::parse_page,
-        provider::{InputType, RerankResult},
-    };
-
-    struct NonFiniteProvider;
-
-    enum RerankMode {
-        Preserve,
-        Reverse,
-        Fail,
-    }
-
-    struct MatrixProvider {
-        vectors: HashMap<String, Vec<f32>>,
-        embed_fails: bool,
-        rerank: RerankMode,
-    }
-
-    #[async_trait::async_trait]
-    impl RetrievalProvider for MatrixProvider {
-        async fn embed(&self, _: InputType, input: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
-            if self.embed_fails {
-                anyhow::bail!("embedding unavailable");
-            }
-            input
-                .iter()
-                .map(|query| {
-                    self.vectors
-                        .get(query)
-                        .cloned()
-                        .ok_or_else(|| anyhow::anyhow!("missing test vector for {query:?}"))
-                })
-                .collect()
-        }
-
-        async fn rerank(
-            &self,
-            _: &str,
-            documents: &[String],
-            top_n: usize,
-        ) -> anyhow::Result<Vec<RerankResult>> {
-            if matches!(self.rerank, RerankMode::Fail) {
-                anyhow::bail!("rerank unavailable");
-            }
-            let count = documents.len().min(top_n);
-            Ok((0..count)
-                .map(|index| RerankResult {
-                    index,
-                    relevance_score: match self.rerank {
-                        RerankMode::Preserve => (count - index) as f64,
-                        RerankMode::Reverse => index as f64,
-                        RerankMode::Fail => unreachable!(),
-                    },
-                })
-                .collect())
-        }
-
-        fn model(&self) -> &str {
-            "matrix"
-        }
-
-        fn dimensions(&self) -> usize {
-            2
-        }
-
-        fn embedding_provider_identity(&self) -> String {
-            "matrix".into()
-        }
-    }
-
-    fn matrix_index(
-        entries: &[(&str, &str, Option<[f32; 2]>)],
-        edges: &[Edge],
-    ) -> (Config, Arc<SearchIndex>) {
-        let config = Config::from_yaml(
-            "documents:\n  include: ['**/*.md']\nsearch:\n  limit: 10\n  candidates: 10\n  graph_weight: 0.5\nprovider:\n  dimensions: 2\n",
-        )
-        .unwrap();
-        let pages: HashMap<String, String> = entries
-            .iter()
-            .map(|(path, text, _)| ((*path).into(), (*text).into()))
-            .collect();
-        let parsed = pages
-            .iter()
-            .map(|(path, text)| {
-                (
-                    path.clone(),
-                    parse_page(text, &LinkConfig::default()).unwrap(),
-                )
-            })
-            .collect();
-        let chunks = entries
-            .iter()
-            .map(|(path, text, vector)| {
-                (
-                    (*path).into(),
-                    vec![(
-                        Chunk {
-                            start_line: 1,
-                            end_line: 1,
-                            heading: Vec::new(),
-                            text: (*text).into(),
-                            embedding_text: (*text).into(),
-                        },
-                        vector.map(Vec::from),
-                    )],
-                )
-            })
-            .collect();
-        let index = SearchIndex::build(&parsed, edges, chunks);
-        (config, Arc::new(index))
-    }
-
-    #[async_trait::async_trait]
-    impl RetrievalProvider for NonFiniteProvider {
-        async fn embed(&self, _: InputType, input: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
-            Ok(input.iter().map(|_| vec![f32::NAN, 0.0]).collect())
-        }
-
-        async fn rerank(
-            &self,
-            _: &str,
-            _: &[String],
-            _: usize,
-        ) -> anyhow::Result<Vec<RerankResult>> {
-            Ok(Vec::new())
-        }
-
-        fn model(&self) -> &str {
-            "invalid"
-        }
-
-        fn dimensions(&self) -> usize {
-            2
-        }
-
-        fn embedding_provider_identity(&self) -> String {
-            "invalid".into()
-        }
-    }
-
-    #[test]
-    fn index_order_does_not_depend_on_hashmap_iteration() {
-        let pages: HashMap<String, String> = HashMap::from([
-            ("b.md".into(), "bravo".into()),
-            ("a.md".into(), "alpha".into()),
-        ]);
-        let parsed = pages
-            .iter()
-            .map(|(path, text)| {
-                (
-                    path.clone(),
-                    parse_page(text, &LinkConfig::default()).unwrap(),
-                )
-            })
-            .collect();
-        let chunk = |text: &str| Chunk {
-            start_line: 1,
-            end_line: 1,
-            heading: Vec::new(),
-            text: text.into(),
-            embedding_text: text.into(),
-        };
-        let first = PageChunks::from([
-            ("b.md".into(), vec![(chunk("bravo"), None)]),
-            ("a.md".into(), vec![(chunk("alpha"), None)]),
-        ]);
-        let second = PageChunks::from([
-            ("a.md".into(), vec![(chunk("alpha"), None)]),
-            ("b.md".into(), vec![(chunk("bravo"), None)]),
-        ]);
-        let paths = |index: SearchIndex| {
-            index
-                .chunks
-                .into_iter()
-                .map(|chunk| chunk.path)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            paths(SearchIndex::build(&parsed, &[], first)),
-            paths(SearchIndex::build(&parsed, &[], second))
-        );
-    }
-
-    #[tokio::test]
-    async fn non_finite_query_vectors_degrade_before_ranking() {
-        let config =
-            Config::from_yaml("documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\n")
-                .unwrap();
-        let parsed = HashMap::from([(
-            "a.md".into(),
-            parse_page("alpha", &LinkConfig::default()).unwrap(),
-        )]);
-        let chunks = PageChunks::from([(
-            "a.md".into(),
-            vec![(
-                Chunk {
-                    start_line: 1,
-                    end_line: 1,
-                    heading: Vec::new(),
-                    text: "alpha".into(),
-                    embedding_text: "alpha".into(),
-                },
-                Some(vec![1.0, 0.0]),
-            )],
-        )]);
-        let index = Arc::new(SearchIndex::build(&parsed, &[], chunks));
-
-        let response = index
-            .search(&config, &NonFiniteProvider, "alpha", &[])
-            .await
-            .unwrap();
-        assert_eq!(response.results.len(), 1);
-        assert_eq!(response.results[0].matched_arms, ["exact:0"]);
-        assert!(
-            response
-                .degraded
-                .iter()
-                .any(|message| message.contains("non-finite"))
-        );
-    }
-
-    #[tokio::test]
-    async fn exact_only_search_and_fusion_are_stable() {
-        let (config, index) = matrix_index(
-            &[
-                ("b.md", "shared phrase", None),
-                ("a.md", "shared phrase", None),
-            ],
-            &[],
-        );
-        let provider = MatrixProvider {
-            vectors: HashMap::new(),
-            embed_fails: true,
-            rerank: RerankMode::Fail,
-        };
-
-        let first = index
-            .search(&config, &provider, "shared phrase", &[])
-            .await
-            .unwrap();
-        let second = index
-            .search(&config, &provider, "shared phrase", &[])
-            .await
-            .unwrap();
-        let summary = |response: &SearchResponse| {
-            response
-                .results
-                .iter()
-                .map(|result| {
-                    (
-                        result.path.clone(),
-                        result.matched_arms.clone(),
-                        result.fused_score,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-
-        assert_eq!(summary(&first), summary(&second));
-        assert_eq!(first.results[0].path, "a.md");
-        assert!(
-            first
-                .results
-                .iter()
-                .all(|result| result.matched_arms == ["exact:0"])
-        );
-    }
-
-    #[tokio::test]
-    async fn retrieval_work_yields_the_runtime_until_released() {
-        let (started, ready) = tokio::sync::oneshot::channel();
-        let (release, wait) = std::sync::mpsc::channel();
-        let task = tokio::spawn(retrieval_task(move || {
-            started.send(()).unwrap();
-            // The timeout bounds a failing test if work accidentally runs on the runtime thread.
-            wait.recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap();
-        }));
-        ready.await.unwrap();
-        release.send(()).unwrap();
-        task.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn vector_and_variant_arms_retrieve_independently() {
-        let (config, index) = matrix_index(
-            &[
-                ("a.md", "ordinary text", Some([0.0, 1.0])),
-                ("b.md", "needle text", Some([1.0, 0.0])),
-            ],
-            &[],
-        );
-        let provider = MatrixProvider {
-            vectors: HashMap::from([
-                ("semantic".into(), vec![1.0, 0.0]),
-                ("missing".into(), vec![0.0, 1.0]),
-                ("needle".into(), vec![1.0, 0.0]),
-            ]),
-            embed_fails: false,
-            rerank: RerankMode::Preserve,
-        };
-
-        let vector_only = index
-            .search(&config, &provider, "semantic", &[])
-            .await
-            .unwrap();
-        assert_eq!(vector_only.results[0].path, "b.md");
-        assert_eq!(vector_only.results[0].matched_arms, ["vector:0"]);
-
-        let variant = index
-            .search(&config, &provider, "missing", &["needle".into()])
-            .await
-            .unwrap();
-        let target = variant
-            .results
-            .iter()
-            .find(|result| result.path == "b.md")
-            .unwrap();
-        assert!(target.matched_arms.contains(&"exact:1".into()));
-        assert!(target.matched_arms.contains(&"vector:1".into()));
-    }
-
-    #[tokio::test]
-    async fn graph_assist_adds_authored_neighbors() {
-        let edge = Edge {
-            source: "seed.md".into(),
-            relation: "related".into(),
-            target: "neighbor.md".into(),
-        };
-        let (config, index) = matrix_index(
-            &[
-                ("seed.md", "origin keyword", None),
-                ("neighbor.md", "otherwise unrelated", None),
-            ],
-            &[edge],
-        );
-        let provider = MatrixProvider {
-            vectors: HashMap::new(),
-            embed_fails: true,
-            rerank: RerankMode::Fail,
-        };
-
-        let response = index
-            .search(&config, &provider, "origin keyword", &[])
-            .await
-            .unwrap();
-        let neighbor = response
-            .results
-            .iter()
-            .find(|result| result.path == "neighbor.md")
-            .unwrap();
-        assert_eq!(neighbor.matched_arms, ["graph"]);
-    }
-
-    #[tokio::test]
-    async fn rerank_overrides_fusion_and_failure_preserves_it() {
-        let (config, index) = matrix_index(
-            &[
-                ("a.md", "shared phrase", None),
-                ("b.md", "shared phrase", None),
-            ],
-            &[],
-        );
-        let reranked = MatrixProvider {
-            vectors: HashMap::new(),
-            embed_fails: true,
-            rerank: RerankMode::Reverse,
-        };
-        let fallback = MatrixProvider {
-            vectors: HashMap::new(),
-            embed_fails: true,
-            rerank: RerankMode::Fail,
-        };
-
-        let response = index
-            .search(&config, &reranked, "shared", &[])
-            .await
-            .unwrap();
-        assert_eq!(response.results[0].path, "b.md");
-        assert!(response.results[0].rerank_score.is_some());
-
-        let response = index
-            .search(&config, &fallback, "shared", &[])
-            .await
-            .unwrap();
-        assert_eq!(response.results[0].path, "a.md");
-        assert!(
-            response
-                .results
-                .iter()
-                .all(|result| result.rerank_score.is_none())
-        );
-        assert!(
-            response
-                .degraded
-                .iter()
-                .any(|message| message.contains("rerank unavailable"))
-        );
     }
 }

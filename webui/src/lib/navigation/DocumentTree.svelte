@@ -49,6 +49,21 @@
   let staging = false;
   let moveError = $state('');
   let previousPaths = '';
+  function resetPaths(tree: FileTree, next: string[]) {
+    const expanded = tree
+      .getVisibleRows(0, tree.getVisibleCount())
+      .filter((row) => row.isExpanded)
+      .map((row) => row.path);
+    tree.resetPaths(next, { initialExpandedPaths: expanded });
+  }
+  function revealSelection(tree: FileTree, path: string) {
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const folder = tree.getItem(parts.slice(0, i).join('/'));
+      if (folder && 'expand' in folder) folder.expand();
+    }
+    tree.getItem(path)?.select();
+  }
   const statuses = $derived(
     treeStatuses(
       paths.filter((path) => !path.endsWith('/')),
@@ -185,15 +200,15 @@
       // Trees mutates its model optimistically. Restore the authoritative
       // paths while the client fetches sources and stages the whole batch.
       queueMicrotask(async () => {
-        tree.resetPaths(paths);
+        resetPaths(tree, paths);
         try {
           await onmove(moves);
         } catch (error) {
           moveError = error instanceof Error ? error.message : String(error);
         } finally {
-          tree.resetPaths(paths);
+          resetPaths(tree, paths);
           previousPaths = JSON.stringify(paths);
-          if (selected) tree.getItem(selected)?.select();
+          if (selected) revealSelection(tree, selected);
           staging = false;
           dragging = false;
         }
@@ -201,7 +216,7 @@
     }
     const tree = new FileTree({
       paths,
-      initialExpansion: 'open',
+      initialExpansion: 'closed',
       initialSelectedPaths: selected ? [selected] : [],
       density: 'default',
       unsafeCSS: `[data-item-section="content"] { flex: 1 1 0; min-width: 0; }
@@ -358,21 +373,14 @@
     syncing = true;
     try {
       if (next !== previousPaths) {
-        tree.resetPaths(paths);
+        resetPaths(tree, paths);
         previousPaths = next;
       }
       untrack(() => {
         for (const path of tree.getSelectedPaths()) {
           if (path !== current) tree.getItem(path)?.deselect();
         }
-        if (current) {
-          const parts = current.split('/');
-          for (let i = 1; i < parts.length; i++) {
-            const folder = tree.getItem(parts.slice(0, i).join('/'));
-            if (folder && 'expand' in folder) folder.expand();
-          }
-          tree.getItem(current)?.select();
-        }
+        if (current) revealSelection(tree, current);
       });
     } finally {
       syncing = false;

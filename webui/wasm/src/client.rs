@@ -57,6 +57,14 @@ pub fn build_snapshot(input: &str) -> Result<String> {
         Templates::compile(&files).map_err(|e| anyhow!("Invalid baseline templates: {e:?}"))?;
     let (parsed, edges) = validate_corpus(&pages, &templates)
         .map_err(|e| anyhow!("Invalid baseline documents: {e:?}"))?;
+    let property_schemas: HashMap<_, _> = pages
+        .keys()
+        .filter_map(|path| {
+            let schema_path = templates.template_path(path)?;
+            let schema = templates.frontmatter_schema(path)?.clone();
+            Some((schema_path.trim_start_matches('/').to_owned(), schema))
+        })
+        .collect();
     let snapshot = ValidationSnapshot {
         version: SNAPSHOT_VERSION,
         revision: input.revision,
@@ -70,36 +78,9 @@ pub fn build_snapshot(input: &str) -> Result<String> {
             })
             .collect(),
     };
-    Ok(serde_json::to_string(&snapshot)?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn ordinary_reads_build_a_usable_validation_baseline() {
-        let input = serde_json::json!({"revision":"r1", "sources":{
-            "config.yaml":"documents:\n  include: ['**/*.md']\n",
-            "schema.md":"```starlark\n```\n",
-            "a.md":"[B](b.md)\n", "b.md":"# B\n"
-        }});
-        let snapshot: serde_json::Value =
-            serde_json::from_str(&build_snapshot(&input.to_string()).unwrap()).unwrap();
-        assert_eq!(snapshot["revision"], "r1");
-        assert_eq!(snapshot["documents"].as_object().unwrap().len(), 2);
-        assert_eq!(snapshot["files"].as_object().unwrap().len(), 2);
-        let result: serde_json::Value = serde_json::from_str(&validate(&serde_json::json!({
-            "snapshot": snapshot, "edits":[{"op":"replace_page", "path":"a.md", "base":"[B](b.md)\n", "content":"[Missing](missing.md)\n"}]
-        }).to_string()).unwrap()).unwrap();
-        assert_eq!(result["valid"], false);
-        assert!(
-            result["findings"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|f| f["message"].as_str().unwrap().contains("dangling"))
-        );
-    }
+    let mut output = serde_json::to_value(snapshot)?;
+    output["property_schemas"] = serde_json::to_value(property_schemas)?;
+    Ok(serde_json::to_string(&output)?)
 }
 
 /// Projects schema references and converts byte offsets for JavaScript strings.
@@ -118,47 +99,4 @@ pub fn document_references(input: &str) -> Result<String> {
         }
     }
     Ok(serde_json::to_string(&references)?)
-}
-
-#[cfg(test)]
-mod reference_tests {
-    use super::*;
-    #[test]
-    fn references_follow_schema_scope_and_preserve_precise_locations() {
-        let source = "---\nrefs:\n  - target: target#part\n    kind: task\n  - target: ignored\n    kind: other\n---\n# 😀 Note\n\n[[ target#part | label ]] and `[[target]]` and \\[[target]].\n\n```\n[[target]]\n```\n";
-        let schema = "```starlark\nlinks(wiki=[r'\\[\\[(?P<target>[^|\\]]+)(?:\\|[^\\]]*)?\\]\\]'])\nrelation('references', selector={'kind':'frontmatter','array_pointer':'/refs','target_pointer':'/target','type_pointer':'/kind','type_value':'task'})\n```\n";
-        let sources = serde_json::json!({"schema.md":schema,"notes/source.md":source,"target.md":"# Target\n"});
-        let refs: serde_json::Value =
-            serde_json::from_str(&document_references(&sources.to_string()).unwrap()).unwrap();
-        let refs = refs["notes/source.md"].as_array().unwrap();
-        assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0]["target"], "target.md");
-        assert_eq!(refs[0]["raw"], "target#part");
-        let start = refs[0]["range"]["start"].as_u64().unwrap() as usize;
-        let end = refs[0]["range"]["end"].as_u64().unwrap() as usize;
-        assert_eq!(
-            String::from_utf16(&source.encode_utf16().collect::<Vec<_>>()[start..end]).unwrap(),
-            "target#part"
-        );
-        assert_eq!(refs[1]["pointer"], "/refs/0/target");
-    }
-    #[test]
-    fn task_dependencies_are_validated_as_document_relations() {
-        let schema = include_str!("../../../mdstore/examples/tasks/v1/schema.md");
-        let sources = std::collections::HashMap::from([
-            ("tasks/v1/schema.md".into(), schema.into()),
-            (
-                "tasks/v1/rumdl.toml".into(),
-                include_str!("../../../mdstore/examples/tasks/v1/rumdl.toml").into(),
-            ),
-        ]);
-        let templates = mdstore::validation::Templates::compile(&sources).unwrap();
-        let pages = std::collections::HashMap::from([("tasks/v1/2026/09/23-001-test.md".into(), "---\nstate: inbox\ndepends_on: [missing.md]\n---\n# Test\n\n## Timeline\n\n- 2026-09-23T09:00:00Z — Created.\n".into())]);
-        let errors = mdstore::validation::validate_corpus(&pages, &templates).unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|finding| finding.message.contains("dangling internal target"))
-        );
-    }
 }

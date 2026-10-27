@@ -1,29 +1,18 @@
 export type Page = {
-  path: string;
   revision?: string;
-  hash?: string | null;
+  path: string;
   exists: boolean;
   text: string;
-  template: {
-    path: string;
-    content: string;
-    definition?: {
-      frontmatter?: import('../documents/markdown').PropertySchema;
-    };
-  } | null;
+  template: { path: string } | null;
 };
 export type Directory = {
-  path: string;
-  kind: 'directory';
   revision: string;
-  repository: string;
-  children: { path: string; kind: 'file' | 'directory'; hash?: string }[];
-  allow_template_edits: boolean;
-  allow_config_edits: boolean;
+  path: string;
+  children: { path: string; kind: 'file' | 'directory' }[];
 };
 export type Draft = Page & { base: string };
 export type EditRequest = {
-  edit_summary: string;
+  summary: string;
   edits: (
     | { op: 'replace_page'; path: string; base: string; content: string }
     | { op: 'create_page'; path: string; content: string }
@@ -33,9 +22,6 @@ export type EditRequest = {
 export type SearchResult = {
   path: string;
   excerpt: string;
-  matched_arms: string[];
-  start_line: number;
-  end_line: number;
 };
 export type ValidationFinding = {
   source?: { path: string; line: number } | null;
@@ -53,6 +39,18 @@ export class ApiError extends Error {
     super(message);
   }
 }
+type EditError = { message: string; location?: string; schema?: string };
+function errorLocation(location: string): { path: string; line?: number } {
+  const match = location.match(/:(\d+)$/);
+  return {
+    path: (match ? location.slice(0, match.index) : location).replace(
+      /^\//,
+      ''
+    ),
+    ...(match ? { line: Number(match[1]) } : {})
+  };
+}
+
 async function mcp<T>(name: string, args: unknown): Promise<T> {
   let response: Response;
   try {
@@ -88,39 +86,169 @@ async function mcp<T>(name: string, args: unknown): Promise<T> {
     content: { text: string }[];
     structuredContent: T;
   } = value.result;
-  if (result.isError)
+  if (result.isError) {
+    const errors = (
+      result.structuredContent as {
+        errors?: EditError[];
+      }
+    )?.errors;
     throw new ApiError(
-      result.content.map((c) => c.text).join('\n'),
+      errors
+        ? errors.map((error) => error.message).join('\n')
+        : result.content.map((c) => c.text).join('\n'),
       422,
-      (
-        result.structuredContent as {
-          validation_findings?: ValidationFinding[];
-        }
-      )?.validation_findings || []
+      errors?.flatMap((error): ValidationFinding[] => {
+        if (error.location === undefined) return [];
+        const source = error.schema ? errorLocation(error.schema) : undefined;
+        return [
+          {
+            ...errorLocation(error.location),
+            message: error.message,
+            ...(source
+              ? { source: { path: source.path, line: source.line! } }
+              : {})
+          }
+        ];
+      }) || []
     );
+  }
   return result.structuredContent;
 }
 
-export const api = {
-  page(path: string) {
-    return mcp<Page>('get_page', { path });
-  },
-  directory(path = '/') {
-    return mcp<Directory>('get_page', { path });
-  },
-  search(query: string, variants: string[]) {
-    return mcp<{ results: SearchResult[]; degraded: string[] }>('search', {
-      query,
-      variants
+export async function completeAnchor(text: string): Promise<string> {
+  if (text === '') return '0:';
+  const lines = text.split(/\r?\n/);
+  if (text.endsWith('\n')) lines.pop();
+  const hash = async (index: number) => {
+    const encoder = new TextEncoder();
+    const fields = [
+      lines[index - 1] ?? '',
+      lines[index],
+      lines[index + 1] ?? ''
+    ].map((line) => encoder.encode(line));
+    const bytes = new Uint8Array(
+      fields.reduce((length, field) => length + 8 + field.length, 0)
+    );
+    const view = new DataView(bytes.buffer);
+    let offset = 0;
+    for (const field of fields) {
+      view.setBigUint64(offset, BigInt(field.length));
+      bytes.set(field, offset + 8);
+      offset += 8 + field.length;
+    }
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return `${index + 1}:${Array.from(digest.slice(0, 2), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  };
+  const first = await hash(0);
+  return lines.length === 1
+    ? first
+    : `${first}..${await hash(lines.length - 1)}`;
+}
+
+async function rawRead(path: string): Promise<Response> {
+  const url =
+    '/path/' +
+    path.replace(/^\//, '').split('/').map(encodeURIComponent).join('/');
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      cache: 'no-cache',
+      signal: AbortSignal.timeout(15000)
     });
+  } catch {
+    throw new ApiError(
+      'Daemon unavailable. Cached documents and local drafts remain available.'
+    );
+  }
+  if (!response.ok && response.status !== 404) {
+    throw new ApiError(await response.text(), response.status);
+  }
+  return response;
+}
+
+function readRevision(response: Response): string {
+  const etag = response.headers.get('etag');
+  if (!etag)
+    throw new ApiError(
+      'Document response is missing its repository revision.',
+      502
+    );
+  return etag;
+}
+
+export const api = {
+  async page(path: string): Promise<Page> {
+    const response = await rawRead(path);
+    const link = response.headers
+      .get('link')
+      ?.match(/<([^>]+)>;\s*rel="describedby"/)?.[1];
+    const template = link
+      ? decodeURIComponent(
+          new URL(link, 'http://mdstore.invalid').pathname.slice(
+            '/path/'.length
+          )
+        )
+      : null;
+    return {
+      path: path.replace(/^\//, ''),
+      revision: readRevision(response),
+      template: template ? { path: template } : null,
+      exists: response.ok,
+      text: response.ok ? await response.text() : ''
+    };
   },
-  apply(request: EditRequest) {
-    return mcp<{
-      touched_paths: string[];
-      push: 'disabled' | 'pushed' | 'queued' | 'diverged';
-      status: 'accepted' | 'already_applied';
-      restart_required?: boolean;
-    }>('apply_edits', request);
+  async directory(path = '/'): Promise<Directory> {
+    const response = await rawRead(path);
+    if (!response.ok)
+      throw new ApiError(await response.text(), response.status);
+    const text = await response.text();
+    return {
+      path: path === '/' ? '/' : path.replace(/^\//, ''),
+      revision: readRevision(response),
+      children: text
+        .split('\n')
+        .filter(Boolean)
+        .map((path) => ({
+          path: path.replace(/^\//, ''),
+          kind: path.endsWith('/') ? 'directory' : 'file'
+        }))
+    };
+  },
+  async search(query: string, variants: string[] = []) {
+    const response = await mcp<{ results: SearchResult[]; degraded: string[] }>(
+      'search',
+      {
+        query,
+        ...(variants.length ? { variants } : {})
+      }
+    );
+    return {
+      ...response,
+      results: response.results.map((result) => ({
+        path: result.path.replace(/:\d+-\d+$/, '').replace(/^\//, ''),
+        excerpt: result.excerpt.replace(/^\d+:[0-9a-f]{4}\|/gm, '')
+      }))
+    };
+  },
+  async apply(request: EditRequest) {
+    const edits: Record<
+      string,
+      { op: 'replace'; anchor?: string; content: string }[]
+    > = Object.create(null);
+    for (const edit of request.edits) {
+      const operation = {
+        op: 'replace' as const,
+        ...(edit.op !== 'create_page'
+          ? { anchor: await completeAnchor(edit.base) }
+          : {}),
+        content: edit.op === 'delete_page' ? '' : edit.content
+      };
+      (edits[`/${edit.path.replace(/^\//, '')}`] ??= []).push(operation);
+    }
+    return mcp<{ success: true }>('edit', {
+      summary: request.summary,
+      edits
+    });
   }
 };
 export function editRequest(
@@ -129,7 +257,7 @@ export function editRequest(
   deletions: Record<string, string> = {}
 ): EditRequest {
   return {
-    edit_summary: summary,
+    summary: summary,
     edits: [
       ...Object.entries(deletions).map(([path, base]) => ({
         op: 'delete_page' as const,
@@ -140,12 +268,14 @@ export function editRequest(
         .sort((a, b) => a.path.localeCompare(b.path))
         .map((d) =>
           d.exists
-            ? {
-                op: 'replace_page' as const,
-                path: d.path,
-                base: d.base,
-                content: d.text
-              }
+            ? d.text === ''
+              ? { op: 'delete_page' as const, path: d.path, base: d.base }
+              : {
+                  op: 'replace_page' as const,
+                  path: d.path,
+                  base: d.base,
+                  content: d.text
+                }
             : { op: 'create_page' as const, path: d.path, content: d.text }
         )
     ]

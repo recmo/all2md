@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    extract::{Path, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -13,17 +13,22 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tower_http::trace::TraceLayer;
 
-use crate::{ApplyEditsRequest, Store, store::ValidationError};
+use crate::{
+    ApplyEditsRequest, Store,
+    hashline::HashlineEditError,
+    store::{StoreState, ValidationError},
+};
 
 /// Preferred MCP protocol revision.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-/// Older MCP protocol revision accepted for compatibility.
-pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
 fn router(store: Arc<Store>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
+        .route("/path", get(raw_root))
+        .route("/path/", get(raw_root))
+        .route("/path/{*path}", get(raw_path))
         .layer(TraceLayer::new_for_http())
         .with_state(store)
 }
@@ -37,10 +42,7 @@ pub async fn serve(store: Arc<Store>, listen: SocketAddr) -> Result<()> {
 }
 
 /// Serves the daemon on an already-bound socket.
-pub async fn serve_listener(
-    listener: tokio::net::TcpListener,
-    store: Arc<Store>,
-) -> Result<()> {
+pub async fn serve_listener(listener: tokio::net::TcpListener, store: Arc<Store>) -> Result<()> {
     let listen = listener.local_addr().context("inspect listening socket")?;
     tracing::info!(%listen, "mdstore listening");
     let sync = Arc::clone(&store).synchronize();
@@ -73,9 +75,90 @@ async fn health(State(store): State<Arc<Store>>) -> Response {
     }
 }
 
-async fn run_blocking<T>(
-    operation: impl FnOnce() -> Result<T> + Send + 'static,
-) -> Result<T>
+async fn raw_root(State(store): State<Arc<Store>>, headers: HeaderMap) -> Response {
+    raw_document(&store, "/", &headers)
+}
+
+async fn raw_path(
+    State(store): State<Arc<Store>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    raw_document(&store, &path, &headers)
+}
+
+fn raw_document(store: &Store, path: &str, headers: &HeaderMap) -> Response {
+    let state = store.read_state();
+    let result = if path.ends_with('/') {
+        state
+            .get_directory_source(path)
+            .map(|(revision, children)| (revision, Some(rooted_directory(children)), None))
+    } else {
+        state
+            .get_source(path)
+            .map(|source| (source.revision, source.text, source.template))
+    };
+    let (revision, text, template) = match result {
+        Ok(source) => source,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                [(header::CACHE_CONTROL, "no-store")],
+                error.to_string(),
+            )
+                .into_response();
+        }
+    };
+    let etag = format!("\"{revision}\"");
+    let unchanged = text.is_some()
+        && headers.get_all(header::IF_NONE_MATCH).iter().any(|value| {
+            value.to_str().is_ok_and(|value| {
+                value.split(',').any(|tag| {
+                    let tag = tag.trim();
+                    tag == "*" || tag.strip_prefix("W/").unwrap_or(tag) == etag
+                })
+            })
+        });
+    let status = if unchanged {
+        StatusCode::NOT_MODIFIED
+    } else if text.is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    };
+    let body = if unchanged {
+        String::new()
+    } else {
+        text.unwrap_or_default()
+    };
+    let mut response = (status, [(header::CACHE_CONTROL, "no-cache")], body).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).expect("Git object ID"),
+    );
+    if let Some(template) = template {
+        let mut url = reqwest::Url::parse("http://mdstore.invalid/path").expect("static URL");
+        url.path_segments_mut()
+            .expect("hierarchical URL")
+            .extend(template.trim_start_matches('/').split('/'));
+        let link = format!("<{}>; rel=\"describedby\"", url.path());
+        response.headers_mut().insert(
+            header::LINK,
+            HeaderValue::from_str(&link).expect("encoded URL"),
+        );
+    }
+    response
+}
+
+fn rooted_directory(children: Vec<String>) -> String {
+    children
+        .into_iter()
+        .map(|path| format!("/{path}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn run_blocking<T>(operation: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
 where
     T: Send + 'static,
 {
@@ -89,7 +172,7 @@ async fn mcp(State(store): State<Arc<Store>>, headers: HeaderMap, body: Bytes) -
         let Ok(version) = version.to_str() else {
             return StatusCode::BAD_REQUEST.into_response();
         };
-        if !matches!(version, MCP_PROTOCOL_VERSION | LEGACY_MCP_PROTOCOL_VERSION) {
+        if version != MCP_PROTOCOL_VERSION {
             return StatusCode::BAD_REQUEST.into_response();
         }
     }
@@ -130,21 +213,13 @@ async fn mcp(State(store): State<Arc<Store>>, headers: HeaderMap, body: Bytes) -
 }
 
 fn initialize(id: Value, params: &Value) -> Response {
-    let Some(requested) = params.get("protocolVersion").and_then(Value::as_str) else {
+    let Some(_) = params.get("protocolVersion").and_then(Value::as_str) else {
         return rpc_error(id, -32602, "initialize requires protocolVersion");
-    };
-    let negotiated = if matches!(
-        requested,
-        MCP_PROTOCOL_VERSION | LEGACY_MCP_PROTOCOL_VERSION
-    ) {
-        requested
-    } else {
-        MCP_PROTOCOL_VERSION
     };
     rpc_result(
         id,
         json!({
-            "protocolVersion": negotiated,
+            "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "mdstore", "version": env!("CARGO_PKG_VERSION")}
         }),
@@ -154,52 +229,61 @@ fn initialize(id: Value, params: &Value) -> Response {
 #[must_use]
 /// Returns the exact public MCP tool allowlist.
 pub fn tool_names() -> [&'static str; 3] {
-    ["search", "get_page", "apply_edits"]
+    ["search", "read", "edit"]
 }
 
 fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "search",
-            "description": "Hybrid exact, embedding, graph-assisted, and reranked search. Query expansion belongs to the caller.",
+            "description": "Hybrid exact, embedding, graph-assisted, and reranked search. Optional variants supply alternative query formulations. Returns ranked results containing only a repository-rooted /path:start-end and a hashline-anchored excerpt, plus degraded retrieval warnings. Excerpt anchors can be used directly with edit.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "minLength": 1},
                     "variants": {"type": "array", "items": {"type": "string"}}
                 },
-                "required": ["query", "variants"],
+                "required": ["query"],
                 "additionalProperties": false
             }
         }),
         json!({
-            "name": "get_page",
-            "description": "Read a file or directory from the published document tree. Use / for the root or a relative path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return that revision, source hash, hashline anchors and exact source text for full-page reads. Markdown responses include the nearest directory template, its instructions and rules. A proposed Markdown path returns exists=false and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
+            "name": "read",
+            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns a plain-text list of direct child paths, with trailing / for directories. Append ** for all descendants or **/ for descendant directories only (for example /notes/** and /notes/**/). Subtree listings exclude the starting directory and are complete, sorted and deduplicated. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. File reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Pass a non-empty path array for ordered batch reads, with one text block per path. An invalid read rejects the whole batch. Anchors must match at the supplied line number; stale anchors require a fresh read. Directories support plain-text output only. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns a missing-file message and its schema path for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "minLength": 1},
-                    "start_line": {"type": "integer", "minimum": 1},
-                    "end_line": {"type": "integer", "minimum": 1}
+                    "path": {
+                        "description": "Repository-rooted path or non-empty array of paths. Each may end in :LINE or :START-END (one-based, inclusive). Use a trailing / for direct children, /** for all descendants, or /**/ for descendant directories only.",
+                        "oneOf": [
+                            {"type": "string", "minLength": 1},
+                            {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+                        ]
+                    }
                 },
                 "required": ["path"],
                 "additionalProperties": false
             }
         }),
         json!({
-            "name": "apply_edits",
-            "description": "Atomically validate and locally commit an edit batch. Use hashline anchors for partial edits, or replace_page with exact original base text for whole-page edits. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; resolved paths are returned. Git replication runs in the background.",
+            "name": "edit",
+            "description": "Atomically validate and locally commit an edit batch. Supply edits as an object mapping each file path to a non-empty operation array; operations omit path. All anchors refer to the pre-edit snapshot. Use replace with an anchor for a line or inclusive range, with the complete anchor range for a whole existing file, or without an anchor to create a missing file. Use 0: to replace an existing empty file with non-empty content. Empty-to-empty replacement is an error. Empty replacement content deletes the selected lines; deleting the file requires a single complete-file anchor. Use append to insert after an anchor, 0: for file start, or omit anchor for EOF; the file must exist. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "edit_summary": {"type": "string", "minLength": 1},
+                    "summary": {"type": "string", "minLength": 1},
                     "edits": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": {"oneOf": edit_operation_schemas()}
+                        "type": "object",
+                        "minProperties": 1,
+                        "propertyNames": {"minLength": 1},
+                        "additionalProperties": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"oneOf": edit_operation_schemas()}
+                        }
                     }
                 },
-                "required": ["edit_summary", "edits"],
+                "required": ["summary", "edits"],
                 "additionalProperties": false
             }
         }),
@@ -207,48 +291,96 @@ fn tools() -> Vec<Value> {
 }
 
 fn edit_operation_schemas() -> Vec<Value> {
-    let mut schemas: Vec<Value> = [
-        ("replace", true, true),
-        ("insert_before", true, true),
-        ("insert_after", true, true),
-        ("delete", true, false),
-        ("create_page", false, true),
-        ("remove_page", true, false),
-    ]
-    .into_iter()
-    .map(|(operation, anchor, content)| {
-        let mut properties = serde_json::Map::from_iter([
-            ("op".into(), json!({"const": operation})),
-            ("path".into(), json!({"type": "string", "minLength": 1})),
-        ]);
-        let mut required = vec!["op", "path"];
-        if anchor {
-            properties.insert("anchor".into(), json!({"type": "string", "minLength": 2}));
-            required.push("anchor");
-        }
-        if content {
-            properties.insert("content".into(), json!({"type": "string"}));
-            required.push("content");
-        }
+    vec![
         json!({
             "type": "object",
-            "properties": properties,
-            "required": required,
+            "properties": {
+                "op": {"const": "replace"},
+                "anchor": {"type": "string", "description": "LINE:HASH or START:HASH..END:HASH. Use the complete range for whole-file replacement/deletion, 0: for an existing empty file, or omit to create a missing file."},
+                "content": {"type": "string", "description": "Replacement text; empty deletes the selected lines or whole file."}
+            },
+            "required": ["op", "content"],
             "additionalProperties": false
+        }),
+        json!({
+            "type": "object",
+            "properties": {
+                "op": {"const": "append"},
+                "anchor": {"type": "string", "description": "LINE:HASH to insert after; 0: for file start; omit for EOF. File must exist."},
+                "content": {"type": "string", "minLength": 1}
+            },
+            "required": ["op", "content"],
+            "additionalProperties": false
+        }),
+    ]
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum ApplyOperation {
+    Replace {
+        anchor: Option<String>,
+        content: String,
+    },
+    Append {
+        anchor: Option<String>,
+        content: String,
+    },
+}
+
+impl ApplyOperation {
+    fn into_edit(self, path: String) -> crate::EditOperation {
+        match self {
+            Self::Replace { anchor, content } => crate::EditOperation::Replace {
+                path,
+                anchor,
+                content,
+            },
+            Self::Append { anchor, content } => crate::EditOperation::Append {
+                path,
+                anchor,
+                content,
+            },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyArguments {
+    summary: String,
+    edits: std::collections::BTreeMap<String, Vec<ApplyOperation>>,
+}
+
+impl ApplyArguments {
+    fn into_request(self) -> Result<ApplyEditsRequest> {
+        if self.edits.is_empty() {
+            bail!("edits must contain at least one path");
+        }
+        let mut paths = std::collections::BTreeMap::new();
+        for (mut path, operations) in self.edits {
+            strip_root_prefix(&mut path);
+            if path.is_empty() {
+                bail!("edit paths must be non-empty");
+            }
+            if paths.insert(path.clone(), operations).is_some() {
+                bail!("duplicate edit path after normalization: /{path}");
+            }
+        }
+        let mut edits = Vec::new();
+        for (path, operations) in paths {
+            if operations.is_empty() {
+                bail!("edits for /{path} must contain at least one operation");
+            }
+            for operation in operations {
+                edits.push(operation.into_edit(path.clone()));
+            }
+        }
+        Ok(ApplyEditsRequest {
+            summary: self.summary,
+            edits,
         })
-    })
-    .collect();
-    schemas.push(json!({
-        "type": "object",
-        "properties": {"op": {"const": "replace_page"}, "path": {"type": "string"}, "base": {"type": "string"}, "content": {"type": "string"}},
-        "required": ["op", "path", "base", "content"], "additionalProperties": false
-    }));
-    schemas.push(json!({
-        "type": "object",
-        "properties": {"op": {"const": "delete_page"}, "path": {"type": "string"}, "base": {"type": "string"}},
-        "required": ["op", "path", "base"], "additionalProperties": false
-    }));
-    schemas
+    }
 }
 
 #[derive(Deserialize)]
@@ -262,15 +394,127 @@ struct CallParams {
 #[serde(deny_unknown_fields)]
 struct SearchArguments {
     query: String,
+    #[serde(default)]
     variants: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PagePaths {
+    Single(String),
+    Multiple(Vec<String>),
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GetArguments {
-    path: String,
-    start_line: Option<usize>,
-    end_line: Option<usize>,
+    path: PagePaths,
+}
+
+fn split_page_path(path: &str) -> Result<(String, Option<(usize, usize)>)> {
+    let Some((path, range)) = path.rsplit_once(':').filter(|(_, suffix)| {
+        suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-')
+    }) else {
+        return Ok((path.to_owned(), None));
+    };
+    let (start, end) = range.split_once('-').unwrap_or((range, range));
+    let positive_line = |value: &str| {
+        value
+            .parse::<usize>()
+            .ok()
+            .filter(|line| *line > 0)
+            .context("line ranges must use positive integers: :LINE or :START-END")
+    };
+    let (start, end) = (positive_line(start)?, positive_line(end)?);
+    if start > end {
+        bail!("line range start must not exceed its end");
+    }
+    Ok((path.to_owned(), Some((start, end))))
+}
+
+fn read_page(state: &StoreState, path: &str) -> Result<String> {
+    let (mut path, window) = split_page_path(path)?;
+    let subtree = path
+        .strip_suffix("/**/")
+        .map(|base| (format!("{base}/"), true))
+        .or_else(|| {
+            path.strip_suffix("/**")
+                .map(|base| (format!("{base}/"), false))
+        });
+    let directories_only = subtree.as_ref().map(|(_, only)| *only);
+    if let Some((directory, _)) = subtree {
+        path = directory;
+    }
+    if path != "/" {
+        strip_root_prefix(&mut path);
+    }
+    if path.ends_with('/') {
+        if window.is_some() {
+            bail!("line windows are only supported for files");
+        }
+        let children = match directories_only {
+            Some(only) => state.get_subtree(&path, only)?,
+            None => state.get_directory(&path)?,
+        };
+        return Ok(rooted_directory(children));
+    }
+    let page = state.get_page(&path, window)?;
+    let template = page.template.as_deref().unwrap_or("none");
+    let content = page.content.as_deref().unwrap_or("File does not exist.");
+    Ok(format!("Path: /{path}\nSchema: {template}\n\n{content}"))
+}
+
+fn read_pages(store: &Store, arguments: GetArguments) -> Result<Value> {
+    let paths = match arguments.path {
+        PagePaths::Single(path) => vec![path],
+        PagePaths::Multiple(paths) => paths,
+    };
+    if paths.is_empty() {
+        bail!("path arrays must contain at least one path");
+    }
+    let state = store.read_state();
+    let content: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            read_page(&state, path)
+                .map(|text| json!({"type": "text", "text": text}))
+                .map_err(|error| anyhow::anyhow!("read {path:?}: {error}"))
+        })
+        .collect::<Result<_>>()?;
+    Ok(json!(content))
+}
+
+fn strip_root_prefix(path: &mut String) {
+    if path.starts_with('/') {
+        path.remove(0);
+    }
+}
+
+fn error_location(path: &str, line: Option<usize>) -> String {
+    let path = format!("/{}", path.trim_start_matches('/'));
+    match line {
+        Some(line) => format!("{path}:{line}"),
+        None => path,
+    }
+}
+
+fn validation_errors(validation: &ValidationError) -> Vec<Value> {
+    validation
+        .findings
+        .iter()
+        .map(|finding| {
+            let mut error = json!({
+                "location": error_location(&finding.path, finding.line),
+                "message": finding.message,
+            });
+            if let Some(source) = &finding.source {
+                error["schema"] = json!(error_location(&source.path, Some(source.line)));
+            }
+            error
+        })
+        .collect()
 }
 
 async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
@@ -278,64 +522,67 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
         Ok(value) => value,
         Err(error) => return rpc_error(id, -32602, &format!("invalid tool call: {error}")),
     };
+    let plain_page = params.name == "read";
     let result = match params.name.as_str() {
         "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
             Ok(arguments) => store
                 .search(&arguments.query, &arguments.variants)
                 .await
-                .and_then(|value| serde_json::to_value(value).map_err(Into::into)),
+                .and_then(|response| serde_json::to_value(response).map_err(Into::into)),
             Err(error) => Err(error.into()),
         },
-        "get_page" => match serde_json::from_value::<GetArguments>(params.arguments) {
-            Ok(arguments) => {
-                let window = arguments
-                    .start_line
-                    .map(|start| (start, arguments.end_line.unwrap_or(start)));
-                if arguments.path.ends_with('/') {
-                    if arguments.start_line.is_some() || arguments.end_line.is_some() {
-                        Err(anyhow::anyhow!("line windows are only supported for files"))
-                    } else {
-                        store.get_directory(&arguments.path)
-                    }
-                } else {
-                    store.get_page(&arguments.path, window)
-                        .and_then(|value| serde_json::to_value(value).map_err(Into::into))
-                }
-            }
+        "read" => match serde_json::from_value::<GetArguments>(params.arguments) {
+            Ok(arguments) => read_pages(store, arguments),
             Err(error) => Err(error.into()),
         },
-        "apply_edits" => match serde_json::from_value::<ApplyEditsRequest>(params.arguments) {
+        "edit" => match serde_json::from_value::<ApplyArguments>(params.arguments)
+            .map_err(anyhow::Error::from)
+            .and_then(ApplyArguments::into_request)
+        {
             Ok(arguments) => {
                 let blocking_store = Arc::clone(store);
-                match run_blocking(move || blocking_store.apply_edits(&arguments)).await {
-                    Ok(value) => serde_json::to_value(value).map_err(Into::into),
-                    Err(error) => Err(error),
-                }
+                run_blocking(move || blocking_store.apply_edits(&arguments))
+                    .await
+                    .map(|_| json!({"success": true}))
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         },
         _ => return rpc_error(id, -32602, "unknown tool"),
     };
     match result {
-        Ok(value) => rpc_result(
-            id,
-            json!({
-                "content": [{"type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default()}],
-                "structuredContent": value,
-                "isError": false
-            }),
-        ),
+        Ok(value) => {
+            let result = if plain_page {
+                json!({"content": value, "isError": false})
+            } else {
+                json!({"content": [], "structuredContent": value, "isError": false})
+            };
+            rpc_result(id, result)
+        }
         Err(error) => {
-            let findings = error
-                .downcast_ref::<ValidationError>()
-                .map(|validation| validation.findings.clone());
-            let mut result = json!({
+            if params.name == "edit" {
+                let errors = match error.downcast_ref::<ValidationError>() {
+                    Some(validation) => json!(validation_errors(validation)),
+                    None => match error.downcast_ref::<HashlineEditError>() {
+                        Some(edit) => json!([{
+                            "location": error_location(&edit.path, edit.line),
+                            "message": edit.source.to_string(),
+                        }]),
+                        None => json!([{"message": error.to_string()}]),
+                    },
+                };
+                return rpc_result(
+                    id,
+                    json!({
+                        "content": [],
+                        "structuredContent": {"errors": errors},
+                        "isError": true
+                    }),
+                );
+            }
+            let result = json!({
                 "content": [{"type": "text", "text": error.to_string()}],
                 "isError": true
             });
-            if let Some(findings) = findings {
-                result["structuredContent"] = json!({"validation_findings": findings});
-            }
             rpc_result(id, result)
         }
     }

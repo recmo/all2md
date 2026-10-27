@@ -21,17 +21,16 @@ use crate::{
         validate_repo_path,
     },
     git::{self, PushState},
-    hashline::{ChangedRange, EditOperation, apply_operations_with_ranges, render},
+    hashline::{EditOperation, apply_operations, render},
     markdown::{Edge, Finding, ParsedPage, validate_corpus},
     provider::{InputType, RetrievalProvider, ZeroEntropyProvider},
-    search::{PageChunks, SearchIndex, SearchResponse},
+    search::{PageChunks, SearchIndex, SearchResponse, SearchResult},
     sidecar::{self, Sidecar},
 };
 
 /// Daemon-owned coherent view of one Git-backed Markdown repository.
 pub struct Store {
     root: PathBuf,
-    startup_listen: String,
     state: RwLock<Arc<StoreState>>,
     provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     reindex_lock: tokio::sync::Mutex<()>,
@@ -71,7 +70,7 @@ impl fmt::Display for WriteBlock {
 }
 
 #[derive(Clone)]
-struct StoreState {
+pub(crate) struct StoreState {
     head: String,
     templates: Arc<crate::template::Templates>,
     config: Config,
@@ -84,29 +83,13 @@ struct StoreState {
     generation: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
 /// One required-summary atomic edit request.
 pub struct ApplyEditsRequest {
     /// Non-empty Git commit message.
-    pub edit_summary: String,
+    pub summary: String,
     /// Hashline operations resolved against one pre-edit snapshot.
     pub edits: Vec<EditOperation>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-/// Result of accepting or replaying an edit request.
-pub struct ApplyEditsResponse {
-    /// Whether a new commit was accepted or the request was already applied.
-    pub status: ApplyStatus,
-    /// Ordered push state after the request.
-    pub push: PushState,
-    /// Repository-relative paths addressed by the request.
-    pub touched_paths: Vec<String>,
-    /// Current hashline windows for changed regions.
-    pub fresh_hashlines: HashMap<String, String>,
-    /// Listener changes take effect after restarting the daemon.
-    pub restart_required: bool,
 }
 
 #[derive(Debug)]
@@ -127,16 +110,6 @@ impl fmt::Display for ValidationError {
 }
 
 impl Error for ValidationError {}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-/// Idempotency status of an edit request.
-pub enum ApplyStatus {
-    /// A new commit was created.
-    Accepted,
-    /// The exact request was already represented by repository history.
-    AlreadyApplied,
-}
 
 #[derive(Serialize, Deserialize)]
 struct PendingReceipt {
@@ -183,28 +156,25 @@ enum ReindexAction {
 
 const STARTUP_SNAPSHOT_ATTEMPTS: usize = 8;
 
+#[derive(Debug)]
+pub(crate) struct PageSource {
+    pub revision: String,
+    pub template: Option<String>,
+    pub text: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 /// Hashline-rendered page or configuration resource.
 pub struct PageResponse {
-    /// Published Git revision shared by all fields in this response.
-    pub revision: String,
-    /// SHA-256 of exact source, absent for a missing page.
-    pub hash: Option<String>,
-    /// Whether the requested file exists in the published tree.
-    pub exists: bool,
-    /// Applicable directory template, including guidance and hard rules.
-    pub template: Option<serde_json::Value>,
+    /// Governing schema as a repository-rooted path.
+    pub template: Option<String>,
     /// Exact repository-relative path.
     pub path: String,
-    /// Raw Markdown or configuration text with hashline prefixes.
-    pub content: String,
+    /// Markdown or configuration text with hashline prefixes; absent for a missing file.
+    pub content: Option<String>,
     /// Exact source text for full-page reads, absent for line windows.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub text: Option<String>,
-    /// Repository-configured projected frontmatter metadata.
-    pub metadata: serde_json::Value,
-    /// Typed relations authored by this page.
-    pub relations: Vec<Edge>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -343,7 +313,6 @@ impl Store {
         };
         Ok(Arc::new(Self {
             root,
-            startup_listen: snapshot.config.server.listen.clone(),
             state: RwLock::new(Arc::new(snapshot)),
             provider_factory,
             reindex_lock: tokio::sync::Mutex::new(()),
@@ -354,12 +323,6 @@ impl Store {
             sync_notify: tokio::sync::Notify::new(),
             replication: RwLock::new(replication),
         }))
-    }
-
-    #[must_use]
-    /// Returns the canonical repository worktree root.
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     #[must_use]
@@ -374,133 +337,50 @@ impl Store {
         validate_corpus(&state.pages, &state.templates).map(|_| ())
     }
 
-    fn restart_required(&self, config: &Config) -> bool {
-        config.server.listen != self.startup_listen
+    /// Retains one published state without holding the lock during the read.
+    pub(crate) fn read_state(&self) -> Arc<StoreState> {
+        Arc::clone(&self.state.read())
     }
 
-    /// Lists direct children of a directory in the published document tree.
-    /// Root is `/`; other directory paths must end with `/`.
-    pub fn get_directory(&self, path: &str) -> Result<serde_json::Value> {
-        let prefix = if path == "/" {
-            ""
-        } else {
-            let directory = path
-                .strip_suffix('/')
-                .context("directory path must end with /")?;
-            validate_repo_path(directory)?;
-            path
-        };
-        let state = self.state.read();
-        let mut children = std::collections::BTreeMap::new();
-        for (file, text) in state.pages.iter().chain(state.config_files.iter()) {
-            let Some(relative) = file.strip_prefix(prefix) else {
-                continue;
-            };
-            if let Some((directory, _)) = relative.split_once('/') {
-                let child = format!("{prefix}{directory}/");
-                children.insert(
-                    child.clone(),
-                    serde_json::json!({"path": child, "kind": "directory"}),
-                );
-            } else {
-                children.insert(file.clone(), serde_json::json!({"path": file, "kind": "file", "hash": crate::validation::source_hash(text)}));
-            }
-        }
-        if !prefix.is_empty() && children.is_empty() {
-            bail!("directory not found: {path}");
-        }
-        Ok(serde_json::json!({
-            "path": path, "kind": "directory", "revision": state.head,
-            "repository": format!("{:x}", Sha256::digest(self.root.to_string_lossy().as_bytes())),
-            "children": children.into_values().collect::<Vec<_>>(),
-            "allow_template_edits": state.config.server.allow_template_edits,
-            "allow_config_edits": state.config.server.allow_config_edits,
-            "restart_required": self.restart_required(&state.config),
-        }))
-    }
-
-    /// Reads an exact page or configuration resource as hashlines.
-    pub fn get_page(&self, path: &str, window: Option<(usize, usize)>) -> Result<PageResponse> {
-        validate_repo_path(path)?;
-        let state = self.state.read();
-        if let Some(text) = state.pages.get(path) {
-            let page = state.parsed.get(path).context("page was not parsed")?;
-            return Ok(PageResponse {
-                revision: state.head.clone(),
-                hash: Some(crate::validation::source_hash(text)),
-                exists: true,
-                template: state.templates.discovery(path),
-                path: path.into(),
-                content: render(text, window),
-                text: window.is_none().then(|| text.clone()),
-                metadata: page.metadata.clone(),
-                relations: state
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.source == path || edge.target == path)
-                    .cloned()
-                    .collect(),
-            });
-        }
-        if (is_config_resource_path(path) || crate::template::is_template(path))
-            && let Some(text) = state.config_files.get(path)
-        {
-            return Ok(PageResponse {
-                revision: state.head.clone(),
-                hash: Some(crate::validation::source_hash(text)),
-                exists: true,
-                template: None,
-                path: path.into(),
-                content: render(text, window),
-                text: window.is_none().then(|| text.clone()),
-                metadata: serde_json::json!({}),
-                relations: Vec::new(),
-            });
-        }
-        if (path.ends_with(".md")
-            || (crate::config::is_lint_config(path) && state.config.server.allow_config_edits))
-            && (!crate::template::is_template(path) || state.config.server.allow_template_edits)
-        {
-            if !crate::template::is_template(path) && !crate::config::is_lint_config(path) {
-                ensure_paths_match_config(&state.config, [&path.to_owned()])?;
-            }
-            return Ok(PageResponse {
-                revision: state.head.clone(),
-                hash: None,
-                exists: false,
-                template: state.templates.discovery(path),
-                path: path.into(),
-                content: String::new(),
-                text: Some(String::new()),
-                metadata: serde_json::json!({}),
-                relations: Vec::new(),
-            });
-        }
-        bail!("page or configuration resource not found: {path}")
-    }
-
-    /// Searches the published exact, vector, and graph index.
+    /// Searches one published snapshot and returns anchored source excerpts.
     pub async fn search(&self, query: &str, variants: &[String]) -> Result<SearchResponse> {
         if query.trim().is_empty() {
             bail!("query must be non-empty");
         }
-        let (config, index, provider) = {
-            let state = self.state.read();
-            (
-                state.config.clone(),
-                state.index.clone(),
-                state.provider.clone(),
+        let snapshot = self.state.read().clone();
+        let response = snapshot
+            .index
+            .search(
+                &snapshot.config,
+                snapshot.provider.as_ref(),
+                query,
+                variants,
             )
-        };
-        index
-            .search(&config, provider.as_ref(), query, variants)
-            .await
+            .await?;
+        let results = response
+            .results
+            .into_iter()
+            .map(|result| {
+                let text = snapshot
+                    .pages
+                    .get(&result.path)
+                    .context("search result source is missing")?;
+                Ok(SearchResult {
+                    path: format!("/{}:{}-{}", result.path, result.start_line, result.end_line),
+                    excerpt: render(text, Some((result.start_line, result.end_line))),
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(SearchResponse {
+            results,
+            degraded: response.degraded,
+        })
     }
 
     /// Validates and commits one atomic hashline edit batch, then notifies replication.
-    pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<ApplyEditsResponse> {
-        if request.edit_summary.trim().is_empty() {
-            bail!("edit_summary must be non-empty");
+    pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<Vec<String>> {
+        if request.summary.trim().is_empty() {
+            bail!("summary must be non-empty");
         }
         if request.edits.is_empty() {
             bail!("edits must contain at least one operation");
@@ -523,7 +403,9 @@ impl Store {
         let mut existing: std::collections::HashSet<_> = current.pages.keys().cloned().collect();
         // Reserve explicitly named creates too, regardless of their position in the batch.
         for edit in &request.edits {
-            if let EditOperation::CreatePage { path, .. } = edit
+            if let EditOperation::Replace {
+                path, anchor: None, ..
+            } = edit
                 && !path.contains(['{', '}'])
             {
                 existing.insert(path.clone());
@@ -531,7 +413,10 @@ impl Store {
         }
         let mut edits = request.edits.clone();
         for edit in &mut edits {
-            if let EditOperation::CreatePage { path, .. } = edit {
+            if let EditOperation::Replace {
+                path, anchor: None, ..
+            } = edit
+            {
                 *path = current.templates.allocate_path(path, &existing)?;
                 existing.insert(path.clone());
             } else if edit.path().contains(['{', '}']) {
@@ -579,8 +464,8 @@ impl Store {
                 bail!("untracked repository path already exists: {path}");
             }
         }
-        let applied = apply_operations_with_ranges(&originals, &edits)?;
-        let changes = &applied.changes;
+        let applied = apply_operations(&originals, &edits)?;
+        let changes = &applied;
         let mut pages = (*current.pages).clone();
         let mut extra = (*current.config_files).clone();
         for (path, content) in changes {
@@ -605,7 +490,8 @@ impl Store {
                 .context("config.yaml cannot be removed")?,
         )
         .map_err(|error| ValidationError {
-            findings: vec![crate::markdown::Finding { source: None,
+            findings: vec![crate::markdown::Finding {
+                source: None,
                 path: "config.yaml".into(),
                 line: None,
                 message: format!("invalid configuration: {error:#}"),
@@ -678,7 +564,6 @@ impl Store {
             .collect();
         let path_list: Vec<String> = paths.iter().cloned().collect();
         let (preimages, postimages) = edit_images(&originals, changes);
-        let fresh_hashlines = fresh_windows(changes, &applied.changed_ranges);
         if let Err(error) = git::write_changes(&self.root, &ordered) {
             return Err(rollback_failure(&self.root, &path_list, error));
         }
@@ -688,7 +573,6 @@ impl Store {
                 return Err(rollback_failure(&self.root, &path_list, error));
             }
         };
-        let committed = tree.is_some();
         if let Some(tree) = tree {
             let pending = PendingReceipt {
                 base_head: base_head.clone(),
@@ -704,7 +588,7 @@ impl Store {
                 &self.root,
                 &pending.tree,
                 &pending.base_head,
-                &request.edit_summary,
+                &request.summary,
             ) {
                 Ok(commit) => commit,
                 Err(error) => {
@@ -753,23 +637,11 @@ impl Store {
             provider,
             generation: current.generation + 1,
         });
-        let push = self.current_push_state()?;
-        let response = ApplyEditsResponse {
-            restart_required: self.restart_required(&self.state.read().config),
-            status: if committed {
-                ApplyStatus::Accepted
-            } else {
-                ApplyStatus::AlreadyApplied
-            },
-            push,
-            touched_paths: path_list,
-            fresh_hashlines,
-        };
-        self.write_receipt(&digest, &response, &preimages, &postimages)?;
+        self.write_receipt(&digest, &path_list, &preimages, &postimages)?;
         self.remove_pending(&digest)?;
         self.sync_notify.notify_one();
         self.reindex_notify.notify_one();
-        Ok(response)
+        Ok(path_list)
     }
 
     /// Rebuilds every embedding sidecar and the search index.
@@ -1130,7 +1002,7 @@ impl Store {
             .join(format!("{digest}.json"))
     }
 
-    fn read_receipt(&self, digest: &str) -> Result<Option<ApplyEditsResponse>> {
+    fn read_receipt(&self, digest: &str) -> Result<Option<Vec<String>>> {
         let path = self.receipt_path(digest);
         if !path.exists() {
             return Ok(None);
@@ -1145,25 +1017,18 @@ impl Store {
                 )
             }
         }
-        let fresh_hashlines = self.current_hashlines(&stored.touched_paths);
-        Ok(Some(ApplyEditsResponse {
-            restart_required: self.restart_required(&self.state.read().config),
-            status: ApplyStatus::AlreadyApplied,
-            push: self.current_push_state()?,
-            touched_paths: stored.touched_paths,
-            fresh_hashlines,
-        }))
+        Ok(Some(stored.touched_paths))
     }
 
     fn write_receipt(
         &self,
         digest: &str,
-        response: &ApplyEditsResponse,
+        touched_paths: &[String],
         preimages: &Images,
         postimages: &Images,
     ) -> Result<()> {
         let stored = StoredReceipt {
-            touched_paths: response.touched_paths.clone(),
+            touched_paths: touched_paths.to_vec(),
             preimages: preimages.clone(),
             postimages: postimages.clone(),
         };
@@ -1182,7 +1047,7 @@ impl Store {
         Ok(())
     }
 
-    fn recover_pending(&self, digest: &str) -> Result<Option<ApplyEditsResponse>> {
+    fn recover_pending(&self, digest: &str) -> Result<Option<Vec<String>>> {
         let path = self.pending_path(digest);
         if !path.exists() {
             return Ok(None);
@@ -1204,31 +1069,14 @@ impl Store {
                 )
             }
         }
-        let push = self.current_push_state()?;
-        let response = ApplyEditsResponse {
-            restart_required: self.restart_required(&self.state.read().config),
-            status: ApplyStatus::AlreadyApplied,
-            push,
-            fresh_hashlines: self.current_hashlines(&pending.touched_paths),
-            touched_paths: pending.touched_paths,
-        };
-        self.write_receipt(digest, &response, &pending.preimages, &pending.postimages)?;
+        self.write_receipt(
+            digest,
+            &pending.touched_paths,
+            &pending.preimages,
+            &pending.postimages,
+        )?;
         self.remove_pending(digest)?;
-        Ok(Some(response))
-    }
-
-    fn current_hashlines(&self, paths: &[String]) -> HashMap<String, String> {
-        let state = self.state.read();
-        paths
-            .iter()
-            .filter_map(|path| {
-                state
-                    .pages
-                    .get(path)
-                    .or_else(|| state.config_files.get(path))
-                    .map(|text| (path.clone(), render(text, None)))
-            })
-            .collect()
+        Ok(Some(pending.touched_paths))
     }
 
     fn replay_state(&self, preimages: &Images, postimages: &Images) -> Result<ReplayState> {
@@ -1257,17 +1105,6 @@ impl Store {
         } else {
             ReplayState::Partial
         })
-    }
-
-    fn current_push_state(&self) -> Result<PushState> {
-        let push_enabled = self.state.read().config.git.push;
-        if !push_enabled {
-            Ok(PushState::Disabled)
-        } else if git::pending_commits(&self.root)? > 0 {
-            Ok(PushState::Queued)
-        } else {
-            Ok(PushState::Pushed)
-        }
     }
 
     fn current_replication(&self) -> ReplicationStatus {
@@ -1533,50 +1370,6 @@ fn embedding_context(config: &Config, page: &ParsedPage) -> Vec<String> {
         .collect()
 }
 
-fn fresh_windows(
-    changes: &HashMap<String, Option<String>>,
-    changed_ranges: &HashMap<String, Vec<ChangedRange>>,
-) -> HashMap<String, String> {
-    changes
-        .iter()
-        .filter_map(|(path, content)| {
-            let text = content.as_ref()?;
-            let line_count = text.lines().count();
-            if line_count == 0 {
-                return Some((path.clone(), String::new()));
-            }
-            let mut windows: Vec<(usize, usize)> = changed_ranges
-                .get(path)
-                .into_iter()
-                .flatten()
-                .map(|range| {
-                    (
-                        range.start_line.saturating_sub(3).max(1),
-                        (range.end_line + 3).min(line_count),
-                    )
-                })
-                .collect();
-            windows.sort_unstable();
-            let mut merged: Vec<(usize, usize)> = Vec::new();
-            for (start, end) in windows {
-                if let Some((_, previous_end)) = merged.last_mut()
-                    && start <= *previous_end + 1
-                {
-                    *previous_end = (*previous_end).max(end);
-                } else {
-                    merged.push((start, end));
-                }
-            }
-            let rendered = merged
-                .into_iter()
-                .map(|window| render(text, Some(window)))
-                .collect::<Vec<_>>()
-                .join("\n…\n");
-            Some((path.clone(), rendered))
-        })
-        .collect()
-}
-
 fn zeroentropy_provider(config: ProviderConfig) -> Arc<dyn RetrievalProvider> {
     Arc::new(ZeroEntropyProvider::new(config))
 }
@@ -1621,201 +1414,112 @@ fn request_digest(request: &ApplyEditsRequest) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{
-        process::Command,
-        sync::atomic::{AtomicBool, Ordering},
-    };
-
-    use super::*;
-
-    #[test]
-    fn embedding_backoff_grows_with_jitter_and_caps_at_one_hour() {
-        let mut ceiling = 1_000;
-        for _ in 0..64 {
-            let previous = ceiling;
-            let delay = embedding_retry_delay(&mut ceiling);
-            assert!(delay >= Duration::from_millis(previous / 2));
-            assert!(delay <= Duration::from_millis(previous));
-            assert_eq!(ceiling, (previous * 2).min(3_600_000));
-        }
-        assert_eq!(ceiling, 3_600_000);
+impl StoreState {
+    /// Lists direct children of a directory in the published document tree.
+    /// Root is `/`; other directory paths must end with `/`.
+    pub(crate) fn get_directory(&self, path: &str) -> Result<Vec<String>> {
+        self.get_directory_source(path).map(|(_, paths)| paths)
     }
 
-    fn run_git(root: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(root)
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().into()
+    /// Lists all descendants, excluding the starting directory itself.
+    pub(crate) fn get_subtree(&self, path: &str, directories_only: bool) -> Result<Vec<String>> {
+        self.list_directory(path, true, directories_only)
+            .map(|(_, paths)| paths)
     }
 
-    fn config(document: &str) -> String {
-        format!(
-            "documents:\n  include: ['{document}']\nprovider:\n  dimensions: 2\ngit:\n  push: false\n"
-        )
+    pub(crate) fn get_directory_source(&self, path: &str) -> Result<(String, Vec<String>)> {
+        self.list_directory(path, false, false)
     }
 
-    struct AdvancingProvider {
-        root: PathBuf,
-        advanced: AtomicBool,
-    }
-
-    #[async_trait::async_trait]
-    impl RetrievalProvider for AdvancingProvider {
-        async fn embed(&self, _: InputType, _: &[String]) -> Result<Vec<Vec<f32>>> {
-            unreachable!()
-        }
-
-        async fn rerank(
-            &self,
-            _: &str,
-            _: &[String],
-            _: usize,
-        ) -> Result<Vec<crate::provider::RerankResult>> {
-            unreachable!()
-        }
-
-        fn model(&self) -> &str {
-            "advancing"
-        }
-
-        fn dimensions(&self) -> usize {
-            2
-        }
-
-        fn embedding_provider_identity(&self) -> String {
-            if !self.advanced.swap(true, Ordering::SeqCst) {
-                fs::write(self.root.join("config.yaml"), config("new.md")).unwrap();
-                fs::write(self.root.join("new.md"), "new snapshot\n").unwrap();
-                run_git(&self.root, &["add", "config.yaml", "new.md"]);
-                run_git(&self.root, &["commit", "-q", "-m", "new snapshot"]);
-            }
-            "advancing-provider".into()
-        }
-    }
-
-    #[test]
-    fn receipt_images_cover_every_edited_path() {
-        let originals = HashMap::from([
-            ("changed.md".into(), "old".into()),
-            ("removed.md".into(), "removed".into()),
-            ("same.md".into(), "same".into()),
-        ]);
-        let changes = HashMap::from([
-            ("changed.md".into(), Some("new".into())),
-            ("same.md".into(), Some("same".into())),
-            ("created.md".into(), Some("created".into())),
-            ("removed.md".into(), None),
-        ]);
-
-        let (preimages, postimages) = edit_images(&originals, &changes);
-        assert_eq!(
-            preimages,
-            BTreeMap::from([
-                ("changed.md".into(), Some("old".into())),
-                ("created.md".into(), None),
-                ("removed.md".into(), Some("removed".into())),
-                ("same.md".into(), Some("same".into())),
-            ])
-        );
-        assert_eq!(
-            postimages,
-            BTreeMap::from([
-                ("changed.md".into(), Some("new".into())),
-                ("created.md".into(), Some("created".into())),
-                ("removed.md".into(), None),
-                ("same.md".into(), Some("same".into())),
-            ])
-        );
-    }
-
-    #[test]
-    fn startup_snapshot_never_mixes_configuration_and_corpus_commits() {
-        let repository = tempfile::tempdir().unwrap();
-        let root = repository.path();
-        run_git(root, &["init", "-q", "-b", "main"]);
-        run_git(root, &["config", "user.name", "mdstore test"]);
-        run_git(root, &["config", "user.email", "mdstore@example.invalid"]);
-        run_git(root, &["config", "commit.gpgsign", "false"]);
-        fs::write(root.join(".gitignore"), "*.mdstore\n").unwrap();
-        fs::write(root.join("config.yaml"), config("old.md")).unwrap();
-        fs::write(root.join("old.md"), "old snapshot\n").unwrap();
-        run_git(root, &["add", ".gitignore", "config.yaml", "old.md"]);
-        run_git(root, &["commit", "-q", "-m", "old snapshot"]);
-
-        let provider: Arc<dyn RetrievalProvider> = Arc::new(AdvancingProvider {
-            root: root.to_path_buf(),
-            advanced: AtomicBool::new(false),
-        });
-        let store = Store::open_with_provider(root, provider).unwrap();
-        assert_eq!(store.config().documents.include, ["new.md"]);
-        assert!(store.get_page("old.md", None).is_err());
-        assert!(store.get_page("new.md", None).is_ok());
-
-        let before = store.state.read().clone();
-        assert!(Arc::ptr_eq(&before, &store.state.read()));
-        store
-            .apply_edits(&ApplyEditsRequest {
-                edit_summary: "publish coherent snapshot".into(),
-                edits: vec![EditOperation::Replace {
-                    path: "new.md".into(),
-                    anchor: format!("1:{}", crate::short_hash("new snapshot")),
-                    content: "edited snapshot".into(),
-                }],
-            })
-            .unwrap();
-        let after = store.state.read().clone();
-        assert_eq!(after.head, git::head(root).unwrap());
-        assert_ne!(before.head, after.head);
-        assert_eq!(before.pages["new.md"], "new snapshot\n");
-        assert_eq!(after.pages["new.md"], "edited snapshot\n");
-        assert!(Arc::ptr_eq(&before.templates, &after.templates));
-        assert!(Arc::ptr_eq(&before.config_files, &after.config_files));
-    }
-
-    #[test]
-    fn startup_retries_a_failed_superseded_snapshot() {
-        let repository = tempfile::tempdir().unwrap();
-        let root = repository.path();
-        run_git(root, &["init", "-q", "-b", "main"]);
-        run_git(root, &["config", "user.name", "mdstore test"]);
-        run_git(root, &["config", "user.email", "mdstore@example.invalid"]);
-        run_git(root, &["config", "commit.gpgsign", "false"]);
-        fs::write(root.join(".gitignore"), "*.mdstore\n").unwrap();
-        fs::write(root.join("config.yaml"), config("old.md")).unwrap();
-        fs::write(root.join("old.md"), "---\nunterminated\n").unwrap();
-        run_git(root, &["add", ".gitignore", "config.yaml", "old.md"]);
-        run_git(root, &["commit", "-q", "-m", "invalid old snapshot"]);
-
-        let (root, git_dir) = Store::prepare_repository(root).unwrap();
-        let provider: Arc<dyn RetrievalProvider> = Arc::new(AdvancingProvider {
-            root: root.clone(),
-            advanced: AtomicBool::new(true),
-        });
-        let mut advanced = false;
-        let store =
-            Store::open_stable_with(&root, &git_dir, Some(&provider), |root, _captured_head| {
-                if !advanced {
-                    fs::write(root.join("config.yaml"), config("new.md")).unwrap();
-                    fs::write(root.join("new.md"), "new snapshot\n").unwrap();
-                    run_git(root, &["add", "config.yaml", "new.md"]);
-                    run_git(root, &["commit", "-q", "-m", "valid new snapshot"]);
-                    advanced = true;
+    fn list_directory(
+        &self,
+        path: &str,
+        recursive: bool,
+        directories_only: bool,
+    ) -> Result<(String, Vec<String>)> {
+        let prefix = if path == "/" {
+            ""
+        } else {
+            let directory = path
+                .strip_suffix('/')
+                .context("directory path must end with /")?;
+            validate_repo_path(directory)?;
+            path
+        };
+        let mut children = std::collections::BTreeSet::new();
+        let mut found = prefix.is_empty();
+        for file in self.pages.keys().chain(self.config_files.keys()) {
+            let Some(relative) = file.strip_prefix(prefix) else {
+                continue;
+            };
+            found = true;
+            if recursive {
+                for (index, _) in relative.match_indices('/') {
+                    children.insert(format!("{prefix}{}", &relative[..=index]));
                 }
-            })
-            .unwrap();
+                if !directories_only {
+                    children.insert(file.clone());
+                }
+            } else {
+                let child = relative.split_once('/').map_or_else(
+                    || file.clone(),
+                    |(directory, _)| format!("{prefix}{directory}/"),
+                );
+                children.insert(child);
+            }
+        }
+        if !found {
+            bail!("directory not found: {path}");
+        }
+        Ok((self.head.clone(), children.into_iter().collect()))
+    }
 
-        assert!(advanced);
-        assert_eq!(store.config().documents.include, ["new.md"]);
-        assert!(store.get_page("old.md", None).is_err());
-        assert!(store.get_page("new.md", None).is_ok());
+    /// Reads an exact page or configuration resource as hashlines.
+    pub(crate) fn get_page(
+        &self,
+        path: &str,
+        window: Option<(usize, usize)>,
+    ) -> Result<PageResponse> {
+        let source = self.get_source(path)?;
+        Ok(PageResponse {
+            template: source.template,
+            path: path.into(),
+            content: source.text.as_ref().map(|text| render(text, window)),
+            text: if window.is_none() { source.text } else { None },
+        })
+    }
+
+    pub(crate) fn get_source(&self, path: &str) -> Result<PageSource> {
+        validate_repo_path(path)?;
+        if let Some(text) = self.pages.get(path) {
+            return Ok(PageSource {
+                revision: self.head.clone(),
+                template: self.templates.template_path(path),
+                text: Some(text.clone()),
+            });
+        }
+        if (is_config_resource_path(path) || crate::template::is_template(path))
+            && let Some(text) = self.config_files.get(path)
+        {
+            return Ok(PageSource {
+                revision: self.head.clone(),
+                template: None,
+                text: Some(text.clone()),
+            });
+        }
+        if (path.ends_with(".md")
+            || (crate::config::is_lint_config(path) && self.config.server.allow_config_edits))
+            && (!crate::template::is_template(path) || self.config.server.allow_template_edits)
+        {
+            if !crate::template::is_template(path) && !crate::config::is_lint_config(path) {
+                ensure_paths_match_config(&self.config, [&path.to_owned()])?;
+            }
+            return Ok(PageSource {
+                revision: self.head.clone(),
+                template: self.templates.template_path(path),
+                text: None,
+            });
+        }
+        bail!("page or configuration resource not found: {path}")
     }
 }

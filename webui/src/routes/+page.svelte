@@ -12,6 +12,8 @@
   import { readInventory } from '$lib/workspace/inventory';
   import { buildSnapshot } from '$lib/validation/localValidation';
   import { onMount, tick } from 'svelte';
+  import { parse as parseYaml } from 'yaml';
+  import { pushState, replaceState } from '$app/navigation';
   import { navigationDrawer } from '$lib/navigation/navigationDrawer';
   let mobile = $state(false);
   let drawerOpen = $state(false);
@@ -48,12 +50,23 @@
   import ConnectionSettings from '$lib/workspace/ConnectionSettings.svelte';
   import WorkspaceNavigation from '$lib/navigation/WorkspaceNavigation.svelte';
   let view = $state<'document' | 'search' | 'settings' | 'submit'>('document');
-  function navigate(next: 'search' | 'settings' | 'submit') {
+  type HistoryMode = 'push' | 'replace' | 'none';
+  let routeHash: string | undefined;
+  function updateLocation(hash: string, mode: HistoryMode = 'push') {
+    routeHash = mode === 'none' ? location.hash : hash;
+    if (mode === 'none' || location.hash === hash) return;
+    if (mode === 'replace') replaceState(hash, {});
+    else pushState(hash, {});
+  }
+  function navigate(
+    next: 'search' | 'settings' | 'submit',
+    historyMode: HistoryMode = 'push'
+  ) {
     closeDrawer();
     ++readVersion;
     view = next;
     showCreate = false;
-    history.replaceState(null, '', '#@' + next);
+    updateLocation('#@' + next, historyMode);
     if (next === 'submit' && online) void run(syncDrafts);
   }
   import {
@@ -230,14 +243,14 @@
   let baselineVersion = 0;
   async function refreshValidationSnapshot() {
     const version = ++baselineVersion;
+    const repository = cache.repository;
     const inventory = await readInventory(api, cache.pages);
-    if (inventory.root.repository !== cache.repository)
-      throw Error('Repository changed. Reconnect before validating.');
     const snapshot =
-      cache.validationSnapshot?.revision === inventory.root.revision
+      cache.validationSnapshot?.revision === inventory.revision &&
+      cache.validationSnapshot.property_schemas
         ? cache.validationSnapshot
         : await buildSnapshot(
-            inventory.root.revision,
+            inventory.revision,
             Object.fromEntries(
               Object.entries(inventory.pages).map(([path, page]) => [
                 path,
@@ -245,13 +258,8 @@
               ])
             )
           );
-    if (
-      version !== baselineVersion ||
-      inventory.root.repository !== cache.repository
-    )
-      return;
-    allowTemplateEdits = inventory.root.allow_template_edits;
-    allowConfigEdits = inventory.root.allow_config_edits;
+    if (version !== baselineVersion || repository !== cache.repository) return;
+    updatePermissions(inventory.pages['config.yaml']?.text ?? '');
     cache = {
       ...cache,
       allowTemplateEdits,
@@ -378,36 +386,34 @@
       busy = false;
     }
   }
-  async function refresh() {
-    const listing = await api.directory();
-    allowTemplateEdits = listing.allow_template_edits === true;
-    allowConfigEdits = listing.allow_config_edits === true;
-    const changed = cache.repository !== listing.repository;
-    if (changed) {
-      cache = await restoreCache(listing.repository);
-
+  function updatePermissions(source: string) {
+    const server = parseYaml(source)?.server;
+    allowTemplateEdits = server?.allow_template_edits === true;
+    allowConfigEdits = server?.allow_config_edits === true;
+  }
+  async function refresh(restoreSelection = true) {
+    await api.directory();
+    updatePermissions((await api.page('config.yaml')).text);
+    if (!cache.repository) {
+      cache = await restoreCache(location.origin);
       validated = '';
     }
-    cache = {
-      ...cache,
-      allowTemplateEdits,
-      allowConfigEdits
-    };
+    cache = { ...cache, allowTemplateEdits, allowConfigEdits };
     online = true;
     await syncDrafts();
-    if (view === 'document' && !current && cache.selected)
-      await openPage(cache.selected);
+    if (restoreSelection && view === 'document' && !current && cache.selected)
+      await openPage(cache.selected, 'replace');
   }
-  async function openPage(path: string) {
-    if (busy) return;
+  async function openPage(path: string, historyMode: HistoryMode = 'push') {
+    if (busy && historyMode !== 'none') return;
     if (path in (cache.deletions || {})) {
-      navigate('submit');
+      navigate('submit', historyMode === 'none' ? 'replace' : historyMode);
       return;
     }
     const version = ++readVersion;
     const draft = cache.drafts[path];
     const cached = draft || cache.pages[path];
-    if (cached) select(cached);
+    if (cached) select(cached, historyMode);
     if (!online) {
       if (!cached)
         throw Error(
@@ -425,7 +431,7 @@
           'This document has overlapping server changes. Resolve them in Submit.',
           true
         );
-      else if (!cache.drafts[path]) select(page);
+      else if (!cache.drafts[path]) select(page, historyMode);
     } catch (e) {
       if (!cached) throw e;
       failure(e);
@@ -440,7 +446,7 @@
     await tick();
     codeEditor?.revealLine(line);
   }
-  function select(page: Page) {
+  function select(page: Page, historyMode: HistoryMode = 'push') {
     closeDrawer();
     view = 'document';
     if (
@@ -456,7 +462,26 @@
         : { ...cache.pages, [page.path]: page }
     };
     persist();
-    history.replaceState(null, '', `#${encodeURIComponent(page.path)}`);
+    updateLocation(`#${encodeURIComponent(page.path)}`, historyMode);
+  }
+  async function restoreLocation() {
+    const target = decodeURIComponent(location.hash.slice(1));
+    closeDrawer();
+    showCreate = false;
+    ++readVersion;
+    if (
+      target === '@search' ||
+      target === '@settings' ||
+      target === '@submit'
+    ) {
+      navigate(target.slice(1) as 'search' | 'settings' | 'submit', 'none');
+    } else if (target) {
+      await openPage(target, 'none');
+    } else {
+      view = 'document';
+      cache = { ...cache, selected: '' };
+      persist();
+    }
   }
   function edit(text: string) {
     if (
@@ -628,10 +653,10 @@
           : 'Server changes merged. Review the updated diff while validation runs, then submit again.';
         return;
       }
-      const request = { ...batch, edit_summary: cache.summary.trim() };
-      // apply_edits validates the entire batch against the current repository
+      const request = { ...batch, summary: cache.summary.trim() };
+      // edit validates the entire batch against the current repository
       // and commits it atomically; local validation is only the preview.
-      const result = await api.apply(request);
+      await api.apply(request);
       const pages = { ...cache.pages };
       const remainingPaths = new Set(cache.paths);
       for (const edit of request.edits) {
@@ -661,19 +686,7 @@
       findings = [];
       validated = '';
       persist();
-      submitNotice =
-        (result.status === 'already_applied'
-          ? 'This change set was already submitted.'
-          : 'Changes committed successfully.') +
-        ({
-          disabled: ' Remote push is disabled.',
-          pushed: ' Pushed to the remote.',
-          queued: ' Remote push is queued.',
-          diverged: ' Remote push is blocked by diverged history.'
-        }[result.push] || '') +
-        (result.restart_required
-          ? ' Restart the daemon to apply listener changes.'
-          : '');
+      submitNotice = 'Changes committed successfully.';
       try {
         await refresh();
       } catch (error) {
@@ -835,8 +848,8 @@
     if (cache !== original)
       throw Error('Workspace changed while preparing the move. Try again.');
     cache = next;
-    if (current) {
-      history.replaceState(null, '', `#${encodeURIComponent(cache.selected)}`);
+    if (current && view === 'document') {
+      updateLocation(`#${encodeURIComponent(cache.selected)}`, 'replace');
     }
     results = null;
   }
@@ -914,7 +927,7 @@
   }
   function follow(href: string) {
     if (!href || href.startsWith('#') || !current) return;
-    if (/^(https?:|mailto:)/i.test(href)) {
+    if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href)) {
       window.open(href, '_blank', 'noopener,noreferrer');
       return;
     }
@@ -954,6 +967,7 @@
     window.addEventListener('offline', offline);
     window.addEventListener('online', connect);
     window.addEventListener('beforeunload', unload);
+    const requestedHash = location.hash;
     const requestedPath = location.hash
       ? decodeURIComponent(location.hash.slice(1))
       : cache.selected;
@@ -968,18 +982,30 @@
       allowTemplateEdits = cache.allowTemplateEdits === true;
       allowConfigEdits = cache.allowConfigEdits === true;
       try {
-        await refresh();
+        await refresh(false);
       } catch (e) {
         failure(e);
       }
+      // Startup must not reopen the original route after Back or another visit.
+      if (location.hash !== requestedHash) return;
       const path = requestedPath || cache.selected;
-      if (view === 'document' && path) await openPage(path);
+      if (view === 'document' && path) await openPage(path, 'replace');
+      routeHash = location.hash;
     });
+    const restoreHistory = () => {
+      if (routeHash === location.hash) return;
+      routeHash = location.hash;
+      void run(restoreLocation);
+    };
+    window.addEventListener('popstate', restoreHistory);
+    window.addEventListener('hashchange', restoreHistory);
     return () => {
       disposeValidation();
       window.removeEventListener('offline', offline);
       window.removeEventListener('online', connect);
       window.removeEventListener('beforeunload', unload);
+      window.removeEventListener('popstate', restoreHistory);
+      window.removeEventListener('hashchange', restoreHistory);
     };
   });
 </script>
@@ -1320,7 +1346,12 @@
     <section class="document-workspace" aria-label="Document">
       <header class="document-header">
         {@render sidebarToggle()}
-        <nav id="path" class="document-breadcrumb" aria-label="Document path">
+        <nav
+          id="path"
+          class="document-breadcrumb"
+          aria-label="Document path"
+          title={current?.path}
+        >
           {#if current}
             {#each current.path.split('/') as part, index}
               {#if index > 0}<span class="path-separator" aria-hidden="true"
@@ -1340,7 +1371,7 @@
               <a
                 class="governing-template"
                 href={`#${encodeURIComponent(current.template.path)}`}
-                title="Governing template"
+                title={`Governing template: ${current.template.path}`}
                 onclick={(event) => {
                   event.preventDefault();
                   void run(() => openPage(current!.template!.path));
@@ -1481,7 +1512,13 @@
                   use:renderedLinks
                   use:markdownView={{
                     text: current.text,
-                    schema: current.template?.definition?.frontmatter
+                    paths: paths.filter((path) => !path.endsWith('/')),
+                    sourcePath: current.path,
+                    schema: current.template
+                      ? cache.validationSnapshot?.property_schemas?.[
+                          current.template.path
+                        ]
+                      : undefined
                   }}
                 ></article>
               {/if}

@@ -149,9 +149,6 @@ export function cachedSearch(cache: Cache, query: string): SearchResult[] {
     )
     .map((p) => ({
       path: p.path,
-      excerpt: p.text.slice(0, 200),
-      matched_arms: ['offline text'],
-      start_line: 1,
-      end_line: p.text.split('\n').length
+      excerpt: p.text.slice(0, 200)
     }));
 }

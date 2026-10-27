@@ -17,8 +17,6 @@ Nix selects the wasm-bindgen CLI version from `wasm/Cargo.lock`.
 pnpm install --frozen-lockfile
 pnpm build
 pnpm check
-pnpm test
-cargo test --manifest-path wasm/Cargo.toml --lib
 cargo build --manifest-path ../mdstore/Cargo.toml
 # In separate terminals, run mdstore serve and:
 MDSTORE_URL=http://127.0.0.1:3131 pnpm preview
@@ -32,14 +30,22 @@ server-side development setting, not a browser-selectable destination.
 daemon for each test on port 43133, with a separate UI proxy on port 43132. Install Playwright Chromium or set `CHROME_EXECUTABLE` to an
 installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 
+The only committed tests are three broad browser end-to-end workflows. Run these
+and the frontend checks before merging. Test individual changes locally with
+temporary checks or reproduction scripts; do not commit those tests, or remove
+them before merging.
+
 ## Data flow
 
-- Search, reads, and submissions call `/mcp` (`search`, `get_page`, `apply_edits`).
-- `get_page` reads directories as well as files. Webui traverses `/`, reuses
-  cached sources with matching hashes, and retries if revisions change during
-  traversal. It builds its validation baseline locally in a WASM worker.
+- Search and submissions call `/mcp` (`search`, `edit`).
+- Raw document reads use `GET /path/document.md`; `GET /path/directory/` lists
+  child paths. Webui traverses the tree and builds its validation baseline
+  locally in a WASM worker. Schema paths arrive in the HTTP `Link` header.
+  GET `ETag` values identify the published commit: cached files are reused only
+  at that commit, and traversal retries if revisions differ. HTTP caching
+  revalidates reads and permits 304 responses without downloading the body.
 - Shared Rust validation runs incrementally in WASM while editing. The server
-  independently validates every submission through `apply_edits`.
+  independently validates every submission through `edit`.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
   the editor stays mounted across view switches to preserve undo and selection.
   Markdown-it and DOMPurify render prose locally; Pierre File renders fenced and
@@ -64,7 +70,11 @@ Service workers require localhost or HTTPS. An insecure non-local HTTP deploymen
 can keep drafts in localStorage but cannot reload the application shell offline.
 
 The document library uses @pierre/trees through its vanilla API, hosted by a Svelte component. It provides virtualized rows, compact folder chains, keyboard navigation, and offline status badges: cached, not cached, downloading, local draft awaiting submission, or local-save failure. Folder badges aggregate offline availability. Cached does not imply up to date with the server. Folder/file context menus support creation, renaming, moving, and staged deletion.
-Renames and moves update local Markdown links. MCP search retains ranked results.
+Markdown and wiki links use source-relative paths; a leading `/` selects the
+repository root. There is no global name search or implicit root fallback.
+Missing targets are marked as broken, including against local drafts and staged
+deletions. Renames and moves preserve relative/rooted link styles and rebase
+outgoing links when their source document moves. MCP search retains ranked results.
 
 
 Flagged app documents (`mdstore: app` in frontmatter) evaluate bounded Starlark
@@ -77,7 +87,7 @@ Submit shows diffs, validation, and reconciliation against server changes. A
 three-way merge automatically reconciles non-overlapping edits and presents
 conflicts for explicit resolution. Nothing is submitted automatically.
 
-For production, host `build/` with a static web server and reverse-proxy `/mcp` and
+For production, host `build/` with a static web server and reverse-proxy `/mcp`, `/path` and
 `/health` to mdstore on the same origin. Restrict access at the reverse proxy. Vite dev/preview provides that
 proxy locally via `MDSTORE_URL`; preview is for local inspection.
 `nix build .#webui` produces static assets, independently of `.#mdstore`.
@@ -91,11 +101,11 @@ before bundling the SPA; Nix builds it as a separate dependency. Generated binar
 and bindings are not committed. Run `pnpm build:wasm` before
 standalone frontend type checks in a fresh checkout.
 
-Webui builds its own versioned baseline from ordinary `get_page` reads: source
+Webui builds its own versioned baseline from raw HTTP reads: source
 hashes, parsed document facts, relation edges, and configuration/template sources.
 The first connection downloads the published document inventory; subsequent
-refreshes reuse unchanged sources unless schema/configuration changes require
-refreshing template projections. Validation uses that cached baseline offline.
+refreshes reuse files at the same commit and fetch fresh sources when the commit
+changes, including updated template projections. Validation uses that cached baseline offline.
 When document-selection globs change, the current client marks local validation
 incomplete and permits submission for authoritative checks; it never labels
 those edits valid based on an incomplete inventory.

@@ -20,12 +20,12 @@ The daemon serves document APIs; it does not host a UI or interpret app definiti
 Use MCP directly or run the separate [web interface](../webui/README.md).
 `cargo build --manifest-path mdstore/Cargo.toml` needs only Rust dependencies.
 
-
 ## Repository configuration
 
 Every served repository tracks a root `config.yaml` with operational settings
 only. Document rules belong exclusively in directory templates. Both kinds of
-configuration are readable but cannot be changed through `apply_edits`.
+configuration are readable. Editing is disabled by default; enable
+`server.allow_config_edits` or `server.allow_template_edits` as appropriate.
 
 ```yaml
 documents:
@@ -106,8 +106,8 @@ Starlark callback validation remain separate from Markdown linting.
 Place `schema.md` beside the documents it governs. The nearest ancestor
 template applies recursively and replaces its parent. Use directories such as
 `tasks/v1/` and `tasks/v2/` for incompatible formats; no version registry is needed.
-Templates are readable through `get_page`, protected from `apply_edits`, and
-excluded from search and embeddings.
+Templates are readable through `read` and excluded from search and embeddings.
+Editing them requires `server.allow_template_edits`.
 
 Markdown supplies instructions and examples. Only top-level fences labelled
 exactly `starlark` execute; their contents form one module in document order.
@@ -132,6 +132,15 @@ Declarations register rules checked by Rust:
 | `relation(name, selector, reciprocal=None)` | Select authored links or frontmatter arrays; reciprocal facts must be authored in the same batch. |
 | `structure(level=None, order="unrestricted", additional_sections=True)` | Set root heading policy before declaring sections. |
 | `preamble(**rules)` | Constrain content before the declared sections. |
+
+Markdown and wiki link paths resolve relative to the source document's directory.
+A leading `/` selects the repository root: `[[meeting]]` in `work/page.md` means
+`work/meeting.md`, while `[[/meeting]]` means `meeting.md` at the root. Use `../`
+for parent directories; paths cannot escape the repository. The `.md` extension
+is optional, and wiki labels/fragments remain supported (`[[/work/meeting#Notes|Notes]]`).
+There is no repository-wide short-name search or implicit root fallback. Missing
+destinations are broken links. Frontmatter relation fields continue to store
+repository paths such as `tasks/v1/2026/09/task.md`.
 
 Section rules include `required`, `nonempty`, `include_subsections`, and `content`
 (`paragraphs`, `list`, `table`, `code`, `blockquotes`, `empty`, or `dated_list()`).
@@ -170,19 +179,26 @@ Under the repository lock, allocation chooses the greatest current serial in
 minimum width, capped at 12. Deleting the highest serial permits reuse. Unknown
 or repeated placeholders and placeholders on other edit operations are rejected.
 Allocation changes only the path, and retries consult durable receipts first.
-Resolved paths are returned in `touched_paths` and `fresh_hashlines`.
+Read the parent directory after a successful edit to discover allocated paths.
 
-`get_page` returns `template: {path, definition, content}`, also for proposed paths
-with `exists: false`. The definition contains declared rules; content is the
-original Markdown. Template updates are authored externally and activated through
-validated Git synchronization.
+`read` returns the governing schema path in `template`, also for proposed
+paths with `content: null`. Read that path separately for its rules and original
+Markdown. Template updates use permission-enabled `edit` requests or validated
+Git synchronization.
 
 ## Local durability and background Git synchronization
 
 An accepted edit is committed locally before it returns. It never waits for a
-network request, including when retrying an already-applied batch. The response's
-`push` state describes current replication, not edit success. Embedding rebuilds
-and Git synchronization are independent background activities.
+network request, including when retrying an already-applied batch. The MCP
+`edit` response contains only `{"success": true}` or `{"errors": [...]}`.
+Validation and edit-engine errors carry a message and a repository-rooted
+`location` such as `/notes/page.md:5`. Stale anchors identify the exact failed
+line, including a failed range endpoint. Without a line number, the location is
+just `/notes/page.md`. Request-level errors without a known file omit `location`.
+An optional `schema` uses the same `/schema.md:12` syntax for the governing rule.
+Absent schema locations are omitted; there is no separate `line` field. Results
+use `structuredContent` without a duplicate text copy; failures set `isError: true`. Embedding rebuilds and Git synchronization are independent
+background activities.
 
 With `git.push: true`, the running daemon synchronizes at startup, after edits,
 and every 30 seconds while healthy. Failures retry with exponential backoff from
@@ -223,44 +239,129 @@ mdstore --root /path/to/brain serve
 ```
 
 The daemon exposes `/mcp` for document operations and `/health` for operational
-status. `get_page` accepts `/` or a directory path ending in `/` to list direct
-children of the published document tree. Directory reads include permissions,
-repository identity, and the Git revision; file reads include the same revision
-and an exact source hash. Empty directories are not persisted by Git.
-Clients can traverse directories and check revisions to obtain a consistent
-inventory. Client-specific caches, validation baselines, and previews are built
-by clients. `apply_edits` always validates changes before committing.
+status. `read` accepts `/` or a directory path ending in `/` to list direct
+children of the published document tree. Use `/notes/**` for all descendants
+(files and directories), or `/notes/**/` for descendant directories only; root
+forms are `/**` and `/**/`. Subtree listings exclude the starting directory,
+are sorted and deduplicated, and return the complete listing without truncation.
+These paths also work in batch reads. Directory reads return only newline-
+separated paths, with trailing `/` for directories. No hashes, revision,
+repository ID or configuration flags are included. File reads return
+plain text containing the path, schema path and hashline content. Returned paths
+start with `/` and are rooted at the repository root. Reads and edits accept paths
+with or without the leading `/`. Empty directories are not persisted by Git. Clients traverse directory lists and read
+sources to build inventories, content fingerprints, validation baselines and
+previews locally. The web editor reads edit permissions from `config.yaml`.
+`edit` always validates changes before committing.
 
-An edit request uses `LINE:HASH` anchors returned by `get_page`. Hashes are
-32 hexadecimal characters (128 bits of SHA-256) and include trailing whitespace:
+`search` requires `query` and accepts optional `variants` (default `[]`). Each
+ranked result contains only `path` in `/path:start-end` form and `excerpt` with
+four-character neighbor-based hashline anchors, ready for use with `edit`.
+Anchors use the same published source snapshot as retrieval, including neighbors
+outside the excerpt. Results omit metadata, heading breadcrumbs, scores,
+retrieval-arm details and vector coverage. Top-level `degraded` warnings report
+retrieval failures. The editor displays ordinary excerpt text and opens the
+underlying file path.
+
+The MCP endpoint supports protocol version `2025-06-18`. Older `2025-03-26`
+requests are no longer accepted; initialization advertises the supported
+version.
+
+An edit request uses `LINE:HASH` anchors returned by `read`. Hashes are four
+hexadecimal characters (16 bits of SHA-256). Each hash covers the line and its
+immediate previous and next lines, with length-prefixed fields and empty strings
+for missing neighbors. Trailing whitespace is significant. The numbered line
+must match: stale anchors fail without relocation or merging. All operations in
+a batch validate against the same pre-edit snapshot.
+
+`edit` groups operations by path; individual operations have no `path`:
 
 ```json
 {
-  "edit_summary": "Link Alice and Bob",
-  "edits": [
-    {
-      "op": "insert_after",
-      "path": "people/alice.md",
-      "anchor": "12:89f234b172385da91ba4cb0c4a7d3abf",
-      "content": "- [Bob](bob.md)"
-    },
-    {
-      "op": "insert_after",
-      "path": "people/bob.md",
-      "anchor": "9:ce55a9a1d046372186e540e350b2d975",
-      "content": "- [Alice](alice.md)"
-    }
-  ]
+  "summary": "Update notes",
+  "edits": {
+    "/notes/example.md": [
+      {"op": "replace", "anchor": "10:abcd", "content": "Updated paragraph."},
+      {"op": "append", "anchor": "20:1234", "content": "Another paragraph."}
+    ]
+  }
 }
 ```
 
-All anchors in a request resolve against the same pre-edit snapshot. Stale,
-ambiguous, or overlapping edits fail before any worktree file changes.
+The path map and every operation array must be non-empty. Paths accept an
+optional leading `/`, but aliases such as `/notes/a.md` and `notes/a.md` in the
+same request are rejected. The whole request remains atomic across files.
+The former flat operation array is not accepted.
+
+Only `replace` and `append` are accepted:
+
+- `replace` with `anchor` replaces an inclusive line/range. Empty `content`
+  deletes those lines. Deleting a file requires a single operation whose anchor
+  covers its complete contents; multiple partial deletions cannot delete it.
+- `replace` without `anchor` creates a missing file. An existing file or empty
+  creation content is rejected. To replace a whole existing file, supply its
+  complete anchor range; for an existing empty file use `0:` with non-empty
+  content. Replacing empty with empty is an error. Whole-file replacement
+  preserves the supplied content exactly, including line endings.
+- `append` inserts non-empty `content` after an anchor. Omit `anchor` for EOF,
+  or use `0:` for the start of the file. The file must already exist.
+
+`base` is not accepted. `summary` is required and must be non-empty.
+
+`read` returns page content once as a plain-text MCP content block, with a
+path/schema header and hashline prefixes. Append `:10` to read one line or
+`:10-20` to read an inclusive line range. The only request argument is `path`;
+separate line-number arguments and `format` are not accepted. Searches and edit
+results use `structuredContent` with an empty `content` array. No response
+includes a serialized JSON copy for older clients. File reads omit revision,
+file hash, existence flags, derived metadata and relations. Read the schema path
+separately for its instructions and rules.
+
+`path` also accepts a non-empty array, for example `{"path": ["/alice.md",
+"/bob.md:10-20"]}`. Results preserve input order, including repeated paths, with
+one text block per path, including plain directory lists. All paths in a batch
+use the same published state, even if a concurrent edit commits during rendering.
+An invalid read rejects the complete batch; a missing Markdown page returns a missing-page
+message and the applicable schema path.
+
+For browser clients, `GET /path/alice.md` returns exact source as
+`text/plain; charset=utf-8`, preserving line endings without JSON escaping or
+hashline prefixes. `GET /path/notes/` returns direct child paths, one per line,
+with trailing `/` for directories; `GET /path/` lists the root. These endpoints
+read the published document tree, including configuration and schemas. A missing
+file returns HTTP 404 and an empty body; an existing empty file returns HTTP 200.
+An applicable schema is identified by `Link: </path/schema.md>; rel="describedby"`,
+including for a missing file. GET responses carry the published Git commit hash
+as their `ETag`, captured with the body from the same snapshot. They use
+`Cache-Control: no-cache`; a matching `If-None-Match` on an existing file or
+directory returns HTTP 304 without a body. Any commit invalidates the cache key,
+including schema and configuration changes. The web editor reuses files at the
+same commit and retries an inventory read if any response belongs to a different
+commit. It compiles property schemas locally from these sources. Edits still
+require hashline anchors. MCP response bodies do not include the GET cache key.
+
+Example edit:
+
+```json
+{
+  "summary": "Link Alice and Bob",
+  "edits": {
+    "/people/alice.md": [
+      {"op": "append", "anchor": "12:89f2", "content": "- [Bob](bob.md)"}
+    ],
+    "/people/bob.md": [
+      {"op": "append", "anchor": "9:ce55", "content": "- [Alice](alice.md)"}
+    ]
+  }
+}
+```
+
+All anchors in a request resolve against the same pre-edit snapshot. Stale
+or overlapping edits fail before any worktree file changes.
 
 The MCP endpoint is `/mcp`; health and indexing coverage are available from
 `/health`. Access control belongs to the deployment firewall or reverse proxy.
-Startup reuses valid sidecars and rebuilds only missing or stale vectors; the explicit `reindex` command forces a
-complete rebuild.
+Startup reuses valid sidecars and rebuilds missing, stale or invalid ones.
 
 ### Editing templates and configuration through the API
 
@@ -274,12 +375,12 @@ server:
 ```
 
 These permissions apply to every caller that can reach the daemon. The UI
-discovers them from root-directory `get_page` reads. Root configuration cannot be deleted. Template changes
+reads them from `GET /path/config.yaml`. Root configuration cannot be deleted. Template changes
 compile the proposed Starlark and validate the entire proposed corpus; documents
 can be updated in the same atomic batch to satisfy new rules. Transition checks
 from both the old and proposed templates remain enforced. Configuration changes
 must parse and pass configuration and corpus validation before publication.
-Listener changes return `restart_required: true`; the running listener remains
+Listener changes require a daemon restart; the running listener remains
 active until the daemon is restarted.
 
 ### Incremental validation
@@ -292,7 +393,7 @@ checks still run against before/after content, and reciprocity is checked on the
 resulting graph so removing a backlink can invalidate an unchanged document.
 
 Adding or removing document paths re-resolves authored targets across the graph:
-even adding a document can make an existing short-name target ambiguous. This
+a destination can become available or disappear. This
 reuses cached parsing and does not rerun unchanged document policies. Startup,
 external snapshot activation, and explicit full validation retain complete
 validation as the baseline.
@@ -306,3 +407,12 @@ Independent clients can link it with `default-features = false`.
 Templates may declare `scope(exclude=["overview.md"])`. Patterns are relative to
 the template directory. Excluded documents inherit the nearest matching parent
 schema; they do not bypass ordinary Markdown parsing or link validation.
+
+## Validation before merging
+
+Develop and test changes locally before merging. Focused tests and reproduction
+scripts are temporary development tools: do not commit them, or remove them
+before merging. Keep only the broad browser end-to-end checks in
+[`webui/tests`](../webui/tests), covering navigation, offline editing/search, and
+validated submission against a disposable daemon and repository. See the
+[webui instructions](../webui/README.md) for running them.
