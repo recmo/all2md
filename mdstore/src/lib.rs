@@ -34,9 +34,7 @@ pub use git::PushState;
 pub use hashline::{EditOperation, short_hash};
 pub use markdown::{Edge, Finding};
 #[cfg(feature = "server")]
-pub use mcp::{
-    LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, serve, serve_listener, tool_names,
-};
+pub use mcp::{MCP_PROTOCOL_VERSION, serve, serve_listener, tool_names};
 #[cfg(feature = "server")]
 pub use provider::{InputType, RerankResult, RetrievalProvider, ZeroEntropyProvider};
 #[cfg(feature = "server")]

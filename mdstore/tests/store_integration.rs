@@ -1358,6 +1358,15 @@ async fn mcp_validates_protocol_and_json_rpc_envelopes() {
         .unwrap();
     assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
 
+    let legacy = client
+        .post(format!("{base_url}/mcp"))
+        .header("mcp-protocol-version", "2025-03-26")
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), StatusCode::BAD_REQUEST);
+
     let malformed = client
         .post(format!("{base_url}/mcp"))
         .header("content-type", "application/json")
@@ -1389,7 +1398,7 @@ async fn mcp_validates_protocol_and_json_rpc_envelopes() {
         assert_eq!(value["error"]["code"], -32600);
     }
 
-    for requested in ["2025-03-26", "2025-06-18"] {
+    for requested in ["2025-03-26", "2025-06-18", "2099-01-01"] {
         let response = client
             .post(format!("{base_url}/mcp"))
             .json(&serde_json::json!({
@@ -1406,7 +1415,7 @@ async fn mcp_validates_protocol_and_json_rpc_envelopes() {
             .await
             .unwrap();
         let value: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(value["result"]["protocolVersion"], requested);
+        assert_eq!(value["result"]["protocolVersion"], "2025-06-18");
     }
 
     let notification = client
@@ -3044,6 +3053,12 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
             false,
         ),
         (
+            serde_json::json!({"path": "/alice.md", "include_template": true}),
+            false,
+            true,
+            false,
+        ),
+        (
             serde_json::json!({"path": "/alice.md", "start_line": 4, "end_line": 6}),
             false,
             false,
@@ -3079,6 +3094,26 @@ async fn mcp_page_content_is_single_and_schema_is_a_path() {
         if error {
             continue;
         }
+        if !raw && !expanded {
+            assert!(response["result"].get("structuredContent").is_none());
+            let blocks = response["result"]["content"].as_array().unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0]["type"], "text");
+            let text = blocks[0]["text"].as_str().unwrap();
+            let path = arguments["path"].as_str().unwrap().trim_start_matches('/');
+            assert!(text.starts_with(&format!("Path: /{path}\nSchema: /schema.md\n\n")));
+            if path == "new.md" {
+                assert!(text.ends_with("File does not exist."));
+            } else {
+                assert!(!text.contains("\\n"));
+                for line in text.split_once("\n\n").unwrap().1.lines() {
+                    let (anchor, _) = line.split_once('|').unwrap();
+                    assert_eq!(anchor.split_once(':').unwrap().1.len(), 4);
+                }
+            }
+            continue;
+        }
+        assert_eq!(response["result"]["content"], serde_json::json!([]));
         let value = &response["result"]["structuredContent"];
         assert!(value["path"].as_str().unwrap().starts_with('/'));
         assert!(value.get("text").is_none());
@@ -3168,6 +3203,7 @@ async fn document_batches_validate_and_submit_through_mcp() {
             .await
             .unwrap();
         assert_eq!(result["result"]["isError"], false, "{result}");
+        assert_eq!(result["result"]["content"], serde_json::json!([]));
     }
     assert_eq!(
         fs::read_to_string(repository.root.join("alice.md")).unwrap(),

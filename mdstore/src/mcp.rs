@@ -17,8 +17,6 @@ use crate::{ApplyEditsRequest, Store, store::ValidationError};
 
 /// Preferred MCP protocol revision.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-/// Older MCP protocol revision accepted for compatibility.
-pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
 fn router(store: Arc<Store>) -> Router {
     Router::new()
@@ -89,7 +87,7 @@ async fn mcp(State(store): State<Arc<Store>>, headers: HeaderMap, body: Bytes) -
         let Ok(version) = version.to_str() else {
             return StatusCode::BAD_REQUEST.into_response();
         };
-        if !matches!(version, MCP_PROTOCOL_VERSION | LEGACY_MCP_PROTOCOL_VERSION) {
+        if version != MCP_PROTOCOL_VERSION {
             return StatusCode::BAD_REQUEST.into_response();
         }
     }
@@ -130,21 +128,13 @@ async fn mcp(State(store): State<Arc<Store>>, headers: HeaderMap, body: Bytes) -
 }
 
 fn initialize(id: Value, params: &Value) -> Response {
-    let Some(requested) = params.get("protocolVersion").and_then(Value::as_str) else {
+    let Some(_) = params.get("protocolVersion").and_then(Value::as_str) else {
         return rpc_error(id, -32602, "initialize requires protocolVersion");
-    };
-    let negotiated = if matches!(
-        requested,
-        MCP_PROTOCOL_VERSION | LEGACY_MCP_PROTOCOL_VERSION
-    ) {
-        requested
-    } else {
-        MCP_PROTOCOL_VERSION
     };
     rpc_result(
         id,
         json!({
-            "protocolVersion": negotiated,
+            "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "mdstore", "version": env!("CARGO_PKG_VERSION")}
         }),
@@ -174,7 +164,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_page",
-            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Content is rendered with four-character neighbor-based hashline anchors by default. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for exact source text (including line endings) for whole-page replacements. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. Editors can explicitly request include_template=true for the expanded template. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
+            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns direct children, permissions, repository identity and Git revision. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. Default file reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Anchors must match at the supplied line number; stale anchors require a fresh read. Use format=raw for structured results containing exact source text (including line endings) for whole-page replacements. Directory reads and expanded-template requests also return structured results. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. Editors can explicitly request include_template=true for the expanded template. A proposed Markdown path returns content=null and its template for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -316,11 +306,19 @@ fn rooted_page_paths(mut value: Value) -> Value {
     value
 }
 
+fn page_text(value: &Value) -> String {
+    let path = value["path"].as_str().unwrap_or_default();
+    let template = value["template"].as_str().unwrap_or("none");
+    let content = value["content"].as_str().unwrap_or("File does not exist.");
+    format!("Path: {path}\nSchema: {template}\n\n{content}")
+}
+
 async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
     let params: CallParams = match serde_json::from_value(params) {
         Ok(value) => value,
         Err(error) => return rpc_error(id, -32602, &format!("invalid tool call: {error}")),
     };
+    let mut plain_page = false;
     let result = match params.name.as_str() {
         "search" => match serde_json::from_value::<SearchArguments>(params.arguments) {
             Ok(arguments) => store
@@ -334,6 +332,9 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                 if arguments.path != "/" {
                     strip_root_prefix(&mut arguments.path);
                 }
+                plain_page = matches!(arguments.format, PageFormat::Hashlines)
+                    && !arguments.include_template
+                    && !arguments.path.ends_with('/');
                 let window = arguments
                     .start_line
                     .map(|start| (start, arguments.end_line.unwrap_or(start)));
@@ -385,14 +386,17 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
         result
     };
     match result {
-        Ok(value) => rpc_result(
-            id,
-            json!({
-                "content": [{"type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default()}],
-                "structuredContent": value,
-                "isError": false
-            }),
-        ),
+        Ok(value) => {
+            let result = if plain_page {
+                json!({
+                    "content": [{"type": "text", "text": page_text(&value)}],
+                    "isError": false
+                })
+            } else {
+                json!({"content": [], "structuredContent": value, "isError": false})
+            };
+            rpc_result(id, result)
+        }
         Err(error) => {
             let findings = error
                 .downcast_ref::<ValidationError>()
