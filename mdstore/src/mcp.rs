@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tower_http::trace::TraceLayer;
 
-use crate::{ApplyEditsRequest, Store, store::ValidationError};
+use crate::{ApplyEditsRequest, Store, hashline::HashlineEditError, store::ValidationError};
 
 /// Preferred MCP protocol revision.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -556,7 +556,13 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
             if params.name == "edit" {
                 let errors = match error.downcast_ref::<ValidationError>() {
                     Some(validation) => json!(validation_errors(validation)),
-                    None => json!([{"message": error.to_string()}]),
+                    None => match error.downcast_ref::<HashlineEditError>() {
+                        Some(edit) => json!([{
+                            "location": error_location(&edit.path, edit.line),
+                            "message": edit.source.to_string(),
+                        }]),
+                        None => json!([{"message": error.to_string()}]),
+                    },
                 };
                 return rpc_result(
                     id,

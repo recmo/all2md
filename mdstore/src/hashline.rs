@@ -22,11 +22,39 @@ pub(crate) enum HashlineError {
     #[error("invalid range {0:?}")]
     InvalidRange(String),
     /// Two operations modify overlapping source ranges.
-    #[error("overlapping edits in {0}")]
-    Overlap(String),
+    #[error("overlapping edits")]
+    Overlap { line: usize },
     /// An operation cannot be applied to the current source.
     #[error("{0}")]
     InvalidOperation(String),
+}
+
+#[derive(Debug, Error)]
+#[error("{path}: {source}")]
+pub(crate) struct HashlineEditError {
+    pub path: String,
+    pub line: Option<usize>,
+    pub source: HashlineError,
+}
+
+impl HashlineError {
+    fn at(self, path: &str) -> HashlineEditError {
+        let line = match &self {
+            Self::InvalidAnchor(anchor)
+            | Self::InvalidRange(anchor)
+            | Self::StaleAnchor { anchor, .. } => anchor
+                .split_once(':')
+                .and_then(|(line, _)| line.parse::<usize>().ok())
+                .filter(|line| *line > 0),
+            Self::Overlap { line } => Some(*line),
+            Self::InvalidOperation(_) => None,
+        };
+        HashlineEditError {
+            path: path.into(),
+            line,
+            source: self,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,7 +156,7 @@ enum ResolvedKind {
 pub(crate) fn apply_operations(
     original: &HashMap<String, String>,
     operations: &[EditOperation],
-) -> Result<HashMap<String, Option<String>>, HashlineError> {
+) -> Result<HashMap<String, Option<String>>, HashlineEditError> {
     let mut grouped: BTreeMap<&str, Vec<(usize, &EditOperation)>> = BTreeMap::new();
     for (index, operation) in operations.iter().enumerate() {
         grouped
@@ -150,20 +178,22 @@ pub(crate) fn apply_operations(
         ] = ops.as_slice()
         {
             if content.is_empty() {
-                return Err(HashlineError::InvalidOperation(format!(
-                    "{path}: cannot create a file with empty content"
-                )));
+                return Err(HashlineError::InvalidOperation(
+                    "cannot create a file with empty content".into(),
+                )
+                .at(path));
             }
             if original.contains_key(path) {
-                return Err(HashlineError::InvalidOperation(format!(
-                    "{path}: file exists; replacement requires an anchor"
-                )));
+                return Err(HashlineError::InvalidOperation(
+                    "file exists; replacement requires an anchor".into(),
+                )
+                .at(path));
             }
             output.insert(path.into(), Some(content.clone()));
             continue;
         }
         let text = original.get(path).ok_or_else(|| {
-            HashlineError::InvalidOperation(format!("{path}: file does not exist"))
+            HashlineError::InvalidOperation("file does not exist".into()).at(path)
         })?;
         if let [
             (
@@ -179,9 +209,10 @@ pub(crate) fn apply_operations(
             && anchor == "0:"
         {
             if content.is_empty() {
-                return Err(HashlineError::InvalidOperation(format!(
-                    "{path}: cannot replace an empty file with empty content"
-                )));
+                return Err(HashlineError::InvalidOperation(
+                    "cannot replace an empty file with empty content".into(),
+                )
+                .at(path));
             }
             output.insert(path.into(), Some(content.clone()));
             continue;
@@ -197,7 +228,7 @@ pub(crate) fn apply_operations(
                     content,
                     ..
                 } => {
-                    let span = resolve_span(anchor, &lines)?;
+                    let span = resolve_span(anchor, &lines).map_err(|error| error.at(path))?;
                     let kind = if content.is_empty() {
                         ResolvedKind::Delete
                     } else {
@@ -206,22 +237,26 @@ pub(crate) fn apply_operations(
                     (span, kind)
                 }
                 EditOperation::Replace { anchor: None, .. } => {
-                    return Err(HashlineError::InvalidOperation(format!(
-                        "{path}: creation must be the only operation for its path"
-                    )));
+                    return Err(HashlineError::InvalidOperation(
+                        "creation must be the only operation for its path".into(),
+                    )
+                    .at(path));
                 }
                 EditOperation::Append {
                     anchor, content, ..
                 } => {
                     if content.is_empty() {
-                        return Err(HashlineError::InvalidOperation(format!(
-                            "{path}: append content must be non-empty"
-                        )));
+                        return Err(HashlineError::InvalidOperation(
+                            "append content must be non-empty".into(),
+                        )
+                        .at(path));
                     }
                     let line = match anchor.as_deref() {
                         None => lines.len(),
                         Some("0:") => 0,
-                        Some(anchor) => resolve_line(anchor, &lines)? + 1,
+                        Some(anchor) => {
+                            resolve_line(anchor, &lines).map_err(|error| error.at(path))? + 1
+                        }
                     };
                     (
                         Span {
@@ -234,7 +269,7 @@ pub(crate) fn apply_operations(
             };
             resolved.push(Resolved { index, span, kind });
         }
-        reject_overlaps(path, &resolved)?;
+        reject_overlaps(&resolved).map_err(|error| error.at(path))?;
         if let [edit] = resolved.as_slice()
             && edit.span.start == 0
             && edit.span.end + 1 == lines.len()
@@ -271,9 +306,10 @@ pub(crate) fn apply_operations(
             }
         }
         if lines.is_empty() {
-            return Err(HashlineError::InvalidOperation(format!(
-                "{path}: deleting a file requires one complete-file anchor"
-            )));
+            return Err(HashlineError::InvalidOperation(
+                "deleting a file requires one complete-file anchor".into(),
+            )
+            .at(path));
         }
         let mut updated = lines.join(separator);
         if trailing_newline || lines.last().is_some_and(String::is_empty) {
@@ -298,7 +334,7 @@ fn split_content(content: &str) -> Vec<String> {
     lines
 }
 
-fn reject_overlaps(path: &str, edits: &[Resolved]) -> Result<(), HashlineError> {
+fn reject_overlaps(edits: &[Resolved]) -> Result<(), HashlineError> {
     for (index, left) in edits.iter().enumerate() {
         for right in &edits[index + 1..] {
             let both_inserts = matches!(left.kind, ResolvedKind::Insert(_))
@@ -307,7 +343,9 @@ fn reject_overlaps(path: &str, edits: &[Resolved]) -> Result<(), HashlineError> 
                 continue;
             }
             if left.span.start <= right.span.end && right.span.start <= left.span.end {
-                return Err(HashlineError::Overlap(path.into()));
+                return Err(HashlineError::Overlap {
+                    line: right.span.start + 1,
+                });
             }
         }
     }
