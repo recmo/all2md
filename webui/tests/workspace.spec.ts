@@ -48,7 +48,7 @@ test('browser history visits documents and workspace views without duplicate ent
   expect(await page.evaluate(() => history.length)).toBe(initialLength + 5);
 });
 
-test('local drafts survive refresh and search requires a daemon connection', async ({
+test('drafts are isolated per tab, survive refresh, and search requires a connection', async ({
   page,
   context
 }) => {
@@ -63,6 +63,26 @@ test('local drafts survive refresh and search requires a daemon connection', asy
   await expect(page.locator('.document-header')).toContainText('Valid');
   await page.reload();
   await expect(page.locator('#preview')).toContainText('Saved local draft.');
+  const secondTab = await context.newPage();
+  await secondTab.goto('/#welcome.md');
+  await expect(secondTab.locator('#preview')).toContainText(
+    'A knowledge garden for your ideas.'
+  );
+  await replaceDocument(secondTab, '# Welcome\n\nSecond tab draft.\n');
+  await secondTab.reload();
+  await expect(secondTab.locator('#preview')).toContainText(
+    'Second tab draft.'
+  );
+  await page.reload();
+  await expect(page.locator('#preview')).toContainText('Saved local draft.');
+  await secondTab.close();
+  const freshTab = await context.newPage();
+  await freshTab.goto('/#welcome.md');
+  await expect(freshTab.locator('#preview')).toContainText(
+    'A knowledge garden for your ideas.'
+  );
+  await freshTab.close();
+
   expect(
     await page.evaluate(() =>
       navigator.serviceWorker.getRegistrations().then((items) => items.length)
@@ -177,8 +197,8 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   expect(listing).not.toContain('welcome.md');
   const journal = await page.evaluate(() =>
     JSON.parse(
-      localStorage.getItem(
-        Object.keys(localStorage).find((key) =>
+      sessionStorage.getItem(
+        Object.keys(sessionStorage).find((key) =>
           key.startsWith('mdstore:workspace:')
         )!
       )!

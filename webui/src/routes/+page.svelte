@@ -208,14 +208,12 @@
   }
   function persist() {
     try {
-      saveLocalChanges(localStorage, workspace);
+      saveLocalChanges(sessionStorage, workspace);
       saved = true;
-    } catch (e) {
+    } catch {
       saved = false;
       message(
-        e instanceof Error && e.message.startsWith('Another tab')
-          ? e.message
-          : 'Local storage is full or unavailable. Your changes are still in this tab. Keep it open until they can be saved.',
+        'Session storage is full or unavailable. Copy your changes before closing this tab.',
         true
       );
     }
@@ -925,7 +923,7 @@
     )
       view = requestedPath.slice(1) as 'search' | 'settings' | 'submit';
     void run(async () => {
-      workspace = loadWorkspace(localStorage);
+      workspace = loadWorkspace(sessionStorage);
       try {
         await refresh(false);
       } catch (e) {
@@ -1208,14 +1206,14 @@
         <h2>Local drafts</h2>
         <p role="status">{online ? 'Connected' : 'Disconnected'}</p>
         <p class:error>{feedback}</p>
-        <p>Unsubmitted changes are saved in this browser.</p>
+        <p>Unsubmitted changes are saved in this tab until it closes.</p>
         <button
           disabled={busy}
           onclick={() => {
             if (
               confirm('Discard all unsubmitted changes for this repository?')
             ) {
-              clearLocalChanges(localStorage);
+              clearLocalChanges(sessionStorage);
               workspace = {
                 ...workspace,
                 drafts: {},
@@ -1333,7 +1331,7 @@
                 class:status-error={!saved}
                 class:status-muted={!online}
                 title={!saved
-                  ? 'Local storage could not save your changes'
+                  ? 'This tab could not save your changes'
                   : !online
                     ? 'Connection lost; reconnect to load server changes'
                     : workspace.drafts[current.path]

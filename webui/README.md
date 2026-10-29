@@ -54,14 +54,15 @@ them before merging.
   indented code with Shiki highlighting (including Rust, LaTeX, Typst, and Lean 4).
   Starlark uses Python coloring; Markdown frontmatter uses YAML coloring.
   Configuration and template editing follow the daemon permission settings.
-- Draft bases, edits, conflicts, and summaries use a synchronous localStorage
-  journal, scoped to the daemon origin. Published documents and validation
+- Draft bases, edits, conflicts, and summaries use a synchronous sessionStorage
+  journal, scoped to the tab and daemon origin. Published documents and validation
   snapshots stay in memory. Connecting loads the published corpus and reconciles
   drafts against current server sources; nothing is submitted automatically.
 - Search always uses the daemon. Browsing, source loading, validation and submission
-  require a connection. Local drafts survive refresh and temporary disconnections.
+  require a connection. Local drafts survive refresh and temporary disconnections
+  within the tab; closing the tab discards them.
 - Settings provides connection retry and discarding unsubmitted changes. Storage
-  quota and concurrent-tab conflicts are surfaced so unsaved work can be recovered.
+  quota failures are surfaced so unsaved work can be copied before closing the tab.
 
 The WebUI uses the browser's HTTP cache for static assets. It does not register a
 service worker, persist published documents, or provide an offline application shell.

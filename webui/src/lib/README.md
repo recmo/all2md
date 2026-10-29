@@ -13,7 +13,7 @@ and explicit paths for dependencies between features. The route in
 
 The selected document is derived from the workspace state and selection, never
 stored as a second mutable copy. Drafts, bases, conflicts, and submission text
-are saved synchronously in a small localStorage journal. Published documents
+are saved synchronously in a small sessionStorage journal for the current tab. Closing the tab discards them. Published documents
 and the validation baseline stay in memory and are loaded from mdstore when the
 workspace connects.
 

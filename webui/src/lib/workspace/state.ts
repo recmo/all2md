@@ -22,9 +22,8 @@ export const emptyWorkspace = (): Workspace => ({
   selected: ''
 });
 
-// localStorage already isolates each daemon origin. Persist only local changes.
+// Keep local changes within the current tab and daemon origin.
 const KEY = 'mdstore:workspace:v1';
-const observed = new WeakMap<Storage, string | null>();
 function localChanges(workspace: LocalChanges): LocalChanges {
   const { drafts, deletions, conflicts, folders, summary, selected } =
     workspace;
@@ -32,7 +31,6 @@ function localChanges(workspace: LocalChanges): LocalChanges {
 }
 export function loadWorkspace(storage: Storage): Workspace {
   const raw = storage.getItem(KEY);
-  observed.set(storage, raw);
   if (!raw) return emptyWorkspace();
   try {
     const parsed = JSON.parse(raw);
@@ -97,15 +95,8 @@ export function loadWorkspace(storage: Storage): Workspace {
   }
 }
 export function saveLocalChanges(storage: Storage, workspace: Workspace) {
-  if (storage.getItem(KEY) !== (observed.get(storage) ?? null))
-    throw Error(
-      'Another tab changed this workspace. Export your drafts, then reload before editing further.'
-    );
-  const encoded = JSON.stringify(localChanges(workspace));
-  storage.setItem(KEY, encoded);
-  observed.set(storage, encoded);
+  storage.setItem(KEY, JSON.stringify(localChanges(workspace)));
 }
 export function clearLocalChanges(storage: Storage) {
   storage.removeItem(KEY);
-  observed.set(storage, null);
 }
