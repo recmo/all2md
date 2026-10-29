@@ -48,7 +48,7 @@ test('browser history visits documents and workspace views without duplicate ent
   expect(await page.evaluate(() => history.length)).toBe(initialLength + 5);
 });
 
-test('offline editing survives reload and search uses the MCP API online', async ({
+test('drafts are isolated per tab, survive refresh, and search requires a connection', async ({
   page,
   context
 }) => {
@@ -59,31 +59,58 @@ test('offline editing survives reload and search uses the MCP API online', async
   });
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
-  await replaceDocument(page, '# Welcome\n\nOffline knowledge garden.\n');
+  await replaceDocument(page, '# Welcome\n\nSaved local draft.\n');
   await expect(page.locator('.document-header')).toContainText('Valid');
-  await page.evaluate(async () => {
-    await navigator.serviceWorker.ready;
-  });
-  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
-  await context.setOffline(true);
   await page.reload();
-  await expect(page.locator('#preview')).toContainText(
-    'Offline knowledge garden.'
+  await expect(page.locator('#preview')).toContainText('Saved local draft.');
+  const secondTab = await context.newPage();
+  await secondTab.goto('/#welcome.md');
+  await expect(secondTab.locator('#preview')).toContainText(
+    'A knowledge garden for your ideas.'
   );
+  await replaceDocument(secondTab, '# Welcome\n\nSecond tab draft.\n');
+  await secondTab.reload();
+  await expect(secondTab.locator('#preview')).toContainText(
+    'Second tab draft.'
+  );
+  await page.reload();
+  await expect(page.locator('#preview')).toContainText('Saved local draft.');
+  await secondTab.close();
+  const freshTab = await context.newPage();
+  await freshTab.goto('/#welcome.md');
+  await expect(freshTab.locator('#preview')).toContainText(
+    'A knowledge garden for your ideas.'
+  );
+  await freshTab.close();
+
+  expect(
+    await page.evaluate(() =>
+      navigator.serviceWorker.getRegistrations().then((items) => items.length)
+    )
+  ).toBe(0);
+  expect(await page.evaluate(() => caches.keys())).toEqual([]);
   await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
   await page.locator('#search').fill('garden');
   await page.locator('#search').press('Enter');
-  await expect(page.getByText('OFFLINE · CACHED TEXT')).toBeVisible();
+  await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
+  expect(calls).toContain('search');
+  expect(calls).toContain('GET /path');
+  await context.setOffline(true);
+  await expect(page.locator('#search')).toBeDisabled();
+  await expect(
+    page.getByText('Connect to the daemon to search your documents.')
+  ).toBeVisible();
   await context.setOffline(false);
   await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
   await expect(
     page.getByRole('status').filter({ hasText: /^Connected$/ })
   ).toBeVisible();
-  await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
-  await page.locator('#search').press('Enter');
-  await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
-  expect(calls).toContain('search');
-  expect(calls).toContain('GET /path');
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('button', { name: 'Discard local changes' }).click();
+  await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
+  await expect(page.locator('#preview')).toContainText(
+    'A knowledge garden for your ideas.'
+  );
 });
 
 test('submit pane reviews validation and diffs, then commits the full staged batch', async ({
@@ -168,22 +195,26 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   const listing = await directoryPaths(page, '/');
   expect(listing).toContain('welcome-submitted.md');
   expect(listing).not.toContain('welcome.md');
-  const cache = await page.evaluate(() =>
+  const journal = await page.evaluate(() =>
     JSON.parse(
-      localStorage.getItem(
-        Object.keys(localStorage).find((key) =>
+      sessionStorage.getItem(
+        Object.keys(sessionStorage).find((key) =>
           key.startsWith('mdstore:workspace:')
         )!
       )!
     )
   );
-  expect(cache.drafts).toEqual({});
-  expect(cache.deletions).toEqual({});
-  expect(cache.pages).toEqual({});
-  await expect
-    .poll(() => cachedDocument(page, cache.repository, 'other.md'))
-    .toContain('Reviewed in the submit pane.');
-  expect(cache.summary).toBe('');
+  expect(journal.drafts).toEqual({});
+  expect(journal.deletions).toEqual({});
+  expect(journal.pages).toBeUndefined();
+  expect(journal.paths).toBeUndefined();
+  expect(journal.validationSnapshot).toBeUndefined();
+  await page.reload();
+  await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
+  await expect(page.locator('#preview')).toContainText(
+    'Reviewed in the submit pane.'
+  );
+  expect(journal.summary).toBe('');
 });
 
 async function replaceDocument(page: Page, text: string) {
@@ -197,35 +228,10 @@ async function replaceDocument(page: Page, text: string) {
 async function directoryPaths(page: Page, path: string): Promise<string[]> {
   const response = await page.request.get('/path/' + path.replace(/^\//, ''));
   expect(response.ok()).toBe(true);
+  expect(response.headers()['x-mdstore-commit']).toMatch(/^[0-9a-f]{40,64}$/);
   const text = await response.text();
   return text
     .split('\n')
     .filter(Boolean)
     .map((path: string) => path.replace(/^\//, ''));
-}
-
-async function cachedDocument(page: Page, repository: string, path: string) {
-  return page.evaluate(
-    ({ repository, path }) =>
-      new Promise<string | undefined>((resolve, reject) => {
-        const open = indexedDB.open('mdstore-documents', 1);
-        open.onerror = () => reject(open.error);
-        open.onsuccess = () => {
-          const db = open.result;
-          const request = db
-            .transaction('documents', 'readonly')
-            .objectStore('documents')
-            .get([repository, path]);
-          request.onsuccess = () => {
-            resolve(request.result?.text);
-            db.close();
-          };
-          request.onerror = () => {
-            reject(request.error);
-            db.close();
-          };
-        };
-      }),
-    { repository, path }
-  );
 }

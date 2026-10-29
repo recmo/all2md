@@ -4,7 +4,7 @@ type InventoryApi = Pick<typeof api, 'directory' | 'page'>;
 
 export async function readInventory(
   api: InventoryApi,
-  cached: Record<string, Page>
+  loaded: Record<string, Page>
 ) {
   let lastError: unknown;
   attempts: for (let attempt = 0; attempt < 3; attempt++) {
@@ -29,7 +29,7 @@ export async function readInventory(
         Array.from({ length: Math.min(8, paths.length) }, async () => {
           while (next < paths.length) {
             const path = paths[next++];
-            const prior = cached[path];
+            const prior = loaded[path];
             pages[path] =
               prior?.exists && prior.revision === revision
                 ? prior

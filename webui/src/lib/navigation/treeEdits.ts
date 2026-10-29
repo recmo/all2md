@@ -1,13 +1,15 @@
-import type { Cache } from '../workspace/cache';
+import type { Workspace } from '../workspace/state';
 import { readonly, type Page } from '../workspace/api';
 import { rewriteLinks } from './rewriteLinks';
 
-export function treePaths(cache: Cache): string[] {
+export function treePaths(workspace: Workspace): string[] {
   return [
     ...new Set([
-      ...cache.paths.filter((path) => !(path in (cache.deletions || {}))),
-      ...Object.keys(cache.drafts),
-      ...(cache.folders || []).map((path) => path + '/')
+      ...workspace.paths.filter(
+        (path) => !(path in (workspace.deletions || {}))
+      ),
+      ...Object.keys(workspace.drafts),
+      ...(workspace.folders || []).map((path) => path + '/')
     ])
   ].sort();
 }
@@ -27,10 +29,10 @@ export function validTreePath(path: string): string {
     );
   return path;
 }
-export function addFolder(cache: Cache, path: string): Cache {
+export function addFolder(workspace: Workspace, path: string): Workspace {
   validTreePath(path);
   if (
-    treePaths(cache).some(
+    treePaths(workspace).some(
       (item) =>
         item === path ||
         item.startsWith(path + '/') ||
@@ -38,22 +40,22 @@ export function addFolder(cache: Cache, path: string): Cache {
     )
   )
     throw Error('That path already exists or is inside a file.');
-  return { ...cache, folders: [...(cache.folders || []), path] };
+  return { ...workspace, folders: [...(workspace.folders || []), path] };
 }
 export function moveTree(
-  cache: Cache,
+  workspace: Workspace,
   from: string,
   to: string,
   directory: boolean,
   sources: Record<string, Page>,
   allowTemplates = false,
   allowConfig = false
-): Cache {
+): Workspace {
   validTreePath(to);
-  if (from === to) return cache;
+  if (from === to) return workspace;
   if (directory && to.startsWith(from + '/'))
     throw Error('A folder cannot be moved inside itself.');
-  const all = treePaths(cache);
+  const all = treePaths(workspace);
   if (
     all.some(
       (path) =>
@@ -88,11 +90,11 @@ export function moveTree(
         'Documents must keep a .md extension; lint configurations must keep their rumdl.toml filename.'
       );
   }
-  const drafts = { ...cache.drafts },
-    deletions = { ...cache.deletions };
+  const drafts = { ...workspace.drafts },
+    deletions = { ...workspace.deletions };
   for (const path of affected) {
-    const source = drafts[path] || sources[path] || cache.pages[path];
-    if (!source) throw Error(`Cache ${path} before moving it offline.`);
+    const source = drafts[path] || sources[path] || workspace.pages[path];
+    if (!source) throw Error(`Load ${path} before moving it.`);
     const destination = to + path.slice(from.length);
     if (source.exists) deletions[path] = drafts[path]?.base ?? source.text;
     const original = deletions[destination];
@@ -108,11 +110,10 @@ export function moveTree(
     if (original === source.text) delete drafts[destination];
   }
   for (const path of all.filter((path) => path.endsWith('.md'))) {
-    const source = cache.drafts[path] || sources[path] || cache.pages[path];
+    const source =
+      workspace.drafts[path] || sources[path] || workspace.pages[path];
     if (!source)
-      throw Error(
-        `Cache ${path} before moving offline so its links can be updated.`
-      );
+      throw Error(`Load ${path} before moving it so its links can be updated.`);
     const destination = moves.get(path) || path;
     const text = rewriteLinks(source.text, path, destination, moves);
     if (text === source.text) continue;
@@ -123,7 +124,7 @@ export function moveTree(
       ...source,
       ...existing,
       path: destination,
-      base: existing?.base ?? cache.drafts[path]?.base ?? source.text,
+      base: existing?.base ?? workspace.drafts[path]?.base ?? source.text,
       text
     };
     if (drafts[destination].exists && text === drafts[destination].base)
@@ -134,49 +135,49 @@ export function moveTree(
       ? to + path.slice(from.length)
       : path;
   return {
-    ...cache,
+    ...workspace,
     drafts,
     deletions,
     folders: [
       ...new Set([
-        ...(cache.folders || []).map(mapPath),
+        ...(workspace.folders || []).map(mapPath),
         ...(directory ? [to] : [])
       ])
     ],
-    selected: mapPath(cache.selected)
+    selected: mapPath(workspace.selected)
   };
 }
 
 export function deleteTree(
-  cache: Cache,
+  workspace: Workspace,
   path: string,
   directory: boolean,
   sources: Record<string, Page>,
   allowTemplates = false,
   allowConfig = false
-): Cache {
+): Workspace {
   validTreePath(path);
   const includes = (item: string) =>
     item === path || (directory && item.startsWith(path + '/'));
-  const all = treePaths(cache);
+  const all = treePaths(workspace);
   const affected = all.filter((item) => !item.endsWith('/') && includes(item));
   if (!affected.length && !all.includes(path + '/'))
     throw Error('The source no longer exists.');
-  const drafts = { ...cache.drafts },
-    deletions = { ...cache.deletions };
+  const drafts = { ...workspace.drafts },
+    deletions = { ...workspace.deletions };
   for (const item of affected) {
     if (item === 'config.yaml' || readonly(item, allowTemplates, allowConfig))
       throw Error(`Deleting ${item} is not permitted.`);
-    const source = drafts[item] || sources[item] || cache.pages[item];
-    if (!source) throw Error(`Cache ${item} before deleting it offline.`);
+    const source = drafts[item] || sources[item] || workspace.pages[item];
+    if (!source) throw Error(`Load ${item} before deleting it.`);
     if (source.exists) deletions[item] = drafts[item]?.base ?? source.text;
     delete drafts[item];
   }
   return {
-    ...cache,
+    ...workspace,
     drafts,
     deletions,
-    folders: (cache.folders || []).filter((folder) => !includes(folder)),
-    selected: includes(cache.selected) ? '' : cache.selected
+    folders: (workspace.folders || []).filter((folder) => !includes(folder)),
+    selected: includes(workspace.selected) ? '' : workspace.selected
   };
 }
