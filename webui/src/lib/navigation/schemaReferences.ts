@@ -31,7 +31,7 @@ export function rewriteSchemaReferences(
     if (readonly(path, allowTemplates, allowConfig))
       throw Error(`Updating references in ${path} requires edit permission.`);
     const page = drafts[path] || cache.pages[path];
-    if (!page) throw Error(`Cache ${path} before updating its references.`);
+    if (!page) throw Error(`Load ${path} before updating its references.`);
     const replacement = (ref: SchemaReference) => {
       const target = moves.get(ref.target) || ref.target;
       const suffix = /[#?].*$/.exec(ref.raw)?.[0] || '';

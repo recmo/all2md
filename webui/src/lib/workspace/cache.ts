@@ -1,5 +1,5 @@
 import type { ValidationSnapshot } from '../validation/localValidation';
-import type { Draft, Page, SearchResult } from './api';
+import type { Draft, Page } from './api';
 export type Cache = {
   version: 1;
   conflicts?: Record<string, import('./reconcile').Conflict>;
@@ -47,24 +47,11 @@ export function loadCache(
     if (
       parsed.version !== 1 ||
       parsed.repository !== repository ||
-      !Array.isArray(parsed.paths) ||
       typeof parsed.summary !== 'string' ||
-      !parsed.pages ||
       !parsed.drafts
     )
       throw Error();
     // Treat storage as untrusted; malformed entries must not become edit requests.
-    for (const [path, page] of Object.entries(parsed.pages) as [
-      string,
-      Page
-    ][]) {
-      if (
-        page.path !== path ||
-        typeof page.text !== 'string' ||
-        typeof page.exists !== 'boolean'
-      )
-        throw Error();
-    }
     for (const [path, draft] of Object.entries(parsed.drafts) as [
       string,
       Draft
@@ -111,10 +98,10 @@ export function loadCache(
           throw Error();
       }
     }
-    return parsed;
+    return { ...parsed, pages: {}, paths: [] };
   } catch {
     throw Error(
-      'The local cache could not be read. Export or clear browser storage before continuing.'
+      'The saved local changes could not be read. Export or clear browser storage before continuing.'
     );
   }
 }
@@ -127,7 +114,7 @@ export function saveCache(storage: Storage, cache: Cache) {
       'Another tab changed this workspace. Export your drafts, then reload before editing further.'
     );
   const { pages, paths, validationSnapshot, ...journal } = cache;
-  const encoded = JSON.stringify({ ...journal, pages: {}, paths: [] });
+  const encoded = JSON.stringify(journal);
   storage.setItem(key(cache.repository), encoded);
   observed(storage).set(cache.repository, encoded);
   storage.setItem(LAST, cache.repository);
@@ -136,19 +123,4 @@ export function clearCache(storage: Storage, repository: string) {
   storage.removeItem(key(repository));
   observed(storage).set(repository, null);
   if (storage.getItem(LAST) === repository) storage.removeItem(LAST);
-}
-export function cachedSearch(cache: Cache, query: string): SearchResult[] {
-  const terms = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  return Object.values({ ...cache.pages, ...cache.drafts })
-    .filter(
-      (p) =>
-        !(p.path in (cache.deletions || {})) &&
-        terms.every((t) =>
-          `${p.path}\n${p.text}`.toLocaleLowerCase().includes(t)
-        )
-    )
-    .map((p) => ({
-      path: p.path,
-      excerpt: p.text.slice(0, 200)
-    }));
 }

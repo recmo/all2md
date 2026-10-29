@@ -92,7 +92,7 @@ export function moveTree(
     deletions = { ...cache.deletions };
   for (const path of affected) {
     const source = drafts[path] || sources[path] || cache.pages[path];
-    if (!source) throw Error(`Cache ${path} before moving it offline.`);
+    if (!source) throw Error(`Load ${path} before moving it.`);
     const destination = to + path.slice(from.length);
     if (source.exists) deletions[path] = drafts[path]?.base ?? source.text;
     const original = deletions[destination];
@@ -110,9 +110,7 @@ export function moveTree(
   for (const path of all.filter((path) => path.endsWith('.md'))) {
     const source = cache.drafts[path] || sources[path] || cache.pages[path];
     if (!source)
-      throw Error(
-        `Cache ${path} before moving offline so its links can be updated.`
-      );
+      throw Error(`Load ${path} before moving it so its links can be updated.`);
     const destination = moves.get(path) || path;
     const text = rewriteLinks(source.text, path, destination, moves);
     if (text === source.text) continue;
@@ -168,7 +166,7 @@ export function deleteTree(
     if (item === 'config.yaml' || readonly(item, allowTemplates, allowConfig))
       throw Error(`Deleting ${item} is not permitted.`);
     const source = drafts[item] || sources[item] || cache.pages[item];
-    if (!source) throw Error(`Cache ${item} before deleting it offline.`);
+    if (!source) throw Error(`Load ${item} before deleting it.`);
     if (source.exists) deletions[item] = drafts[item]?.base ?? source.text;
     delete drafts[item];
   }

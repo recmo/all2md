@@ -48,7 +48,7 @@ test('browser history visits documents and workspace views without duplicate ent
   expect(await page.evaluate(() => history.length)).toBe(initialLength + 5);
 });
 
-test('offline editing survives reload and search uses the MCP API online', async ({
+test('local drafts survive refresh and search requires a daemon connection', async ({
   page,
   context
 }) => {
@@ -59,63 +59,34 @@ test('offline editing survives reload and search uses the MCP API online', async
   });
   await page.goto('/');
   await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
-  await replaceDocument(page, '# Welcome\n\nOffline knowledge garden.\n');
+  await replaceDocument(page, '# Welcome\n\nSaved local draft.\n');
   await expect(page.locator('.document-header')).toContainText('Valid');
-  await page.evaluate(async () => {
-    await navigator.serviceWorker.ready;
-  });
-  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
-  // A stale installed shell must not hide the current HTML on refresh.
-  await page.evaluate(async () => {
-    const key = (await caches.keys()).find((key) =>
-      key.startsWith('mdstore-shell-')
-    )!;
-    const cache = await caches.open(key);
-    const shell = (await cache.match('/'))!;
-    await cache.put(
-      '/',
-      new Response(
-        (await shell.text()).replace(
-          '<head>',
-          '<head><meta name="cached-shell" content="stale">'
-        ),
-        { headers: shell.headers }
-      )
-    );
-  });
   await page.reload();
-  await expect(page.locator('meta[name="cached-shell"]')).toHaveCount(0);
-  await expect(page.locator('#preview')).toContainText(
-    'Offline knowledge garden.'
-  );
-  await context.setOffline(true);
-  await page.reload();
-  await expect(page.locator('meta[name="cached-shell"]')).toHaveCount(1);
-  await expect(page.locator('#preview')).toContainText(
-    'Offline knowledge garden.'
-  );
+  await expect(page.locator('#preview')).toContainText('Saved local draft.');
+  expect(
+    await page.evaluate(() =>
+      navigator.serviceWorker.getRegistrations().then((items) => items.length)
+    )
+  ).toBe(0);
+  expect(await page.evaluate(() => caches.keys())).toEqual([]);
   await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
   await page.locator('#search').fill('garden');
   await page.locator('#search').press('Enter');
-  await expect(page.getByText('OFFLINE · CACHED TEXT')).toBeVisible();
+  await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
+  expect(calls).toContain('search');
+  expect(calls).toContain('GET /path');
+  await context.setOffline(true);
+  await expect(page.locator('#search')).toBeDisabled();
+  await expect(
+    page.getByText('Connect to the daemon to search your documents.')
+  ).toBeVisible();
   await context.setOffline(false);
   await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
   await expect(
     page.getByRole('status').filter({ hasText: /^Connected$/ })
   ).toBeVisible();
-  await page.getByRole('treeitem', { name: 'Search', exact: true }).click();
-  await page.locator('#search').press('Enter');
-  await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
-  expect(calls).toContain('search');
-  expect(calls).toContain('GET /path');
-  await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
-  await page.getByText('Local storage ·', { exact: false }).click();
   page.once('dialog', (dialog) => dialog.accept());
-  await page.getByRole('button', { name: 'Clear local cache' }).click();
-  await page.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(
-    page.getByRole('status').filter({ hasText: /^Connected$/ })
-  ).toBeVisible();
+  await page.getByRole('button', { name: 'Discard local changes' }).click();
   await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
   await expect(page.locator('#preview')).toContainText(
     'A knowledge garden for your ideas.'
@@ -215,10 +186,14 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   );
   expect(cache.drafts).toEqual({});
   expect(cache.deletions).toEqual({});
-  expect(cache.pages).toEqual({});
-  await expect
-    .poll(() => cachedDocument(page, cache.repository, 'other.md'))
-    .toContain('Reviewed in the submit pane.');
+  expect(cache.pages).toBeUndefined();
+  expect(cache.paths).toBeUndefined();
+  expect(cache.validationSnapshot).toBeUndefined();
+  await page.reload();
+  await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
+  await expect(page.locator('#preview')).toContainText(
+    'Reviewed in the submit pane.'
+  );
   expect(cache.summary).toBe('');
 });
 
@@ -239,30 +214,4 @@ async function directoryPaths(page: Page, path: string): Promise<string[]> {
     .split('\n')
     .filter(Boolean)
     .map((path: string) => path.replace(/^\//, ''));
-}
-
-async function cachedDocument(page: Page, repository: string, path: string) {
-  return page.evaluate(
-    ({ repository, path }) =>
-      new Promise<string | undefined>((resolve, reject) => {
-        const open = indexedDB.open('mdstore-documents', 1);
-        open.onerror = () => reject(open.error);
-        open.onsuccess = () => {
-          const db = open.result;
-          const request = db
-            .transaction('documents', 'readonly')
-            .objectStore('documents')
-            .get([repository, path]);
-          request.onsuccess = () => {
-            resolve(request.result?.text);
-            db.close();
-          };
-          request.onerror = () => {
-            reject(request.error);
-            db.close();
-          };
-        };
-      }),
-    { repository, path }
-  );
 }

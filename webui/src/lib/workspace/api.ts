@@ -68,9 +68,7 @@ async function mcp<T>(name: string, args: unknown): Promise<T> {
       signal: AbortSignal.timeout(15000)
     });
   } catch {
-    throw new ApiError(
-      'Daemon unavailable. Cached documents and local drafts remain available.'
-    );
+    throw new ApiError('Daemon unavailable. Check the connection and retry.');
   }
   const value = await response.json().catch(() => {
     throw new ApiError(
@@ -156,9 +154,7 @@ async function rawRead(path: string): Promise<Response> {
       signal: AbortSignal.timeout(15000)
     });
   } catch {
-    throw new ApiError(
-      'Daemon unavailable. Cached documents and local drafts remain available.'
-    );
+    throw new ApiError('Daemon unavailable. Check the connection and retry.');
   }
   if (!response.ok && response.status !== 404) {
     throw new ApiError(await response.text(), response.status);

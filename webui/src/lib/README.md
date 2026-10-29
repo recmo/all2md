@@ -14,8 +14,8 @@ and explicit paths for dependencies between features. The route in
 The selected document is derived from the workspace cache and selection, never
 stored as a second mutable copy. Drafts, bases, conflicts, and submission text
 are saved synchronously in a small localStorage journal. Published documents
-and the validation baseline use a separate, asynchronous IndexedDB cache;
-cache failures must not prevent saved drafts from being submitted.
+and the validation baseline stay in memory and are loaded from mdstore when the
+workspace connects.
 
 App document metadata and schema ownership are projected in Rust, using the
 same projection during validation and view evaluation. JavaScript supplies the

@@ -1,10 +1,5 @@
 <script lang="ts">
   import {
-    loadDocuments,
-    saveDocuments,
-    clearDocuments
-  } from '$lib/workspace/documentCache';
-  import {
     rewriteSchemaReferences,
     assertReferencesPreserved
   } from '$lib/navigation/schemaReferences';
@@ -83,7 +78,6 @@
     loadCache,
     saveCache,
     clearCache,
-    cachedSearch,
     emptyCache,
     type Cache
   } from '$lib/workspace/cache';
@@ -120,7 +114,6 @@
     validated = $state('');
   let results = $state.raw<SearchResult[] | null>(null),
     searchLabel = $state('ALL DOCUMENTS');
-  let fetching = $state<string[]>([]);
   let validating = $state(false);
   let validationVersion = 0;
   let readVersion = 0,
@@ -149,14 +142,14 @@
     // Only content, connectivity and foreground operations schedule validation.
     // A description change does not invalidate the checked document edits.
     const edits = signature;
-    const snapshotRevision = cache.validationSnapshot?.revision;
     const connected = online;
     const ready =
       !busy &&
       !reconciling &&
       !conflictPaths.length &&
       draftCount > 0 &&
-      (connected || !!snapshotRevision);
+      connected &&
+      !!cache.validationSnapshot;
     validationVersion++;
     validating = false;
     validated = '';
@@ -210,26 +203,10 @@
       failure(e);
     }
   }
-  async function restoreCache(repository?: string) {
-    const journal = loadCache(localStorage, repository);
-    try {
-      return await loadDocuments(journal);
-    } catch {
-      return journal;
-    }
-  }
   function persist() {
     try {
       saveCache(localStorage, cache);
       saved = true;
-      const repository = cache.repository;
-      void saveDocuments(cache).catch(() => {
-        if (cache.repository === repository)
-          message(
-            'Drafts are saved. Offline document caching is unavailable; reconnect to load uncached documents.',
-            true
-          );
-      });
     } catch (e) {
       saved = false;
       message(
@@ -358,10 +335,6 @@
         let page: Page | undefined =
           cache.drafts[change.path] || cache.pages[change.path];
         if (!page) {
-          if (!online)
-            throw Error(
-              'Open or cache ' + change.path + ' before editing offline'
-            );
           page = await api.page(change.path);
         }
         if (!page.exists && !cache.drafts[change.path])
@@ -395,7 +368,7 @@
     await api.directory();
     updatePermissions((await api.page('config.yaml')).text);
     if (!cache.repository) {
-      cache = await restoreCache(location.origin);
+      cache = loadCache(localStorage, location.origin);
       validated = '';
     }
     cache = { ...cache, allowTemplateEdits, allowConfigEdits };
@@ -412,16 +385,8 @@
     }
     const version = ++readVersion;
     const draft = cache.drafts[path];
-    const cached = draft || cache.pages[path];
-    if (cached) select(cached, historyMode);
-    if (!online) {
-      if (!cached)
-        throw Error(
-          'This document has not been cached. Connect to the daemon to open it.'
-        );
-      return;
-    }
-    fetching = [...new Set([...fetching, path])];
+    const loaded = draft || cache.pages[path];
+    if (loaded) select(loaded, historyMode);
     try {
       const page = await api.page(path);
       if (version !== readVersion) return;
@@ -433,10 +398,8 @@
         );
       else if (!cache.drafts[path]) select(page, historyMode);
     } catch (e) {
-      if (!cached) throw e;
+      if (!loaded) throw e;
       failure(e);
-    } finally {
-      fetching = fetching.filter((p) => p !== path);
     }
   }
   let codeEditor = $state<CodeEditor>();
@@ -512,11 +475,6 @@
       searchLabel = 'ALL DOCUMENTS';
       return;
     }
-    if (!online) {
-      results = cachedSearch(cache, query);
-      searchLabel = 'OFFLINE · CACHED TEXT';
-      return;
-    }
     searchLabel = 'SEARCHING…';
     try {
       const response = await api.search(
@@ -534,15 +492,13 @@
     } catch (e) {
       if (version !== searchVersion) return;
       searchLabel = 'SEARCH FAILED';
-      if (e instanceof ApiError && e.status === 0) {
-        results = cachedSearch(cache, query);
-        searchLabel = 'OFFLINE · CACHED TEXT';
-      }
+      results = null;
       throw e;
     }
   }
   async function validate(refreshBaseline = false) {
-    if (busy || reconciling || conflictPaths.length || !draftCount) return;
+    if (!online || busy || reconciling || conflictPaths.length || !draftCount)
+      return;
     if (refreshBaseline && online) {
       await refreshValidationSnapshot();
       await tick();
@@ -586,7 +542,7 @@
         return;
       if (result.needs.length) {
         message(
-          `Validation incomplete: ${result.needs.length} affected document(s) need current source. ${online ? 'Reconnect to refresh the baseline.' : 'Reconnect to fetch them.'}`
+          `Validation incomplete: ${result.needs.length} affected document(s) need current source. Reconnect to refresh the baseline.`
         );
         return;
       }
@@ -607,11 +563,9 @@
       message(
         result.restart_required
           ? 'Validation passed. Listener changes require a daemon restart after submission.'
-          : !online
-            ? 'Validation passed offline against the cached baseline. Reconnect to submit.'
-            : cache.summary.trim()
-              ? 'Validation passed. Ready to submit; the daemon checks the current repository before committing.'
-              : 'Validation passed.'
+          : cache.summary.trim()
+            ? 'Validation passed. Ready to submit; the daemon checks the current repository before committing.'
+            : 'Validation passed.'
       );
     } catch (e) {
       if (version === validationVersion && checkedSignature === signature)
@@ -748,7 +702,6 @@
           (item === path || (directory && item.startsWith(path + '/')))
       )) {
         if (!cache.drafts[item] && !sources[item]) {
-          if (!online) throw Error(`Cache ${item} before deleting it offline.`);
           sources[item] = await api.page(item);
         }
       }
@@ -791,10 +744,6 @@
     // source is unavailable, rather than silently leaving stale backlinks.
     for (const path of paths.filter((path) => !path.endsWith('/'))) {
       if (!cache.drafts[path] && !sources[path]) {
-        if (!online)
-          throw Error(
-            `Cache ${path} before moving offline so its links can be updated.`
-          );
         sources[path] = await api.page(path);
       }
     }
@@ -912,15 +861,7 @@
     )
       throw Error('Enter an explicit document path ending in .md.');
     if (!cache.repository) throw Error('Connect to a repository first.');
-    let page: Page;
-    if (online) page = await api.page(path);
-    else
-      page = cache.pages[path] || {
-        path,
-        exists: false,
-        text: '',
-        template: null
-      };
+    const page = await api.page(path);
     select(cache.drafts[path] || page);
     showCreate = false;
     if (!page.exists) edit(page.text);
@@ -950,9 +891,9 @@
     const offline = () => {
       online = false;
       validated = '';
-      message(
-        'Offline. Reading, local rendering, and drafting remain available.'
-      );
+      results = null;
+      searchLabel = 'ALL DOCUMENTS';
+      message('Connection lost. Reconnect to continue.', true);
     };
     const connect = () => {
       validated = '';
@@ -978,7 +919,7 @@
     )
       view = requestedPath.slice(1) as 'search' | 'settings' | 'submit';
     void run(async () => {
-      cache = await restoreCache();
+      cache = loadCache(localStorage);
       allowTemplateEdits = cache.allowTemplateEdits === true;
       allowConfigEdits = cache.allowConfigEdits === true;
       try {
@@ -1019,10 +960,7 @@
         : current
           ? `${title} · mdstore`
           : 'mdstore · Library'}</title
-  ><meta
-    name="description"
-    content="An offline-capable Markdown workspace"
-  /></svelte:head
+  ><meta name="description" content="A Markdown workspace" /></svelte:head
 >
 <dialog bind:this={treeDialog} class="tree-dialog">
   <form
@@ -1105,14 +1043,12 @@
       validation={{
         valid: draftCount
           ? validated === signature
-          : !!cache.validationSnapshot,
+          : online && !!cache.validationSnapshot,
         invalid: findings.map((finding) => finding.path),
         pending: draftCount > 0 && validated !== signature
       }}
       selected={view === 'document' ? current?.path : undefined}
       drafts={Object.keys(cache.drafts)}
-      cached={Object.keys(cache.pages)}
-      {fetching}
       {saved}
       {busy}
       onaction={treeActionOpen}
@@ -1265,34 +1201,30 @@
     <div class="workspace-page">
       <ConnectionSettings onconnect={refresh} />
       <section class="review">
-        <h2>Offline storage</h2>
-        <p role="status">{online ? 'Connected' : 'Offline · local cache'}</p>
+        <h2>Local drafts</h2>
+        <p role="status">{online ? 'Connected' : 'Disconnected'}</p>
         <p class:error>{feedback}</p>
-        <details class="cache-settings">
-          <summary
-            >Local storage · {Object.keys(cache.pages).length} cached</summary
-          >
-          <p>Documents and drafts are stored in this browser.</p>
-          <button
-            disabled={busy}
-            onclick={() => {
-              if (
-                confirm(
-                  'Clear cached documents and local drafts for this repository?'
-                )
-              ) {
-                void clearDocuments(cache.repository).catch(() =>
-                  message('Could not clear offline documents.', true)
-                );
-                clearCache(localStorage, cache.repository);
-                cache = emptyCache(cache.repository);
-
-                validated = '';
-                saved = true;
-              }
-            }}>Clear local cache</button
-          >
-        </details>
+        <p>Unsubmitted changes are saved in this browser.</p>
+        <button
+          disabled={busy}
+          onclick={() => {
+            if (
+              confirm('Discard all unsubmitted changes for this repository?')
+            ) {
+              clearCache(localStorage, cache.repository);
+              cache = {
+                ...cache,
+                drafts: {},
+                deletions: {},
+                conflicts: {},
+                folders: [],
+                summary: ''
+              };
+              validated = '';
+              persist();
+            }
+          }}>Discard local changes</button
+        >
       </section>
     </div>
   {:else if view === 'search'}
@@ -1313,8 +1245,9 @@
             id="search"
             type="search"
             bind:value={query}
-            placeholder={online ? 'Search with MCP…' : 'Search cached text…'}
-          /><button aria-label="Search">↵</button>
+            placeholder="Search with MCP…"
+            disabled={!online}
+          /><button aria-label="Search" disabled={!online}>↵</button>
         </div>
         <details class="search-options">
           <summary>Query variants</summary><label for="variants"
@@ -1324,7 +1257,9 @@
       </form>
       <p class="muted">
         {searchLabel === 'ALL DOCUMENTS'
-          ? 'Search the library using the MCP search API, or cached text when offline.'
+          ? online
+            ? 'Search the library using the MCP search API.'
+            : 'Connect to the daemon to search your documents.'
           : searchLabel}
       </p>
       {#if results}
@@ -1396,14 +1331,14 @@
                 title={!saved
                   ? 'Local storage could not save your changes'
                   : !online
-                    ? 'Working from the offline cache'
+                    ? 'Connection lost; reconnect to load server changes'
                     : cache.drafts[current.path]
                       ? 'Changes saved locally; pending submission'
                       : 'Up to date with the server'}
                 >{!saved
                   ? 'Not saved'
                   : !online
-                    ? 'Offline'
+                    ? 'Disconnected'
                     : cache.drafts[current.path]
                       ? 'Local'
                       : 'Synced'}</span
@@ -1529,7 +1464,7 @@
           <span>▧</span>
           <h2>Your knowledge, connected.</h2>
           {#if error}<p class="error" role="alert">{feedback}</p>{/if}
-          <p>Explore your library. Write in place. Keep working offline.</p>
+          <p>Explore your library. Write in place.</p>
         </div>{/if}
     </section>
   {/if}

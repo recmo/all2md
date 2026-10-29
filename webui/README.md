@@ -1,7 +1,7 @@
 # mdstore web workspace
 
 SvelteKit SPA with a static adapter, Pierre CodeView, markdown-it, and DOMPurify.
-This package owns the frontend, offline-validation orchestration, and Starlark app
+This package owns the frontend, local validation orchestration, and Starlark app
 runtime. Its `wasm/` crate links mdstore's generic validation library. The document
 server has no dependency on this package and does not host the UI.
 
@@ -54,34 +54,26 @@ them before merging.
   indented code with Shiki highlighting (including Rust, LaTeX, Typst, and Lean 4).
   Starlark uses Python coloring; Markdown frontmatter uses YAML coloring.
   Configuration and template editing follow the daemon permission settings.
-  The service worker caches bundled language assets for offline rendering.
 - Draft bases, edits, conflicts, and summaries use a synchronous localStorage
   journal, scoped by origin and repository. Published documents and validation
-  snapshots use a separate IndexedDB cache with per-document writes. Connecting
-  caches the published corpus; cache failures do not block saved drafts from
-  being submitted. The service worker caches only the app shell.
-- Offline search is explicitly labelled cached-text search. Reconnecting refreshes
-  the listing; it never auto-submits and requires fresh validation. Exact original
-  source is retained for concurrency checks, including across browser reloads.
-- Settings provides connection retry and cache management. Cache quota and
-  concurrent-tab conflicts are surfaced; export drafts before closing a tab
-  whose changes could not be saved. Cached documents remain readable offline
-  until the cache is cleared.
+  snapshots stay in memory. Connecting loads the published corpus and reconciles
+  drafts against current server sources; nothing is submitted automatically.
+- Search always uses the daemon. Browsing, source loading, validation and submission
+  require a connection. Local drafts survive refresh and temporary disconnections.
+- Settings provides connection retry and discarding unsubmitted changes. Storage
+  quota and concurrent-tab conflicts are surfaced so unsaved work can be recovered.
 
-Browser refresh fetches the current application shell, falling back to the installed
-shell when offline or the server is unavailable. Updated service workers activate
-after tabs using the previous worker close, so those tabs retain their cached
-assets for offline use until they close.
+The WebUI uses the browser's HTTP cache for static assets. It does not register a
+service worker, persist published documents, or provide an offline application shell.
 
 If Connect reports a missing repository revision (`X-Mdstore-Commit`), check that
 the reverse proxy forwards `/path` and `/path/*` to mdstore instead of the static
-app shell, and deploy matching daemon and WebUI versions. Clearing local
-storage cannot repair a missing server header.
+app shell, and deploy matching daemon and WebUI versions.
 
-Service workers require localhost or HTTPS. An insecure non-local HTTP deployment
-can keep drafts in localStorage but cannot reload the application shell offline.
-
-The document library uses @pierre/trees through its vanilla API, hosted by a Svelte component. It provides virtualized rows, compact folder chains, keyboard navigation, and offline status badges: cached, not cached, downloading, local draft awaiting submission, or local-save failure. Folder badges aggregate offline availability. Cached does not imply up to date with the server. Folder/file context menus support creation, renaming, moving, and staged deletion.
+The document library uses @pierre/trees through its vanilla API, hosted by a Svelte
+component. Folder/file context menus support creation, renaming, moving, and staged
+deletion. Badges show drafts, staged deletions, validation findings, save failures,
+and merge conflicts; folder badges aggregate staged changes.
 Markdown and wiki links use source-relative paths; a leading `/` selects the
 repository root. There is no global name search or implicit root fallback.
 Missing targets are marked as broken, including against local drafts and staged
@@ -104,7 +96,7 @@ For production, host `build/` with a static web server and reverse-proxy `/mcp`,
 proxy locally via `MDSTORE_URL`; preview is for local inspection.
 `nix build .#webui` produces static assets, independently of `.#mdstore`.
 
-## Offline validation
+## Local validation
 
 The browser executes the same Rust validation library in a Web Worker,
 including the Starlark interpreter, schema checks, Markdown rules, link resolution,
@@ -117,15 +109,14 @@ Webui builds its own versioned baseline from raw HTTP reads: source
 hashes, parsed document facts, relation edges, and configuration/template sources.
 The first connection downloads the published document inventory; subsequent
 refreshes reuse files at the same commit and fetch fresh sources when the commit
-changes, including updated template projections. Validation uses that cached baseline offline.
+changes, including updated template projections. Validation uses this in-memory baseline while connected.
 When document-selection globs change, the current client marks local validation
 incomplete and permits submission for authoritative checks; it never labels
 those edits valid based on an incomplete inventory.
 
-The app caches the baseline, worker and WASM binary for offline use. Local results
-are advisory against the cached revision; submission always runs authoritative
+Local results are advisory against the loaded revision; submission always runs authoritative
 server validation, permissions and optimistic concurrency checks again. Revalidate
-refreshes the baseline when online. The worker preserves Starlark's execution
+refreshes the baseline from the daemon. The worker preserves Starlark's execution
 limits and is terminated if a request exceeds 15 seconds.
 
 
@@ -149,8 +140,7 @@ fallback), `template` (root-relative path with leading slash), `frontmatter`, an
 `text` (nullable for metadata-only records). Template and app definition files are
 not collection records. Queries can use comprehensions, sorting and dictionaries;
 there is no query DSL, database or index. Local drafts replace baseline records;
-staged deletions disappear. Missing metadata and offline freshness are displayed
-explicitly. Evaluation runs in a bounded WASM worker without filesystem, network,
+staged deletions disappear. Missing metadata and connection status are displayed explicitly. Evaluation runs in a bounded WASM worker without filesystem, network,
 loaders or implicit clock access.
 
 Views bind roles to frontmatter JSON pointers, or `title`/`path`:
@@ -191,7 +181,7 @@ action execution does not bypass template validation or commit automatically.
 Client-side app definition validation executes collection queries against the proposed document
 inventory and checks view/action references. Action callbacks execute only when
 invoked with a real event; their proposed edits go through ordinary validation.
-Offline validation of an edited app requires the collection source documents.
+Local validation of an edited app requires the collection source documents.
 
 ### Reconciling browser drafts
 
@@ -200,7 +190,7 @@ changes fetches current source and performs a client-side three-way merge agains
 the draft's original base. Disjoint edits merge automatically. Conflicts preserve
 both versions and the original base in local storage; the tree marks them and
 Submit offers passage-by-passage Yours, Server, and manual resolutions using
-Pierre diffs. Manual resolutions are saved locally and can be completed offline.
+Pierre diffs. Manual resolutions are saved locally.
 Resolving updates the exact base and triggers validation again.
 
 Delete/modify, remote deletion, and colliding new files require explicit choices.

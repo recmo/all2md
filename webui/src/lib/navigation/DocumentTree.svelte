@@ -10,8 +10,6 @@
     validation,
     selected,
     drafts,
-    cached,
-    fetching,
     saved,
     busy,
     oncreate,
@@ -26,8 +24,6 @@
     validation?: { valid: boolean; invalid: string[]; pending: boolean };
     selected?: string;
     drafts: string[];
-    cached: string[];
-    fetching: string[];
     saved: boolean;
     oncreate: (folder: string) => void;
     onaction: (
@@ -67,9 +63,7 @@
   const statuses = $derived(
     treeStatuses(
       paths.filter((path) => !path.endsWith('/')),
-      cached,
       drafts,
-      fetching,
       saved,
       deleted,
       validation,
