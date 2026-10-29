@@ -535,17 +535,22 @@ pub(crate) fn sync_index(root: &Path, revision: &str, paths: &[String]) -> Resul
     Ok(())
 }
 
-/// Returns whether history after `base` contains the exact tree.
-pub(crate) fn history_contains_tree(root: &Path, base: &str, tree: &str) -> Result<bool> {
+/// Returns the first commit after `base` with the exact tree.
+pub(crate) fn history_commit_for_tree(
+    root: &Path,
+    base: &str,
+    tree: &str,
+) -> Result<Option<String>> {
     let ancestor = run(root, ["merge-base", "--is-ancestor", base, "HEAD"])?;
     if !ancestor.status.success() {
-        return Ok(false);
+        return Ok(None);
     }
     let range = format!("{base}..HEAD");
-    let output = checked(root, ["log", "--format=%T", &range])?;
+    let output = checked(root, ["log", "--reverse", "--format=%H %T", &range])?;
     Ok(String::from_utf8(output.stdout)?
         .lines()
-        .any(|candidate| candidate == tree))
+        .filter_map(|line| line.split_once(' '))
+        .find_map(|(commit, candidate)| (candidate == tree).then(|| commit.to_owned())))
 }
 
 /// Restores exact paths from the current winning `HEAD`.

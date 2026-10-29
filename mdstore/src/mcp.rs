@@ -236,7 +236,7 @@ fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "search",
-            "description": "Hybrid exact, embedding, graph-assisted, and reranked search. Optional variants supply alternative query formulations. Returns ranked results containing only a repository-rooted /path:start-end and a hashline-anchored excerpt, plus degraded retrieval warnings. Excerpt anchors can be used directly with edit.",
+            "description": "Search documents; variants optionally add query formulations. Returns snapshot commit, ranked /path:start-end excerpts with edit-ready anchors, and degraded retrieval warnings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -249,12 +249,12 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "read",
-            "description": "Read a file or directory from the published document tree. Use / for the root or a path ending in / for a directory: returns a plain-text list of direct child paths, with trailing / for directories. Append ** for all descendants or **/ for descendant directories only (for example /notes/** and /notes/**/). Subtree listings exclude the starting directory and are complete, sorted and deduplicated. File reads return only path, template and content; returned paths start with / at the repository root. Reads and edits also accept paths without that prefix. File reads return a plain-text path/schema header followed by four-character neighbor-based hashlines, without a structured duplicate. Append :LINE or :START-END to the path for a line window. Pass a non-empty path array for ordered batch reads, with one text block per path. An invalid read rejects the whole batch. Anchors must match at the supplied line number; stale anchors require a fresh read. Directories support plain-text output only. Markdown responses identify the nearest schema by its repository-rooted template path with a leading /; read that path separately for instructions and rules. A proposed Markdown path returns a missing-file message and its schema path for discovery before creation. Configuration edits require server.allow_config_edits; template edits require server.allow_template_edits.",
+            "description": "Read files or directories. Paths are repository-rooted; leading / is optional. Files return path, schema path, and LINE:HH|text (two hex digits). Read the schema separately for rules. Missing Markdown files return their schema for creation. Directories list child paths with trailing / for directories. Arrays preserve order; any invalid read rejects the batch. One commit header applies to all returned blocks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {
-                        "description": "Repository-rooted path or non-empty array of paths. Each may end in :LINE or :START-END (one-based, inclusive). Use a trailing / for direct children, /** for all descendants, or /**/ for descendant directories only.",
+                        "description": "Path or non-empty path array. Files: :LINE or :START-END (one-based, inclusive). Directories: / for root, trailing / for children, /** for all descendants, /**/ for descendant directories only.",
                         "oneOf": [
                             {"type": "string", "minLength": 1},
                             {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
@@ -267,12 +267,13 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "edit",
-            "description": "Atomically validate and locally commit an edit batch. Supply edits as an object mapping each file path to a non-empty operation array; operations omit path. All anchors refer to the pre-edit snapshot. Use replace with an anchor for a line or inclusive range, with the complete anchor range for a whole existing file, or without an anchor to create a missing file. Use 0: to replace an existing empty file with non-empty content. Empty-to-empty replacement is an error. Empty replacement content deletes the selected lines; deleting the file requires a single complete-file anchor. Use append to insert after an anchor, 0: for file start, or omit anchor for EOF; the file must exist. Config edits require server.allow_config_edits; listener changes require a restart. Template edits require server.allow_template_edits and validate the complete corpus against the proposed templates. Create paths may contain {serial:03} for template-governed allocation; read the parent directory afterward to discover allocated paths. Git replication runs in the background. Returns {success: true} or {errors: [...]}. Error location and optional schema use /path:line syntax, omitting :line when unavailable and omitting absent schema.",
+            "description": "Validate and locally commit an atomic batch. Map paths to operation arrays; anchors refer to the pre-edit snapshot and must match at their line numbers. Copy anchors from read/search; on stale errors use the returned current lines or reread that range. Replacement text omits hashline prefixes. Whole-file replacement/deletion requires one complete-file anchor. Config/template edits require server permission. Create paths may use {serial:03}; read the parent afterward for allocated paths. Returns {success: true, commit: HASH} or {errors: [{location?, message, schema?}]}.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "summary": {"type": "string", "minLength": 1},
                     "edits": {
+                        "description": "Repository-rooted paths (leading / optional) mapped to operation arrays.",
                         "type": "object",
                         "minProperties": 1,
                         "propertyNames": {"minLength": 1},
@@ -296,7 +297,7 @@ fn edit_operation_schemas() -> Vec<Value> {
             "type": "object",
             "properties": {
                 "op": {"const": "replace"},
-                "anchor": {"type": "string", "description": "LINE:HASH or START:HASH..END:HASH. Use the complete range for whole-file replacement/deletion, 0: for an existing empty file, or omit to create a missing file."},
+                "anchor": {"type": "string", "description": "LINE:HH or START:HH..END:HH, inclusive. Complete range for whole-file edits; 0: for an empty file; omit to create a missing file."},
                 "content": {"type": "string", "description": "Replacement text; empty deletes the selected lines or whole file."}
             },
             "required": ["op", "content"],
@@ -306,7 +307,7 @@ fn edit_operation_schemas() -> Vec<Value> {
             "type": "object",
             "properties": {
                 "op": {"const": "append"},
-                "anchor": {"type": "string", "description": "LINE:HASH to insert after; 0: for file start; omit for EOF. File must exist."},
+                "anchor": {"type": "string", "description": "LINE:HH to insert after; 0: for file start; omit for EOF. File must exist."},
                 "content": {"type": "string", "minLength": 1}
             },
             "required": ["op", "content"],
@@ -475,14 +476,12 @@ fn read_pages(store: &Store, arguments: GetArguments) -> Result<Value> {
         bail!("path arrays must contain at least one path");
     }
     let state = store.read_state();
-    let content: Vec<_> = paths
-        .iter()
-        .map(|path| {
-            read_page(&state, path)
-                .map(|text| json!({"type": "text", "text": text}))
-                .map_err(|error| anyhow::anyhow!("read {path:?}: {error}"))
-        })
-        .collect::<Result<_>>()?;
+    let mut content = vec![json!({"type": "text", "text": format!("Commit: {}", state.head)})];
+    for path in paths {
+        let text =
+            read_page(&state, &path).map_err(|error| anyhow::anyhow!("read {path:?}: {error}"))?;
+        content.push(json!({"type": "text", "text": text}));
+    }
     Ok(json!(content))
 }
 
@@ -543,7 +542,7 @@ async fn call_tool(id: Value, store: &Arc<Store>, params: Value) -> Response {
                 let blocking_store = Arc::clone(store);
                 run_blocking(move || blocking_store.apply_edits(&arguments))
                     .await
-                    .map(|_| json!({"success": true}))
+                    .map(|commit| json!({"success": true, "commit": commit}))
             }
             Err(error) => Err(error),
         },

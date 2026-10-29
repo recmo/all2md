@@ -11,7 +11,7 @@ pub(crate) enum HashlineError {
     #[error("invalid anchor {0:?}")]
     InvalidAnchor(String),
     /// No current line matches the anchor.
-    #[error("stale anchor {anchor}; current neighborhood:\n{context}")]
+    #[error("stale anchor {anchor}. Current:\n{context}")]
     StaleAnchor {
         /// Anchor supplied by the caller.
         anchor: String,
@@ -92,7 +92,7 @@ impl EditOperation {
 }
 
 #[must_use]
-/// Computes a four-character SHA-256 prefix over a line and its immediate neighbors.
+/// Computes a two-character SHA-256 prefix over a line and its immediate neighbors.
 /// Missing neighbors are empty strings. Length prefixes preserve field boundaries.
 pub fn short_hash(line: &str, prev: &str, next: &str) -> String {
     let mut hash = Sha256::new();
@@ -100,7 +100,7 @@ pub fn short_hash(line: &str, prev: &str, next: &str) -> String {
         hash.update((part.len() as u64).to_be_bytes());
         hash.update(part.as_bytes());
     }
-    format!("{:x}", hash.finalize())[..4].to_owned()
+    format!("{:x}", hash.finalize())[..2].to_owned()
 }
 
 fn line_hash<S: AsRef<str>>(lines: &[S], index: usize) -> String {
@@ -381,7 +381,7 @@ fn resolve_line(anchor: &str, lines: &[String]) -> Result<usize, HashlineError> 
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| HashlineError::InvalidAnchor(anchor.into()))?;
-    if expected.len() != 4 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if expected.len() != 2 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(HashlineError::InvalidAnchor(anchor.into()));
     }
     if lines
@@ -390,10 +390,15 @@ fn resolve_line(anchor: &str, lines: &[String]) -> Result<usize, HashlineError> 
     {
         return Ok(number - 1);
     }
-    let start = number.saturating_sub(3).max(1);
-    let end = number.saturating_add(2).min(lines.len());
+    let line = number.min(lines.len()).max(1);
+    let start = line.saturating_sub(1).max(1);
+    let end = line.saturating_add(1).min(lines.len());
     Err(HashlineError::StaleAnchor {
         anchor: anchor.into(),
-        context: render(&lines.join("\n"), Some((start, end))),
+        context: if lines.is_empty() {
+            "File is empty.".into()
+        } else {
+            render(&lines.join("\n"), Some((start, end)))
+        },
     })
 }
