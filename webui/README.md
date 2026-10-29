@@ -41,9 +41,11 @@ them before merging.
 - Raw document reads use `GET /path/document.md`; `GET /path/directory/` lists
   child paths. Webui traverses the tree and builds its validation baseline
   locally in a WASM worker. Schema paths arrive in the HTTP `Link` header.
-  GET `ETag` values identify the published commit: cached files are reused only
-  at that commit, and traversal retries if revisions differ. HTTP caching
-  revalidates reads and permits 304 responses without downloading the body.
+  GET `X-Mdstore-Commit` values identify the published commit: cached files are
+  reused only at that commit, and traversal retries if revisions differ. HTTP caching
+  revalidates reads using `ETag` and permits 304 responses without downloading
+  the body. The commit header is independent of compression or proxy changes to
+  the HTTP cache validator.
 - Shared Rust validation runs incrementally in WASM while editing. The server
   independently validates every submission through `edit`.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
@@ -65,6 +67,15 @@ them before merging.
   concurrent-tab conflicts are surfaced; export drafts before closing a tab
   whose changes could not be saved. Cached documents remain readable offline
   until the cache is cleared.
+
+Browser refresh fetches the current application shell, falling back to the installed
+shell when offline or the server is unavailable. Updated service workers activate
+once their assets are cached; existing tabs keep their in-memory work until reload.
+
+If Connect reports a missing repository revision (`X-Mdstore-Commit`), check that
+the reverse proxy forwards `/path` and `/path/*` to mdstore instead of the static
+app shell, and deploy matching daemon and WebUI versions. Clearing local
+storage cannot repair a missing server header.
 
 Service workers require localhost or HTTPS. An insecure non-local HTTP deployment
 can keep drafts in localStorage but cannot reload the application shell offline.

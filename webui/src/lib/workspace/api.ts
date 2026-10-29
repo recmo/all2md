@@ -167,13 +167,13 @@ async function rawRead(path: string): Promise<Response> {
 }
 
 function readRevision(response: Response): string {
-  const etag = response.headers.get('etag');
-  if (!etag)
+  const commit = response.headers.get('x-mdstore-commit');
+  if (!commit)
     throw new ApiError(
-      'Document response is missing its repository revision.',
+      `Cannot load documents: ${new URL(response.url).pathname} is missing its repository revision (X-Mdstore-Commit). Check that the reverse proxy forwards /path/ to mdstore, and deploy matching daemon and WebUI versions.`,
       502
     );
-  return etag;
+  return commit;
 }
 
 export const api = {

@@ -4,7 +4,13 @@ const worker = self as unknown as ServiceWorkerGlobalScope;
 const CACHE = `mdstore-shell-${version}`;
 const ASSETS = ['/', '/settings', ...build, ...files];
 worker.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
+  event.waitUntil(
+    (async () => {
+      const cache = await caches.open(CACHE);
+      await cache.addAll(ASSETS);
+      await worker.skipWaiting();
+    })()
+  );
 });
 worker.addEventListener('activate', (event) => {
   event.waitUntil(
@@ -20,11 +26,21 @@ worker.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== worker.location.origin)
     return;
+  const navigation = event.request.mode === 'navigate';
   // Never cache API responses or submission operations.
   if (!ASSETS.includes(url.pathname)) return;
   event.respondWith(
     (async () => {
       const cache = await caches.open(CACHE);
+      if (navigation) {
+        try {
+          const response = await fetch(event.request, { cache: 'no-cache' });
+          if (response.ok) return response;
+        } catch {
+          // The installed shell remains available offline.
+        }
+        return (await cache.match('/')) || Response.error();
+      }
       return (await cache.match(url.pathname)) || fetch(event.request);
     })()
   );

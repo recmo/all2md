@@ -332,8 +332,10 @@ read the published document tree, including configuration and schemas. A missing
 file returns HTTP 404 and an empty body; an existing empty file returns HTTP 200.
 An applicable schema is identified by `Link: </path/schema.md>; rel="describedby"`,
 including for a missing file. GET responses carry the published Git commit hash
-as their `ETag`, captured with the body from the same snapshot. They use
-`Cache-Control: no-cache`; a matching `If-None-Match` on an existing file or
+in `X-Mdstore-Commit`, captured with the body from the same snapshot. `ETag`
+also uses that hash for HTTP caching, but proxies may transform the validator
+when compressing responses; clients use the dedicated header for snapshot identity.
+Responses use `Cache-Control: no-cache`; a matching `If-None-Match` on an existing file or
 directory returns HTTP 304 without a body. Any commit invalidates the cache key,
 including schema and configuration changes. The web editor reuses files at the
 same commit and retries an inventory read if any response belongs to a different

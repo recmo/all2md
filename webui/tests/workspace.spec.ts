@@ -65,8 +65,32 @@ test('offline editing survives reload and search uses the MCP API online', async
     await navigator.serviceWorker.ready;
   });
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+  // A stale installed shell must not hide the current HTML on refresh.
+  await page.evaluate(async () => {
+    const key = (await caches.keys()).find((key) =>
+      key.startsWith('mdstore-shell-')
+    )!;
+    const cache = await caches.open(key);
+    const shell = (await cache.match('/'))!;
+    await cache.put(
+      '/',
+      new Response(
+        (await shell.text()).replace(
+          '<head>',
+          '<head><meta name="cached-shell" content="stale">'
+        ),
+        { headers: shell.headers }
+      )
+    );
+  });
+  await page.reload();
+  await expect(page.locator('meta[name="cached-shell"]')).toHaveCount(0);
+  await expect(page.locator('#preview')).toContainText(
+    'Offline knowledge garden.'
+  );
   await context.setOffline(true);
   await page.reload();
+  await expect(page.locator('meta[name="cached-shell"]')).toHaveCount(1);
   await expect(page.locator('#preview')).toContainText(
     'Offline knowledge garden.'
   );
@@ -84,6 +108,18 @@ test('offline editing survives reload and search uses the MCP API online', async
   await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
   expect(calls).toContain('search');
   expect(calls).toContain('GET /path');
+  await page.getByRole('treeitem', { name: 'Settings', exact: true }).click();
+  await page.getByText('Local storage ·', { exact: false }).click();
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('button', { name: 'Clear local cache' }).click();
+  await page.getByRole('button', { name: 'Connect', exact: true }).click();
+  await expect(
+    page.getByRole('status').filter({ hasText: /^Connected$/ })
+  ).toBeVisible();
+  await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
+  await expect(page.locator('#preview')).toContainText(
+    'A knowledge garden for your ideas.'
+  );
 });
 
 test('submit pane reviews validation and diffs, then commits the full staged batch', async ({
@@ -197,6 +233,7 @@ async function replaceDocument(page: Page, text: string) {
 async function directoryPaths(page: Page, path: string): Promise<string[]> {
   const response = await page.request.get('/path/' + path.replace(/^\//, ''));
   expect(response.ok()).toBe(true);
+  expect(response.headers()['x-mdstore-commit']).toMatch(/^[0-9a-f]{40,64}$/);
   const text = await response.text();
   return text
     .split('\n')
