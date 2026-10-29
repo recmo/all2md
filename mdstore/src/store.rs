@@ -71,7 +71,7 @@ impl fmt::Display for WriteBlock {
 
 #[derive(Clone)]
 pub(crate) struct StoreState {
-    head: String,
+    pub(crate) head: String,
     templates: Arc<crate::template::Templates>,
     config: Config,
     config_files: Arc<HashMap<String, String>>,
@@ -115,14 +115,13 @@ impl Error for ValidationError {}
 struct PendingReceipt {
     base_head: String,
     tree: String,
-    touched_paths: Vec<String>,
     preimages: Images,
     postimages: Images,
 }
 
 #[derive(Serialize, Deserialize)]
 struct StoredReceipt {
-    touched_paths: Vec<String>,
+    commit: String,
     preimages: Images,
     postimages: Images,
 }
@@ -372,13 +371,14 @@ impl Store {
             })
             .collect::<Result<_>>()?;
         Ok(SearchResponse {
+            commit: snapshot.head.clone(),
             results,
             degraded: response.degraded,
         })
     }
 
-    /// Validates and commits one atomic hashline edit batch, then notifies replication.
-    pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<Vec<String>> {
+    /// Validates and commits one atomic hashline edit batch, returning its Git commit ID.
+    pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<String> {
         if request.summary.trim().is_empty() {
             bail!("summary must be non-empty");
         }
@@ -577,7 +577,6 @@ impl Store {
             let pending = PendingReceipt {
                 base_head: base_head.clone(),
                 tree,
-                touched_paths: path_list.clone(),
                 preimages: preimages.clone(),
                 postimages: postimages.clone(),
             };
@@ -622,7 +621,7 @@ impl Store {
             provider.as_ref(),
         );
         *self.state.write() = Arc::new(StoreState {
-            head: base_head,
+            head: base_head.clone(),
             templates,
             config,
             config_files: if extra == *current.config_files {
@@ -637,11 +636,11 @@ impl Store {
             provider,
             generation: current.generation + 1,
         });
-        self.write_receipt(&digest, &path_list, &preimages, &postimages)?;
+        self.write_receipt(&digest, &base_head, &preimages, &postimages)?;
         self.remove_pending(&digest)?;
         self.sync_notify.notify_one();
         self.reindex_notify.notify_one();
-        Ok(path_list)
+        Ok(base_head)
     }
 
     /// Rebuilds every embedding sidecar and the search index.
@@ -1002,7 +1001,7 @@ impl Store {
             .join(format!("{digest}.json"))
     }
 
-    fn read_receipt(&self, digest: &str) -> Result<Option<Vec<String>>> {
+    fn read_receipt(&self, digest: &str) -> Result<Option<String>> {
         let path = self.receipt_path(digest);
         if !path.exists() {
             return Ok(None);
@@ -1017,18 +1016,18 @@ impl Store {
                 )
             }
         }
-        Ok(Some(stored.touched_paths))
+        Ok(Some(stored.commit))
     }
 
     fn write_receipt(
         &self,
         digest: &str,
-        touched_paths: &[String],
+        commit: &str,
         preimages: &Images,
         postimages: &Images,
     ) -> Result<()> {
         let stored = StoredReceipt {
-            touched_paths: touched_paths.to_vec(),
+            commit: commit.to_owned(),
             preimages: preimages.clone(),
             postimages: postimages.clone(),
         };
@@ -1047,16 +1046,18 @@ impl Store {
         Ok(())
     }
 
-    fn recover_pending(&self, digest: &str) -> Result<Option<Vec<String>>> {
+    fn recover_pending(&self, digest: &str) -> Result<Option<String>> {
         let path = self.pending_path(digest);
         if !path.exists() {
             return Ok(None);
         }
         let pending: PendingReceipt = serde_json::from_slice(&fs::read(&path)?)?;
-        if !git::history_contains_tree(&self.root, &pending.base_head, &pending.tree)? {
+        let Some(commit) =
+            git::history_commit_for_tree(&self.root, &pending.base_head, &pending.tree)?
+        else {
             fs::remove_file(path)?;
             return Ok(None);
-        }
+        };
         match self.replay_state(&pending.preimages, &pending.postimages)? {
             ReplayState::Applied => {}
             ReplayState::Reverted => {
@@ -1069,14 +1070,9 @@ impl Store {
                 )
             }
         }
-        self.write_receipt(
-            digest,
-            &pending.touched_paths,
-            &pending.preimages,
-            &pending.postimages,
-        )?;
+        self.write_receipt(digest, &commit, &pending.preimages, &pending.postimages)?;
         self.remove_pending(digest)?;
-        Ok(Some(pending.touched_paths))
+        Ok(Some(commit))
     }
 
     fn replay_state(&self, preimages: &Images, postimages: &Images) -> Result<ReplayState> {

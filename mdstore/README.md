@@ -190,15 +190,20 @@ Git synchronization.
 
 An accepted edit is committed locally before it returns. It never waits for a
 network request, including when retrying an already-applied batch. The MCP
-`edit` response contains only `{"success": true}` or `{"errors": [...]}`.
+`edit` response contains `{"success": true, "commit": "<git commit hash>"}` or `{"errors": [...]}`.
 Validation and edit-engine errors carry a message and a repository-rooted
 `location` such as `/notes/page.md:5`. Stale anchors identify the exact failed
-line, including a failed range endpoint. Without a line number, the location is
+line, including a failed range endpoint, followed by up to three current
+hashlines for recovery (or an empty-file notice). Without a line number, the location is
 just `/notes/page.md`. Request-level errors without a known file omit `location`.
 An optional `schema` uses the same `/schema.md:12` syntax for the governing rule.
 Absent schema locations are omitted; there is no separate `line` field. Results
 use `structuredContent` without a duplicate text copy; failures set `isError: true`. Embedding rebuilds and Git synchronization are independent
 background activities.
+
+Successful edits return their local Git commit hash in `commit`. Repeating an
+applied batch returns its original commit, even after unrelated edits. A no-op
+edit returns the current commit without creating a new one.
 
 With `git.push: true`, the running daemon synchronizes at startup, after edits,
 and every 30 seconds while healthy. Failures retry with exponential backoff from
@@ -244,10 +249,11 @@ children of the published document tree. Use `/notes/**` for all descendants
 (files and directories), or `/notes/**/` for descendant directories only; root
 forms are `/**` and `/**/`. Subtree listings exclude the starting directory,
 are sorted and deduplicated, and return the complete listing without truncation.
-These paths also work in batch reads. Directory reads return only newline-
-separated paths, with trailing `/` for directories. No hashes, revision,
-repository ID or configuration flags are included. File reads return
-plain text containing the path, schema path and hashline content. Returned paths
+These paths also work in batch reads. Each read response starts with one
+`Commit: <git commit hash>` text block for the complete snapshot, followed by
+one text block per requested path. Directory blocks list newline-separated
+paths, with trailing `/` for directories. File blocks contain the path, schema
+path and hashline content. Returned paths
 start with `/` and are rooted at the repository root. Reads and edits accept paths
 with or without the leading `/`. Empty directories are not persisted by Git. Clients traverse directory lists and read
 sources to build inventories, content fingerprints, validation baselines and
@@ -256,19 +262,20 @@ previews locally. The web editor reads edit permissions from `config.yaml`.
 
 `search` requires `query` and accepts optional `variants` (default `[]`). Each
 ranked result contains only `path` in `/path:start-end` form and `excerpt` with
-four-character neighbor-based hashline anchors, ready for use with `edit`.
+two-character neighbor-based hashline anchors, ready for use with `edit`.
 Anchors use the same published source snapshot as retrieval, including neighbors
 outside the excerpt. Results omit metadata, heading breadcrumbs, scores,
-retrieval-arm details and vector coverage. Top-level `degraded` warnings report
-retrieval failures. The editor displays ordinary excerpt text and opens the
+retrieval-arm details and vector coverage. Top-level `commit` identifies the
+published snapshot used for retrieval and excerpts. Top-level `degraded` warnings
+report retrieval failures. The editor displays ordinary excerpt text and opens the
 underlying file path.
 
 The MCP endpoint supports protocol version `2025-06-18`. Older `2025-03-26`
 requests are no longer accepted; initialization advertises the supported
 version.
 
-An edit request uses `LINE:HASH` anchors returned by `read`. Hashes are four
-hexadecimal characters (16 bits of SHA-256). Each hash covers the line and its
+An edit request uses `LINE:HASH` anchors returned by `read`. Hashes are two
+hexadecimal characters (8 bits of SHA-256). Each hash covers the line and its
 immediate previous and next lines, with length-prefixed fields and empty strings
 for missing neighbors. Trailing whitespace is significant. The numbered line
 must match: stale anchors fail without relocation or merging. All operations in
@@ -281,8 +288,8 @@ a batch validate against the same pre-edit snapshot.
   "summary": "Update notes",
   "edits": {
     "/notes/example.md": [
-      {"op": "replace", "anchor": "10:abcd", "content": "Updated paragraph."},
-      {"op": "append", "anchor": "20:1234", "content": "Another paragraph."}
+      {"op": "replace", "anchor": "10:ab", "content": "Updated paragraph."},
+      {"op": "append", "anchor": "20:12", "content": "Another paragraph."}
     ]
   }
 }
@@ -308,18 +315,17 @@ Only `replace` and `append` are accepted:
 
 `base` is not accepted. `summary` is required and must be non-empty.
 
-`read` returns page content once as a plain-text MCP content block, with a
-path/schema header and hashline prefixes. Append `:10` to read one line or
+`read` returns one commit header for the whole response, then page content as
+plain-text MCP content blocks with path/schema headers and hashline prefixes. Append `:10` to read one line or
 `:10-20` to read an inclusive line range. The only request argument is `path`;
 separate line-number arguments and `format` are not accepted. Searches and edit
 results use `structuredContent` with an empty `content` array. No response
-includes a serialized JSON copy for older clients. File reads omit revision,
-file hash, existence flags, derived metadata and relations. Read the schema path
+includes a serialized JSON copy for older clients. File reads omit file hash, existence flags, derived metadata and relations. Read the schema path
 separately for its instructions and rules.
 
 `path` also accepts a non-empty array, for example `{"path": ["/alice.md",
 "/bob.md:10-20"]}`. Results preserve input order, including repeated paths, with
-one text block per path, including plain directory lists. All paths in a batch
+one text block per path after the shared commit header, including directory lists. All paths in a batch
 use the same published state, even if a concurrent edit commits during rendering.
 An invalid read rejects the complete batch; a missing Markdown page returns a missing-page
 message and the applicable schema path.
@@ -340,7 +346,7 @@ directory returns HTTP 304 without a body. Any commit invalidates the cache key,
 including schema and configuration changes. The web editor reuses files at the
 same commit and retries an inventory read if any response belongs to a different
 commit. It compiles property schemas locally from these sources. Edits still
-require hashline anchors. MCP response bodies do not include the GET cache key.
+require hashline anchors. MCP results identify the same published Git commit.
 
 Example edit:
 

@@ -137,7 +137,7 @@ export async function completeAnchor(text: string): Promise<string> {
       offset += 8 + field.length;
     }
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-    return `${index + 1}:${Array.from(digest.slice(0, 2), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+    return `${index + 1}:${Array.from(digest.slice(0, 1), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
   };
   const first = await hash(0);
   return lines.length === 1
@@ -215,18 +215,19 @@ export const api = {
     };
   },
   async search(query: string, variants: string[] = []) {
-    const response = await mcp<{ results: SearchResult[]; degraded: string[] }>(
-      'search',
-      {
-        query,
-        ...(variants.length ? { variants } : {})
-      }
-    );
+    const response = await mcp<{
+      commit: string;
+      results: SearchResult[];
+      degraded: string[];
+    }>('search', {
+      query,
+      ...(variants.length ? { variants } : {})
+    });
     return {
       ...response,
       results: response.results.map((result) => ({
         path: result.path.replace(/:\d+-\d+$/, '').replace(/^\//, ''),
-        excerpt: result.excerpt.replace(/^\d+:[0-9a-f]{4}\|/gm, '')
+        excerpt: result.excerpt.replace(/^\d+:[0-9a-f]{2}\|/gm, '')
       }))
     };
   },
@@ -245,7 +246,7 @@ export const api = {
       };
       (edits[`/${edit.path.replace(/^\//, '')}`] ??= []).push(operation);
     }
-    return mcp<{ success: true }>('edit', {
+    return mcp<{ success: true; commit: string }>('edit', {
       summary: request.summary,
       edits
     });
