@@ -175,7 +175,7 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   const listing = await directoryPaths(page, '/');
   expect(listing).toContain('welcome-submitted.md');
   expect(listing).not.toContain('welcome.md');
-  const cache = await page.evaluate(() =>
+  const journal = await page.evaluate(() =>
     JSON.parse(
       localStorage.getItem(
         Object.keys(localStorage).find((key) =>
@@ -184,17 +184,17 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
       )!
     )
   );
-  expect(cache.drafts).toEqual({});
-  expect(cache.deletions).toEqual({});
-  expect(cache.pages).toBeUndefined();
-  expect(cache.paths).toBeUndefined();
-  expect(cache.validationSnapshot).toBeUndefined();
+  expect(journal.drafts).toEqual({});
+  expect(journal.deletions).toEqual({});
+  expect(journal.pages).toBeUndefined();
+  expect(journal.paths).toBeUndefined();
+  expect(journal.validationSnapshot).toBeUndefined();
   await page.reload();
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await expect(page.locator('#preview')).toContainText(
     'Reviewed in the submit pane.'
   );
-  expect(cache.summary).toBe('');
+  expect(journal.summary).toBe('');
 });
 
 async function replaceDocument(page: Page, text: string) {

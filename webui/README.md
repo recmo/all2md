@@ -55,7 +55,7 @@ them before merging.
   Starlark uses Python coloring; Markdown frontmatter uses YAML coloring.
   Configuration and template editing follow the daemon permission settings.
 - Draft bases, edits, conflicts, and summaries use a synchronous localStorage
-  journal, scoped by origin and repository. Published documents and validation
+  journal, scoped to the daemon origin. Published documents and validation
   snapshots stay in memory. Connecting loads the published corpus and reconciles
   drafts against current server sources; nothing is submitted automatically.
 - Search always uses the daemon. Browsing, source loading, validation and submission

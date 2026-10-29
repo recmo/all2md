@@ -415,7 +415,7 @@
   });
 
   $effect(() => {
-    // Decorations read the current cache state; re-render through the public
+    // Decorations read the current workspace state; re-render through the public
     // composition API without rebuilding the model or resetting expansion.
     statuses;
     model?.setComposition({ ...composition });

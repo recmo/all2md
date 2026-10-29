@@ -1,53 +1,44 @@
 import type { ValidationSnapshot } from '../validation/localValidation';
 import type { Draft, Page } from './api';
-export type Cache = {
-  version: 1;
+
+export type LocalChanges = {
   conflicts?: Record<string, import('./reconcile').Conflict>;
-  validationSnapshot?: ValidationSnapshot;
-  allowTemplateEdits?: boolean;
-  allowConfigEdits?: boolean;
-  repository: string;
-  paths: string[];
   folders?: string[];
   deletions?: Record<string, string>;
-  pages: Record<string, Page>;
   drafts: Record<string, Draft>;
   summary: string;
   selected: string;
 };
-export const emptyCache = (repository: string): Cache => ({
-  version: 1,
-  repository,
+export type Workspace = LocalChanges & {
+  validationSnapshot?: ValidationSnapshot;
+  paths: string[];
+  pages: Record<string, Page>;
+};
+export const emptyWorkspace = (): Workspace => ({
   paths: [],
   pages: {},
   drafts: {},
   summary: '',
   selected: ''
 });
-const snapshots = new WeakMap<Storage, Map<string, string | null>>();
-function observed(storage: Storage) {
-  let map = snapshots.get(storage);
-  if (!map) {
-    map = new Map();
-    snapshots.set(storage, map);
-  }
-  return map;
+
+// localStorage already isolates each daemon origin. Persist only local changes.
+const KEY = 'mdstore:workspace:v1';
+const observed = new WeakMap<Storage, string | null>();
+function localChanges(workspace: LocalChanges): LocalChanges {
+  const { drafts, deletions, conflicts, folders, summary, selected } =
+    workspace;
+  return { drafts, deletions, conflicts, folders, summary, selected };
 }
-const LAST = 'mdstore:last-repository:v1';
-const key = (repository: string) => `mdstore:workspace:v1:${repository}`;
-export function loadCache(
-  storage: Storage,
-  repository = storage.getItem(LAST) || ''
-): Cache {
-  const raw = repository ? storage.getItem(key(repository)) : null;
-  observed(storage).set(repository, raw);
-  if (!raw) return emptyCache(repository);
+export function loadWorkspace(storage: Storage): Workspace {
+  const raw = storage.getItem(KEY);
+  observed.set(storage, raw);
+  if (!raw) return emptyWorkspace();
   try {
     const parsed = JSON.parse(raw);
     if (
-      parsed.version !== 1 ||
-      parsed.repository !== repository ||
       typeof parsed.summary !== 'string' ||
+      typeof parsed.selected !== 'string' ||
       !parsed.drafts
     )
       throw Error();
@@ -98,29 +89,23 @@ export function loadCache(
           throw Error();
       }
     }
-    return { ...parsed, pages: {}, paths: [] };
+    return { ...emptyWorkspace(), ...localChanges(parsed) };
   } catch {
     throw Error(
       'The saved local changes could not be read. Export or clear browser storage before continuing.'
     );
   }
 }
-export function saveCache(storage: Storage, cache: Cache) {
-  if (!cache.repository) return;
-  // Write data before the pointer; quota failures must be surfaced to the editor.
-  const current = storage.getItem(key(cache.repository));
-  if (current !== (observed(storage).get(cache.repository) ?? null))
+export function saveLocalChanges(storage: Storage, workspace: Workspace) {
+  if (storage.getItem(KEY) !== (observed.get(storage) ?? null))
     throw Error(
       'Another tab changed this workspace. Export your drafts, then reload before editing further.'
     );
-  const { pages, paths, validationSnapshot, ...journal } = cache;
-  const encoded = JSON.stringify(journal);
-  storage.setItem(key(cache.repository), encoded);
-  observed(storage).set(cache.repository, encoded);
-  storage.setItem(LAST, cache.repository);
+  const encoded = JSON.stringify(localChanges(workspace));
+  storage.setItem(KEY, encoded);
+  observed.set(storage, encoded);
 }
-export function clearCache(storage: Storage, repository: string) {
-  storage.removeItem(key(repository));
-  observed(storage).set(repository, null);
-  if (storage.getItem(LAST) === repository) storage.removeItem(LAST);
+export function clearLocalChanges(storage: Storage) {
+  storage.removeItem(KEY);
+  observed.set(storage, null);
 }
