@@ -43,6 +43,8 @@ pub(crate) type PageChunks = HashMap<String, Vec<(Chunk, Option<Vec<f32>>)>>;
 #[derive(Debug, Clone, Serialize)]
 /// Ranked source excerpts and retrieval warnings.
 pub struct SearchResponse {
+    /// Git commit used for retrieval and excerpt rendering.
+    pub commit: String,
     /// Results in final rank order.
     pub results: Vec<SearchResult>,
     /// Retrieval components that failed or returned invalid data.
