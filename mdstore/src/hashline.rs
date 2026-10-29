@@ -208,13 +208,7 @@ pub(crate) fn apply_operations(
             && text.is_empty()
             && anchor == "0:"
         {
-            if content.is_empty() {
-                return Err(HashlineError::InvalidOperation(
-                    "cannot replace an empty file with empty content".into(),
-                )
-                .at(path));
-            }
-            output.insert(path.into(), Some(content.clone()));
+            output.insert(path.into(), (!content.is_empty()).then(|| content.clone()));
             continue;
         }
         let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();

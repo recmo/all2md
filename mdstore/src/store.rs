@@ -90,6 +90,12 @@ pub struct ApplyEditsRequest {
     pub summary: String,
     /// Hashline operations resolved against one pre-edit snapshot.
     pub edits: Vec<EditOperation>,
+    /// Required snapshot guard for moves; optional for anchored edits alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_commit: Option<String>,
+    /// Simultaneous relocations after explicit edits, before final validation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moves: Vec<crate::Move>,
 }
 
 #[derive(Debug)]
@@ -382,8 +388,11 @@ impl Store {
         if request.summary.trim().is_empty() {
             bail!("summary must be non-empty");
         }
-        if request.edits.is_empty() {
-            bail!("edits must contain at least one operation");
+        if request.edits.is_empty() && request.moves.is_empty() {
+            bail!("edits or moves must contain at least one operation");
+        }
+        if !request.moves.is_empty() && request.expected_commit.is_none() {
+            bail!("moves require expected_commit from read/search");
         }
         let digest = request_digest(request)?;
         let _lock = self.lock_repository()?;
@@ -400,6 +409,37 @@ impl Store {
         }
 
         let current = self.state.read().clone();
+        if let Some(expected) = &request.expected_commit
+            && expected != &current.head
+        {
+            bail!("stale expected_commit: current commit is {}", current.head);
+        }
+        for movement in &request.moves {
+            for path in [&movement.from, &movement.to] {
+                validate_repo_path(path)?;
+                ensure_repository_path_safe(&self.root, path)?;
+                if !current.pages.contains_key(path)
+                    && (git::is_tracked(&self.root, path)?
+                        || fs::symlink_metadata(self.root.join(path)).is_ok())
+                {
+                    bail!("move path is occupied or outside the document corpus: {path}");
+                }
+            }
+            for parent in Path::new(&movement.to)
+                .ancestors()
+                .skip(1)
+                .filter(|path| !path.as_os_str().is_empty())
+            {
+                if fs::symlink_metadata(self.root.join(parent))
+                    .is_ok_and(|metadata| !metadata.is_dir())
+                {
+                    bail!(
+                        "move destination has a non-directory parent: {}",
+                        movement.to
+                    );
+                }
+            }
+        }
         let mut existing: std::collections::HashSet<_> = current.pages.keys().cloned().collect();
         // Reserve explicitly named creates too, regardless of their position in the batch.
         for edit in &request.edits {
@@ -465,10 +505,10 @@ impl Store {
             }
         }
         let applied = apply_operations(&originals, &edits)?;
-        let changes = &applied;
+        let mut changes = applied;
         let mut pages = (*current.pages).clone();
         let mut extra = (*current.config_files).clone();
-        for (path, content) in changes {
+        for (path, content) in &changes {
             let destination = if crate::template::is_template(path) || is_config_resource_path(path)
             {
                 &mut extra
@@ -513,7 +553,6 @@ impl Store {
                 }
             }
         }
-        ensure_pages_match_config(&config, &pages)?;
         if config.provider != current.config.provider && self.provider_factory.is_none() {
             bail!("provider changes require a daemon with a configurable provider");
         }
@@ -528,6 +567,29 @@ impl Store {
         } else {
             Arc::clone(&current.templates)
         };
+        if !request.moves.is_empty() {
+            let pre_move = pages.clone();
+            pages = crate::moves::apply(
+                &current.pages,
+                &pages,
+                &request.moves,
+                &current.templates,
+                &templates,
+            )?;
+            // Include all implicit backlink changes and both sides of every move
+            // in staging, rollback, receipts, and index synchronization.
+            originals = (*current.pages).clone();
+            originals.extend(load_pages(&self.root, &current.head, &config)?);
+            originals.extend((*current.config_files).clone());
+            let all_paths: BTreeSet<_> = pre_move.keys().chain(pages.keys()).cloned().collect();
+            for path in all_paths {
+                if pre_move.get(&path) != pages.get(&path) {
+                    changes.insert(path.clone(), pages.get(&path).cloned());
+                }
+            }
+            paths = changes.keys().cloned().collect();
+        }
+        ensure_pages_match_config(&config, &pages)?;
         let (parsed, edges) = crate::markdown::validate_incremental(
             &pages,
             &templates,
@@ -541,11 +603,11 @@ impl Store {
         .map_err(|findings| ValidationError { findings })?;
         current
             .templates
-            .validate_changes(&current.pages, &pages)
+            .validate_transaction_changes(&current.pages, &pages, &request.moves)
             .map_err(|findings| ValidationError { findings })?;
         if templates_changed {
             templates
-                .validate_changes(&current.pages, &pages)
+                .validate_transaction_changes(&current.pages, &pages, &request.moves)
                 .map_err(|findings| ValidationError { findings })?;
         }
         ensure_sidecars_ignored(&self.root, pages.keys().map(String::as_str))?;
@@ -563,7 +625,7 @@ impl Store {
             .map(|path| (path.clone(), changes.get(path).cloned().flatten()))
             .collect();
         let path_list: Vec<String> = paths.iter().cloned().collect();
-        let (preimages, postimages) = edit_images(&originals, changes);
+        let (preimages, postimages) = edit_images(&originals, &changes);
         if let Err(error) = git::write_changes(&self.root, &ordered) {
             return Err(rollback_failure(&self.root, &path_list, error));
         }

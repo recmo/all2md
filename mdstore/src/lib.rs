@@ -12,6 +12,8 @@ mod markdown_lint;
 #[cfg(feature = "server")]
 mod mcp;
 #[cfg(feature = "server")]
+mod moves;
+#[cfg(feature = "server")]
 mod provider;
 #[cfg(feature = "server")]
 mod search;
@@ -35,6 +37,8 @@ pub use hashline::{EditOperation, short_hash};
 pub use markdown::{Edge, Finding};
 #[cfg(feature = "server")]
 pub use mcp::{MCP_PROTOCOL_VERSION, serve, serve_listener, tool_names};
+#[cfg(feature = "server")]
+pub use moves::Move;
 #[cfg(feature = "server")]
 pub use provider::{InputType, RerankResult, RetrievalProvider, ZeroEntropyProvider};
 #[cfg(feature = "server")]

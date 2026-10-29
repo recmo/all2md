@@ -671,12 +671,12 @@ fn validate_reciprocals(
     }
 }
 
-struct TargetResolver {
+pub(crate) struct TargetResolver {
     exact: std::collections::HashSet<String>,
 }
 
 impl TargetResolver {
-    fn new<'a>(paths: impl Iterator<Item = &'a String>) -> Self {
+    pub(crate) fn new<'a>(paths: impl Iterator<Item = &'a String>) -> Self {
         Self {
             exact: paths.cloned().collect(),
         }
@@ -687,7 +687,7 @@ impl TargetResolver {
         self.resolve("", raw, LinkSyntax::Wiki)
     }
 
-    fn resolve(
+    pub(crate) fn resolve(
         &self,
         source: &str,
         raw: &str,
@@ -732,7 +732,7 @@ impl TargetResolver {
     }
 }
 
-fn decode_markdown_path(path: &str) -> Result<String, String> {
+pub(crate) fn decode_markdown_path(path: &str) -> Result<String, String> {
     let mut output = String::with_capacity(path.len());
     for (index, component) in path.split('/').enumerate() {
         if index > 0 {
@@ -782,7 +782,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn has_uri_scheme(target: &str) -> bool {
+pub(crate) fn has_uri_scheme(target: &str) -> bool {
     let Some((scheme, _)) = target.split_once(':') else {
         return false;
     };
@@ -795,7 +795,7 @@ fn has_uri_scheme(target: &str) -> bool {
         })
 }
 
-fn normalize_path(path: &Path) -> Result<String, String> {
+pub(crate) fn normalize_path(path: &Path) -> Result<String, String> {
     let mut parts = Vec::new();
     for part in path.components() {
         match part {

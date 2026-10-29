@@ -295,20 +295,80 @@ a batch validate against the same pre-edit snapshot.
 }
 ```
 
-The path map and every operation array must be non-empty. Paths accept an
+Every operation array must be non-empty; the path map may be omitted or empty
+when the request contains moves. Paths accept an
 optional leading `/`, but aliases such as `/notes/a.md` and `notes/a.md` in the
 same request are rejected. The whole request remains atomic across files.
 The former flat operation array is not accepted.
+
+### Atomic moves
+
+`edit` accepts document moves alongside anchored edits and deletions. Supply
+`expected_commit` from `read` or `search`; a stale snapshot rejects the batch.
+The snapshot guard is optional for requests containing only anchored edits.
+
+```json
+{
+  "summary": "Move the design and its notes",
+  "expected_commit": "HASH_FROM_READ",
+  "moves": [
+    {"from": "drafts/design.md", "to": "projects/design.md"},
+    {"from": "projects/design.md", "to": "archive/design.md"}
+  ],
+  "edits": {
+    "drafts/design.md": [
+      {"op": "replace", "anchor": "12:ab", "content": "Revised paragraph."}
+    ]
+  }
+}
+```
+
+All paths and anchors address the starting snapshot. Explicit edits run first;
+links added or retargeted by those edits also use the original path namespace.
+Moves then apply simultaneously, once per document: in the example, original
+`drafts/design.md` ends at `projects/design.md`, and original
+`projects/design.md` ends at `archive/design.md`. Swaps and longer cycles work
+the same way. Edit a moved document through its original path.
+
+Destinations must be unique. An occupied destination must move away or be
+explicitly deleted in the same batch. Moving and deleting the same source,
+creating a document at a move destination, unsafe paths, and moves of templates
+or configuration resources are rejected. Moves name individual Markdown
+documents, not directories.
+
+The server rewrites incoming Markdown and configured wiki links and recalculates
+relative destinations inside moved documents, including image and asset links.
+It patches destination bytes only, preserving labels, titles, query strings,
+heading fragments, omitted Markdown extensions, frontmatter/provenance, external
+URLs, and code examples.
+Reference-style Markdown links update their shared definition once. Overlapping
+or unsupported destination spans and rewrites that the destination schema's
+link grammar cannot express reject the batch.
+
+A surviving link to a deleted document is rejected even if a moved document
+takes over its filename. To intentionally redirect it to the replacement, edit
+the link to the replacement's original path; the move will rewrite it afterward.
+Frontmatter fields are not rewritten automatically and must satisfy final
+schema and relationship validation as authored.
+
+The final corpus is validated under its final directory schemas before any
+checkout writes. Source deletion and destination creation callbacks both run,
+including at filenames reused by chains or swaps. Moves, explicit edits,
+deletions, and automatic backlinks publish in one Git commit. Retrying the exact
+request returns its recorded commit when the result still matches the store.
+
+### Anchored operations
 
 Only `replace` and `append` are accepted:
 
 - `replace` with `anchor` replaces an inclusive line/range. Empty `content`
   deletes those lines. Deleting a file requires a single operation whose anchor
   covers its complete contents; multiple partial deletions cannot delete it.
+  Use `0:` with empty content to delete an existing empty file.
 - `replace` without `anchor` creates a missing file. An existing file or empty
   creation content is rejected. To replace a whole existing file, supply its
   complete anchor range; for an existing empty file use `0:` with non-empty
-  content. Replacing empty with empty is an error. Whole-file replacement
+  content. Whole-file replacement
   preserves the supplied content exactly, including line endings.
 - `append` inserts non-empty `content` after an anchor. Omit `anchor` for EOF,
   or use `0:` for the start of the file. The file must already exist.

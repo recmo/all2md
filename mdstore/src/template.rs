@@ -236,6 +236,53 @@ impl Templates {
     }
 
     /// Validates transition callbacks for changed documents.
+    #[cfg(feature = "server")]
+    pub(crate) fn validate_transaction_changes(
+        &self,
+        before: &HashMap<String, String>,
+        after: &HashMap<String, String>,
+        moves: &[crate::Move],
+    ) -> Result<(), Vec<Finding>> {
+        if moves.is_empty() {
+            return self.validate_changes(before, after);
+        }
+        let endpoints: std::collections::HashSet<_> = moves
+            .iter()
+            .flat_map(|movement| [&movement.from, &movement.to])
+            .collect();
+        let ordinary = |pages: &HashMap<String, String>| {
+            pages
+                .iter()
+                .filter(|(path, _)| !endpoints.contains(path))
+                .map(|(path, text)| (path.clone(), text.clone()))
+                .collect()
+        };
+        let mut findings = self
+            .validate_changes(&ordinary(before), &ordinary(after))
+            .err()
+            .unwrap_or_default();
+        // Endpoint identities leave and arrive, even when their filenames are
+        // reused by another document in a chain, swap, or explicit replacement.
+        for path in endpoints {
+            for (old, new) in [(before.get(path), None), (None, after.get(path))] {
+                let image = |text: Option<&String>| {
+                    text.map(|text| (path.clone(), text.clone()))
+                        .into_iter()
+                        .collect()
+                };
+                if let Err(errors) = self.validate_changes(&image(old), &image(new)) {
+                    findings.extend(errors);
+                }
+            }
+        }
+        if findings.is_empty() {
+            Ok(())
+        } else {
+            Err(findings)
+        }
+    }
+
+    /// Validates transition callbacks for changed documents.
     pub fn validate_changes(
         &self,
         before: &HashMap<String, String>,
