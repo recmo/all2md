@@ -4,13 +4,8 @@ const worker = self as unknown as ServiceWorkerGlobalScope;
 const CACHE = `mdstore-shell-${version}`;
 const ASSETS = ['/', '/settings', ...build, ...files];
 worker.addEventListener('install', (event) => {
-  event.waitUntil(
-    (async () => {
-      const cache = await caches.open(CACHE);
-      await cache.addAll(ASSETS);
-      await worker.skipWaiting();
-    })()
-  );
+  // Existing tabs must release the old worker before its asset cache is removed.
+  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
 });
 worker.addEventListener('activate', (event) => {
   event.waitUntil(

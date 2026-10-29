@@ -70,7 +70,8 @@ them before merging.
 
 Browser refresh fetches the current application shell, falling back to the installed
 shell when offline or the server is unavailable. Updated service workers activate
-once their assets are cached; existing tabs keep their in-memory work until reload.
+after tabs using the previous worker close, so those tabs retain their cached
+assets for offline use until they close.
 
 If Connect reports a missing repository revision (`X-Mdstore-Commit`), check that
 the reverse proxy forwards `/path` and `/path/*` to mdstore instead of the static
