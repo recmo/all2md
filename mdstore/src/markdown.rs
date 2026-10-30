@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::Range, path::Path};
 
-use anyhow::{Context, Result};
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use anyhow::{Context, Result, bail};
+use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -21,9 +21,6 @@ pub struct ParsedPage {
     pub headings: Vec<Heading>,
     #[serde(skip)]
     pub(crate) events: Vec<(Event<'static>, Range<usize>)>,
-    #[cfg(feature = "server")]
-    #[serde(skip)]
-    pub(crate) wiki_ranges: Vec<Range<usize>>,
     #[serde(skip)]
     pub(crate) section_headings: Vec<(u8, String, usize, usize)>,
     #[serde(skip)]
@@ -32,7 +29,7 @@ pub struct ParsedPage {
     pub code_blocks: Vec<SourceRange>,
     /// Source lines that begin or end structural blocks.
     pub structural_boundaries: Vec<usize>,
-    /// Authored Markdown and configured wiki links.
+    /// Authored Markdown links, images, and configured wiki links.
     pub links: Vec<RawLink>,
 }
 
@@ -69,15 +66,55 @@ pub struct Heading {
 pub struct RawLink {
     /// Raw authored target.
     pub target: String,
-    /// Byte range of a configured wiki target in the complete document source.
+    /// Editable destination bytes in the complete source; absent if not safely locatable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_range: Option<Range<usize>>,
+    /// Whether the destination is a literal image asset rather than a document link.
+    #[serde(default)]
+    pub image: bool,
     /// One-based source line.
     pub line: usize,
     /// Syntax that produced the link.
     pub syntax: LinkSyntax,
     /// Containing heading breadcrumb.
     pub sections: Vec<String>,
+}
+
+impl RawLink {
+    /// Preserves authored query/fragment bytes, rejecting ambiguous entity encodings.
+    #[cfg(feature = "server")]
+    pub(crate) fn source_suffix<'a>(&self, text: &'a str) -> Result<&'a str> {
+        let Some(separator) = self.target.find(['#', '?']) else {
+            return Ok("");
+        };
+        let range = self
+            .target_range
+            .as_ref()
+            .context("missing link destination span")?;
+        let raw = &text[range.clone()];
+        let bytes = raw.as_bytes();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            // A numeric character reference can contain a '#' belonging to the path.
+            if bytes[cursor] == b'&'
+                && let Some(end) = raw[cursor..].find(';')
+                && raw[cursor + 1..cursor + end]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'#')
+            {
+                cursor += end + 1;
+                continue;
+            }
+            if matches!(bytes[cursor], b'#' | b'?') {
+                if bytes[cursor] == self.target.as_bytes()[separator] {
+                    return Ok(&raw[cursor..]);
+                }
+                break;
+            }
+            cursor += 1;
+        }
+        bail!("cannot preserve encoded link suffix safely")
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -139,7 +176,7 @@ pub struct FindingSource {
 }
 
 /// Uses the native wiki parser only when no custom wiki grammar is configured.
-pub(crate) fn parser_options(links: &crate::config::LinkConfig) -> Options {
+fn parser_options(links: &crate::config::LinkConfig) -> Options {
     let mut options = Options::all();
     // Custom wiki syntax is scanned separately. Native wiki parsing can consume
     // a wiki-looking label before the enclosing Markdown link is recognized.
@@ -171,8 +208,8 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
         .iter()
         .map(|wiki| Regex::new(wiki))
         .collect::<Result<Vec<_>, _>>()?;
-    let parser = Parser::new_ext(body, parser_options(links)).into_offset_iter();
-    for (event, range) in parser {
+    let mut parser = Parser::new_ext(body, parser_options(links)).into_offset_iter();
+    while let Some((event, range)) = parser.next() {
         let line = body_start_line
             + body[..range.start]
                 .bytes()
@@ -267,11 +304,50 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
                     });
                 }
             }
-            Event::Start(Tag::Link { dest_url, .. }) if links.markdown => {
+            Event::Start(tag @ (Tag::Link { .. } | Tag::Image { .. })) if links.markdown => {
+                let (link_type, dest_url, id, image) = match tag {
+                    Tag::Link {
+                        link_type,
+                        dest_url,
+                        id,
+                        ..
+                    } => (link_type, dest_url, id, false),
+                    Tag::Image {
+                        link_type,
+                        dest_url,
+                        id,
+                        ..
+                    } => (
+                        link_type,
+                        dest_url,
+                        id,
+                        !matches!(link_type, LinkType::WikiLink { .. }),
+                    ),
+                    _ => unreachable!(),
+                };
+                let target_range = match link_type {
+                    LinkType::Inline => find_span(body, range.clone(), "](", &dest_url).ok(),
+                    LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => parser
+                        .reference_definitions()
+                        .get(&id)
+                        .and_then(|definition| {
+                            find_span(body, definition.span.clone(), "]:", &dest_url).ok()
+                        }),
+                    LinkType::WikiLink { .. } => {
+                        let start =
+                            range.start + 2 + usize::from(body[range.clone()].starts_with('!'));
+                        let end = start + dest_url.len();
+                        (end <= range.end && body.get(start..end) == Some(dest_url.as_ref()))
+                            .then_some(start..end)
+                    }
+                    _ => None,
+                }
+                .map(|range| body_offset + range.start..body_offset + range.end);
                 markdown_links.push((
                     RawLink {
                         target: dest_url.to_string(),
-                        target_range: None,
+                        target_range,
+                        image,
                         line,
                         syntax: LinkSyntax::Markdown,
                         sections: heading_stack.clone(),
@@ -316,11 +392,6 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
         body_start_line,
         headings,
         events,
-        #[cfg(feature = "server")]
-        wiki_ranges: wiki_ranges
-            .into_iter()
-            .map(|range| body_offset + range.start..body_offset + range.end)
-            .collect(),
         section_headings,
         list_entries,
         code_blocks,
@@ -383,6 +454,7 @@ fn scan_wiki_links(
                 RawLink {
                     target,
                     target_range: Some(target_range),
+                    image: false,
                     line,
                     syntax: LinkSyntax::Wiki,
                     sections: heading_stack.clone(),
@@ -529,7 +601,7 @@ fn validate_with_baseline(
         if !affected.contains(path) {
             continue;
         }
-        for link in &page.links {
+        for link in page.links.iter().filter(|link| !link.image) {
             match resolver.resolve(path, &link.target, link.syntax) {
                 Ok(Some(target)) => {
                     resolved_links
@@ -696,8 +768,40 @@ pub(crate) struct TargetResolver {
 
 impl TargetResolver {
     #[cfg(feature = "server")]
-    pub(crate) fn contains(&self, path: &str) -> bool {
-        self.exact.contains(path)
+    pub(crate) fn resolve_link(
+        &self,
+        source: &str,
+        link: &RawLink,
+    ) -> Result<Option<(String, bool)>> {
+        let path = link.target.split(['#', '?']).next().unwrap_or_default();
+        if path.is_empty() || path.starts_with("//") || has_uri_scheme(path) {
+            return Ok(None);
+        }
+        // Images name literal asset paths, including extensionless files. They do
+        // not inherit the optional .md extension of document links.
+        if !link.image
+            && let Some(target) = self
+                .resolve(source, &link.target, link.syntax)
+                .map_err(|error| anyhow::anyhow!("{source}: {error}"))?
+        {
+            return Ok(Some((target, true)));
+        }
+        // The corpus resolver deliberately ignores assets. Their relative paths still
+        // need rebasing when their source document moves.
+        let decoded = decode_markdown_path(path).map_err(anyhow::Error::msg)?;
+        let target = if let Some(rooted) = decoded.strip_prefix('/') {
+            normalize_path(Path::new(rooted))
+        } else {
+            normalize_path(
+                &Path::new(source)
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .join(decoded),
+            )
+        }
+        .map_err(anyhow::Error::msg)?;
+        let document = self.exact.contains(&target);
+        Ok(Some((target, document)))
     }
 
     pub(crate) fn new<'a>(paths: impl Iterator<Item = &'a String>) -> Self {
@@ -711,7 +815,7 @@ impl TargetResolver {
         self.resolve("", raw, LinkSyntax::Wiki)
     }
 
-    pub(crate) fn resolve(
+    fn resolve(
         &self,
         source: &str,
         raw: &str,
@@ -756,7 +860,7 @@ impl TargetResolver {
     }
 }
 
-pub(crate) fn decode_markdown_path(path: &str) -> Result<String, String> {
+fn decode_markdown_path(path: &str) -> Result<String, String> {
     let mut output = String::with_capacity(path.len());
     for (index, component) in path.split('/').enumerate() {
         if index > 0 {
@@ -898,7 +1002,11 @@ pub fn document_references(
             }
             Ok(())
         };
-        for link in &page.links {
+        for link in page
+            .links
+            .iter()
+            .filter(|link| matches!(link.syntax, LinkSyntax::Wiki))
+        {
             if let Some(range) = &link.target_range {
                 add(&link.target, Some(range.clone()), None)?;
             }
@@ -936,4 +1044,71 @@ pub fn document_references(
         references.insert(path.clone(), found);
     }
     Ok(references)
+}
+
+fn find_span(body: &str, range: Range<usize>, marker: &str, target: &str) -> Result<Range<usize>> {
+    let candidates: Vec<_> = body[range.clone()]
+        .match_indices(marker)
+        .filter_map(|(index, _)| {
+            let start = range.start + index + marker.len();
+            destination_span(body, start, range.end).and_then(|span| {
+                let raw = &body[span.clone()];
+                let probe = format!("[](<{raw}>)");
+                let parsed = Parser::new(&probe).find_map(|event| match event {
+                    Event::Start(Tag::Link { dest_url, .. }) => Some(dest_url.into_string()),
+                    _ => None,
+                });
+                (parsed.as_deref() == Some(target)).then_some(span)
+            })
+        })
+        .collect();
+    let [span] = candidates.as_slice() else {
+        bail!(
+            "ambiguous or unsupported Markdown destination: {}",
+            &body[range]
+        );
+    };
+    Ok(span.clone())
+}
+
+// The Markdown parser identifies the link/definition; this scanner only locates
+// its destination bytes, including escaped and balanced parentheses.
+fn destination_span(text: &str, mut start: usize, end: usize) -> Option<Range<usize>> {
+    let bytes = text.as_bytes();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let angle = start < end && bytes[start] == b'<';
+    if angle {
+        start += 1;
+    }
+    let mut cursor = start;
+    let mut depth = 0;
+    while cursor < end {
+        let byte = bytes[cursor];
+        if byte == b'\\' && cursor + 1 < end {
+            cursor += 2;
+            continue;
+        }
+        if angle {
+            if byte == b'>' {
+                return Some(start..cursor);
+            }
+        } else {
+            if byte == b'(' {
+                depth += 1;
+            }
+            if byte == b')' {
+                if depth == 0 {
+                    return Some(start..cursor);
+                }
+                depth -= 1;
+            }
+            if byte.is_ascii_whitespace() {
+                return Some(start..cursor);
+            }
+        }
+        cursor += 1;
+    }
+    (!angle && depth == 0).then_some(start..cursor)
 }
