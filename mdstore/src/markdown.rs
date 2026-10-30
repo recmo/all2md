@@ -774,7 +774,7 @@ impl TargetResolver {
         link: &RawLink,
     ) -> Result<Option<(String, bool)>> {
         let path = link.target.split(['#', '?']).next().unwrap_or_default();
-        if path.is_empty() || path.starts_with("//") || has_uri_scheme(path) {
+        if path.is_empty() || is_external(path, link.syntax) {
             return Ok(None);
         }
         // Images name literal asset paths, including extensionless files. They do
@@ -822,14 +822,11 @@ impl TargetResolver {
         syntax: LinkSyntax,
     ) -> Result<Option<String>, String> {
         let raw = raw.split(['#', '?']).next().unwrap_or_default();
-        if raw.is_empty() {
+        if raw.is_empty() || is_external(raw, syntax) {
             return Ok(None);
         }
         let decoded;
         let target = if matches!(syntax, LinkSyntax::Markdown) {
-            if raw.starts_with("//") || has_uri_scheme(raw) {
-                return Ok(None);
-            }
             decoded = decode_markdown_path(raw)?;
             if Path::new(&decoded)
                 .extension()
@@ -908,6 +905,10 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+fn is_external(target: &str, syntax: LinkSyntax) -> bool {
+    matches!(syntax, LinkSyntax::Markdown) && (target.starts_with("//") || has_uri_scheme(target))
 }
 
 pub(crate) fn has_uri_scheme(target: &str) -> bool {
