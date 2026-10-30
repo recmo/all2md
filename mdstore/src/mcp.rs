@@ -136,6 +136,10 @@ fn raw_document(store: &Store, path: &str, headers: &HeaderMap) -> Response {
         header::ETAG,
         HeaderValue::from_str(&etag).expect("Git object ID"),
     );
+    response.headers_mut().insert(
+        "x-mdstore-commit",
+        HeaderValue::from_str(&revision).expect("Git object ID"),
+    );
     if let Some(template) = template {
         let mut url = reqwest::Url::parse("http://mdstore.invalid/path").expect("static URL");
         url.path_segments_mut()

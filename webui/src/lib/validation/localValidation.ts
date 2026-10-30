@@ -6,7 +6,7 @@ export type ValidationSnapshot = {
   files: Record<string, string>;
   documents: Record<string, { hash: string; parsed: unknown }>;
   edges: unknown[];
-  property_schemas?: Record<
+  property_schemas: Record<
     string,
     import('../documents/markdown').PropertySchema
   >;

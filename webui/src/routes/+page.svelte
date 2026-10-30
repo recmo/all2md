@@ -1,10 +1,5 @@
 <script lang="ts">
   import {
-    loadDocuments,
-    saveDocuments,
-    clearDocuments
-  } from '$lib/workspace/documentCache';
-  import {
     rewriteSchemaReferences,
     assertReferencesPreserved
   } from '$lib/navigation/schemaReferences';
@@ -80,13 +75,12 @@
     type SearchResult
   } from '$lib/workspace/api';
   import {
-    loadCache,
-    saveCache,
-    clearCache,
-    cachedSearch,
-    emptyCache,
-    type Cache
-  } from '$lib/workspace/cache';
+    loadWorkspace,
+    saveLocalChanges,
+    clearLocalChanges,
+    emptyWorkspace,
+    type Workspace
+  } from '$lib/workspace/state';
   import {
     validateLocally,
     disposeValidation
@@ -104,9 +98,11 @@
     deleteTree
   } from '$lib/navigation/treeEdits';
   import DocumentTree from '$lib/navigation/DocumentTree.svelte';
-  let cache = $state.raw<Cache>(emptyCache(''));
+  let workspace = $state.raw<Workspace>(emptyWorkspace());
   const current = $derived(
-    cache.drafts[cache.selected] || cache.pages[cache.selected] || null
+    workspace.drafts[workspace.selected] ||
+      workspace.pages[workspace.selected] ||
+      null
   );
   let online = $state(false),
     busy = $state(false),
@@ -120,7 +116,6 @@
     validated = $state('');
   let results = $state.raw<SearchResult[] | null>(null),
     searchLabel = $state('ALL DOCUMENTS');
-  let fetching = $state<string[]>([]);
   let validating = $state(false);
   let validationVersion = 0;
   let readVersion = 0,
@@ -135,10 +130,11 @@
     findings.filter((finding) => finding.path === currentPath)
   );
   const draftCount = $derived(
-    Object.keys(cache.drafts).length + Object.keys(cache.deletions || {}).length
+    Object.keys(workspace.drafts).length +
+      Object.keys(workspace.deletions || {}).length
   );
   const batch = $derived(
-    editRequest(cache.summary, cache.drafts, cache.deletions)
+    editRequest(workspace.summary, workspace.drafts, workspace.deletions)
   );
   const signature = $derived(JSON.stringify(batch.edits));
   $effect(() => {
@@ -149,14 +145,14 @@
     // Only content, connectivity and foreground operations schedule validation.
     // A description change does not invalidate the checked document edits.
     const edits = signature;
-    const snapshotRevision = cache.validationSnapshot?.revision;
     const connected = online;
     const ready =
       !busy &&
       !reconciling &&
       !conflictPaths.length &&
       draftCount > 0 &&
-      (connected || !!snapshotRevision);
+      connected &&
+      !!workspace.validationSnapshot;
     validationVersion++;
     validating = false;
     validated = '';
@@ -181,7 +177,7 @@
       ?.replace(/\.md$/, '')
       .replaceAll('-', ' ') || 'A place for everything you know.'
   );
-  const paths = $derived(treePaths(cache));
+  const paths = $derived(treePaths(workspace));
   function message(text: string, failed = false) {
     feedback = text;
     error = failed;
@@ -210,32 +206,14 @@
       failure(e);
     }
   }
-  async function restoreCache(repository?: string) {
-    const journal = loadCache(localStorage, repository);
-    try {
-      return await loadDocuments(journal);
-    } catch {
-      return journal;
-    }
-  }
   function persist() {
     try {
-      saveCache(localStorage, cache);
+      saveLocalChanges(sessionStorage, workspace);
       saved = true;
-      const repository = cache.repository;
-      void saveDocuments(cache).catch(() => {
-        if (cache.repository === repository)
-          message(
-            'Drafts are saved. Offline document caching is unavailable; reconnect to load uncached documents.',
-            true
-          );
-      });
-    } catch (e) {
+    } catch {
       saved = false;
       message(
-        e instanceof Error && e.message.startsWith('Another tab')
-          ? e.message
-          : 'Local storage is full or unavailable. Your changes are still in this tab. Keep it open until they can be saved.',
+        'Session storage is full or unavailable. Copy your changes before closing this tab.',
         true
       );
     }
@@ -243,12 +221,10 @@
   let baselineVersion = 0;
   async function refreshValidationSnapshot() {
     const version = ++baselineVersion;
-    const repository = cache.repository;
-    const inventory = await readInventory(api, cache.pages);
+    const inventory = await readInventory(api, workspace.pages);
     const snapshot =
-      cache.validationSnapshot?.revision === inventory.revision &&
-      cache.validationSnapshot.property_schemas
-        ? cache.validationSnapshot
+      workspace.validationSnapshot?.revision === inventory.revision
+        ? workspace.validationSnapshot
         : await buildSnapshot(
             inventory.revision,
             Object.fromEntries(
@@ -258,48 +234,49 @@
               ])
             )
           );
-    if (version !== baselineVersion || repository !== cache.repository) return;
+    if (version !== baselineVersion) return;
     updatePermissions(inventory.pages['config.yaml']?.text ?? '');
-    cache = {
-      ...cache,
-      allowTemplateEdits,
-      allowConfigEdits,
+    workspace = {
+      ...workspace,
       paths: inventory.paths,
       pages: inventory.pages,
       validationSnapshot: snapshot
     };
-    persist();
   }
   let reconciling = $state(false);
   const conflictPaths = $derived(
-    Object.keys(cache.conflicts || {}).filter(
-      (path) => localVersion(cache, path) !== undefined
+    Object.keys(workspace.conflicts || {}).filter(
+      (path) => localVersion(workspace, path) !== undefined
     )
   );
-  function acceptReconciliation(next: Cache) {
-    cache = next;
+  function acceptReconciliation(next: Workspace) {
+    workspace = next;
     persist();
   }
   async function syncDrafts() {
-    if (!online || reconciling) return;
+    if (reconciling) return;
     reconciling = true;
-    const repository = cache.repository;
     try {
+      await refreshValidationSnapshot();
       const paths = [
         ...new Set([
-          ...Object.keys(cache.drafts),
-          ...Object.keys(cache.deletions || {})
+          ...Object.keys(workspace.drafts),
+          ...Object.keys(workspace.deletions || {})
         ])
       ];
       // Fetch the entire batch before changing any local bases.
-      const pages = await Promise.all(paths.map((path) => api.page(path)));
-      if (cache.repository !== repository) return;
-      let next = cache;
+      const pages = await Promise.all(
+        paths.map((path) => workspace.pages[path] ?? api.page(path))
+      );
+      let next = workspace;
       for (const page of pages) next = reconcilePage(next, page);
       acceptReconciliation(next);
-      await refreshValidationSnapshot();
+      online = true;
       if (Object.keys(next.conflicts || {}).length)
         message('Resolve overlapping server changes in Submit.', true);
+    } catch (error) {
+      online = false;
+      throw error;
     } finally {
       reconciling = false;
     }
@@ -310,8 +287,8 @@
     text: string | null
   ) {
     if (
-      localVersion(cache, path) !== conflict.local ||
-      cache.conflicts?.[path] !== conflict
+      localVersion(workspace, path) !== conflict.local ||
+      workspace.conflicts?.[path] !== conflict
     ) {
       message(
         'The draft changed while resolving. Check the updated conflict.',
@@ -319,15 +296,15 @@
       );
       return;
     }
-    acceptReconciliation(resolvePage(cache, conflict.server, text));
+    acceptReconciliation(resolvePage(workspace, conflict.server, text));
     validated = '';
   }
   function saveResolution(path: string, choices: Record<number, string>) {
-    const conflict = cache.conflicts?.[path];
+    const conflict = workspace.conflicts?.[path];
     if (!conflict) return;
-    cache = {
-      ...cache,
-      conflicts: { ...cache.conflicts, [path]: { ...conflict, choices } }
+    workspace = {
+      ...workspace,
+      conflicts: { ...workspace.conflicts, [path]: { ...conflict, choices } }
     };
     persist();
   }
@@ -335,51 +312,48 @@
     if (busy) throw Error('Another operation is in progress');
     busy = true;
     try {
-      const originalDrafts = cache.drafts,
-        originalDeletions = cache.deletions,
-        repository = cache.repository;
+      const originalDrafts = workspace.drafts,
+        originalDeletions = workspace.deletions;
       const paths = new Set<string>();
-      const drafts = { ...cache.drafts };
+      const drafts = { ...workspace.drafts };
       for (const change of edits) {
         if (typeof change.path !== 'string' || paths.has(change.path))
           throw Error('An action must edit each document at most once');
         paths.add(change.path);
-        if (!cache.paths.includes(change.path) && !cache.drafts[change.path])
+        if (
+          !workspace.paths.includes(change.path) &&
+          !workspace.drafts[change.path]
+        )
           throw Error('Actions may only edit existing workspace documents');
         if (
           readonly(change.path, allowTemplateEdits, allowConfigEdits) ||
-          change.path in (cache.deletions || {}) ||
-          cache.conflicts?.[change.path]
+          change.path in (workspace.deletions || {}) ||
+          workspace.conflicts?.[change.path]
         )
           throw Error(
             'Resolve permissions, deletion or conflicts before editing ' +
               change.path
           );
         let page: Page | undefined =
-          cache.drafts[change.path] || cache.pages[change.path];
+          workspace.drafts[change.path] || workspace.pages[change.path];
         if (!page) {
-          if (!online)
-            throw Error(
-              'Open or cache ' + change.path + ' before editing offline'
-            );
           page = await api.page(change.path);
         }
-        if (!page.exists && !cache.drafts[change.path])
+        if (!page.exists && !workspace.drafts[change.path])
           throw Error('Document was deleted: ' + change.path);
         const text = applyAppEdit(page.text, change);
         drafts[change.path] = {
           ...page,
           text,
-          base: cache.drafts[change.path]?.base ?? page.text
+          base: workspace.drafts[change.path]?.base ?? page.text
         };
       }
       if (
-        cache.drafts !== originalDrafts ||
-        cache.deletions !== originalDeletions ||
-        cache.repository !== repository
+        workspace.drafts !== originalDrafts ||
+        workspace.deletions !== originalDeletions
       )
         throw Error('Workspace changed while preparing the action. Try again.');
-      cache = { ...cache, drafts };
+      workspace = { ...workspace, drafts };
       validated = '';
       persist();
     } finally {
@@ -392,51 +366,38 @@
     allowConfigEdits = server?.allow_config_edits === true;
   }
   async function refresh(restoreSelection = true) {
-    await api.directory();
-    updatePermissions((await api.page('config.yaml')).text);
-    if (!cache.repository) {
-      cache = await restoreCache(location.origin);
-      validated = '';
-    }
-    cache = { ...cache, allowTemplateEdits, allowConfigEdits };
-    online = true;
     await syncDrafts();
-    if (restoreSelection && view === 'document' && !current && cache.selected)
-      await openPage(cache.selected, 'replace');
+    if (
+      restoreSelection &&
+      view === 'document' &&
+      !current &&
+      workspace.selected
+    )
+      await openPage(workspace.selected, 'replace');
   }
   async function openPage(path: string, historyMode: HistoryMode = 'push') {
     if (busy && historyMode !== 'none') return;
-    if (path in (cache.deletions || {})) {
+    if (path in (workspace.deletions || {})) {
       navigate('submit', historyMode === 'none' ? 'replace' : historyMode);
       return;
     }
     const version = ++readVersion;
-    const draft = cache.drafts[path];
-    const cached = draft || cache.pages[path];
-    if (cached) select(cached, historyMode);
-    if (!online) {
-      if (!cached)
-        throw Error(
-          'This document has not been cached. Connect to the daemon to open it.'
-        );
-      return;
-    }
-    fetching = [...new Set([...fetching, path])];
+    const draft = workspace.drafts[path];
+    const loaded = draft || workspace.pages[path];
+    if (loaded) select(loaded, historyMode);
     try {
       const page = await api.page(path);
       if (version !== readVersion) return;
-      acceptReconciliation(reconcilePage(cache, page));
-      if (cache.conflicts?.[path])
+      acceptReconciliation(reconcilePage(workspace, page));
+      if (workspace.conflicts?.[path])
         message(
           'This document has overlapping server changes. Resolve them in Submit.',
           true
         );
-      else if (!cache.drafts[path]) select(page, historyMode);
+      else if (!workspace.drafts[path]) select(page, historyMode);
     } catch (e) {
-      if (!cached) throw e;
+      if (!loaded) throw e;
       failure(e);
-    } finally {
-      fetching = fetching.filter((p) => p !== path);
     }
   }
   let codeEditor = $state<CodeEditor>();
@@ -454,12 +415,12 @@
       page.path !== current?.path
     )
       mode = 'rendered';
-    cache = {
-      ...cache,
+    workspace = {
+      ...workspace,
       selected: page.path,
-      pages: cache.drafts[page.path]
-        ? cache.pages
-        : { ...cache.pages, [page.path]: page }
+      pages: workspace.drafts[page.path]
+        ? workspace.pages
+        : { ...workspace.pages, [page.path]: page }
     };
     persist();
     updateLocation(`#${encodeURIComponent(page.path)}`, historyMode);
@@ -479,7 +440,7 @@
       await openPage(target, 'none');
     } else {
       view = 'document';
-      cache = { ...cache, selected: '' };
+      workspace = { ...workspace, selected: '' };
       persist();
     }
   }
@@ -492,15 +453,18 @@
       return;
     const draft: Draft = {
       ...current,
-      base: cache.drafts[current.path]?.base ?? current.text,
+      base: workspace.drafts[current.path]?.base ?? current.text,
       text
     };
-    const drafts = { ...cache.drafts };
+    const drafts = { ...workspace.drafts };
     if (draft.exists && text === draft.base) delete drafts[draft.path];
     else drafts[draft.path] = draft;
-    cache = { ...cache, drafts };
-    if (cache.conflicts?.[draft.path]) {
-      cache = reconcilePage(cache, cache.conflicts[draft.path].server);
+    workspace = { ...workspace, drafts };
+    if (workspace.conflicts?.[draft.path]) {
+      workspace = reconcilePage(
+        workspace,
+        workspace.conflicts[draft.path].server
+      );
     }
     validated = '';
     persist();
@@ -510,11 +474,6 @@
     if (!query.trim()) {
       results = null;
       searchLabel = 'ALL DOCUMENTS';
-      return;
-    }
-    if (!online) {
-      results = cachedSearch(cache, query);
-      searchLabel = 'OFFLINE · CACHED TEXT';
       return;
     }
     searchLabel = 'SEARCHING…';
@@ -534,16 +493,14 @@
     } catch (e) {
       if (version !== searchVersion) return;
       searchLabel = 'SEARCH FAILED';
-      if (e instanceof ApiError && e.status === 0) {
-        results = cachedSearch(cache, query);
-        searchLabel = 'OFFLINE · CACHED TEXT';
-      }
+      results = null;
       throw e;
     }
   }
   async function validate(refreshBaseline = false) {
-    if (busy || reconciling || conflictPaths.length || !draftCount) return;
-    if (refreshBaseline && online) {
+    if (!online || busy || reconciling || conflictPaths.length || !draftCount)
+      return;
+    if (refreshBaseline) {
       await refreshValidationSnapshot();
       await tick();
     }
@@ -556,13 +513,13 @@
     message('Validating locally…');
     const request = batch;
     try {
-      const snapshot = cache.validationSnapshot;
+      const snapshot = workspace.validationSnapshot;
       if (!snapshot) {
         message('Connect once to build the local validation baseline.');
         return;
       }
       const sources = Object.fromEntries(
-        Object.entries(cache.pages).map(([path, page]) => [path, page.text])
+        Object.entries(workspace.pages).map(([path, page]) => [path, page.text])
       );
       let result = await validateLocally(snapshot, request, sources);
       if (version !== validationVersion || checkedSignature !== signature)
@@ -573,12 +530,12 @@
         );
         if (version !== validationVersion || checkedSignature !== signature)
           return;
-        const pages = { ...cache.pages };
+        const pages = { ...workspace.pages };
         for (const page of fetched) {
           sources[page.path] = page.text;
           pages[page.path] = page;
         }
-        cache = { ...cache, pages };
+        workspace = { ...workspace, pages };
         persist();
         result = await validateLocally(snapshot, request, sources);
       }
@@ -586,7 +543,7 @@
         return;
       if (result.needs.length) {
         message(
-          `Validation incomplete: ${result.needs.length} affected document(s) need current source. ${online ? 'Reconnect to refresh the baseline.' : 'Reconnect to fetch them.'}`
+          `Validation incomplete: ${result.needs.length} affected document(s) need current source. Reconnect to refresh the baseline.`
         );
         return;
       }
@@ -607,11 +564,9 @@
       message(
         result.restart_required
           ? 'Validation passed. Listener changes require a daemon restart after submission.'
-          : !online
-            ? 'Validation passed offline against the cached baseline. Reconnect to submit.'
-            : cache.summary.trim()
-              ? 'Validation passed. Ready to submit; the daemon checks the current repository before committing.'
-              : 'Validation passed.'
+          : workspace.summary.trim()
+            ? 'Validation passed. Ready to submit; the daemon checks the current repository before committing.'
+            : 'Validation passed.'
       );
     } catch (e) {
       if (version === validationVersion && checkedSignature === signature)
@@ -627,7 +582,7 @@
     draftCount > 0 &&
       !conflictPaths.length &&
       !reconciling &&
-      !!cache.summary.trim() &&
+      !!workspace.summary.trim() &&
       online &&
       saved &&
       !busy &&
@@ -635,7 +590,7 @@
       (validated === signature || submissionOnly === signature)
   );
   function describe(summary: string) {
-    cache = { ...cache, summary };
+    workspace = { ...workspace, summary };
     persist();
   }
   async function submit() {
@@ -653,12 +608,12 @@
           : 'Server changes merged. Review the updated diff while validation runs, then submit again.';
         return;
       }
-      const request = { ...batch, summary: cache.summary.trim() };
+      const request = { ...batch, summary: workspace.summary.trim() };
       // edit validates the entire batch against the current repository
       // and commits it atomically; local validation is only the preview.
       await api.apply(request);
-      const pages = { ...cache.pages };
-      const remainingPaths = new Set(cache.paths);
+      const pages = { ...workspace.pages };
+      const remainingPaths = new Set(workspace.paths);
       for (const edit of request.edits) {
         if (edit.op === 'delete_page') {
           delete pages[edit.path];
@@ -668,13 +623,13 @@
             path: edit.path,
             exists: true,
             text: edit.content,
-            template: cache.drafts[edit.path]?.template ?? null
+            template: workspace.drafts[edit.path]?.template ?? null
           };
           remainingPaths.add(edit.path);
         }
       }
-      cache = {
-        ...cache,
+      workspace = {
+        ...workspace,
         pages,
         paths: [...remainingPaths].sort(),
         drafts: {},
@@ -726,33 +681,32 @@
     treeDialog.showModal();
   }
   let deletionUndo = $state.raw<{
-    before: Cache;
-    after: Cache;
+    before: Workspace;
+    after: Workspace;
     path: string;
   } | null>(null);
   const canUndoDeletion = $derived(
     !!deletionUndo &&
-      cache.drafts === deletionUndo.after.drafts &&
-      cache.deletions === deletionUndo.after.deletions &&
-      cache.folders === deletionUndo.after.folders
+      workspace.drafts === deletionUndo.after.drafts &&
+      workspace.deletions === deletionUndo.after.deletions &&
+      workspace.folders === deletionUndo.after.folders
   );
   async function stageDelete(path: string, directory: boolean) {
     if (busy) return;
     ++readVersion;
     busy = true;
     try {
-      const sources = { ...cache.pages };
+      const sources = { ...workspace.pages };
       for (const item of paths.filter(
         (item) =>
           !item.endsWith('/') &&
           (item === path || (directory && item.startsWith(path + '/')))
       )) {
-        if (!cache.drafts[item] && !sources[item]) {
-          if (!online) throw Error(`Cache ${item} before deleting it offline.`);
+        if (!workspace.drafts[item] && !sources[item]) {
           sources[item] = await api.page(item);
         }
       }
-      const before = { ...cache, pages: sources };
+      const before = { ...workspace, pages: sources };
       const after = deleteTree(
         before,
         path,
@@ -761,7 +715,7 @@
         allowTemplateEdits,
         allowConfigEdits
       );
-      cache = after;
+      workspace = after;
       deletionUndo = { before, after, path };
       results = null;
       persist();
@@ -772,8 +726,8 @@
   }
   function undoDeletion() {
     if (!canUndoDeletion || busy || !deletionUndo) return;
-    cache = {
-      ...cache,
+    workspace = {
+      ...workspace,
       drafts: deletionUndo.before.drafts,
       deletions: deletionUndo.before.deletions,
       folders: deletionUndo.before.folders,
@@ -785,20 +739,16 @@
   async function stageMoves(
     moves: { from: string; to: string; directory: boolean }[]
   ) {
-    const original = cache;
-    const sources = { ...cache.pages };
+    const original = workspace;
+    const sources = { ...workspace.pages };
     // Incoming links can occur anywhere. Keep the operation atomic if any
     // source is unavailable, rather than silently leaving stale backlinks.
     for (const path of paths.filter((path) => !path.endsWith('/'))) {
-      if (!cache.drafts[path] && !sources[path]) {
-        if (!online)
-          throw Error(
-            `Cache ${path} before moving offline so its links can be updated.`
-          );
+      if (!workspace.drafts[path] && !sources[path]) {
         sources[path] = await api.page(path);
       }
     }
-    let next = { ...cache, pages: sources };
+    let next = { ...workspace, pages: sources };
     for (const move of moves) {
       if (move.from === move.to) continue;
       const paths = treePaths(next).filter((path) => !path.endsWith('/'));
@@ -845,11 +795,11 @@
         mapping
       );
     }
-    if (cache !== original)
+    if (workspace !== original)
       throw Error('Workspace changed while preparing the move. Try again.');
-    cache = next;
+    workspace = next;
     if (current && view === 'document') {
-      updateLocation(`#${encodeURIComponent(cache.selected)}`, 'replace');
+      updateLocation(`#${encodeURIComponent(workspace.selected)}`, 'replace');
     }
     results = null;
   }
@@ -871,13 +821,16 @@
     busy = true;
     treeError = '';
     try {
-      if (!cache.repository) throw Error('Connect to a repository first.');
+      if (!online) throw Error('Connect to the daemon first.');
       const value = treeValue.trim();
       if (!value) throw Error('Enter a name or path.');
       if (treeAction !== 'move' && value.includes('/'))
         throw Error('Enter a name without slashes.');
       if (treeAction === 'folder')
-        cache = addFolder(cache, [treeSource, value].filter(Boolean).join('/'));
+        workspace = addFolder(
+          workspace,
+          [treeSource, value].filter(Boolean).join('/')
+        );
       else {
         const destination = value;
         await stageMoves([
@@ -911,17 +864,9 @@
       readonly(path, allowTemplateEdits, allowConfigEdits)
     )
       throw Error('Enter an explicit document path ending in .md.');
-    if (!cache.repository) throw Error('Connect to a repository first.');
-    let page: Page;
-    if (online) page = await api.page(path);
-    else
-      page = cache.pages[path] || {
-        path,
-        exists: false,
-        text: '',
-        template: null
-      };
-    select(cache.drafts[path] || page);
+    if (!online) throw Error('Connect to the daemon first.');
+    const page = await api.page(path);
+    select(workspace.drafts[path] || page);
     showCreate = false;
     if (!page.exists) edit(page.text);
   }
@@ -950,9 +895,9 @@
     const offline = () => {
       online = false;
       validated = '';
-      message(
-        'Offline. Reading, local rendering, and drafting remain available.'
-      );
+      results = null;
+      searchLabel = 'ALL DOCUMENTS';
+      message('Connection lost. Reconnect to continue.', true);
     };
     const connect = () => {
       validated = '';
@@ -970,7 +915,7 @@
     const requestedHash = location.hash;
     const requestedPath = location.hash
       ? decodeURIComponent(location.hash.slice(1))
-      : cache.selected;
+      : workspace.selected;
     if (
       requestedPath === '@search' ||
       requestedPath === '@settings' ||
@@ -978,9 +923,7 @@
     )
       view = requestedPath.slice(1) as 'search' | 'settings' | 'submit';
     void run(async () => {
-      cache = await restoreCache();
-      allowTemplateEdits = cache.allowTemplateEdits === true;
-      allowConfigEdits = cache.allowConfigEdits === true;
+      workspace = loadWorkspace(sessionStorage);
       try {
         await refresh(false);
       } catch (e) {
@@ -988,7 +931,7 @@
       }
       // Startup must not reopen the original route after Back or another visit.
       if (location.hash !== requestedHash) return;
-      const path = requestedPath || cache.selected;
+      const path = requestedPath || workspace.selected;
       if (view === 'document' && path) await openPage(path, 'replace');
       routeHash = location.hash;
     });
@@ -1019,10 +962,7 @@
         : current
           ? `${title} · mdstore`
           : 'mdstore · Library'}</title
-  ><meta
-    name="description"
-    content="An offline-capable Markdown workspace"
-  /></svelte:head
+  ><meta name="description" content="A Markdown workspace" /></svelte:head
 >
 <dialog bind:this={treeDialog} class="tree-dialog">
   <form
@@ -1098,21 +1038,19 @@
   <nav id="documents" aria-label="Documents">
     <DocumentTree
       paths={[
-        ...new Set([...paths, ...Object.keys(cache.deletions || {})])
+        ...new Set([...paths, ...Object.keys(workspace.deletions || {})])
       ].sort()}
-      deleted={Object.keys(cache.deletions || {})}
+      deleted={Object.keys(workspace.deletions || {})}
       conflicts={conflictPaths}
       validation={{
         valid: draftCount
           ? validated === signature
-          : !!cache.validationSnapshot,
+          : online && !!workspace.validationSnapshot,
         invalid: findings.map((finding) => finding.path),
         pending: draftCount > 0 && validated !== signature
       }}
       selected={view === 'document' ? current?.path : undefined}
-      drafts={Object.keys(cache.drafts)}
-      cached={Object.keys(cache.pages)}
-      {fetching}
+      drafts={Object.keys(workspace.drafts)}
       {saved}
       {busy}
       onaction={treeActionOpen}
@@ -1120,7 +1058,7 @@
       ondelete={stageDelete}
       oncreate={(folder) => void createHere(folder)}
       onopen={(path) =>
-        path in (cache.deletions || {}) || conflictPaths.includes(path)
+        path in (workspace.deletions || {}) || conflictPaths.includes(path)
           ? navigate('submit')
           : run(() => openPage(path))}
     />
@@ -1151,7 +1089,7 @@
         <textarea
           id="summary"
           rows="3"
-          value={cache.summary}
+          value={workspace.summary}
           oninput={(event) => describe(event.currentTarget.value)}
           placeholder="Describe your changes…"
           required
@@ -1180,7 +1118,7 @@
           >
         </div>
         {#each conflictPaths as path (path)}
-          {@const conflict = cache.conflicts![path]}
+          {@const conflict = workspace.conflicts![path]}
           {#key JSON.stringify( [conflict.base, conflict.local, conflict.server] )}
             <ConflictResolver
               {path}
@@ -1188,7 +1126,7 @@
               disabled={busy || reconciling}
               onprogress={(choices) => saveResolution(path, choices)}
               onresolve={(text) =>
-                resolveConflict(path, cache.conflicts![path], text)}
+                resolveConflict(path, workspace.conflicts![path], text)}
             />
           {/key}
         {:else}<p class="muted">No unresolved conflicts.</p>{/each}
@@ -1265,34 +1203,30 @@
     <div class="workspace-page">
       <ConnectionSettings onconnect={refresh} />
       <section class="review">
-        <h2>Offline storage</h2>
-        <p role="status">{online ? 'Connected' : 'Offline · local cache'}</p>
+        <h2>Local drafts</h2>
+        <p role="status">{online ? 'Connected' : 'Disconnected'}</p>
         <p class:error>{feedback}</p>
-        <details class="cache-settings">
-          <summary
-            >Local storage · {Object.keys(cache.pages).length} cached</summary
-          >
-          <p>Documents and drafts are stored in this browser.</p>
-          <button
-            disabled={busy}
-            onclick={() => {
-              if (
-                confirm(
-                  'Clear cached documents and local drafts for this repository?'
-                )
-              ) {
-                void clearDocuments(cache.repository).catch(() =>
-                  message('Could not clear offline documents.', true)
-                );
-                clearCache(localStorage, cache.repository);
-                cache = emptyCache(cache.repository);
-
-                validated = '';
-                saved = true;
-              }
-            }}>Clear local cache</button
-          >
-        </details>
+        <p>Unsubmitted changes are saved in this tab until it closes.</p>
+        <button
+          disabled={busy}
+          onclick={() => {
+            if (
+              confirm('Discard all unsubmitted changes for this repository?')
+            ) {
+              clearLocalChanges(sessionStorage);
+              workspace = {
+                ...workspace,
+                drafts: {},
+                deletions: {},
+                conflicts: {},
+                folders: [],
+                summary: ''
+              };
+              validated = '';
+              persist();
+            }
+          }}>Discard local changes</button
+        >
       </section>
     </div>
   {:else if view === 'search'}
@@ -1313,8 +1247,9 @@
             id="search"
             type="search"
             bind:value={query}
-            placeholder={online ? 'Search with MCP…' : 'Search cached text…'}
-          /><button aria-label="Search">↵</button>
+            placeholder="Search with MCP…"
+            disabled={!online}
+          /><button aria-label="Search" disabled={!online}>↵</button>
         </div>
         <details class="search-options">
           <summary>Query variants</summary><label for="variants"
@@ -1324,7 +1259,9 @@
       </form>
       <p class="muted">
         {searchLabel === 'ALL DOCUMENTS'
-          ? 'Search the library using the MCP search API, or cached text when offline.'
+          ? online
+            ? 'Search the library using the MCP search API.'
+            : 'Connect to the daemon to search your documents.'
           : searchLabel}
       </p>
       {#if results}
@@ -1394,27 +1331,27 @@
                 class:status-error={!saved}
                 class:status-muted={!online}
                 title={!saved
-                  ? 'Local storage could not save your changes'
+                  ? 'This tab could not save your changes'
                   : !online
-                    ? 'Working from the offline cache'
-                    : cache.drafts[current.path]
+                    ? 'Connection lost; reconnect to load server changes'
+                    : workspace.drafts[current.path]
                       ? 'Changes saved locally; pending submission'
                       : 'Up to date with the server'}
                 >{!saved
                   ? 'Not saved'
                   : !online
-                    ? 'Offline'
-                    : cache.drafts[current.path]
+                    ? 'Disconnected'
+                    : workspace.drafts[current.path]
                       ? 'Local'
                       : 'Synced'}</span
               >
-              {#if cache.drafts[current.path]}<span class="status-modified"
+              {#if workspace.drafts[current.path]}<span class="status-modified"
                   >Modified</span
                 >{/if}
               {#if currentFindings.length}<span class="status-error"
                   >Invalid</span
                 >
-              {:else if cache.drafts[current.path]}
+              {:else if workspace.drafts[current.path]}
                 <span class:status-muted={validated !== signature}
                   >{validating
                     ? 'Validating…'
@@ -1499,7 +1436,7 @@
               {#if isApp(current.text)}
                 <AppViews
                   path={current.path}
-                  {cache}
+                  {workspace}
                   {online}
                   {busy}
                   onopen={(path) => void run(() => openPage(path))}
@@ -1515,7 +1452,7 @@
                     paths: paths.filter((path) => !path.endsWith('/')),
                     sourcePath: current.path,
                     schema: current.template
-                      ? cache.validationSnapshot?.property_schemas?.[
+                      ? workspace.validationSnapshot?.property_schemas[
                           current.template.path
                         ]
                       : undefined
@@ -1529,7 +1466,7 @@
           <span>▧</span>
           <h2>Your knowledge, connected.</h2>
           {#if error}<p class="error" role="alert">{feedback}</p>{/if}
-          <p>Explore your library. Write in place. Keep working offline.</p>
+          <p>Explore your library. Write in place.</p>
         </div>{/if}
     </section>
   {/if}
