@@ -1,5 +1,6 @@
 import AVFoundation
 import CryptoKit
+import Darwin
 import Foundation
 
 struct ArchiveResult: Sendable {
@@ -32,8 +33,8 @@ enum AudioFinalizer {
         temporaryDestination: URL,
         finalDestination: URL
     ) throws -> ArchiveResult {
-        let microphoneSegments = microphoneSegments.filter { FileManager.default.fileExists(atPath: $0.url.path) }
-        let participants = participants.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        let microphoneSegments = try microphoneSegments.filter { try containsAudio($0.url) }
+        let participants = try participants.flatMap { try containsAudio($0) ? $0 : nil }
         guard !microphoneSegments.isEmpty || participants != nil else {
             throw CaptureError.writerFailure("no captured audio is available for finalization")
         }
@@ -133,14 +134,23 @@ enum AudioFinalizer {
 
     static func recoveredSegments(from urls: [URL], startedAt: Date) throws -> [CapturedAudioSegment] {
         var cursor = startedAt
-        return try urls.sorted { $0.lastPathComponent < $1.lastPathComponent }.map { url in
+        return try urls.sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { url in
             let input = try AVAudioFile(forReading: url)
+            guard input.length > 0 else { return nil }
             let duration = input.processingFormat.sampleRate > 0
                 ? Double(input.length) / input.processingFormat.sampleRate
                 : 0
             let segment = CapturedAudioSegment(url: url, startedAt: cursor, endedAt: cursor.addingTimeInterval(duration))
             cursor = segment.endedAt
             return segment
+        }
+    }
+
+    static func containsAudio(_ url: URL) throws -> Bool {
+        do {
+            return try AVAudioFile(forReading: url).length > 0
+        } catch {
+            throw CaptureError.writerFailure("Cannot read \(url.lastPathComponent); original audio preserved: \(error.localizedDescription)")
         }
     }
 
@@ -167,20 +177,44 @@ enum AudioFinalizer {
         arguments: [String],
         captureStandardOutput: Bool = false
     ) throws -> Data {
-        let process = Process()
-        process.executableURL = try executable(named: name)
-        process.arguments = arguments
+        let executable = try executable(named: name)
         let standardOutput = Pipe()
-        let standardError = Pipe()
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-        try process.run()
+        guard let errorStream = tmpfile() else {
+            throw CaptureError.writerFailure("Could not capture \(name) errors: \(String(cString: strerror(errno)))")
+        }
+        defer { fclose(errorStream) }
+        let errorFile = FileHandle(fileDescriptor: fileno(errorStream), closeOnDealloc: false)
+        func check(_ status: Int32) throws {
+            guard status == 0 else {
+                throw CaptureError.writerFailure("Could not launch \(name): \(String(cString: strerror(status)))")
+            }
+        }
+        var actions: posix_spawn_file_actions_t? = nil
+        try check(posix_spawn_file_actions_init(&actions))
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        try check(posix_spawn_file_actions_adddup2(&actions, standardOutput.fileHandleForWriting.fileDescriptor, STDOUT_FILENO))
+        try check(posix_spawn_file_actions_adddup2(&actions, errorFile.fileDescriptor, STDERR_FILENO))
+        try check(posix_spawn_file_actions_addclose(&actions, standardOutput.fileHandleForReading.fileDescriptor))
+        try check(posix_spawn_file_actions_addclose(&actions, standardOutput.fileHandleForWriting.fileDescriptor))
+        try check(posix_spawn_file_actions_addclose(&actions, errorFile.fileDescriptor))
+        let strings = ([executable.path] + arguments).map { strdup($0) }
+        defer { strings.forEach { free($0) } }
+        var argv = strings + [nil]
+        var processID: pid_t = 0
+        // Foundation Process creates a separate process group. Spawn directly
+        // so tools stay in the worker's group and its deadline stops them too.
+        try check(posix_spawn(&processID, executable.path, &actions, nil, &argv, _NSGetEnviron().pointee))
+        try standardOutput.fileHandleForWriting.close()
         let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let error = standardError.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        var status: Int32 = 0
+        while waitpid(processID, &status, 0) < 0 {
+            if errno != EINTR { try check(errno) }
+        }
+        try errorFile.seek(toOffset: 0)
+        let error = errorFile.readDataToEndOfFile()
+        guard status == 0 else {
             let message = String(data: error, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw CaptureError.writerFailure("\(name) failed: \(message?.isEmpty == false ? message! : "exit \(process.terminationStatus)")")
+            throw CaptureError.writerFailure("\(name) failed: \(message?.isEmpty == false ? message! : "status \(status)")")
         }
         return captureStandardOutput ? output : Data()
     }
@@ -189,6 +223,11 @@ enum AudioFinalizer {
         if let bundled = Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "bin"),
            FileManager.default.isExecutableFile(atPath: bundled.path) {
             return bundled
+        }
+        if let executable = Bundle.main.executableURL {
+            let appBundled = executable.deletingLastPathComponent().deletingLastPathComponent()
+                .appending(path: "Resources/bin/\(name)")
+            if FileManager.default.isExecutableFile(atPath: appBundled.path) { return appBundled }
         }
         var paths = ProcessInfo.processInfo.environment["PATH"]?.split(separator: ":").map(String.init) ?? []
         paths += [

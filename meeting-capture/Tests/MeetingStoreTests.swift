@@ -1,9 +1,189 @@
 import Foundation
 import AVFoundation
+import Darwin
 import XCTest
 @testable import MeetingCapture
 
 final class MeetingStoreTests: XCTestCase {
+    func testWorkerAccessCheckProcessesAppAudioAndCleansArtifacts() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let microphone = root.appending(path: "test.caf")
+        try writeTone(to: microphone, sampleRate: 48_000, channels: 1, duration: 0.1)
+        let original = try Data(contentsOf: microphone)
+        let worker = try BackgroundWorkerClient()
+        let report = try await worker.checkAccess(WorkerAccessRequest(
+            root: root, microphone: microphone,
+            applicationProcessID: ProcessInfo.processInfo.processIdentifier
+        ))
+        XCTAssertTrue(report.accessibility.hasPrefix("Accessibility:"))
+        let metadata = try await worker.checkMetadataAccess(WorkerAccessRequest(
+            root: root, microphone: microphone, applicationProcessID: ProcessInfo.processInfo.processIdentifier
+        ))
+        XCTAssertTrue(metadata.accessibility.hasPrefix("Accessibility:"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["test.caf"])
+        XCTAssertEqual(try Data(contentsOf: microphone), original)
+        do {
+            _ = try await worker.checkAccess(WorkerAccessRequest(root: microphone, microphone: microphone,
+                                                               applicationProcessID: ProcessInfo.processInfo.processIdentifier))
+            XCTFail("Worker must reject an unusable meeting directory")
+        } catch {}
+        XCTAssertEqual(try Data(contentsOf: microphone), original)
+    }
+
+    @MainActor
+    func testStartupCheckGatesRecordingAndCanRetry() async throws {
+        var attempts = 0
+        let model = AppModel(checkCapture: {
+            attempts += 1
+            throw CaptureError.microphonePermissionRequired
+        })
+        XCTAssertEqual(model.state, .checkingPermissions)
+        model.manualStart()
+        XCTAssertEqual(model.state, .checkingPermissions)
+        model.start()
+        for _ in 0..<100 where model.state == .checkingPermissions { await Task.yield() }
+        XCTAssertEqual(model.state, .permissionRequired)
+        XCTAssertNil(model.startupReport)
+        XCTAssertTrue(model.permissionMessage.contains("Microphone"))
+        model.manualStart()
+        XCTAssertEqual(model.state, .permissionRequired)
+        model.checkPermissions()
+        for _ in 0..<100 where model.state == .checkingPermissions { await Task.yield() }
+        XCTAssertEqual(attempts, 2)
+        XCTAssertEqual(model.state, .permissionRequired)
+    }
+
+    @MainActor
+    func testStartupSuccessRequiresCompletedCheck() async throws {
+        var finish: CheckedContinuation<StartupCaptureReport, Error>?
+        let model = AppModel(checkCapture: {
+            try await withCheckedThrowingContinuation { finish = $0 }
+        })
+        model.start()
+        for _ in 0..<100 where finish == nil { await Task.yield() }
+        XCTAssertEqual(model.state, .checkingPermissions)
+        XCTAssertNil(model.startupReport)
+        model.checkPermissions() // Must not start a duplicate probe.
+        finish?.resume(returning: StartupCaptureReport(systemAudioObserved: false))
+        for _ in 0..<100 where model.state == .checkingPermissions { await Task.yield() }
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertEqual(model.startupReport, StartupCaptureReport(systemAudioObserved: false))
+    }
+
+    @MainActor
+    func testPermissionChecksCannotInterruptCapture() {
+        let client = AudioClient(audioObjectID: 0, processID: 1, bundleID: nil, applicationName: "Fixture", inputDevices: [])
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .recording(client)))
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .detecting(client, since: Date())))
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .countdown(client, remaining: 2)))
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .finalizing))
+        XCTAssertTrue(AppModel.allowsPermissionCheck(in: .permissionRequired))
+        XCTAssertTrue(AppModel.allowsPermissionCheck(in: .idle))
+    }
+
+    @MainActor
+    func testStartupRejectsEmptyMicrophoneRecording() {
+        XCTAssertThrowsError(try StartupCaptureCheck.validateMicrophoneFrames(0))
+        XCTAssertNoThrow(try StartupCaptureCheck.validateMicrophoneFrames(4096))
+    }
+
+    @MainActor
+    func testStartupStorageCheckCleansUpAndReportsUnwritableDestination() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try StartupCaptureCheck.validateStorage(root)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        let file = root.appending(path: "not-a-directory")
+        try Data("keep".utf8).write(to: file)
+        XCTAssertThrowsError(try StartupCaptureCheck.validateStorage(file))
+        XCTAssertEqual(try Data(contentsOf: file), Data("keep".utf8))
+    }
+
+    @MainActor
+    func testManualRecordingsDoNotAutoStopWithoutMicrophoneActivity() {
+        XCTAssertFalse(AppModel.shouldAutoStop(method: .manual))
+        XCTAssertTrue(AppModel.shouldAutoStop(method: .audioProcess))
+        XCTAssertTrue(AppModel.shouldAutoStop(method: .deviceRunning))
+    }
+
+    func testClaimExcludesDiscoveryAndRejectsConcurrentWorker() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let paths = try store.paths(startedAt: Date(), title: "claim")
+        let input = paths.microphoneTemporary(segment: 1)
+        try writeTone(to: input, sampleRate: 48_000, channels: 1, duration: 0.1)
+        let original = try Data(contentsOf: input)
+        var claim: RecordingClaim? = try RecordingClaim(paths)
+        XCTAssertTrue(store.interruptedRecordings().isEmpty)
+        let worker = try BackgroundWorkerClient()
+        do {
+            _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: input))
+            XCTFail("Recovery must reject a recording owned by capture or finalization")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("already being captured or processed"))
+        }
+        withExtendedLifetime(claim) {}
+        claim = nil
+        XCTAssertEqual(store.interruptedRecordings().map { $0.resolvingSymlinksInPath() }, [input.resolvingSymlinksInPath()])
+        XCTAssertTrue(store.interruptedRecordings(excluding: [paths.manifest]).isEmpty)
+        XCTAssertEqual(try Data(contentsOf: input), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.archiveFinal.path))
+        // Releasing the claim makes the same input recoverable by a real worker.
+        let manifest = try await worker.recover(RecoverCaptureRequest(interruptedFile: input))
+        XCTAssertEqual(manifest, paths.manifest)
+    }
+
+    func testWorkersPreserveUnreadableTracks() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let worker = try BackgroundWorkerClient()
+        for corruptMicrophone in [false, true] {
+            let start = Date()
+            let paths = try store.paths(startedAt: start, title: "corrupt-\(corruptMicrophone)")
+            let microphone = paths.microphoneTemporary(segment: 1)
+            let participants = paths.participantsTemporary
+            try writeTone(to: microphone, sampleRate: 48_000, channels: 1, duration: 0.1)
+            try writeTone(to: participants, sampleRate: 48_000, channels: 2, duration: 0.1)
+            try Data("damaged CAF with irreplaceable payload".utf8)
+                .write(to: corruptMicrophone ? microphone : participants)
+            let microphoneData = try Data(contentsOf: microphone)
+            let participantData = try Data(contentsOf: participants)
+            let request = FinalizeCaptureRequest(
+                microphoneSegments: [CapturedAudioSegment(url: microphone, startedAt: start, endedAt: start.addingTimeInterval(0.1))],
+                participants: participants, participantsStartedAt: start,
+                captureStartedAt: start, captureEndedAt: start.addingTimeInterval(0.1),
+                paths: paths, accessibilityWorkerProcessID: nil,
+                trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: nil),
+                metadata: [], warnings: [], interruptions: []
+            )
+            do {
+                _ = try await worker.finalize(request)
+                XCTFail("Unreadable inputs must fail finalization")
+            } catch {}
+            do {
+                _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: microphone))
+                XCTFail("Unreadable inputs must fail recovery")
+            } catch {}
+            XCTAssertEqual(try Data(contentsOf: microphone), microphoneData)
+            XCTAssertEqual(try Data(contentsOf: participants), participantData)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: paths.manifest.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: paths.archiveFinal.path))
+        }
+    }
+
+    func testSystemAudioWriterInputUsesSafePassthroughConstruction() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = try AVAssetWriter(outputURL: root, fileType: .caf)
+        let input = try SystemAudioRecorder.makeWriterInput()
+        XCTAssertEqual(input.mediaType, .audio)
+        XCTAssertTrue(writer.canAdd(input))
+    }
+
     func testAccessibilityTreeDiffRecordsAddedRemovedAndChangedAttributes() {
         let before = [
             AccessibilitySnapshotNode(path: "0", attributes: ["AXRole": "AXApplication"]),
@@ -165,6 +345,50 @@ final class MeetingStoreTests: XCTestCase {
         )
         XCTAssertEqual(retried.tracks.count, 2)
         XCTAssertTrue(FileManager.default.fileExists(atPath: final.path))
+    }
+
+    func testRecoveryRejectsHeaderOnlyAudio() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let empty = root.appending(path: ".fixture-microphone.part.caf")
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        _ = try AVAudioFile(forWriting: empty, settings: format.settings)
+
+        let segments = try AudioFinalizer.recoveredSegments(from: [empty], startedAt: Date())
+
+        XCTAssertTrue(segments.isEmpty)
+    }
+
+    @MainActor
+    func testMaintenanceCannotStartDuringCaptureCriticalStates() {
+        let client = AudioClient(
+            audioObjectID: 1,
+            processID: 42,
+            bundleID: "fixture.meeting",
+            applicationName: "Fixture",
+            inputDevices: []
+        )
+        XCTAssertTrue(AppModel.allowsMaintenance(in: .idle))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .detecting(client, since: Date())))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .countdown(client, remaining: 5)))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .recording(client)))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .finalizing))
+    }
+
+    func testWorkerSegfaultDoesNotCrashHost() async throws {
+        let worker = try BackgroundWorkerClient()
+        do {
+            try await worker.verifyCrashIsolation()
+            XCTFail("The crash-test worker unexpectedly succeeded")
+        } catch let error as BackgroundWorkerError {
+            guard case let .crashed(command, reason, status) = error else {
+                return XCTFail("Unexpected worker error: \(error)")
+            }
+            XCTAssertEqual(command, "crash-test")
+            XCTAssertEqual(reason, .uncaughtSignal)
+            XCTAssertEqual(status, SIGSEGV)
+        }
     }
 
     func testProcessResolverWalksFromBrowserHelperToOwningApplication() throws {
