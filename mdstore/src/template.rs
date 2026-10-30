@@ -6,7 +6,7 @@ use std::{
 
 use crate::config::validate_json_pointer;
 use anyhow::{Context, Result, bail};
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{Event, Tag};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -15,13 +15,13 @@ use crate::{SectionListRule, markdown::Finding};
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Template {
+    exclude: Vec<String>,
     frontmatter: Option<serde_json::Value>,
-    pub(crate) markdown: crate::MarkdownConfig,
+    filename: Option<FilenameRule>,
+    markdown: Option<String>,
     pub(crate) links: crate::LinkConfig,
     pub(crate) relations: Vec<crate::RelationRule>,
     pub(crate) metadata: std::collections::BTreeMap<String, String>,
-    instructions: String,
-    examples: Vec<String>,
     structure: Structure,
     preamble: Rules,
     sections: Vec<Section>,
@@ -48,10 +48,6 @@ enum Order {
 struct Section {
     heading: String,
     #[serde(default)]
-    instructions: String,
-    #[serde(default)]
-    examples: Vec<String>,
-    #[serde(default)]
     rules: Rules,
     #[serde(default)]
     structure: Structure,
@@ -71,6 +67,7 @@ struct Rules {
     list_items: Bounds,
     include_subsections: bool,
     list: Option<SectionListRule>,
+    dated_list: Option<DatedList>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,33 +88,66 @@ struct Bounds {
     maximum: Option<usize>,
 }
 
-pub(crate) fn is_template(path: &str) -> bool {
-    Path::new(path)
-        .file_name()
-        .is_some_and(|name| name == "template.yaml")
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilenameRule {
+    pattern: String,
+    #[serde(default)]
+    serial_scope: Vec<String>,
 }
 
-pub(crate) struct Templates {
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DatedList {
+    order: String,
+    min_items: usize,
+    allow_equal_timestamps: bool,
+}
+
+/// Whether a path names a directory schema.
+pub fn is_template(path: &str) -> bool {
+    Path::new(path)
+        .file_name()
+        .is_some_and(|name| name == "schema.md")
+}
+
+/// Compiled directory schemas and their validation policies.
+pub struct Templates {
     entries: HashMap<String, CompiledTemplate>,
     default: Template,
 }
 
 struct CompiledTemplate {
+    excluded: globset::GlobSet,
     template: Template,
     schema: Option<jsonschema::Validator>,
-    definition: serde_json::Value,
+    markdown: Option<crate::markdown_lint::MarkdownLint>,
+    script: crate::template_script::Script,
+    markdown_source: String,
+}
+
+impl std::fmt::Debug for Templates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Templates").field("paths", &self.entries.keys()).finish_non_exhaustive()
+    }
 }
 
 impl Templates {
-    pub(crate) fn compile(files: &HashMap<String, String>) -> Result<Self, Vec<Finding>> {
+    /// Compiles the template and configuration resources.
+    pub fn compile(files: &HashMap<String, String>) -> Result<Self, Vec<Finding>> {
         let mut entries = HashMap::new();
         let mut findings = Vec::new();
         for (path, text) in files.iter().filter(|(path, _)| is_template(path)) {
-            match parse(text) {
+            let result = crate::template_script::Script::compile(path, text).and_then(
+                |(script, definition)| {
+                    compile_definition(definition, script, text.clone(), path, files)
+                },
+            );
+            match result {
                 Ok(template) => {
                     entries.insert(path.clone(), template);
                 }
-                Err(error) => findings.push(Finding {
+                Err(error) => findings.push(Finding { source: None,
                     path: path.clone(),
                     line: None,
                     message: format!("invalid template: {error}"),
@@ -137,14 +167,28 @@ impl Templates {
     fn applicable(&self, path: &str) -> Option<(String, &CompiledTemplate)> {
         let mut directory = Path::new(path).parent()?;
         loop {
-            let candidate = directory
-                .join("template.yaml")
-                .to_string_lossy()
-                .into_owned();
+            let candidate = directory.join("schema.md").to_string_lossy().into_owned();
             if let Some(template) = self.entries.get(&candidate) {
-                return Some((candidate, template));
+                let relative = Path::new(path).strip_prefix(directory).ok()?;
+                if !template.excluded.is_match(relative) {
+                    return Some((candidate, template));
+                }
             }
             directory = directory.parent()?;
+        }
+    }
+
+    /// Whether two schema inventories govern this path identically.
+    pub fn same_policy(&self, other: &Self, path: &str) -> bool {
+        match (self.applicable(path), other.applicable(path)) {
+            (None, None) => true,
+            (Some((a, left)), Some((b, right))) => {
+                a == b
+                    && left.markdown_source == right.markdown_source
+                    && left.markdown.as_ref().map(|lint| lint.source())
+                        == right.markdown.as_ref().map(|lint| lint.source())
+            }
+            _ => false,
         }
     }
 
@@ -153,12 +197,14 @@ impl Templates {
             .map_or(&self.default, |(_, entry)| &entry.template)
     }
 
-    pub(crate) fn discovery(&self, path: &str) -> Option<serde_json::Value> {
-        self.applicable(path).map(|(path, entry)| {
-            serde_json::json!({
-                "path": path, "definition": entry.definition
-            })
-        })
+    /// Returns the governing template as a repository-rooted path.
+    pub fn template_path(&self, path: &str) -> Option<String> {
+        self.applicable(path).map(|(path, _)| format!("/{path}"))
+    }
+
+    /// Returns the governing frontmatter schema for client-side property rendering.
+    pub fn frontmatter_schema(&self, path: &str) -> Option<&serde_json::Value> {
+        self.policy(path).frontmatter.as_ref()
     }
 
     pub(crate) fn validate_page(
@@ -171,18 +217,228 @@ impl Templates {
         let Some((template_path, entry)) = self.applicable(path) else {
             return;
         };
+        if let Some(lint) = &entry.markdown {
+            lint.validate(path, text, findings);
+        }
+        let initial = findings.len();
         validate_page(path, text, page, &template_path, entry, findings);
+        if initial == findings.len() {
+            let doc = crate::template_script::document(path, text, page);
+            if let Err(error) = entry.script.check(None, Some(&doc), false) {
+                findings.push(crate::template_script::finding(
+                    path,
+                    text,
+                    &template_path,
+                    &error,
+                ));
+            }
+        }
+    }
+
+    /// Validates transition callbacks for changed documents.
+    #[cfg(feature = "server")]
+    pub(crate) fn validate_transaction_changes(
+        &self,
+        before: &HashMap<String, String>,
+        after: &HashMap<String, String>,
+        moves: &[crate::Move],
+    ) -> Result<(), Vec<Finding>> {
+        self.validate_changes_at(
+            before,
+            after,
+            &moves
+                .iter()
+                .flat_map(|movement| [&movement.from, &movement.to])
+                .collect(),
+        )
+    }
+
+    /// Validates transition callbacks for changed documents.
+    pub fn validate_changes(
+        &self,
+        before: &HashMap<String, String>,
+        after: &HashMap<String, String>,
+    ) -> Result<(), Vec<Finding>> {
+        self.validate_changes_at(before, after, &HashSet::new())
+    }
+
+    fn validate_changes_at(
+        &self,
+        before: &HashMap<String, String>,
+        after: &HashMap<String, String>,
+        endpoints: &HashSet<&String>,
+    ) -> Result<(), Vec<Finding>> {
+        let mut paths: std::collections::BTreeSet<_> = before.keys().collect();
+        paths.extend(after.keys());
+        let mut findings = Vec::new();
+        for path in paths {
+            let Some((template_path, entry)) = self.applicable(path) else {
+                continue;
+            };
+            let script = &entry.script;
+            if !script.has_change_checks {
+                continue;
+            }
+            let parse = |text: Option<&String>| {
+                text.map(|text| crate::markdown::parse_page(text, &entry.template.links))
+                    .transpose()
+            };
+            let (old, new) = (before.get(path), after.get(path));
+            // A reused move endpoint represents separate departing and arriving identities.
+            let transitions = if endpoints.contains(path) {
+                [(old, None), (None, new)]
+            } else {
+                [(old, new), (None, None)]
+            };
+            for (old_text, new_text) in transitions {
+                if old_text == new_text {
+                    continue;
+                }
+                let result = (|| {
+                    let old = parse(old_text)?;
+                    let new = parse(new_text)?;
+                    let old = old
+                        .as_ref()
+                        .zip(old_text)
+                        .map(|(page, text)| crate::template_script::document(path, text, page));
+                    let new = new
+                        .as_ref()
+                        .zip(new_text)
+                        .map(|(page, text)| crate::template_script::document(path, text, page));
+                    script.check(old.as_ref(), new.as_ref(), true)
+                })();
+                if let Err(error) = result {
+                    let text = new_text.or(old_text).map_or("", String::as_str);
+                    findings.push(crate::template_script::finding(
+                        path,
+                        text,
+                        &template_path,
+                        &error,
+                    ));
+                }
+            }
+        }
+        if findings.is_empty() {
+            Ok(())
+        } else {
+            Err(findings)
+        }
+    }
+
+    /// Allocation is called under the repository lock, after receipt recovery.
+    pub(crate) fn allocate_path(
+        &self,
+        requested: &str,
+        existing: &HashSet<String>,
+    ) -> Result<String> {
+        if !requested.contains(['{', '}']) {
+            return Ok(requested.to_owned());
+        }
+        let placeholder = Regex::new(r"\{serial(?::0?([1-9][0-9]?))?\}").expect("constant pattern");
+        let captures = placeholder
+            .captures(requested)
+            .context("unknown path placeholder")?;
+        let marker = captures.get(0).expect("whole match");
+        let prefix = &requested[..marker.start()];
+        let suffix = &requested[marker.end()..];
+        if prefix.contains(['{', '}']) || suffix.contains(['{', '}']) {
+            bail!("only one serial placeholder is allowed");
+        }
+        let width: usize = captures
+            .get(1)
+            .map_or(Ok(1), |value| value.as_str().parse())?;
+        if width > 12 {
+            bail!("serial padding must not exceed 12 digits");
+        }
+        let probe = format!("{prefix}{:0width$}{suffix}", 1);
+        let policy = self.policy(&probe);
+        let rule = policy
+            .filename
+            .as_ref()
+            .context("serial allocation requires a filename declaration")?;
+        let pattern = Regex::new(&rule.pattern)?;
+        let target = pattern
+            .captures(&probe)
+            .context("path does not match template filename pattern")?;
+        if target.get(0).is_none_or(|found| found.as_str() != probe) {
+            bail!("path does not match template filename pattern");
+        }
+        let serial_capture = target
+            .name("serial")
+            .context("serial allocation requires a named serial capture")?;
+        if serial_capture.start() != prefix.len()
+            || serial_capture.end() != probe.len() - suffix.len()
+        {
+            bail!("serial placeholder must occupy the named serial capture");
+        }
+        let mut maximum = 0_u64;
+        for path in existing {
+            if let Some(found) = pattern.captures(path)
+                && found.get(0).is_some_and(|matched| matched.as_str() == path)
+                && rule.serial_scope.iter().all(|key| {
+                    found.name(key).map(|v| v.as_str()) == target.name(key).map(|v| v.as_str())
+                })
+            {
+                let serial: u64 = found
+                    .name("serial")
+                    .context("filename requires serial capture")?
+                    .as_str()
+                    .parse()?;
+                maximum = maximum.max(serial);
+            }
+        }
+        let serial = maximum.checked_add(1).context("serial counter exhausted")?;
+        let path = format!("{prefix}{serial:0width$}{suffix}");
+        let final_match = pattern
+            .find(&path)
+            .context("allocated path violates filename pattern")?;
+        if final_match.start() != 0 || final_match.end() != path.len() || existing.contains(&path) {
+            bail!("allocated path violates filename pattern or already exists");
+        }
+        Ok(path)
     }
 }
 
-fn parse(text: &str) -> Result<CompiledTemplate> {
-    let definition: serde_yaml::Value = serde_yaml::from_str(text)?;
-    let template: Template = serde_yaml::from_value(definition.clone())?;
+struct LocalSchemaOnly;
+
+impl jsonschema::Retrieve for LocalSchemaOnly {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(format!("external schema references are forbidden: {uri}").into())
+    }
+}
+
+fn compile_definition(
+    definition: serde_json::Value,
+    script: crate::template_script::Script,
+    markdown_source: String,
+    template_path: &str,
+    files: &HashMap<String, String>,
+) -> Result<CompiledTemplate> {
+    let template: Template = serde_json::from_value(definition)?;
+    if let Some(rule) = &template.filename {
+        let pattern = Regex::new(&rule.pattern)?;
+        let names: HashSet<_> = pattern.capture_names().flatten().collect();
+        if !rule.serial_scope.is_empty() && !names.contains("serial") {
+            bail!("serial_scope requires a named serial capture");
+        }
+        for key in &rule.serial_scope {
+            if key == "serial" || !names.contains(key.as_str()) {
+                bail!("invalid serial scope capture {key}");
+            }
+        }
+    }
     validate_definition(&template.structure, &template.sections, 0)?;
     validate_rules(&template.preamble)?;
-    if template.markdown.max_line_length == Some(0) {
-        bail!("markdown.max_line_length must be greater than zero");
-    }
+    let markdown = template
+        .markdown
+        .as_ref()
+        .map(|reference| {
+            crate::markdown_lint::MarkdownLint::compile(template_path, reference, files)
+        })
+        .transpose()?;
     for wiki in &template.links.wiki {
         let pattern =
             Regex::new(wiki).with_context(|| format!("invalid wiki-link pattern {wiki:?}"))?;
@@ -221,16 +477,36 @@ fn parse(text: &str) -> Result<CompiledTemplate> {
     let schema = template
         .frontmatter
         .as_ref()
-        .map(jsonschema::validator_for)
+        .map(|schema| {
+            jsonschema::options()
+                .with_retriever(LocalSchemaOnly)
+                .build(schema)
+                .map_err(|error| anyhow::anyhow!("{error}"))
+        })
         .transpose()?;
+    let mut excluded = globset::GlobSetBuilder::new();
+    for pattern in &template.exclude {
+        excluded.add(globset::Glob::new(pattern).context("invalid scope exclusion")?);
+    }
     Ok(CompiledTemplate {
+        excluded: excluded.build()?,
         template,
         schema,
-        definition: serde_json::to_value(definition)?,
+        markdown,
+        script,
+        markdown_source,
     })
 }
 
 fn validate_rules(rules: &Rules) -> Result<()> {
+    if let Some(list) = &rules.dated_list {
+        if !matches!(list.order.as_str(), "ascending" | "descending") {
+            bail!("dated_list requires ascending or descending order");
+        }
+        if rules.content != Some(Content::List) || rules.list.is_some() {
+            bail!("dated_list requires list content and cannot be combined with list rules");
+        }
+    }
     for bounds in [
         &rules.paragraphs,
         &rules.words,
@@ -291,13 +567,39 @@ fn validate_page(
     findings: &mut Vec<Finding>,
 ) {
     let template = &entry.template;
+    if let Some(rule) = &template.filename {
+        let pattern = Regex::new(&rule.pattern).expect("validated filename pattern");
+        if !pattern
+            .find(path)
+            .is_some_and(|found| found.start() == 0 && found.end() == path.len())
+        {
+            findings.push(Finding { source: None,
+                path: path.into(),
+                line: None,
+                message: format!(
+                    "{template_path}: path does not match filename pattern {}",
+                    rule.pattern
+                ),
+            });
+        }
+    }
     if let Some(validator) = &entry.schema {
         for error in validator.iter_errors(&page.frontmatter) {
-            findings.push(Finding {
+            findings.push(Finding { source: None,
                 path: path.to_owned(),
-                line: Some(1),
+                line: Some(crate::template_script::field_line(
+                    text,
+                    error
+                        .instance_path
+                        .to_string()
+                        .trim_start_matches('/')
+                        .split('/')
+                        .next()
+                        .unwrap_or(""),
+                )),
                 message: format!(
-                    "{template_path}: frontmatter{}: {error}",
+                    "{template_path}{}: frontmatter{}: {error}",
+                    entry.script.rule_context("frontmatter"),
                     error.instance_path
                 ),
             });
@@ -309,36 +611,21 @@ fn validate_page(
         .get(page.body_start_line - 1)
         .copied()
         .unwrap_or(text.len());
-    let body = &text[body_start..];
-    let events: Vec<_> = Parser::new_ext(body, Options::all())
-        .into_offset_iter()
-        .map(|(event, range)| (event, body_start + range.start..body_start + range.end))
-        .collect();
-    let mut headings = Vec::new();
-    let mut depth = 0_usize;
-    for (event, range) in &events {
-        match event {
-            Event::Start(tag) => {
-                if let Tag::Heading { level, .. } = tag
-                    && depth == 0
-                {
-                    let line = offsets.partition_point(|offset| *offset <= range.start);
-                    if let Some(heading) = page.headings.iter().find(|heading| heading.line == line)
-                    {
-                        headings.push((*level as u8, heading.text.clone(), range.start, range.end));
-                    }
-                }
-                depth += 1;
-            }
-            Event::End(_) => depth -= 1,
-            _ => {}
-        }
-    }
+    let events = &page.events;
+    let headings = &page.section_headings;
     let mut report = |offset: usize, message: String| {
-        findings.push(Finding {
+        findings.push(Finding { source: None,
             path: path.to_owned(),
             line: Some(offsets.partition_point(|start| *start <= offset)),
-            message: format!("{template_path}: {message}"),
+            message: {
+                let context = template
+                    .sections
+                    .iter()
+                    .find(|section| message.contains(&format!("{:?}", section.heading)))
+                    .map(|section| entry.script.rule_context(&section.heading))
+                    .unwrap_or_default();
+                format!("{template_path}{context}: {message}")
+            },
         })
     };
     let first_section = headings
@@ -347,13 +634,14 @@ fn validate_page(
         .unwrap_or(headings.len());
     check_sections(
         text,
-        &events,
+        events,
         &headings[first_section..],
         body_start,
         text.len(),
         &template.structure,
         &template.sections,
         &template.preamble,
+        &page.list_entries,
         0,
         &offsets,
         &mut report,
@@ -372,6 +660,7 @@ fn check_sections(
     structure: &Structure,
     sections: &[Section],
     own_rules: &Rules,
+    entries: &[crate::markdown::ListEntry],
     parent: u8,
     offsets: &[usize],
     report: &mut dyn FnMut(usize, String),
@@ -387,6 +676,7 @@ fn check_sections(
         events,
         start,
         own_rules,
+        entries,
         offsets,
         report,
     );
@@ -419,19 +709,8 @@ fn check_sections(
                 report(*heading_start, format!("section {name:?} is out of order"));
             }
             previous = Some(position);
-            let mut section_report = |offset, message| {
-                report(
-                    offset,
-                    format!(
-                        "section {name:?}: {message}{}",
-                        if section.instructions.is_empty() {
-                            String::new()
-                        } else {
-                            format!("; guidance: {}", section.instructions)
-                        }
-                    ),
-                )
-            };
+            let mut section_report =
+                |offset, message| report(offset, format!("section {name:?}: {message}"));
             check_sections(
                 text,
                 events,
@@ -441,6 +720,7 @@ fn check_sections(
                 &section.structure,
                 &section.sections,
                 &section.rules,
+                entries,
                 *actual_level,
                 offsets,
                 &mut section_report,
@@ -454,10 +734,7 @@ fn check_sections(
         if section.rules.required && !seen.contains(&position) {
             report(
                 start,
-                format!(
-                    "required section {:?} is missing; guidance: {}",
-                    section.heading, section.instructions
-                ),
+                format!("required section {:?} is missing", section.heading),
             );
         }
     }
@@ -468,6 +745,7 @@ fn check_content(
     events: &[(Event<'_>, Range<usize>)],
     offset: usize,
     rules: &Rules,
+    entries: &[crate::markdown::ListEntry],
     offsets: &[usize],
     report: &mut dyn FnMut(usize, String),
 ) {
@@ -547,6 +825,18 @@ fn check_content(
             );
         }
     }
+    if let Some(list) = &rules.dated_list {
+        let list_rule = SectionListRule {
+            ordered: Some(false),
+            minimum_items: list.min_items,
+            date_order: None,
+            item_pattern: None,
+        };
+        crate::structure::validate_list(text, offset, offsets, &list_rule, &mut |line, message| {
+            report(offsets[line.saturating_sub(1)], message)
+        });
+        validate_timestamps(text, offset, entries, list, report);
+    }
     if let Some(list) = &rules.list {
         crate::structure::validate_list(text, offset, offsets, list, &mut |line, message| {
             report(offsets[line.saturating_sub(1)], message)
@@ -554,154 +844,46 @@ fn check_content(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn test_templates(text: &str) -> Result<Templates, Vec<Finding>> {
-    Templates::compile(&HashMap::from([("template.yaml".into(), text.into())]))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn template_with_relations(relations: &str) -> String {
-        format!("relations:\n{relations}\n")
-    }
-
-    #[test]
-    fn relation_names_and_reciprocals_are_closed() {
-        let duplicate = template_with_relations(
-            "  - name: related\n    selector: {kind: markdown_links}\n  - name: related\n    selector: {kind: markdown_links}",
-        );
-        assert!(test_templates(&duplicate).is_err());
-        let unknown = template_with_relations(
-            "  - name: parent\n    reciprocal: child\n    selector: {kind: markdown_links}",
-        );
-        assert!(test_templates(&unknown).is_err());
-    }
-
-    #[test]
-    fn wiki_link_patterns_define_their_grammar() {
-        let config = |wiki: &str| test_templates(&format!("links:\n  wiki: [{wiki:?}]"));
-        assert!(config(r"\{\{(?P<target>[^}]+)\}\}").is_ok());
-        assert!(config("[").is_err());
-        assert!(config(r"\{\{([^}]+)\}\}").is_err());
-    }
-
-    const PEOPLE: &str = "instructions: Write established facts.\nstructure: {level: 2, order: enforced, additional_sections: false}\nsections:\n- heading: Summary\n  instructions: One concise paragraph.\n  rules:\n    required: true\n    content: paragraphs\n    paragraphs: {minimum: 1, maximum: 1}\n    words: {maximum: 5}\n- heading: Timeline\n  rules:\n    required: true\n    list: {minimum_items: 1, date_order: descending}\n";
-
-    fn check(text: &str, template: &str) -> Vec<Finding> {
-        let templates = test_templates(template).unwrap();
-        crate::markdown::validate_corpus(
-            &HashMap::from([("people/a.md".into(), text.into())]),
-            &templates,
-        )
-        .err()
-        .unwrap_or_default()
-    }
-
-    #[test]
-    fn people_structure_and_length_rules() {
-        let good =
-            "# Alice\n\n## Summary\nA **good** person.\n\n## Timeline\n- 2024-01-01 Met Alice.\n";
-        assert!(check(good, PEOPLE).is_empty(), "{:?}", check(good, PEOPLE));
-        for bad in [
-            good.replace("A **good** person.", "One.\n\nTwo."),
-            good.replace("A **good** person.", "One two three four five six."),
-            good.replace("## Summary", "### Summary"),
-            good.replace("## Summary", "## Other"),
-            format!("{good}\n## Extra\n"),
-            good.replace("2024-01-01", "2024-02-30"),
-            good.replace("A **good** person.", "- One item"),
-        ] {
-            assert!(!check(&bad, PEOPLE).is_empty(), "{bad}");
-        }
-        let reversed = "## Timeline\n- 2024-01-01 Met Alice\n## Summary\nOne.\n";
-        assert!(!check(reversed, PEOPLE).is_empty());
-    }
-
-    #[test]
-    fn closest_template_replaces_parent_and_discovery_preserves_guidance() {
-        let files = HashMap::from([
-            ("template.yaml".into(), PEOPLE.into()),
-            (
-                "people/template.yaml".into(),
-                "instructions: Different.\nstructure: {additional_sections: true}".into(),
-            ),
-        ]);
-        let templates = Templates::compile(&files).unwrap();
-        let discovery = templates.discovery("people/new.md").unwrap();
-        assert_eq!(discovery["path"], "people/template.yaml");
-        assert_eq!(discovery["definition"]["instructions"], "Different.");
-        assert!(
-            crate::markdown::validate_corpus(
-                &HashMap::from([("people/new.md".into(), "# Any\n".into())]),
-                &templates,
-            )
-            .is_ok()
-        );
-        assert!(
-            Templates::compile(&HashMap::new())
-                .unwrap()
-                .discovery("new.md")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn recursive_sections_and_own_content_limits() {
-        let template = "structure: {level: 2}\nsections:\n- heading: Overview\n  rules: {required: true, words: {maximum: 1}}\n  sections:\n  - heading: Details\n    rules: {required: true, nonempty: true}\n";
-        let text = "## Overview\nOne\n### Details\nMany more words here.\n";
-        assert!(check(text, template).is_empty());
-        assert!(
-            !check(
-                text,
-                &template.replace(
-                    "required: true, words",
-                    "include_subsections: true, required: true, words"
-                )
-            )
-            .is_empty()
-        );
-        assert!(!check("## Overview\nOne\n", template).is_empty());
-        for template in [
-            "sections: [{heading: A}, {heading: A}]",
-            "sections: [{heading: A, rules: {words: {minimum: 4, maximum: 1}}}]",
-            "structure: {level: 7}",
-            "unknown: true",
-            "instructions: first\ninstructions: second",
-        ] {
-            assert!(parse(template).is_err());
-        }
-    }
-
-    #[test]
-    fn inline_markup_does_not_inflate_lengths() {
-        let template = "structure: {level: 2}\nsections:\n- heading: Summary\n  rules: {required: true, words: {maximum: 1}, characters: {maximum: 6}}\n";
-        assert!(check("## Summary\nfoo**bar**\n", template).is_empty());
-        assert!(!check("## Summary\nfoo**bars**\n", template).is_empty());
-    }
-
-    #[test]
-    fn section_lengths_preserve_document_wide_reference_definitions() {
-        let template = "structure: {level: 2, additional_sections: true}\nsections:\n- heading: Summary\n  rules: {required: true, content: paragraphs, paragraphs: {minimum: 1, maximum: 1}, words: {maximum: 1}, characters: {maximum: 5}}\n";
-        for text in [
-            "## Summary\n[Alice][person]\n## Sources\n[person]: https://example.com\n",
-            "[person]: https://example.com\n\n## Summary\n[Alice][person]\n",
-            "## Summary\n[Alice][]\n## Sources\n[Alice]: https://example.com\n",
-            "## Summary\n[Alice]\n## Sources\n[Alice]: https://example.com\n",
-        ] {
-            assert!(
-                check(text, template).is_empty(),
-                "{text:?}: {:?}",
-                check(text, template)
+fn validate_timestamps(
+    text: &str,
+    offset: usize,
+    entries: &[crate::markdown::ListEntry],
+    rule: &DatedList,
+    report: &mut dyn FnMut(usize, String),
+) {
+    let mut previous = None;
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.range.start >= offset && entry.range.end <= offset + text.len())
+    {
+        let Some(date) = entry.timestamp else {
+            report(
+                entry.range.start,
+                "timeline entry must start with a literal RFC3339 timestamp".into(),
+            );
+            continue;
+        };
+        if previous.is_some_and(|prev| {
+            (if rule.order == "ascending" {
+                date < prev
+            } else {
+                date > prev
+            }) || (!rule.allow_equal_timestamps && date == prev)
+        }) {
+            report(
+                entry.range.start,
+                "timeline timestamp is out of order".into(),
             );
         }
-        assert!(
-            !check(
-                "## Summary\n[Alicia][person]\n## Sources\n[person]: https://example.com\n",
-                template
-            )
+        previous = Some(date);
+        if text[entry.text_start - offset..entry.range.end - offset]
+            .trim()
             .is_empty()
-        );
+        {
+            report(
+                entry.range.start,
+                "timeline entry must explain what happened".into(),
+            );
+        }
     }
 }

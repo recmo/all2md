@@ -1,16 +1,16 @@
 use std::{collections::HashMap, ops::Range, path::Path};
 
-use anyhow::{Context, Result};
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use anyhow::{Context, Result, bail};
+use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{RelationLinkSyntax, RelationSelector};
 use crate::template::{Template, Templates};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parsed structural and authored-link information for one page.
-pub(crate) struct ParsedPage {
+pub struct ParsedPage {
     /// Metadata projected using the page's directory template.
     pub metadata: serde_json::Value,
     /// YAML frontmatter converted to JSON.
@@ -19,26 +19,40 @@ pub(crate) struct ParsedPage {
     pub body_start_line: usize,
     /// Parsed headings in source order.
     pub headings: Vec<Heading>,
+    #[serde(skip)]
+    pub(crate) events: Vec<(Event<'static>, Range<usize>)>,
+    #[serde(skip)]
+    pub(crate) section_headings: Vec<(u8, String, usize, usize)>,
+    #[serde(skip)]
+    pub(crate) list_entries: Vec<ListEntry>,
     /// Fenced and indented code block ranges.
     pub code_blocks: Vec<SourceRange>,
     /// Source lines that begin or end structural blocks.
     pub structural_boundaries: Vec<usize>,
-    /// Authored Markdown and configured wiki links.
+    /// Authored Markdown links, images, and configured wiki links.
     pub links: Vec<RawLink>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone)]
+pub(crate) struct ListEntry {
+    pub range: Range<usize>,
+    pub line: usize,
+    pub timestamp: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub text_start: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 /// Inclusive one-based source line range.
-pub(crate) struct SourceRange {
+pub struct SourceRange {
     /// First line.
     pub start_line: usize,
     /// Last line.
     pub end_line: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// A parsed Markdown heading.
-pub(crate) struct Heading {
+pub struct Heading {
     /// Heading depth from one through six.
     pub level: u8,
     /// Plain heading text.
@@ -47,11 +61,17 @@ pub(crate) struct Heading {
     pub line: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// An authored link before corpus target resolution.
-pub(crate) struct RawLink {
+pub struct RawLink {
     /// Raw authored target.
     pub target: String,
+    /// Editable destination bytes in the complete source; absent if not safely locatable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_range: Option<Range<usize>>,
+    /// Whether the destination is a literal image asset rather than a document link.
+    #[serde(default)]
+    pub image: bool,
     /// One-based source line.
     pub line: usize,
     /// Syntax that produced the link.
@@ -60,10 +80,47 @@ pub(crate) struct RawLink {
     pub sections: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+impl RawLink {
+    /// Preserves authored query/fragment bytes, rejecting ambiguous entity encodings.
+    #[cfg(feature = "server")]
+    pub(crate) fn source_suffix<'a>(&self, text: &'a str) -> Result<&'a str> {
+        let Some(separator) = self.target.find(['#', '?']) else {
+            return Ok("");
+        };
+        let range = self
+            .target_range
+            .as_ref()
+            .context("missing link destination span")?;
+        let raw = &text[range.clone()];
+        let bytes = raw.as_bytes();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            // A numeric character reference can contain a '#' belonging to the path.
+            if bytes[cursor] == b'&'
+                && let Some(end) = raw[cursor..].find(';')
+                && raw[cursor + 1..cursor + end]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'#')
+            {
+                cursor += end + 1;
+                continue;
+            }
+            if matches!(bytes[cursor], b'#' | b'?') {
+                if bytes[cursor] == self.target.as_bytes()[separator] {
+                    return Ok(&raw[cursor..]);
+                }
+                break;
+            }
+            cursor += 1;
+        }
+        bail!("cannot preserve encoded link suffix safely")
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 /// Supported authored link syntax.
-pub(crate) enum LinkSyntax {
+pub enum LinkSyntax {
     /// Standard Markdown link.
     Markdown,
     /// Repository-configured wiki link.
@@ -85,7 +142,7 @@ struct ResolvedLink {
     sections: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 /// A resolved, typed relation edge between pages.
 pub struct Edge {
     /// Source page path.
@@ -96,9 +153,12 @@ pub struct Edge {
     pub target: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// A structured corpus validation finding.
 pub struct Finding {
+    /// Schema source responsible for this finding, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<FindingSource>,
     /// Page or configuration resource path.
     pub path: String,
     /// Human-readable validation message.
@@ -108,10 +168,34 @@ pub struct Finding {
     pub line: Option<usize>,
 }
 
+/// A one-based source location in a schema document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingSource {
+    pub path: String,
+    pub line: usize,
+}
+
+/// Uses the native wiki parser only when no custom wiki grammar is configured.
+fn parser_options(links: &crate::config::LinkConfig) -> Options {
+    let mut options = Options::all();
+    // Custom wiki syntax is scanned separately. Native wiki parsing can consume
+    // a wiki-looking label before the enclosing Markdown link is recognized.
+    if !links.wiki.is_empty() {
+        options.remove(Options::ENABLE_WIKILINKS);
+    }
+    options
+}
+
 /// Parses one Markdown page according to configured link syntaxes.
-pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
+pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
     let (frontmatter, body_start_line, body) = parse_frontmatter(text)?;
     let mut headings = Vec::new();
+    let mut events = Vec::new();
+    let mut section_headings = Vec::new();
+    let mut list_entries = Vec::new();
+    let mut depth = 0;
+    let mut section_span = None;
+    let body_offset = text.len() - body.len();
     let mut code_blocks = Vec::new();
     let mut structural_boundaries = Vec::new();
     let mut markdown_links = Vec::new();
@@ -124,13 +208,48 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
         .iter()
         .map(|wiki| Regex::new(wiki))
         .collect::<Result<Vec<_>, _>>()?;
-    let parser = Parser::new_ext(body, Options::all()).into_offset_iter();
-    for (event, range) in parser {
+    let mut parser = Parser::new_ext(body, parser_options(links)).into_offset_iter();
+    while let Some((event, range)) = parser.next() {
         let line = body_start_line
             + body[..range.start]
                 .bytes()
                 .filter(|byte| *byte == b'\n')
                 .count();
+        events.push((
+            event.clone().into_static(),
+            body_offset + range.start..body_offset + range.end,
+        ));
+        match &event {
+            Event::Start(tag) => {
+                if matches!(tag, Tag::Heading { .. }) && depth == 0 {
+                    section_span = Some((body_offset + range.start, body_offset + range.end));
+                }
+                if matches!(tag, Tag::Item) && depth == 1 {
+                    let raw = &body[range.clone()];
+                    let marker = raw.find(char::is_whitespace).unwrap_or(raw.len());
+                    let content = raw[marker..].trim_start();
+                    let stamp = content.split_whitespace().next().unwrap_or("");
+                    let timestamp = chrono::DateTime::parse_from_rfc3339(stamp).ok();
+                    let narrative = if timestamp.is_some() {
+                        content[stamp.len()..]
+                            .trim_start()
+                            .trim_start_matches('—')
+                            .trim_start()
+                    } else {
+                        content
+                    };
+                    list_entries.push(ListEntry {
+                        range: body_offset + range.start..body_offset + range.end,
+                        line,
+                        timestamp,
+                        text_start: body_offset + range.end - narrative.len(),
+                    });
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 heading = Some((heading_level(level), String::new(), line));
@@ -175,6 +294,9 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
                 if let Some((level, text, line)) = heading.take() {
                     heading_stack.truncate(usize::from(level.saturating_sub(1)));
                     heading_stack.push(text.trim().into());
+                    if let Some((start, end)) = section_span.take() {
+                        section_headings.push((level, text.trim().into(), start, end));
+                    }
                     headings.push(Heading {
                         level,
                         text: text.trim().into(),
@@ -182,10 +304,50 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
                     });
                 }
             }
-            Event::Start(Tag::Link { dest_url, .. }) if links.markdown => {
+            Event::Start(tag @ (Tag::Link { .. } | Tag::Image { .. })) if links.markdown => {
+                let (link_type, dest_url, id, image) = match tag {
+                    Tag::Link {
+                        link_type,
+                        dest_url,
+                        id,
+                        ..
+                    } => (link_type, dest_url, id, false),
+                    Tag::Image {
+                        link_type,
+                        dest_url,
+                        id,
+                        ..
+                    } => (
+                        link_type,
+                        dest_url,
+                        id,
+                        !matches!(link_type, LinkType::WikiLink { .. }),
+                    ),
+                    _ => unreachable!(),
+                };
+                let target_range = match link_type {
+                    LinkType::Inline => find_span(body, range.clone(), "](", &dest_url).ok(),
+                    LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => parser
+                        .reference_definitions()
+                        .get(&id)
+                        .and_then(|definition| {
+                            find_span(body, definition.span.clone(), "]:", &dest_url).ok()
+                        }),
+                    LinkType::WikiLink { .. } => {
+                        let start =
+                            range.start + 2 + usize::from(body[range.clone()].starts_with('!'));
+                        let end = start + dest_url.len();
+                        (end <= range.end && body.get(start..end) == Some(dest_url.as_ref()))
+                            .then_some(start..end)
+                    }
+                    _ => None,
+                }
+                .map(|range| body_offset + range.start..body_offset + range.end);
                 markdown_links.push((
                     RawLink {
                         target: dest_url.to_string(),
+                        target_range,
+                        image,
                         line,
                         syntax: LinkSyntax::Markdown,
                         sections: heading_stack.clone(),
@@ -201,7 +363,14 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
             _ => {}
         }
     }
-    let wiki_links = scan_wiki_links(body, body_start_line, &headings, &wiki, &wiki_exclusions);
+    let mut wiki_links = scan_wiki_links(body, body_start_line, &headings, &wiki, &wiki_exclusions);
+    let body_offset = text.len() - body.len();
+    for (link, _) in &mut wiki_links {
+        if let Some(range) = &mut link.target_range {
+            range.start += body_offset;
+            range.end += body_offset;
+        }
+    }
     let wiki_ranges: Vec<Range<usize>> =
         wiki_links.iter().map(|(_, range)| range.clone()).collect();
     let mut links: Vec<RawLink> = markdown_links
@@ -222,6 +391,9 @@ pub(crate) fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Resul
         frontmatter,
         body_start_line,
         headings,
+        events,
+        section_headings,
+        list_entries,
         code_blocks,
         structural_boundaries,
         links,
@@ -255,15 +427,22 @@ fn scan_wiki_links(
                     .bytes()
                     .filter(|byte| *byte == b'\n')
                     .count();
-            matches.push((range, target.as_str().trim().to_owned(), line));
+            let trimmed = target.as_str().trim();
+            let start = target.start() + target.as_str().len() - target.as_str().trim_start().len();
+            matches.push((
+                range,
+                trimmed.to_owned(),
+                line,
+                start..start + trimmed.len(),
+            ));
         }
     }
-    matches.sort_by_key(|(range, _, _)| range.start);
+    matches.sort_by_key(|(range, _, _, _)| range.start);
     let mut heading_index = 0;
     let mut heading_stack = Vec::new();
     matches
         .into_iter()
-        .map(|(range, target, line)| {
+        .map(|(range, target, line, target_range)| {
             while let Some(heading) = headings.get(heading_index)
                 && heading.line < line
             {
@@ -274,6 +453,8 @@ fn scan_wiki_links(
             (
                 RawLink {
                     target,
+                    target_range: Some(target_range),
+                    image: false,
                     line,
                     syntax: LinkSyntax::Wiki,
                     sections: heading_stack.clone(),
@@ -305,7 +486,8 @@ fn heading_level(level: HeadingLevel) -> u8 {
     }
 }
 
-fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
+/// Parses YAML frontmatter and returns its value, one-based body line, and body source.
+pub fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
     if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
         return Ok((serde_json::json!({}), 1, text));
     }
@@ -320,6 +502,9 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
             let value: serde_yaml::Value =
                 serde_yaml::from_str(&yaml).context("parse YAML frontmatter")?;
             let json = serde_json::to_value(value).context("convert YAML frontmatter")?;
+            if !json.is_object() {
+                anyhow::bail!("frontmatter must be a YAML mapping");
+            }
             return Ok((json, line_number + 1, &text[offset..]));
         }
         yaml.push_str(line);
@@ -329,27 +514,81 @@ fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)> {
 }
 
 /// Successful parsed corpus and relation graph, or all validation findings.
-pub(crate) type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
+pub type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
 
 /// Parses and validates the complete corpus and its configured resources.
-pub(crate) fn validate_corpus(
+pub fn validate_corpus(pages: &HashMap<String, String>, templates: &Templates) -> CorpusValidation {
+    validate_with_baseline(pages, templates, None)
+}
+
+/// A successfully validated baseline; never constructed from unvalidated client input.
+#[derive(Debug)]
+pub struct ValidationBaseline<'a> {
+    /// Original source (or opaque identity markers for unchanged documents).
+    pub pages: &'a HashMap<String, String>,
+    /// Previously validated parsed facts.
+    pub parsed: &'a HashMap<String, ParsedPage>,
+    /// Previously validated relation edges.
+    pub edges: &'a [Edge],
+    /// Templates used for the baseline.
+    pub templates: &'a Templates,
+}
+
+/// Validates a proposed corpus while reusing unchanged baseline facts.
+pub fn validate_incremental(
     pages: &HashMap<String, String>,
     templates: &Templates,
+    baseline: ValidationBaseline<'_>,
+) -> CorpusValidation {
+    validate_with_baseline(pages, templates, Some(baseline))
+}
+
+fn validate_with_baseline(
+    pages: &HashMap<String, String>,
+    templates: &Templates,
+    baseline: Option<ValidationBaseline<'_>>,
 ) -> CorpusValidation {
     let mut findings = Vec::new();
     let mut parsed = HashMap::new();
     let mut policies = HashMap::new();
+    let mut affected = std::collections::HashSet::new();
+    // Inventory changes can add or remove the exact destination of an authored link.
+    // Inventory changes therefore re-resolve all authored targets, without reparsing.
+    let inventory_changed = baseline.as_ref().is_none_or(|base| {
+        base.pages.len() != pages.len() || base.pages.keys().any(|path| !pages.contains_key(path))
+    });
     for (path, text) in pages {
         let config = templates.policy(path);
         policies.insert(path.clone(), config);
+        if let Some(base) = &baseline
+            && base.pages.get(path) == Some(text)
+            && templates.same_policy(base.templates, path)
+            && let Some(page) = base.parsed.get(path)
+        {
+            parsed.insert(path.clone(), page.clone());
+            if inventory_changed {
+                affected.insert(path.clone());
+            }
+            continue;
+        }
+        affected.insert(path.clone());
         match parse_page(text, &config.links) {
             Ok(mut page) => {
                 page.metadata = project_metadata(config, &page.frontmatter);
+                if page.metadata.get("title").is_none() {
+                    let title = page
+                        .headings
+                        .iter()
+                        .find(|heading| heading.level == 1)
+                        .map(|heading| heading.text.as_str())
+                        .unwrap_or(path);
+                    page.metadata["title"] = serde_json::json!(title);
+                }
                 templates.validate_page(path, text, &page, &mut findings);
-                crate::markdown_style::validate(&config.markdown, path, text, &page, &mut findings);
                 parsed.insert(path.clone(), page);
             }
             Err(error) => findings.push(Finding {
+                source: None,
                 path: path.clone(),
                 message: error.to_string(),
                 line: None,
@@ -359,7 +598,10 @@ pub(crate) fn validate_corpus(
     let resolver = TargetResolver::new(pages.keys());
     let mut resolved_links: HashMap<String, Vec<ResolvedLink>> = HashMap::new();
     for (path, page) in &parsed {
-        for link in &page.links {
+        if !affected.contains(path) {
+            continue;
+        }
+        for link in page.links.iter().filter(|link| !link.image) {
             match resolver.resolve(path, &link.target, link.syntax) {
                 Ok(Some(target)) => {
                     resolved_links
@@ -373,6 +615,7 @@ pub(crate) fn validate_corpus(
                 }
                 Ok(None) => {}
                 Err(message) => findings.push(Finding {
+                    source: None,
                     path: path.clone(),
                     message,
                     line: Some(link.line),
@@ -380,8 +623,17 @@ pub(crate) fn validate_corpus(
             }
         }
     }
-    let mut edges = Vec::new();
+    let mut edges: Vec<Edge> = baseline.as_ref().map_or_else(Vec::new, |base| {
+        base.edges
+            .iter()
+            .filter(|edge| pages.contains_key(&edge.source) && !affected.contains(&edge.source))
+            .cloned()
+            .collect()
+    });
     for (source, config) in &policies {
+        if !affected.contains(source) {
+            continue;
+        }
         for rule in &config.relations {
             match &rule.selector {
                 RelationSelector::MarkdownLinks {
@@ -437,6 +689,7 @@ pub(crate) fn validate_corpus(
                                 item.pointer(target_pointer).and_then(|v| v.as_str())
                             else {
                                 findings.push(Finding {
+                                    source: None,
                                     path: source.clone(),
                                     message: format!(
                                         "relation {} target at {target_pointer} must be a string",
@@ -446,7 +699,7 @@ pub(crate) fn validate_corpus(
                                 });
                                 continue;
                             };
-                            match resolver.resolve(source, target, LinkSyntax::Wiki) {
+                            match resolver.resolve_reference(target) {
                                 Ok(Some(target)) => edges.push(Edge {
                                     source: source.clone(),
                                     relation: rule.name.clone(),
@@ -454,6 +707,7 @@ pub(crate) fn validate_corpus(
                                 }),
                                 Ok(None) => unreachable!(),
                                 Err(message) => findings.push(Finding {
+                                    source: None,
                                     path: source.clone(),
                                     message,
                                     line: None,
@@ -496,6 +750,7 @@ fn validate_reciprocals(
         };
         if !set.contains(&reverse) {
             findings.push(Finding {
+                source: None,
                 path: edge.source.clone(),
                 message: format!(
                     "missing reciprocal {reciprocal} edge from {} to {} for {} edge",
@@ -507,31 +762,57 @@ fn validate_reciprocals(
     }
 }
 
-struct TargetResolver {
+pub(crate) struct TargetResolver {
     exact: std::collections::HashSet<String>,
-    stems: HashMap<String, Vec<String>>,
 }
 
 impl TargetResolver {
-    fn new<'a>(paths: impl Iterator<Item = &'a String>) -> Self {
-        let mut exact = std::collections::HashSet::new();
-        let mut stems: HashMap<String, Vec<String>> = HashMap::new();
-        for path in paths {
-            exact.insert(path.clone());
-            let without_extension = path.strip_suffix(".md").unwrap_or(path);
-            stems
-                .entry(without_extension.into())
-                .or_default()
-                .push(path.clone());
-            if let Some(name) = Path::new(without_extension)
-                .file_name()
-                .and_then(|v| v.to_str())
-                .filter(|name| *name != without_extension)
-            {
-                stems.entry(name.into()).or_default().push(path.clone());
-            }
+    #[cfg(feature = "server")]
+    pub(crate) fn resolve_link(
+        &self,
+        source: &str,
+        link: &RawLink,
+    ) -> Result<Option<(String, bool)>> {
+        let path = link.target.split(['#', '?']).next().unwrap_or_default();
+        if path.is_empty() || is_external(path, link.syntax) {
+            return Ok(None);
         }
-        Self { exact, stems }
+        // Images name literal asset paths, including extensionless files. They do
+        // not inherit the optional .md extension of document links.
+        if !link.image
+            && let Some(target) = self
+                .resolve(source, &link.target, link.syntax)
+                .map_err(|error| anyhow::anyhow!("{source}: {error}"))?
+        {
+            return Ok(Some((target, true)));
+        }
+        // The corpus resolver deliberately ignores assets. Their relative paths still
+        // need rebasing when their source document moves.
+        let decoded = decode_markdown_path(path).map_err(anyhow::Error::msg)?;
+        let target = if let Some(rooted) = decoded.strip_prefix('/') {
+            normalize_path(Path::new(rooted))
+        } else {
+            normalize_path(
+                &Path::new(source)
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .join(decoded),
+            )
+        }
+        .map_err(anyhow::Error::msg)?;
+        let document = self.exact.contains(&target);
+        Ok(Some((target, document)))
+    }
+
+    pub(crate) fn new<'a>(paths: impl Iterator<Item = &'a String>) -> Self {
+        Self {
+            exact: paths.cloned().collect(),
+        }
+    }
+
+    // Frontmatter relation fields store repository paths, not authored links.
+    fn resolve_reference(&self, raw: &str) -> Result<Option<String>, String> {
+        self.resolve("", raw, LinkSyntax::Wiki)
     }
 
     fn resolve(
@@ -541,14 +822,11 @@ impl TargetResolver {
         syntax: LinkSyntax,
     ) -> Result<Option<String>, String> {
         let raw = raw.split(['#', '?']).next().unwrap_or_default();
-        if raw.is_empty() {
+        if raw.is_empty() || is_external(raw, syntax) {
             return Ok(None);
         }
         let decoded;
         let target = if matches!(syntax, LinkSyntax::Markdown) {
-            if raw.starts_with("//") || has_uri_scheme(raw) {
-                return Ok(None);
-            }
             decoded = decode_markdown_path(raw)?;
             if Path::new(&decoded)
                 .extension()
@@ -560,28 +838,21 @@ impl TargetResolver {
         } else {
             raw
         };
-        if target.starts_with('/') {
-            return Err(format!("absolute internal link is not allowed: {target}"));
-        }
-        let candidate = if matches!(syntax, LinkSyntax::Markdown) {
+        let candidate = if let Some(root_path) = target.strip_prefix('/') {
+            normalize_path(Path::new(root_path))?
+        } else {
             let parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
             normalize_path(&parent.join(target))?
-        } else {
-            normalize_path(Path::new(target))?
         };
         let with_extension = if candidate.ends_with(".md") {
-            candidate.clone()
+            candidate
         } else {
             format!("{candidate}.md")
         };
         if self.exact.contains(&with_extension) {
-            return Ok(Some(with_extension));
-        }
-        let stem = candidate.strip_suffix(".md").unwrap_or(&candidate);
-        match self.stems.get(stem).map(Vec::as_slice) {
-            Some([only]) => Ok(Some(only.clone())),
-            Some(many) => Err(format!("ambiguous internal target {raw:?}: {many:?}")),
-            None => Err(format!("dangling internal target {raw:?}")),
+            Ok(Some(with_extension))
+        } else {
+            Err(format!("dangling internal target {raw:?}"))
         }
     }
 }
@@ -636,7 +907,11 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn has_uri_scheme(target: &str) -> bool {
+fn is_external(target: &str, syntax: LinkSyntax) -> bool {
+    matches!(syntax, LinkSyntax::Markdown) && (target.starts_with("//") || has_uri_scheme(target))
+}
+
+pub(crate) fn has_uri_scheme(target: &str) -> bool {
     let Some((scheme, _)) = target.split_once(':') else {
         return false;
     };
@@ -649,7 +924,7 @@ fn has_uri_scheme(target: &str) -> bool {
         })
 }
 
-fn normalize_path(path: &Path) -> Result<String, String> {
+pub(crate) fn normalize_path(path: &Path) -> Result<String, String> {
     let mut parts = Vec::new();
     for part in path.components() {
         match part {
@@ -681,235 +956,160 @@ pub(crate) fn project_metadata(
     serde_json::Value::Object(output)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::LinkConfig;
-    use crate::template::test_templates;
+/// A resolved schema-defined reference with an editable source location.
+#[derive(Debug, Serialize)]
+pub struct DocumentReference {
+    /// Resolved repository-relative target.
+    pub target: String,
+    /// Authored target, including any fragment or query.
+    pub raw: String,
+    /// Byte range for a wiki-link target, excluding its delimiters and label.
+    pub range: Option<Range<usize>>,
+    /// JSON pointer for a frontmatter relation target.
+    pub pointer: Option<String>,
+}
 
-    #[test]
-    fn wiki_links_ignore_code_and_escaped_examples() {
-        let page = parse_page(
-            "# Links\n\n{{real}}\n\n[[not configured]]\n\n`{{inline}}`\n\n```md\n{{fenced}}\n```\n\n\\{{escaped}}\n",
-            &LinkConfig {
-                markdown: false,
-                wiki: vec![r"\{\{(?P<target>[^}|#]+)(?:#[^}|]+)?(?:\|[^}]+)?\}\}".into()],
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            page.links
-                .iter()
-                .map(|link| link.target.as_str())
-                .collect::<Vec<_>>(),
-            ["real"]
-        );
-    }
-
-    #[test]
-    fn configured_wiki_links_take_precedence_over_markdown_parsing() {
-        let templates = test_templates(
-            r#"structure: {additional_sections: true}
-links:
-  markdown: true
-  wiki: ['\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]']
-relations:
-  - name: markdown
-    selector: {kind: markdown_links, syntax: markdown}
-  - name: wiki
-    selector: {kind: markdown_links, syntax: wiki}
-"#,
-        )
-        .unwrap();
-        let pages = HashMap::from([
-            ("a.md".into(), "[[b#Part|Bee]]\n".into()),
-            ("b.md".into(), "B\n".into()),
-        ]);
-        let (_, edges) = validate_corpus(&pages, &templates).unwrap();
-        assert_eq!(
-            edges,
-            [Edge {
-                source: "a.md".into(),
-                relation: "wiki".into(),
-                target: "b.md".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn markdown_relation_selectors_keep_types_separate() {
-        let templates = test_templates(
-            r#"structure: {additional_sections: true}
-links: {markdown: true}
-relations:
-  - name: friend
-    reciprocal: friend
-    selector: {kind: markdown_links, section: Friends}
-  - name: source
-    reciprocal: source
-    selector: {kind: markdown_links, section: Sources}
-"#,
-        )
-        .unwrap();
-        let pages = HashMap::from([
-            (
-                "a.md".into(),
-                "# Friends\n\n[B](b.md)\n\n# Sources\n\n[C](c.md)\n".into(),
-            ),
-            ("b.md".into(), "# Friends\n\n[A](a.md)\n".into()),
-            ("c.md".into(), "# Sources\n\n[A](a.md)\n".into()),
-        ]);
-        let (_, edges) = validate_corpus(&pages, &templates).unwrap();
-        assert_eq!(edges.len(), 4);
-        assert!(edges.iter().all(|edge| {
-            (edge.relation == "friend" && edge.source != "c.md" && edge.target != "c.md")
-                || (edge.relation == "source" && edge.source != "b.md" && edge.target != "b.md")
-        }));
-    }
-
-    #[test]
-    fn required_sections_are_enforced_by_templates() {
-        let templates = test_templates("structure: {additional_sections: true}\nsections: [{heading: Notes, rules: {required: true}}]").unwrap();
-        let pages = HashMap::from([("page.md".into(), "# Other\n".into())]);
-        assert!(validate_corpus(&pages, &templates).is_err());
-    }
-
-    #[test]
-    fn directory_templates_select_heterogeneous_page_types() {
-        let templates = Templates::compile(&HashMap::from([
-            (
-                "people/template.yaml".into(),
-                "sections: [{heading: Biography, rules: {required: true}}]".into(),
-            ),
-            (
-                "tasks/template.yaml".into(),
-                "sections: [{heading: Status, rules: {required: true}}]".into(),
-            ),
-        ]))
-        .unwrap();
-        let mut pages = HashMap::from([
-            ("people/alice.md".into(), "# Biography\n\nPerson.\n".into()),
-            ("tasks/one.md".into(), "# Status\n\nOpen.\n".into()),
-        ]);
-        assert!(validate_corpus(&pages, &templates).is_ok());
-        pages.insert("people/alice.md".into(), "# Status\n\nActive.\n".into());
-        let findings = validate_corpus(&pages, &templates).unwrap_err();
-        assert!(!findings.is_empty());
-        assert!(
-            findings
-                .iter()
-                .all(|finding| finding.path == "people/alice.md")
-        );
-    }
-
-    #[test]
-    fn non_page_markdown_destinations_are_not_internal_links() {
-        let paths = [
-            "notes/page.md".to_owned(),
-            "notes/other.md".to_owned(),
-            "notes/other note.md".to_owned(),
-            "notes/café.md".to_owned(),
-            "notes/hash#tag.md".to_owned(),
-            "notes/wiki%20name.md".to_owned(),
-        ];
-        let resolver = TargetResolver::new(paths.iter());
-        for target in [
-            "../assets/paper.pdf",
-            "ftp://example.com/file",
-            "urn:isbn:9780140328721",
-            "//cdn.example.com/file",
-        ] {
-            assert_eq!(
-                resolver.resolve("notes/page.md", target, LinkSyntax::Markdown),
-                Ok(None),
-                "resolved {target:?} as a page"
-            );
+/// Resolves configured wiki and frontmatter references using validation policies.
+/// Standard Markdown destinations remain available through the Markdown parser.
+pub fn document_references(
+    sources: &HashMap<String, String>,
+    templates: &Templates,
+) -> Result<HashMap<String, Vec<DocumentReference>>> {
+    let resolver = TargetResolver::new(
+        sources
+            .keys()
+            .filter(|path| path.ends_with(".md") && !crate::template::is_template(path)),
+    );
+    let mut references = HashMap::new();
+    for (path, text) in sources.iter().filter(|(path, _)| path.ends_with(".md")) {
+        let policy = templates.policy(path);
+        let page = parse_page(text, &policy.links)?;
+        let mut found = Vec::new();
+        let mut add = |raw: &str, range, pointer: Option<String>| -> Result<()> {
+            if let Some(target) = (if pointer.is_some() {
+                resolver.resolve_reference(raw)
+            } else {
+                resolver.resolve(path, raw, LinkSyntax::Wiki)
+            })
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("{path}: cannot resolve reference"))?
+            {
+                found.push(DocumentReference {
+                    target,
+                    raw: raw.into(),
+                    range,
+                    pointer,
+                });
+            }
+            Ok(())
+        };
+        for link in page
+            .links
+            .iter()
+            .filter(|link| matches!(link.syntax, LinkSyntax::Wiki))
+        {
+            if let Some(range) = &link.target_range {
+                add(&link.target, Some(range.clone()), None)?;
+            }
         }
-        assert_eq!(
-            resolver.resolve("notes/page.md", "other.md?view=1", LinkSyntax::Markdown),
-            Ok(Some("notes/other.md".into()))
-        );
-        assert_eq!(
-            resolver.resolve(
-                "notes/page.md",
-                "other%20note.md?view=1#details",
-                LinkSyntax::Markdown
-            ),
-            Ok(Some("notes/other note.md".into()))
-        );
-        assert_eq!(
-            resolver.resolve("notes/page.md", "caf%C3%A9.md", LinkSyntax::Markdown),
-            Ok(Some("notes/café.md".into()))
-        );
-        assert_eq!(
-            resolver.resolve("notes/page.md", "hash%23tag.md", LinkSyntax::Markdown),
-            Ok(Some("notes/hash#tag.md".into()))
-        );
-        assert_eq!(
-            resolver.resolve("notes/page.md", "wiki%20name", LinkSyntax::Wiki),
-            Ok(Some("notes/wiki%20name.md".into()))
-        );
-
-        let templates = Templates::compile(&HashMap::new()).unwrap();
-        let pages = HashMap::from([
-            (
-                "notes/page.md".into(),
-                "[Other](other%20note.md?view=1#details)\n".into(),
-            ),
-            ("notes/other note.md".into(), "Other.\n".into()),
-        ]);
-        assert!(validate_corpus(&pages, &templates).is_ok());
-    }
-
-    #[test]
-    fn root_page_stems_resolve_once() {
-        let paths = ["page.md".to_owned()];
-        let resolver = TargetResolver::new(paths.iter());
-
-        assert_eq!(
-            resolver.resolve("source.md", "page", LinkSyntax::Wiki),
-            Ok(Some("page.md".into()))
-        );
-    }
-
-    #[test]
-    fn markdown_link_decoding_rejects_invalid_or_escaping_paths() {
-        let paths = ["notes/page.md".to_owned()];
-        let resolver = TargetResolver::new(paths.iter());
-        for target in [
-            "bad%.md",
-            "bad%GG.md",
-            "bad%00.md",
-            "bad%2Fname.md",
-            "bad%5Cname.md",
-            "bad%FF.md",
-            "%2e%2e/%2e%2e/outside.md",
-        ] {
-            assert!(
-                resolver
-                    .resolve("notes/page.md", target, LinkSyntax::Markdown)
-                    .is_err(),
-                "accepted {target:?}"
-            );
+        for rule in &policy.relations {
+            if let RelationSelector::Frontmatter {
+                array_pointer,
+                target_pointer,
+                type_pointer,
+                type_value,
+            } = &rule.selector
+            {
+                if let Some(items) = page
+                    .frontmatter
+                    .pointer(array_pointer)
+                    .and_then(|v| v.as_array())
+                {
+                    for (index, item) in items.iter().enumerate() {
+                        if let (Some(pointer), Some(expected)) = (type_pointer, type_value) {
+                            if item.pointer(pointer) != Some(expected) {
+                                continue;
+                            }
+                        }
+                        if let Some(raw) = item.pointer(target_pointer).and_then(|v| v.as_str()) {
+                            add(
+                                raw,
+                                None,
+                                Some(format!("{array_pointer}/{index}{target_pointer}")),
+                            )?;
+                        }
+                    }
+                }
+            }
         }
+        references.insert(path.clone(), found);
     }
+    Ok(references)
+}
 
-    #[test]
-    fn template_schema_errors_are_reported_once_and_page_errors_per_page() {
-        let invalid = test_templates("frontmatter: {type: not_a_type}")
-            .err()
-            .unwrap();
-        assert_eq!(invalid.len(), 1);
-        assert_eq!(invalid[0].path, "template.yaml");
-        let templates =
-            test_templates("frontmatter: {type: object, required: [required]}").unwrap();
-        let pages = HashMap::from([
-            ("one.md".into(), "---\nvalue: one\n---\n".into()),
-            ("two.md".into(), "---\nvalue: two\n---\n".into()),
-        ]);
-        let findings = validate_corpus(&pages, &templates).unwrap_err();
-        assert_eq!(findings.len(), 2);
-        assert!(findings.iter().any(|finding| finding.path == "one.md"));
-        assert!(findings.iter().any(|finding| finding.path == "two.md"));
+fn find_span(body: &str, range: Range<usize>, marker: &str, target: &str) -> Result<Range<usize>> {
+    let candidates: Vec<_> = body[range.clone()]
+        .match_indices(marker)
+        .filter_map(|(index, _)| {
+            let start = range.start + index + marker.len();
+            destination_span(body, start, range.end).and_then(|span| {
+                let raw = &body[span.clone()];
+                let probe = format!("[](<{raw}>)");
+                let parsed = Parser::new(&probe).find_map(|event| match event {
+                    Event::Start(Tag::Link { dest_url, .. }) => Some(dest_url.into_string()),
+                    _ => None,
+                });
+                (parsed.as_deref() == Some(target)).then_some(span)
+            })
+        })
+        .collect();
+    let [span] = candidates.as_slice() else {
+        bail!(
+            "ambiguous or unsupported Markdown destination: {}",
+            &body[range]
+        );
+    };
+    Ok(span.clone())
+}
+
+// The Markdown parser identifies the link/definition; this scanner only locates
+// its destination bytes, including escaped and balanced parentheses.
+fn destination_span(text: &str, mut start: usize, end: usize) -> Option<Range<usize>> {
+    let bytes = text.as_bytes();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
     }
+    let angle = start < end && bytes[start] == b'<';
+    if angle {
+        start += 1;
+    }
+    let mut cursor = start;
+    let mut depth = 0;
+    while cursor < end {
+        let byte = bytes[cursor];
+        if byte == b'\\' && cursor + 1 < end {
+            cursor += 2;
+            continue;
+        }
+        if angle {
+            if byte == b'>' {
+                return Some(start..cursor);
+            }
+        } else {
+            if byte == b'(' {
+                depth += 1;
+            }
+            if byte == b')' {
+                if depth == 0 {
+                    return Some(start..cursor);
+                }
+                depth -= 1;
+            }
+            if byte.is_ascii_whitespace() {
+                return Some(start..cursor);
+            }
+        }
+        cursor += 1;
+    }
+    (!angle && depth == 0).then_some(start..cursor)
 }

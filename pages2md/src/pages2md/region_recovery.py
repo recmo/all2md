@@ -143,7 +143,7 @@ def recover_regions(source_page, blocks, candidates, *, backend=None, bundle=Non
 
         for entry in store.replay(source_hash):
             evaluate(*entry)
-        if callable(getattr(backend, "recognize_detail", None)):
+        if backend is not None:
             calls = 0
             for box, scale in _crop_targets(audit):
                 if calls >= budget:

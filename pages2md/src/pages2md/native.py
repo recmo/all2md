@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from dataclasses import asdict
+from collections import Counter
+from dataclasses import asdict, replace
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -13,8 +14,9 @@ from .compare import compare_text, normalize
 from .embedded import assess_embedded, bbox_coverage, bbox_iou, embedded_text_for_bbox
 from .lists import annotate_native_list_block
 from .embedded import bbox_iou as _iou, bbox_coverage as _coverage
-from .model import Block, EmbeddedEvidence, OcrObservation
-from .quality import output_quality_warnings, candidate_rejection
+from .model import Block, EmbeddedEvidence, OcrObservation, FIGURE_KINDS, FORMULA_KINDS
+from .quality import output_quality_warnings, math_syntax_errors, repeated_region_pairs, candidate_rejection
+from .decoding import words
 
 PAGE_TOKEN = re.compile(r"\s*<PAGE>\s*")
 DET_TOKEN = re.compile(r"<\|det\|>(.*?)<\|/det\|>", re.DOTALL)
@@ -267,8 +269,10 @@ def validate_observation(observation: OcrObservation) -> list[str]:
             break
     if "visual_text_repetition" in compare_text(_observation_text(observation), "").warnings:
         warnings.append("visual_text_repetition")
-    if observation.generation.get("finish_reason") in {"length", "max_tokens"}:
+    if observation.generation.get("finish_reason") in {"length", "max_tokens", "ungrounded_guard"}:
         warnings.append("visual_truncated")
+    if observation.generation.get("finish_reason") == "repetition_guard":
+        warnings.append("visual_repetition_guard")
     if len(observation.source_pages) > 1:
         segment_count = len([part for part in PAGE_TOKEN.split(raw) if part.strip()])
         if segment_count != len(observation.source_pages):
@@ -281,6 +285,9 @@ def validate_observation(observation: OcrObservation) -> list[str]:
             page_count=len(observation.source_pages),
         )
     )
+    if repeated_region_pairs([{"kind":b.kind,"bbox":b.bbox,"markdown":b.markdown,
+                               "source_pages":b.source_pages} for b in observation.blocks]):
+        warnings.append("visual_region_repetition")
     return sorted(set(warnings))
 
 
@@ -290,9 +297,58 @@ def reconcile_observations(
     *,
     embedded_text: str = "",
     embedded: EmbeddedEvidence | None = None,
+    page_image=None,
+) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
+    from .equation_recovery import apply_regions
+    regions = [r for r in recoveries if r.mode == "region_detail" and r.source_pages == primary.source_pages]
+    peers = [r for r in recoveries if r.mode != "region_detail"]
+    blank_regions = _blank_nonprose_regions(primary, page_image)
+    blocks, provenance, warnings = _reconcile_observations(
+        primary, peers, embedded_text=embedded_text, embedded=embedded,
+        blank_regions=blank_regions,
+    )
+    if blank_regions:
+        for action in provenance:
+            if action.get("action") == "selected_source_supported_page":
+                action["blank_source_regions"] = sorted(blank_regions)
+    blocks, actions, extra = apply_regions(blocks, regions, peers, primary)
+    return blocks, [*provenance,*actions], sorted(set([*warnings,*extra]))
+
+
+def _reconcile_observations(
+    primary: OcrObservation,
+    recoveries: list[OcrObservation],
+    *,
+    embedded_text: str = "",
+    embedded: EmbeddedEvidence | None = None,
+    blank_regions=frozenset(),
 ) -> tuple[list[Block], list[dict[str, Any]], list[str]]:
     """Keep multi-page structure and apply only confidently aligned Gundam spans."""
     provenance: list[dict[str, Any]] = []
+    recoveries = [replace(r, warnings=sorted(set([*r.warnings, *validate_observation(r)])))
+                  for r in recoveries if set(r.source_pages) <= set(primary.source_pages)]
+    # Work on derived views only. The raw stream, original blocks and rejected
+    # attempt warnings remain intact in the checkpoint for later audits.
+    if embedded is not None and assess_embedded(embedded).geometric:
+        primary, actions = _salvage_grounded_body(primary, embedded)
+        provenance.extend(actions)
+        cleaned = []
+        for recovery in recoveries:
+            recovery, actions = _salvage_grounded_body(recovery, embedded)
+            if "visual_region_repetition" in primary.warnings:
+                recovery, boundary_actions = _restore_supported_opening(primary, recovery, embedded)
+                actions.extend(boundary_actions)
+            cleaned.append(recovery)
+            provenance.extend(actions)
+        recoveries = cleaned
+        winner = _source_supported_page(primary, recoveries, embedded, blank_regions=blank_regions)
+        if winner is not None:
+            blocks = [_copy_block(block) for block in winner.blocks]
+            for block in blocks:
+                block.provenance.append({"observation": winner.id, "action": "selected_source_supported_page"})
+            provenance.append({"primary_observation": primary.id, "recovery_observation": winner.id,
+                               "action": "selected_source_supported_page"})
+            return blocks, provenance, sorted(set(winner.warnings))
     warnings: list[str] = list(primary.warnings)
     # Cached observations can predate quality checks. Reject runaway auxiliary
     # output BEFORE quadratic alignment, while retaining its raw checkpoint.
@@ -306,7 +362,7 @@ def reconcile_observations(
     canonical = [_copy_block(block) for block in primary.blocks]
     primary_bad = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
     trust_visual = _observation_text(primary)
-    if primary_bad and embedded is not None and embedded.text:
+    if embedded is not None and embedded.text:
         observations = [primary, *recoveries]
         trust_visual = max(
             (_observation_text(observation) for observation in observations),
@@ -345,11 +401,15 @@ def reconcile_observations(
         provenance.extend(recovered_provenance)
         warnings.extend(recovered_warnings)
         return canonical, provenance, sorted(set(warnings))
-    if len(recoveries) >= 2 and not primary_bad:
-        return _reconcile_consensus(primary, recoveries, canonical, warnings)
+    clean_recoveries = [r for r in recoveries if not set(r.warnings) & _SEVERE_OBSERVATION_WARNINGS]
+    if len(clean_recoveries) >= 2 and not primary_bad:
+        blocks, actions, warnings = _reconcile_consensus(primary, clean_recoveries, canonical, warnings)
+        return blocks, [*provenance, *actions], warnings
     for recovery in recoveries:
+        if set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS:
+            continue
         warnings.extend(recovery.warnings)
-        if _should_replace_corrupt_local_page(primary, recovery):
+        if _should_replace_corrupt_local_page(primary, recovery, blank_regions=blank_regions):
             recovery_text = normalize(_observation_text(recovery)).casefold()
             retained_headings = [
                 block
@@ -447,6 +507,191 @@ def reconcile_observations(
     return canonical, provenance, sorted(set(warnings))
 
 
+def _source_precision_recall(text: str, evidence: str) -> tuple[float, float]:
+    observed, source = Counter(words(text)), Counter(words(evidence))
+    shared = sum((observed & source).values())
+    return shared / max(1, sum(observed.values())), shared / max(1, sum(source.values()))
+
+
+def _supported_grounded_block(block: Block, embedded: EmbeddedEvidence) -> bool:
+    if block.bbox is None or not (0 <= block.bbox[0] < block.bbox[2] <= 1000
+                                  and 0 <= block.bbox[1] < block.bbox[3] <= 1000):
+        return False
+    local = embedded_text_for_bbox(embedded, block.bbox, minimum_coverage=.25)
+    return len(words(block.markdown)) >= 3 and _source_precision_recall(block.markdown, local)[0] >= .6
+
+
+def _salvage_grounded_body(observation: OcrObservation, embedded: EmbeddedEvidence):
+    first = next((i for i, b in enumerate(observation.blocks) if b.bbox is not None), 0)
+    prefix, body = observation.blocks[:first], observation.blocks[first:]
+    if not prefix or sum(_supported_grounded_block(b, embedded) for b in body) < 2:
+        return observation, []
+    removed = []
+    retained = []
+    for i, block in enumerate(prefix):
+        precision, _ = _source_precision_recall(block.markdown, embedded.text)
+        suspicious = bool(set(output_quality_warnings(block.markdown)) & {
+            "visual_text_repetition", "visual_structural_repetition", "visual_implausible_output_length"})
+        numeric_chain = bool(re.fullmatch(r"[\d.\s]+", block.markdown) and block.markdown.count(".") >= 12)
+        compact = block.markdown.strip()
+        chain = re.match(r"([A-Za-z0-9]{1,8})([-/.])(?:\1\2){4,}", compact)
+        short_chain = bool(chain and chain[1].startswith(compact[chain.end():]))
+        literal_support = normalize(block.markdown).casefold() in normalize(embedded.text).casefold()
+        if block.metadata.get("native_ungrounded") and not literal_support and (
+            (precision < .2 and (suspicious or short_chain or len(block.markdown) >= 80)) or numeric_chain
+        ):
+            removed.append(i)
+        else:
+            retained.append(block)
+    if not removed:
+        return observation, []
+    derived = OcrObservation(observation.id, observation.mode, observation.raw,
+                             list(observation.source_pages), dict(observation.generation),
+                             [_copy_block(b) for b in [*retained, *body]])
+    derived.warnings = validate_observation(derived)
+    return derived, [{"observation": observation.id,
+                      "primary_observation": observation.id, "recovery_observation": observation.id,
+                      "action": "excluded_unsupported_prefix",
+                      "original_block_indices": removed, "raw_preserved": True}]
+
+
+def _blank_nonprose_regions(primary, page_image):
+    # Only an actual white raster region can waive a non-prose preservation
+    # veto; absent or unparseable native text is not evidence of blankness.
+    if page_image is None:
+        return frozenset()
+    from PIL import Image
+    blank = set()
+    with Image.open(page_image) as image:
+        gray = image.convert("L")
+        for block in primary.blocks:
+            box = block.bbox
+            if block.kind not in FIGURE_KINDS | FORMULA_KINDS | {"table"} or not box:
+                continue
+            if not (0 <= box[0] < box[2] <= 1000 and 0 <= box[1] < box[3] <= 1000):
+                continue
+            # Inspect only fully enclosed pixels: outward rounding can borrow
+            # a partial pixel of ink from the adjacent prose line.
+            pixels = (math.ceil(box[0]*gray.width/1000), math.ceil(box[1]*gray.height/1000),
+                      math.floor(box[2]*gray.width/1000), math.floor(box[3]*gray.height/1000))
+            if pixels[2] <= pixels[0] or pixels[3] <= pixels[1]:
+                continue
+            if gray.crop(pixels).getextrema() == (255, 255):
+                blank.add(tuple(box))
+    return frozenset(blank)
+
+
+def _preserves_nonprose_regions(primary, recovery, blank_regions=frozenset()):
+    # Native prose cannot establish whether figures, formulas or tables remain.
+    for block in primary.blocks:
+        if block.bbox and tuple(block.bbox) in blank_regions:
+            continue
+        family = next((kinds for kinds in (FIGURE_KINDS, FORMULA_KINDS, {"table"})
+                       if block.kind in kinds), None)
+        if family is not None and not (block.bbox and any(
+            candidate.kind in family and candidate.bbox
+            and bbox_iou(block.bbox, candidate.bbox) >= .8
+            for candidate in recovery.blocks
+        )):
+            return False
+    return True
+
+
+def _source_supported_page(primary, recoveries, embedded, *, blank_regions=frozenset()):
+    """Replace a poorly supported page with a coherent, corroborated local read.
+
+    This also handles short hallucinations and stop-terminated loops: neither
+    requires a length finish reason. Math-only pages abstain from this route.
+    """
+    old_precision, old_recall = _source_precision_recall(_observation_text(primary), embedded.text)
+    old_score = min(old_precision, old_recall)
+    candidates = []
+    for recovery in recoveries:
+        if len(recovery.source_pages) != 1 or not set(recovery.source_pages) <= set(primary.source_pages):
+            continue
+        if set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS:
+            continue
+        precision, recall = _source_precision_recall(_observation_text(recovery), embedded.text)
+        supported = sum(_supported_grounded_block(b, embedded) for b in recovery.blocks)
+        # Global agreement must not buy a missing local paragraph. Preserve
+        # corroborated Base regions; local reconciliation can still improve
+        # other regions when a whole-page replacement is unsafe.
+        preserves = all(
+            _preserves_supported_text(block, recovery.blocks, embedded)
+            for block in primary.blocks if _supported_grounded_block(block, embedded)
+        )
+        if preserves and _preserves_nonprose_regions(primary, recovery, blank_regions) and precision >= .65 and recall >= .7 and min(precision, recall) >= old_score + .18 and supported >= 2:
+            candidates.append((min(precision, recall), recovery))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def _restore_supported_opening(primary, recovery, embedded):
+    """Keep a well-corroborated visual opening when a clean reread clips it.
+
+    This is restricted to the boundary before the first grounded recovery block,
+    not arbitrary document splicing. It enables replacing a repeated page body
+    without sacrificing an accurate opening from the original observation.
+    """
+    if len(recovery.source_pages) != 1 or not set(recovery.source_pages) <= set(primary.source_pages):
+        return recovery, []
+    first = next((i for i,b in enumerate(recovery.blocks) if b.bbox is not None), None)
+    if first is None:
+        return recovery, []
+    boundary = recovery.blocks[first].bbox[1]
+    eligible = [b for b in primary.blocks if b.bbox and b.kind in {"paragraph","heading"}
+        and 35 <= b.bbox[1] < b.bbox[3] <= boundary+3
+        and len(words(b.markdown)) >= 4
+        # OCR can clip the right edge of an opening containing inline math.
+        # Corroborate the same narrow row band, not arbitrary text elsewhere.
+        and _opening_prose_supported(b, embedded)]
+    if not eligible:
+        return recovery, []
+    opening = min(eligible,key=lambda b:b.bbox[1])
+    # Do not restore a whole series of missing regions using this narrow route.
+    if boundary-opening.bbox[3] > 15 or any(
+        b.bbox and _iou(opening.bbox,b.bbox) >= .2 for b in recovery.blocks[first:]
+    ):
+        return recovery, []
+    prefix = " ".join(b.markdown for b in recovery.blocks[:first])
+    if prefix and (len(words(prefix)) > 1.5*len(words(opening.markdown))
+                   or _source_precision_recall(prefix,opening.markdown)[0] < .4):
+        return recovery, []
+    block = _copy_block(opening)
+    block.provenance.append({"observation":primary.id,"action":"preserved_supported_opening"})
+    repaired = replace(recovery,blocks=[block,*[_copy_block(b) for b in recovery.blocks[first:]]])
+    repaired.warnings = validate_observation(repaired)
+    return repaired,[{"primary_observation":primary.id,"recovery_observation":recovery.id,
+                      "action":"preserved_supported_opening","raw_preserved":True}]
+
+
+def _opening_prose_supported(block, embedded):
+    band = (0, block.bbox[1]-3, 1000, block.bbox[3]+3)
+    # Native extraction can put the end of this row and several later rows in
+    # one block. Select individual lines, not the enclosing block's coverage.
+    local = " ".join(str(line.get("text", "")) for native in embedded.blocks
+                     for line in native.get("lines", [])
+                     if len(line.get("bbox", [])) == 4 and _coverage(line["bbox"],band) >= .5)
+    observed = Counter(w for w in words(block.markdown) if len(w) >= 3 and w.isalpha())
+    source = Counter(words(local))
+    return sum(observed.values()) >= 3 and sum((observed & source).values()) / sum(observed.values()) >= .9
+
+
+def _preserves_supported_text(block: Block, candidates: list[Block], embedded: EmbeddedEvidence) -> bool:
+    evidence = embedded_text_for_bbox(embedded, block.bbox, minimum_coverage=.25)
+    # Only prose words corroborated by native evidence veto a replacement.
+    # Ambiguous mathematical glyph serialization cannot veto visual recovery.
+    supported = Counter(w for w in words(block.markdown) if len(w) >= 3 and w.isalpha()) & Counter(words(evidence))
+    if sum(supported.values()) < 3:
+        return True
+    local = Counter(words(" ".join(
+        candidate.markdown for candidate in candidates
+        if candidate.bbox and block.bbox and (
+            _coverage(candidate.bbox, block.bbox) >= .5 or _coverage(block.bbox, candidate.bbox) >= .5
+        )
+    )))
+    return sum((supported & local).values()) / sum(supported.values()) >= .9
+
+
 def _reconcile_page_detail(
     primary: OcrObservation,
     recovery: OcrObservation,
@@ -491,6 +736,7 @@ def _reconcile_page_detail(
         evidence_delta = candidate_evidence - base_evidence
         detail_preferred = bool(
             _structural_penalty(candidate.markdown) <= _structural_penalty(block.markdown)
+            and (embedded is None or _preserves_supported_text(block, [candidate], embedded))
             and (
                 evidence_delta > 0.0005
                 or candidate_local >= base_local + 0.25
@@ -514,6 +760,11 @@ def _reconcile_page_detail(
             candidate.markdown,
             local_evidence,
         )
+        if embedded is not None and span_changes:
+            merged_block = _copy_block(block)
+            merged_block.markdown = merged
+            if not _preserves_supported_text(block, [merged_block], embedded):
+                merged, span_changes = block.markdown, []
         partial_span_win = bool(
             span_changes
             and _evidence_normalize(merged) != _evidence_normalize(candidate.markdown)
@@ -588,11 +839,13 @@ def _merge_supported_spans(base: str, detail: str, embedded: str) -> tuple[str, 
             regions.append([left_start, left_end, right_start, right_end])
     accepted: list[tuple[int, int, str, str, float]] = []
     base_score = _embedded_support(base, embedded)
+    base_syntax = len(math_syntax_errors(base))
     for left_start, left_end, right_start, right_end in regions:
         replacement = detail[right_start:right_end]
         variant = base[:left_start] + replacement + base[left_end:]
         delta = _embedded_support(variant, embedded) - base_score
-        if delta <= 0.0005 or _structural_penalty(variant) > _structural_penalty(base):
+        if (delta <= 0.0005 or _structural_penalty(variant) > _structural_penalty(base)
+                or len(math_syntax_errors(variant)) > base_syntax):
             continue
         accepted.append((left_start, left_end, replacement, base[left_start:left_end], delta))
     if not accepted:
@@ -606,6 +859,9 @@ def _merge_supported_spans(base: str, detail: str, embedded: str) -> tuple[str, 
             "detail": replacement,
             "embedded_support_delta": f"{delta:.6f}",
         })
+    # Independently safe edits may interact; validate their composition too.
+    if len(math_syntax_errors(merged)) > base_syntax:
+        return base, []
     return merged, list(reversed(changes))
 
 
@@ -623,18 +879,22 @@ def _recover_uncovered_blocks(
     warnings: list[str] = []
     for recovery in recoveries:
         if set(recovery.warnings) & {
-            "visual_implausible_coordinates",
             "visual_malformed_grounding",
             "visual_page_transition_mismatch",
         }:
             continue
         for candidate in recovery.blocks:
+            if candidate.bbox and not (0 <= candidate.bbox[0] < candidate.bbox[2] <= 1000
+                                       and 0 <= candidate.bbox[1] < candidate.bbox[3] <= 1000):
+                continue
             if candidate.kind in {"page_number", "header", "footer"}:
                 continue
             normalized = _evidence_normalize(candidate.markdown)
             if (
                 len(normalized) < 3
                 or len(normalized) > 5000
+                or set(output_quality_warnings(candidate.markdown)) & {
+                    "visual_structural_repetition", "visual_malformed_math", "visual_malformed_table"}
                 or "visual_text_repetition"
                 in compare_text(candidate.markdown, "").warnings
                 or _structural_penalty(candidate.markdown) > 0.2
@@ -861,7 +1121,9 @@ def _structural_penalty(value: str) -> float:
     return penalty
 
 
-def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObservation) -> bool:
+def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObservation, *, blank_regions=frozenset()) -> bool:
+    if not _preserves_nonprose_regions(primary, recovery, blank_regions):
+        return False
     severe = bool(set(primary.warnings) & _SEVERE_OBSERVATION_WARNINGS)
     if not severe or set(recovery.warnings) & _SEVERE_OBSERVATION_WARNINGS:
         return False
@@ -880,6 +1142,7 @@ def _should_replace_corrupt_local_page(primary: OcrObservation, recovery: OcrObs
 
 
 _SEVERE_OBSERVATION_WARNINGS = {
+    "visual_region_repetition",
     "visual_math_repetition",
     "visual_empty_output",
     "visual_implausible_output_length",
@@ -888,6 +1151,9 @@ _SEVERE_OBSERVATION_WARNINGS = {
     "visual_malformed_table",
     "visual_page_transition_mismatch",
     "visual_text_repetition",
+    "visual_structural_repetition",
+    "visual_repetition_guard",
+    "visual_implausible_coordinates",
     "visual_truncated",
 }
 

@@ -216,6 +216,62 @@
             echo "Run: uv sync --project doc2md --extra dev"
           '';
         };
+      mdstoreSourceFilter = path: type:
+        nixpkgs.lib.cleanSourceFilter path type
+        && !(nixpkgs.lib.hasSuffix "/src/lib/wasm" (toString path))
+        && !(builtins.elem (builtins.baseNameOf path) [ "target" "node_modules" ".svelte-kit" "build" "test-results" "playwright-report" ]);
+      wasmBindgenVersion =
+        (nixpkgs.lib.findFirst (package: package.name == "wasm-bindgen")
+          (throw "wasm-bindgen is missing from webui/wasm/Cargo.lock")
+          (builtins.fromTOML (builtins.readFile ./webui/wasm/Cargo.lock)).package).version;
+      mkWasmBindgenCli = mdSystem:
+        nixpkgs.legacyPackages.${mdSystem}."wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasmBindgenVersion}";
+      mkMdstoreWasm = mdSystem:
+        let systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+        in systemPkgs.rustPlatform.buildRustPackage {
+          pname = "mdstore-validation-wasm";
+          version = "0.1.0";
+          src = systemPkgs.runCommand "source" {} ''
+            mkdir -p $out/webui
+            cp -r ${nixpkgs.lib.cleanSourceWith { src = ./mdstore; filter = mdstoreSourceFilter; }} $out/mdstore
+            cp -r ${nixpkgs.lib.cleanSourceWith { src = ./webui/wasm; filter = mdstoreSourceFilter; }} $out/webui/wasm
+          '';
+          sourceRoot = "source/webui/wasm";
+          cargoLock.lockFile = ./webui/wasm/Cargo.lock;
+          nativeBuildInputs = [ (mkWasmBindgenCli mdSystem) systemPkgs.llvmPackages.lld ];
+          doCheck = false;
+          buildPhase = ''
+            runHook preBuild
+            cargo build --offline --frozen --target wasm32-unknown-unknown --release
+            runHook postBuild
+          '';
+          installPhase = ''
+            wasm-bindgen target/wasm32-unknown-unknown/release/mdstore_validation_wasm.wasm --target web --omit-default-module-path --remove-name-section --out-dir $out --out-name validator
+          '';
+        };
+      mkMdstoreWeb = mdSystem:
+        let
+          systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+          pnpm = systemPkgs.pnpm_11;
+        in systemPkgs.stdenvNoCC.mkDerivation (finalAttrs: {
+          pname = "webui";
+          passthru.wasm = mkMdstoreWasm mdSystem;
+          version = "0.1.0";
+          src = nixpkgs.lib.cleanSourceWith { src = ./webui; filter = mdstoreSourceFilter; };
+          pnpmDeps = systemPkgs.fetchPnpmDeps {
+            inherit (finalAttrs) pname version src;
+            inherit pnpm;
+            fetcherVersion = 4;
+            pnpmInstallFlags = [ "--network-concurrency=4" "--fetch-timeout=600000" ];
+            hash = "sha256-kPaYBbRK+Ii3PjRG/b+Fn2hnl6fNfHb6sR9/u/Wcz80=";
+          };
+          nativeBuildInputs = [ systemPkgs.nodejs pnpm systemPkgs.pnpmConfigHook ];
+          buildPhase = ''
+            cp -r ${mkMdstoreWasm mdSystem} src/lib/wasm
+            pnpm check && pnpm exec vite build
+          '';
+          installPhase = "cp -r build $out";
+        });
       mkMdstore =
         mdSystem:
         let
@@ -224,9 +280,9 @@
         systemPkgs.rustPlatform.buildRustPackage {
           pname = "mdstore";
           version = "0.1.0";
-          src = ./mdstore;
+          src = nixpkgs.lib.cleanSourceWith { src = ./mdstore; filter = mdstoreSourceFilter; };
           cargoLock.lockFile = ./mdstore/Cargo.lock;
-          nativeCheckInputs = [ systemPkgs.git ];
+          doCheck = false;
           nativeBuildInputs = [ systemPkgs.makeWrapper ];
           postFixup = ''
             wrapProgram "$out/bin/mdstore" --prefix PATH : ${nixpkgs.lib.makeBinPath [ systemPkgs.git ]}
@@ -255,15 +311,31 @@
             systemPkgs.rustfmt
           ];
           shellHook = ''
-            echo "Run: cargo test --manifest-path mdstore/Cargo.toml"
+            echo "Run: cargo build --manifest-path mdstore/Cargo.toml"
           '';
         };
+      mkWebuiShell = mdSystem:
+        let systemPkgs = nixpkgs.legacyPackages.${mdSystem};
+        in systemPkgs.mkShell {
+          inputsFrom = [ (mkMdstoreShell mdSystem) ];
+          packages = [
+            systemPkgs.nodejs
+            systemPkgs.pnpm_11
+            (mkWasmBindgenCli mdSystem)
+            systemPkgs.llvmPackages.lld
+          ];
+          shellHook = ''
+            echo "Run: pnpm --dir webui install --frozen-lockfile && pnpm --dir webui build"
+          '';
+        };
+
     in
     {
       packages =
         forDocSystems (docSystem: {
           doc2md = mkDoc2md docSystem;
           mdstore = mkMdstore docSystem;
+          webui = mkMdstoreWeb docSystem;
         })
         // {
           ${system} = {
@@ -276,6 +348,7 @@
               ;
             doc2md = mkDoc2md system;
             mdstore = mkMdstore system;
+            webui = mkMdstoreWeb system;
           };
         };
 
@@ -436,6 +509,7 @@
         forDocSystems (docSystem: {
           doc2md = mkDocShell docSystem;
           mdstore = mkMdstoreShell docSystem;
+          webui = mkWebuiShell docSystem;
         })
         // {
           ${system} = rec {
@@ -486,6 +560,7 @@
 
             doc2md = mkDocShell system;
             mdstore = mkMdstoreShell system;
+            webui = mkWebuiShell system;
             default = pages2md;
           };
         };

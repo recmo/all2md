@@ -1,0 +1,2 @@
+patchedDependencies:
+  '@svar-ui/svelte-gantt@2.7.3': patches/@svar-ui__svelte-gantt@2.7.3.patch

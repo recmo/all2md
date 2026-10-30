@@ -1,0 +1,34 @@
+diff --git a/src/components/Gantt.svelte b/src/components/Gantt.svelte
+index b9dc1c3e8a5791e7c817d79ae0a9c33768cb3026..b9507426243220f2ac6337cf19c4bd4c9703605d 100644
+--- a/src/components/Gantt.svelte
++++ b/src/components/Gantt.svelte
+@@ -53,6 +53,7 @@
+ 		cellHeight = 38,
+ 		scaleHeight = 36,
+ 		gridWidth = null,
++		compact = undefined,
+ 		displayMode = "all",
+ 		readonly = false,
+ 		cellBorders = "full",
+@@ -138,7 +139,7 @@
+ 	let tableAPI = $state();
+ 	let ganttWidth = $state();
+ 	const COMPACT_WIDTH = 650;
+-	let compactMode = $derived(ganttWidth <= COMPACT_WIDTH);
++	let compactMode = $derived(compact ?? ganttWidth <= COMPACT_WIDTH);
+ 
+ 	// public API
+ 	export const // state
+diff --git a/types/index.d.ts b/types/index.d.ts
+index e3f52e4bf0ade06c971e615b6370e8177c8bdece..800373321bccb0567193bdb330cff0670f8dcf4f 100644
+--- a/types/index.d.ts
++++ b/types/index.d.ts
+@@ -41,6 +41,8 @@ export declare const Gantt: Component<
+ 			}) => void;
+ 		}>;
+ 		readonly?: boolean;
++		/** Override automatic grid-only layout on narrow screens. */
++		compact?: boolean;
+ 		init?: (api: IApi) => void;
+ 	} & IConfig &
+ 		GanttActions<TMethodsConfig>

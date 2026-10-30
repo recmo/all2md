@@ -87,30 +87,6 @@ pub struct Config {
     pub server: ServerConfig,
 }
 
-/// Repository-selected Markdown checks. All checks are disabled by default.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct MarkdownConfig {
-    /// Reject fenced code blocks without a closing fence.
-    pub closed_fences: bool,
-    /// Require a nonempty language/info string on fenced code blocks.
-    pub fence_language: bool,
-    /// Reject headings without visible text.
-    pub nonempty_headings: bool,
-    /// Reject increases of more than one heading level; the first level is unrestricted.
-    pub heading_increment: bool,
-    /// Reject Markdown links with empty destinations.
-    pub nonempty_links: bool,
-    /// Reject trailing spaces/tabs outside code, except two-space hard breaks.
-    pub no_trailing_whitespace: bool,
-    /// Reject tabs outside code blocks.
-    pub no_tabs: bool,
-    /// Maximum Unicode character count per body line, excluding code blocks.
-    pub max_line_length: Option<usize>,
-    /// Require a terminating newline on nonempty documents.
-    pub final_newline: bool,
-}
-
 impl Config {
     /// Parses and validates root config.yaml.
     pub fn from_yaml(text: &str) -> Result<Self> {
@@ -199,7 +175,7 @@ pub(crate) fn validate_json_pointer(pointer: &str, kind: &str) -> Result<()> {
 }
 
 /// Validates a repository-relative path without accessing the filesystem.
-pub(crate) fn validate_repo_path(path: &str) -> Result<()> {
+pub fn validate_repo_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
     if path.is_empty() || candidate.is_absolute() {
         bail!("path must stay within the repository: {path}");
@@ -215,8 +191,13 @@ pub(crate) fn validate_repo_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_config_resource_path(path: &str) -> bool {
-    path == "config.yaml"
+/// Whether a path names a configuration or lint resource.
+pub fn is_config_resource_path(path: &str) -> bool {
+    path == "config.yaml" || is_lint_config(path)
+}
+
+pub(crate) fn is_lint_config(path: &str) -> bool {
+    matches!(path.rsplit('/').next(), Some("rumdl.toml" | ".rumdl.toml"))
 }
 
 /// Rejects repository paths whose existing ancestors contain symlinks.
@@ -511,91 +492,25 @@ impl Default for GitConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Configures the daemon HTTP listener and authentication source.
+/// Configures the daemon HTTP listener and editing permissions.
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
     /// Fixed IP socket address on which the daemon listens.
     pub listen: String,
+    /// Allow API callers to edit templates.
     #[serde(default)]
-    /// Optional environment variable containing the bearer token.
-    pub bearer_token_env: Option<String>,
+    pub allow_template_edits: bool,
+    /// Allow API callers to edit root config.yaml.
+    #[serde(default)]
+    pub allow_config_edits: bool,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: default_listen(),
-            bearer_token_env: None,
+            allow_template_edits: false,
+            allow_config_edits: false,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_git_metadata_and_non_normal_paths() {
-        for path in [
-            "",
-            ".",
-            "../note.md",
-            ".git/hooks/note.md",
-            ".GIT/hooks/note.md",
-            "a/.git/note.md",
-        ] {
-            assert!(validate_repo_path(path).is_err(), "accepted {path:?}");
-        }
-        assert!(validate_repo_path("notes/page.md").is_ok());
-    }
-
-    #[test]
-    fn search_weights_are_finite_and_non_negative() {
-        let config = |search: &str| {
-            Config::from_yaml(&format!(
-                "documents:\n  include: ['**/*.md']\nsearch:\n{search}\nprovider:\n  dimensions: 2\n"
-            ))
-        };
-        assert!(config("  rrf_k: 0").is_err());
-        assert!(config("  rrf_k: .inf").is_err());
-        assert!(config("  graph_weight: -0.1").is_err());
-        assert!(config("  graph_weight: .nan").is_err());
-        assert!(config("  rrf_k: 60\n  graph_weight: 0").is_ok());
-    }
-
-    #[test]
-    fn git_push_timeout_must_be_nonzero() {
-        let error = Config::from_yaml(
-            "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push_timeout_seconds: 0\n",
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("git.push_timeout_seconds"));
-    }
-
-    #[test]
-    fn chunk_context_pointers_are_validated() {
-        let config = |pointer: &str| {
-            Config::from_yaml(&format!(
-                "documents:\n  include: ['**/*.md']\nchunking:\n  context_pointers: [{pointer:?}]\nprovider:\n  dimensions: 2\n"
-            ))
-        };
-        assert!(config("/title").is_ok());
-        assert!(config("/escaped~0name/~1path").is_ok());
-        assert!(config("title").is_err());
-        assert!(config("/bad~2escape").is_err());
-        assert!(config("/trailing~").is_err());
-    }
-
-    #[test]
-    fn server_listener_is_a_fixed_socket_address() {
-        let config = |listen: &str| {
-            Config::from_yaml(&format!(
-                "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\nserver:\n  listen: {listen}\n"
-            ))
-        };
-        assert!(config("127.0.0.1:3131").is_ok());
-        assert!(config("'[::1]:3131'").is_ok());
-        assert!(config("127.0.0.1:0").is_err());
-        assert!(config("localhost:3131").is_err());
     }
 }

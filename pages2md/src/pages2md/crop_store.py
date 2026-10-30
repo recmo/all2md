@@ -94,7 +94,7 @@ class CropStore:
                 crop = crop.resize((crop.width * scale, crop.height * scale))
             crop.save(crop_path)
         try:
-            raw, generation = backend.recognize_detail(crop_path)
+            raw, generation = backend.recognize_region(crop_path)
             value = {"raw": raw, "generation": dict(generation), "bbox": box,
                      "page": source_page.number, "source_hash": source_hash}
         except Exception as error:

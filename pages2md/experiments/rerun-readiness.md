@@ -1,0 +1,133 @@
+# Targeted region recovery and rerun readiness
+
+**Status: ready to merge and perform a staged full rerun.** The original corpus OCR remains
+untouched. A full rerun must use fresh staged bundles, retaining old results.
+Historical runners are archived; maintained tools are listed in
+[the validation index](README.md).
+
+## Integrated review (2026-09-09)
+
+- Main `3d714fe` was merged in `f77268e`. The full regression suite passes
+  (539 tests, five existing SWIG deprecation warnings).
+- `integrated-canary-01` contains new Jo26 (19 pages) and KKH26 (16 pages)
+  document reads. Jo26 resumed after five checkpointed pages when general crops
+  were moved to the bounded region entry point in `e759d49`; this is not a claim
+  that every saved observation used that final policy.
+- The same troublesome crop consumed 70,314 aggregate tokens under the old path.
+  `bounded-crop-probe` used 12,324 total tokens with every retry capped at 4096.
+  It abstained rather than recovering the text; the cap is per generation, not
+  per region including all retries. Concurrent timings are not throughput data.
+- Jo26 page 16 exposed a preservation veto caused by a phantom equation in a
+  blank source region. Fully enclosed raster pixels now distinguish blankness
+  from an adjacent line's boundary pixel; even faint interior ink retains the
+  veto. Missing native text alone never waives preservation.
+- Final-code, model-forbidden reassembly is retained in `integrated-canary-final`.
+  Both complete documents verify and publish successfully (35 pages total).
+  Jo26 page 16 uses the clean saved Detail body and preserves its correct opening;
+  Corollaries 5.9 and 5.10 each appear once as statements, with the correct ending.
+  All 33 pre-resume evidence files are hash-identical. The rejected artifact is
+  retained separately.
+- Source-page inspection checked Jo26 page 16 and KKH26's opening abstract and
+  equations. KKH26's exponent is correct; author affiliation markers still have
+  cosmetic duplication. Advisory source-region and Markdown lint warnings remain.
+  Verification is not certification of every mathematical symbol.
+
+## What changed
+
+The decoder now has an automatic local visual recovery stage for small disputed
+display equations. This addresses a failure that page-level candidate scoring
+cannot fix: the improved equation may occur inside a merged block whose predicted
+bounding box only covers the first equation.
+
+- At most two short disputed display equations per page; agreed regions, tables,
+  and paragraphs are not subjected to this new crop policy.
+- Visual-only crops, with neighboring blocks limiting vertical padding. Canvas,
+  pixel/page geometry, image hash, original raw text and confidence are retained.
+- At most 4096 tokens per region attempt, without reducing the ordinary page
+  budget. Existing bounded startup/block retries still apply inside an attempt.
+- Adopt exactly one complete math expression only when an independent page read
+  corroborates it. A matching substring inside a larger expression is insufficient.
+- Preserve script direction, operators and mathematical font roles in comparison.
+  Only harmless spacing, delimiter sizing and text-label style are normalized.
+- Retain the page block's geometry and surrounding content. Crop observations
+  are excluded from ordinary whole-page and spatial candidate selection.
+- Failed or ambiguous reads leave the original intact. One failed crop does not
+  discard another completed crop. Identical text at different targets gets
+  separate evidence identities.
+- Whole-page same-region repetition is checked beyond the decoder's short block
+  window. Repeated text at different positions is preserved. A duplicated region
+  triggers an independent page-level Base recovery even if Detail is syntactically
+  clean; a surviving duplicate is a publication error, not excused by vocabulary
+  agreement with embedded text.
+- An accurate, source-corroborated opening can be preserved from the original
+  visual read when a clean page recovery clips or guesses that opening. This is
+  restricted to the narrow row band before the first grounded recovery block.
+
+The native-text repair additionally handles a tightly constrained two-glyph
+Latin-for-Greek error, with four already matched glyphs on each side, unique
+occurrence context, matching case, valid geometry and math-only source ranges.
+It changes identities, not TeX structure. Positive next-glyph math steering
+remains disabled: the earlier fraction-prefix experiment showed it is unsafe.
+
+No public decoder options, model-weight changes, deployment, or corpus rerun.
+Raw checkpoint compatibility remains unchanged; new stages apply to new reads.
+
+## Targeted experiments
+
+All directories below are retained under gitignored `experiments/artifacts/`.
+
+- `region-crops-01`: ten Base/Detail reads of five BCGM25 45 equations. Several
+  broad crops produced loops or malformed structures; this ruled out blanket
+  crop replacement. The small final-bound crop was correct.
+- `region-policy-01`: production policy on BCGM25 44-45 and BCIKS20 60-61.
+- `region-policy-final`: repeated targeted reads with the final 4096-token cap.
+  Four region calls produced the same three selections: BCGM25's final bound,
+  BCIKS20's `Q(X,Y)` definition (`l`, not `t`), and a second displayed formula.
+  BCGM25 44 abstained. BCIKS20 60 triggered no small-region reads.
+- `region-canary-01`: separate copy of the 16-page KKH26 canary, augmented with
+  fourteen targeted region observations. All twenty previous raw observations
+  were hash-verified unchanged. Four region selections passed visual inspection.
+  Reassembly and publication succeeded; independent verification has no surviving
+  decode or math-syntax errors. The abstract now has `2^{Ω_ρ(1/η)}`, and the
+  unsupported `2D-2D-...` prefix remains absent. Raw observations total 34.
+- `region-fresh-canary`: a fresh no-flags conversion of all nineteen Jo26 pages.
+  The initial run published but the content audit found a duplicated section on
+  page 16. Its observed runtime was 752.528 seconds, with other experiments sharing
+  the machine; this is not an isolated throughput benchmark.
+- `region-final-canary`: all nineteen Jo26 pages rebuilt from the first run's
+  forty-five preserved raw observations plus one independent page-16 Base read
+  (1322 tokens). The winning derived page uses the clean Detail body and preserves
+  the original accurate opening. Corollaries 5.9 and 5.10 now occur once each;
+  page 16 shrank from 5722 to 2847 characters without losing its opening or ending.
+  Publication and independent verification pass, with no surviving region-repeat
+  or math-syntax errors. All forty-five earlier raw hashes match; total raw count
+  is 46. Both the initial duplicated publication and the intermediate opening
+  variant are retained rather than overwritten.
+- `readiness-final`: final-code reassembly of the four hard pages confirms the
+  corrected BCGM25 bound and BCIKS20 exponent. The strengthened verifier explicitly
+  rejects the original duplicated Jo26 artifact, demonstrating that this failure
+  can no longer receive the earlier false-green verification result.
+
+The first canary/crop runs predate the later budget/identity/failure-isolation
+hardening. `region-policy-final` tests the bounded final OCR entry point.
+Audit code snapshots describe deterministic verification/reassembly, not a claim
+that earlier generations were rerun under newer code.
+
+## Readiness boundary
+
+Readiness means that known blocking recovery failures are addressed, regression
+controls pass, complete document canaries publish, and no known catastrophic
+repetition or missing-page failure remains in those canaries. It does not mean
+that every mathematical symbol in the corpus is certified correct. Native
+disagreement, uncertain OCR and Markdown lint warnings still require honest
+reporting; mathematical use of the transcription should retain source access.
+
+The earlier pre-integration suite had 472 passing tests.
+This includes crop budget/identity/failure isolation, image-integrity checks,
+two-glyph repair abstention, legitimate repetition controls, long-distance region
+duplication, automatic independent rereading, and opening preservation. Visual
+checks covered the selected equation crops and complete relevant source pages.
+
+A full rerun should use fresh staged bundles, preserving previous corpus OCR for
+comparison. Updating the code alone intentionally does not invalidate old raw
+checkpoints. Do not use destructive replacement merely to obtain a new decode.

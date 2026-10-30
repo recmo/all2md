@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import time
+import unicodedata
 from copy import deepcopy
 from dataclasses import asdict
 from difflib import SequenceMatcher
@@ -37,7 +38,7 @@ from .markdown import (
     strict_page_markdown,
     write_markdown,
 )
-from .model import FIGURE_KINDS, FORMULA_KINDS, Block, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult
+from .model import FIGURE_KINDS, FORMULA_KINDS, Block, Box, Comparison, EmbeddedEvidence, Link, OcrObservation, PageResult
 from .native import observation_dict, parse_native_observation, reconcile_observations
 from .ocr import MlxUnlimitedOcr, OcrBackend, confidence_summary, split_multi_page_output
 from .quality import adjacent_overlap, output_quality_warnings, runaway_repetition_span
@@ -48,8 +49,10 @@ from .region_recovery import recover_regions
 from .region_review import write_review
 from .crop_store import CropStore
 
-# Bump only when stored raw observations are incompatible with recognition.
-OCR_CHECKPOINT_VERSION = 1
+# Bump when stored raw observations are incompatible with recognition. The
+# decoder source fingerprint below catches future changes without requiring a
+# manual bump for every implementation-only edit.
+OCR_CHECKPOINT_VERSION = 2
 
 EMBEDDED_PROOF_MARKS = {"□": r"\(\square\)", "∎": r"\(\blacksquare\)"}
 REVIEW_METADATA_KEYS = {
@@ -137,10 +140,12 @@ def _convert_workspace(
         "contract_version": OCR_CHECKPOINT_VERSION,
         "source_sha256": _source_hash(source),
         "backend": dict(backend.identity),
+        "decoder_code": _decoder_code_fingerprint(),
         "dpi": DEFAULT_DPI,
         "multi_page": True,
         "quality": "thorough",
     }
+    ocr_fingerprint["embedded_decode"] = not ignore_embedded_text
     assembly_fingerprint = {
         "split_mode": "auto",
         "math_validator": validator_identity(),
@@ -148,7 +153,7 @@ def _convert_workspace(
         "code": _code_fingerprint(
             "adapters.py", "assets.py", "chapters.py", "compare.py", "formatting.py",
             "embedded.py", "alignment.py", "lists.py", "markdown.py", "model.py", "native.py", "pipeline.py",
-            "quality.py", "verify.py", "syntax.py", "reconciliation.py", "document.py", "edits.py", "mathlint.py", "katex_lint.cjs", "urls.py", "semantics.py", "footnotes.py",
+            "quality.py", "decoding.py", "equation_recovery.py", "verify.py", "syntax.py", "reconciliation.py", "document.py", "edits.py", "mathlint.py", "katex_lint.cjs", "urls.py", "semantics.py", "footnotes.py",
             "latex.py", "texstructure.py", "regions.py", "region_recovery.py",
             "crop_store.py", "region_review.py",
         ),
@@ -160,7 +165,7 @@ def _convert_workspace(
         resume
         and resume_state
         and resume_state.get("source") == str(source)
-        and resume_state.get("ocr_fingerprint") == ocr_fingerprint
+        and _compatible_ocr_fingerprint(resume_state.get("ocr_fingerprint"), ocr_fingerprint)
     )
     can_resume_pages = bool(
         can_reuse_ocr
@@ -340,6 +345,7 @@ def _convert_workspace(
                         candidates,
                         embedded_text=source_page.embedded.text,
                         embedded=source_page.embedded,
+                        page_image=source_page.image_path,
                     )
                     validation_warnings.extend(candidate_warnings)
                     result = _page_result(
@@ -656,6 +662,7 @@ def _page_result(
             blocks,
             source_page.image_path,
             trusted_embedded,
+            source_assets=source_page.source_assets,
         )
     )
     validation_warnings.extend(
@@ -668,7 +675,8 @@ def _page_result(
     blocks = normalize_page_blocks(blocks)
     validation_warnings.extend(reconcile_text(blocks, source_page.embedded, embedded_trust))
     blocks, region_result = recover_regions(
-        source_page, blocks, [primary, *recoveries], backend=backend, bundle=bundle,
+        source_page, blocks, [primary, *(r for r in recoveries if r.mode != "region_detail")],
+        backend=backend if backend is not None and backend.supports_region_recovery else None, bundle=bundle,
         crop_store=crop_store,
     )
     blocks = normalize_page_blocks(blocks)
@@ -686,9 +694,12 @@ def _page_result(
     consensus_observations = sorted({
         entry["recovery_observation"]
         for entry in recovery
-        if entry.get("action") in {"selected_ocr_consensus", "selected_targeted_detail"}
+        if entry.get("action") in {"selected_ocr_consensus", "selected_targeted_detail",
+                                   "selected_source_supported_page", "recovered_uncovered_region", "selected_region_consensus"}
         and entry.get("recovery_observation")
     })
+    selected_page = next((entry["recovery_observation"] for entry in recovery
+                          if entry.get("action") == "selected_source_supported_page"), None)
     result = PageResult(
         number=source_page.number,
         image=source_page.image_path.name,
@@ -711,7 +722,7 @@ def _page_result(
             ],
             "canonical": {
                 "authoritative_observation": (
-                    "multi_base_with_targeted_detail" if consensus_observations else group_observation.id
+                    selected_page or ("multi_base_with_targeted_detail" if consensus_observations else group_observation.id)
                 ),
                 "selected_observations": consensus_observations,
             },
@@ -744,7 +755,10 @@ def _has_embedded_coverage_gap(
             if bbox[1] < 35 or bbox[3] > 925:
                 continue
             native_text = _coverage_text(text)
-            if native_text and native_text in visual_text:
+            prose = [word.casefold() for word in re.findall(
+                r"[^\W\d_]{3,}", unicodedata.normalize("NFKC", text)
+            ) if word.islower() or word.istitle()]
+            if len(prose) < 3 and native_text and native_text in visual_text:
                 continue
             covered = any(
                 block.bbox is not None
@@ -754,6 +768,16 @@ def _has_embedded_coverage_gap(
                 )
                 for block in blocks
             )
+            # A page-sized box is not evidence that its text was transcribed.
+            # For prose, require local lexical coverage too. Math serialization
+            # is deliberately excluded: PDF glyph order is not LaTeX order.
+            if covered and len(prose) >= 3:
+                local_text = _coverage_text(" ".join(
+                    block.markdown for block in blocks
+                    if block.bbox is not None
+                    and bbox_coverage(bbox, _expand_bbox(block.bbox, 8.0)) >= 0.55
+                ))
+                covered = sum(word in local_text.split() for word in prose) / len(prose) >= 0.65
             if not covered:
                 uncovered_characters += len(text)
                 if uncovered_characters >= 18:
@@ -762,7 +786,7 @@ def _has_embedded_coverage_gap(
 
 
 def _coverage_text(value: str) -> str:
-    return " ".join(re.findall(r"[\w]+", value.casefold(), re.UNICODE))
+    return " ".join(re.findall(r"[\w]+", unicodedata.normalize("NFKC", value).casefold(), re.UNICODE))
 
 
 def _expand_bbox(bbox, padding: float):
@@ -823,6 +847,7 @@ def _reassemble_cached_page(
         candidates,
         embedded_text=source_page.embedded.text,
         embedded=source_page.embedded,
+        page_image=source_page.image_path,
     )
     return _page_result(
         source_page,
@@ -920,34 +945,44 @@ def _blank_page_result(source_page, ink_fraction: float) -> PageResult:
     )
 
 
+def _compatible_ocr_fingerprint(previous, current) -> bool:
+    """Old image-only observations remain evidence, but guided OCR is not reversible.
+
+    Changing deterministic assembly must not destroy or regenerate costly raw
+    observations. New decoder policies apply to new invocations, whose actual
+    recipe and diagnostics are recorded individually.
+    """
+    if not isinstance(previous, dict):
+        return False
+    old, new = dict(previous), dict(current)
+    old_guided, new_guided = old.pop("embedded_decode", False), new.pop("embedded_decode", False)
+    # Decoder improvements apply to new invocations, not retained observations.
+    # Keep model/source/render limits strict and never erase native influence.
+    for value in (old, new):
+        backend = value.get("backend")
+        if isinstance(backend, dict) and backend.get("engine") == "mlx-vlm":
+            backend = dict(backend)
+            for key in ("initial_grounding", "startup_recovery", "block_decoding", "block_retries"):
+                backend.pop(key, None)
+            value["backend"] = backend
+    return old == new and not (old_guided and not new_guided)
+
+
+def _recognize_with_evidence(backend, method: str, pages):
+    function = getattr(backend, method)
+    multiple = method == "recognize_pages"
+    image = [page.image_path for page in pages] if multiple else pages[0].image_path
+    evidence = [page.embedded for page in pages] if multiple else pages[0].embedded
+    return function(image, embedded=evidence)
+
+
 def _recognize_primary(group, backend, bundle: Path):
-    recognize_pages = getattr(backend, "recognize_pages", None)
-    if callable(recognize_pages):
-        value = recognize_pages([page.image_path for page in group])
-        if _is_invocation(value):
-            raw, generation = value
-            parts = split_multi_page_output(raw, len(group))
-            recognized = [
-                (
-                    part,
-                    {
-                        **dict(generation),
-                        **_segment_confidence(raw, part, generation),
-                        "group_index": index,
-                    },
-                )
-                for index, part in enumerate(parts)
-            ]
-        else:
-            recognized = list(value)
-            raw = "\n<PAGE>\n".join(item[0] for item in recognized)
-            generation = {"mode": "multi_base", "group_size": len(group), "compat_backend": True}
-    else:
-        # Fixture compatibility. The production backend always exposes the
-        # documented multi-page Base contract, including for one-page windows.
-        recognized = [backend.recognize(page.image_path) for page in group]
-        raw = "\n<PAGE>\n".join(item[0] for item in recognized)
-        generation = {"mode": "multi_base", "group_size": len(group), "compat_backend": True}
+    raw, generation = _recognize_with_evidence(backend, "recognize_pages", group)
+    parts = split_multi_page_output(raw, len(group))
+    recognized = [
+        (part, {**generation, **_segment_confidence(raw, part, generation), "group_index": index})
+        for index, part in enumerate(parts)
+    ]
     observation = parse_native_observation(
         raw,
         mode="multi_base",
@@ -991,12 +1026,15 @@ def _collect_page_candidates(
     bundle,
 ):
     critical = {
+        "visual_region_repetition",
         "visual_empty_output",
         "visual_implausible_output_length",
         "visual_malformed_grounding",
         "visual_malformed_math",
         "visual_implausible_coordinates",
         "visual_text_repetition",
+        "visual_structural_repetition",
+        "visual_repetition_guard",
         "visual_truncated",
         "visual_malformed_table",
         "visual_page_transition_mismatch",
@@ -1004,11 +1042,12 @@ def _collect_page_candidates(
     }
     markdown = _blocks_markdown(primary.blocks, "")
     comparison = _compare_with_embedded(markdown, source_page.embedded)
-    embedded_trust = assess_embedded(source_page.embedded, markdown)
+    embedded_trust = assess_embedded(source_page.embedded)
     embedded_disagreement = (
         comparison.character_similarity is not None
         and comparison.character_similarity < 0.75
-        and not (comparison.length_ratio is not None and comparison.length_ratio < 0.65)
+        and embedded_trust.geometric
+        and len(re.findall(r"\w+", source_page.embedded.text)) >= 8
     )
     group_problem = bool(set(group_observation.warnings) & critical)
     target_blocks = [
@@ -1034,13 +1073,8 @@ def _collect_page_candidates(
 
     candidates: list[OcrObservation] = []
     warnings: list[str] = []
-    recognize_detail = getattr(backend, "recognize_detail", None)
-    if not callable(recognize_detail):
-        recognize_detail = getattr(backend, "recognize", None)
-    if not callable(recognize_detail):
-        return [], ["visual_auxiliary_ocr_unavailable"]
     try:
-        raw, generation = recognize_detail(source_page.image_path)
+        raw, generation = _recognize_with_evidence(backend, "recognize_detail", [source_page])
         generation = {
             **dict(generation),
             "target_block_indices": [index for index, _ in target_blocks],
@@ -1065,7 +1099,6 @@ def _collect_page_candidates(
     # Base candidate as well as the cropped Gundam view. This is deliberately a
     # different visual contract, not another deterministic sample of the same
     # prompt.
-    recognize_pages = getattr(backend, "recognize_pages", None)
     detail_failed = not candidates or bool(
         set(candidates[0].warnings)
         & {
@@ -1075,6 +1108,8 @@ def _collect_page_candidates(
             "visual_malformed_math",
             "visual_malformed_table",
             "visual_text_repetition",
+            "visual_structural_repetition",
+            "visual_repetition_guard",
             "visual_truncated",
         }
     ) or bool(
@@ -1084,14 +1119,13 @@ def _collect_page_candidates(
             source_page.embedded,
         )
     )
-    if structural_problem and detail_failed and callable(recognize_pages):
+    # Do not repeat the same deterministic one-page Base request. Cropped
+    # detail is already the independent retry in that case.
+    already_single_base = len(group_observation.source_pages) == 1 and group_observation.mode == "multi_base"
+    if (structural_problem or embedded_disagreement) and (detail_failed or "visual_region_repetition" in primary.warnings) and not already_single_base:
         try:
-            value = recognize_pages([source_page.image_path])
-            if _is_invocation(value):
-                raw, generation = value
-                raw = split_multi_page_output(raw, 1)[0]
-            else:
-                raw, generation = list(value)[0]
+            raw, generation = _recognize_with_evidence(backend, "recognize_pages", [source_page])
+            raw = split_multi_page_output(raw, 1)[0]
             generation = {
                 **dict(generation),
                 "mode": "single_page_base",
@@ -1108,6 +1142,11 @@ def _collect_page_candidates(
             candidates.append(candidate)
         except Exception:
             warnings.append("visual_single_page_base_failed")
+    from .equation_recovery import collect_regions
+    try:
+        candidates.extend(collect_regions(source_page, primary, candidates, backend, bundle, warnings=warnings))
+    except Exception:
+        warnings.append("visual_region_ocr_failed")
     return candidates, sorted(set(warnings))
 
 
@@ -1145,15 +1184,6 @@ def _store_raw_observation(bundle: Path, observation: OcrObservation) -> Path:
     if not path.exists():
         atomic_text(path, observation.raw)
     return path
-
-
-def _is_invocation(value) -> bool:
-    return (
-        isinstance(value, tuple)
-        and len(value) == 2
-        and isinstance(value[0], str)
-        and isinstance(value[1], dict)
-    )
 
 
 def _ocr_groups(pages, outline: list[dict], maximum: int = 8):
@@ -1409,11 +1439,14 @@ def _canonicalize_figure_blocks(
     blocks: list[Block],
     page_image: Path,
     embedded: EmbeddedEvidence | None = None,
+    *,
+    source_assets: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Clamp figure boxes and reject blank, duplicate, or glyph-explained crops."""
     candidates: list[tuple[int, Block]] = []
     warnings: list[str] = []
     rejected: set[int] = set()
+    raw_boxes: dict[int, Box] = {}
     proof_glyphs = list(_embedded_characters(embedded, EMBEDDED_PROOF_MARKS))
     with Image.open(page_image) as source:
         grayscale = source.convert("L")
@@ -1431,6 +1464,7 @@ def _canonicalize_figure_blocks(
             if matching_glyph is not None:
                 block.kind = "paragraph"
                 block.markdown = EMBEDDED_PROOF_MARKS[matching_glyph["text"]]
+                block.asset_id = None
                 block.bbox = tuple(matching_glyph["bbox"])
                 block.metadata.update({
                     "embedded_glyph": matching_glyph["text"],
@@ -1444,15 +1478,20 @@ def _canonicalize_figure_blocks(
                 })
                 warnings.append("visual_text_glyph_figure_reclassified")
                 continue
-            if _visual_proof_square(grayscale, block, blocks[max(0, index - 2):index]):
+            square = _visual_proof_square(grayscale, block)
+            if square is not None:
                 block.kind = "paragraph"
-                block.markdown = r"\(\square\)"
+                block.markdown, block.bbox = square
+                block.asset_id = None
                 block.metadata.update({"reclassified_from": "figure",
-                                       "reclassification_reason": "proof_context_and_square_shape"})
+                                       "reclassification_reason": "glyph_sized_square_shape"})
                 warnings.append("visual_proof_square_reclassified")
                 continue
+            if _expand_figure_labels(grayscale, block, blocks):
+                warnings.append("visual_figure_crop_expanded_to_labels")
+            raw_boxes[index] = block.bbox
             block.bbox = _padded_bbox(block.bbox)
-            blank, touches_edge = _figure_crop_status(grayscale, block.bbox)
+            blank, _ = _figure_crop_status(grayscale, block.bbox)
             if blank:
                 warnings.append("visual_blank_figure_crop_rejected")
                 if block.markdown.strip():
@@ -1461,34 +1500,147 @@ def _canonicalize_figure_blocks(
                 else:
                     rejected.add(index)
                 continue
-            if touches_edge:
-                warnings.append("visual_figure_crop_may_be_clipped")
             candidates.append((index, block))
 
-    # Only near-identical boxes are duplicates. Nested boxes can represent
-    # legitimate panels, labels, or inset figures and must remain available.
-    retained: list[tuple[int, Block]] = []
-    for candidate in sorted(
-        candidates,
-        key=lambda item: (
-            bool(item[1].markdown.strip()),
-            len(item[1].markdown.strip()),
-            len(item[1].provenance),
-            len(item[1].metadata),
-            _bbox_area(item[1].bbox),
-        ),
-        reverse=True,
-    ):
-        _, block = candidate
-        if any(_iou(block.bbox, kept.bbox) >= 0.90 for _, kept in retained):
-            rejected.add(candidate[0])
-            warnings.append("visual_duplicate_figure_crop_rejected")
-            continue
-        retained.append(candidate)
+    merged, merge_warnings = _merge_figure_regions(candidates, raw_boxes, source_assets or [])
+    rejected.update(merged)
+    warnings.extend(merge_warnings)
+    if any(index not in rejected and _figure_crop_status(grayscale, block.bbox)[1]
+           for index, block in candidates):
+        warnings.append("visual_figure_crop_may_be_clipped")
 
     if rejected:
         blocks[:] = [block for index, block in enumerate(blocks) if index not in rejected]
+    _place_visual_proof_marks(blocks)
     return sorted(set(warnings))
+
+
+def _expand_figure_labels(image: Image.Image, figure: Block, blocks: list[Block]) -> bool:
+    """Recover formula labels cut by a figure edge using boxes and visible ink.
+
+    Only inspect labels already overlapping the original figure horizontally
+    and contained in its vertical span. Require ink to continue across the cut;
+    nearby detached equations cannot enlarge a figure, nor can labels chain
+    into surrounding prose through an incrementally growing box.
+    """
+    left, top, right, bottom = figure.bbox
+    w, h = image.size
+    labels = []
+    for block in blocks:
+        if block.kind not in FORMULA_KINDS or not block.bbox:
+            continue
+        a, b, c, d = block.bbox
+        if not (top <= b < d <= bottom):
+            continue
+        if left <= a < right < c:
+            edge = right
+        elif a < left < c <= right:
+            edge = left
+        else:
+            continue
+        # A short horizontal bridge must lie within the formula box on both
+        # sides of the cut, over several scanlines (not just one noisy pixel).
+        x0 = max(0, round(max(a, edge - 2) * w / 1000))
+        x1 = min(w, round(min(c, edge + 2) * w / 1000))
+        y0, y1 = max(0, round(b * h / 1000)), min(h, round(d * h / 1000))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        crop = image.crop((x0, y0, x1, y1))
+        rows = sum(all(crop.getpixel((x, y)) < 230 for x in range(crop.width))
+                   for y in range(crop.height))
+        if rows >= max(3, round(h / 1000)):
+            labels.append(block)
+    if not labels:
+        return False
+    figure.metadata["figure_label_crop_expansion"] = {
+        "original_bbox": list(figure.bbox),
+        "labels": [asdict(block) for block in labels],
+        "reason": "overlapping_formula_boxes_and_ink_crossing_crop_edge",
+    }
+    figure.bbox = _figure_envelope([figure.bbox, *(block.bbox for block in labels)])
+    return True
+
+
+def _figure_envelope(boxes: list[Box]) -> Box:
+    return (min(box[0] for box in boxes), min(box[1] for box in boxes),
+            max(box[2] for box in boxes), max(box[3] for box in boxes))
+
+
+def _same_figure_extent(left: Box, right: Box) -> bool:
+    """Allow crop-border drift, but require both regions to cover each other."""
+    return (bbox_coverage(left, _padded_bbox(right)) >= .98
+            and bbox_coverage(right, _padded_bbox(left)) >= .98)
+
+
+def _merge_figure_regions(
+    candidates: list[tuple[int, Block]],
+    raw_boxes: dict[int, Box],
+    source_assets: list[dict[str, Any]],
+) -> tuple[set[int], list[str]]:
+    """Emit each overlapping region once while retaining observation evidence.
+
+    Compare unpadded detections so crop padding cannot join adjacent figures.
+    Nested panels are already visible in their enclosing figure. Substantially
+    overlapping detections are rendered as a union so neither loses content.
+    Disjoint detections join only when they cover one embedded image placement.
+    """
+    groups = [{index} for index, _ in candidates]
+
+    def join(indices):
+        nonlocal groups
+        touching = [group for group in groups if group & indices]
+        if touching:
+            groups = [group for group in groups if not group & indices]
+            groups.append(set.union(*touching))
+
+    for offset, (index, _) in enumerate(candidates):
+        box = raw_boxes[index]
+        for other, _ in candidates[offset + 1:]:
+            other_box = raw_boxes[other]
+            if (_iou(box, other_box) >= .5
+                    or bbox_coverage(box, other_box) >= .98
+                    or bbox_coverage(other_box, box) >= .98):
+                join({index, other})
+
+    for placement in source_assets:
+        box = placement.get("bbox")
+        if not box or len(box) != 4:
+            continue
+        members = {index for index, _ in candidates
+                   if bbox_coverage(raw_boxes[index], _padded_bbox(box)) >= .98}
+        if len(members) > 1 and _same_figure_extent(
+                _figure_envelope([raw_boxes[index] for index in members]), box):
+            join(members)
+
+    by_index = dict(candidates)
+    rejected, warnings = set(), set()
+    for group in sorted(groups, key=min):
+        if len(group) < 2:
+            continue
+        indices = sorted(group)
+        blocks = [by_index[index] for index in indices]
+        snapshots = [asdict(block) for block in blocks]
+        envelope = _figure_envelope([raw_boxes[index] for index in indices])
+        warning = ("visual_duplicate_figure_crop_rejected"
+                   if all(_iou(raw_boxes[index], envelope) >= .9 for index in indices)
+                   else "visual_overlapping_figure_crops_merged")
+        retained = blocks[0]
+        captions = list(dict.fromkeys(block.markdown.strip() for block in blocks
+                                      if block.markdown.strip()))
+        provenance = []
+        for block in blocks:
+            for entry in block.provenance:
+                if entry not in provenance:
+                    provenance.append(entry)
+        retained.bbox = _padded_bbox(envelope)
+        retained.markdown = "\n\n".join(captions)
+        retained.asset_id = None
+        retained.provenance = provenance
+        retained.source_pages = sorted({page for block in blocks for page in block.source_pages})
+        retained.metadata["merged_figure_blocks"] = snapshots
+        rejected.update(indices[1:])
+        warnings.add(warning)
+    return rejected, sorted(warnings)
 
 
 def _embedded_characters(
@@ -1540,35 +1692,82 @@ def _embedded_proof_anchor(blocks: list[Block], embedded: EmbeddedEvidence, glyp
     return None
 
 
-def _visual_proof_square(image: Image.Image, block: Block, preceding: list[Block]) -> bool:
-    """Require proof-ending context, text-scale geometry and an outlined square."""
-    if not block.bbox or block.bbox[2] - block.bbox[0] > 45:
-        return False
-    context = next((b for b in reversed(preceding) if b.bbox and b.kind not in FIGURE_KINDS
-                    and re.search(r"(?:as desired|as required|completes the proof[^\n]*|"
-                                  r"concludes the proof[^\n]*|which proves[^\n]*)[.]\s*$",
-                                  b.markdown, re.I)), None)
-    if context is None or context.bbox[2] >= block.bbox[0]:
-        return False
-    line_height = context.bbox[3] - context.bbox[1]
-    if abs((context.bbox[1] + context.bbox[3] - block.bbox[1] - block.bbox[3]) / 2) > line_height:
-        return False
-    w, h = image.size
+def _visual_proof_square(
+    image: Image.Image, block: Block,
+) -> tuple[str, Box] | None:
+    """Return the glyph and tight box for an outlined or filled text-sized square.
+
+    Classification uses only raster shape and size, independently of text,
+    reading order, or page position.
+    """
+    if not block.bbox:
+        return None
     a, b, c, d = block.bbox
-    crop = image.crop((int(a*w/1000), int(b*h/1000), int(c*w/1000), int(d*h/1000)))
+    if not (0 < c - a <= 45 and 0 < d - b <= 45):
+        return None
+    w, h = image.size
+    # Tight OCR boxes occasionally clip the final antialiased border row.
+    left, top = max(0, int((a - 2) * w / 1000)), max(0, int((b - 2) * h / 1000))
+    crop = image.crop((left, top, min(w, int((c + 2) * w / 1000)),
+                       min(h, int((d + 2) * h / 1000))))
     ink = crop.point(lambda x: 255 if x < 210 else 0)
     bounds = ink.getbbox()
     if bounds is None:
-        return False
+        return None
     ink = ink.crop(bounds)
     iw, ih = ink.size
-    if not (.8 <= iw / max(1, ih) <= 1.25 and 3 <= ih <= 1.5 * line_height*h/1000):
-        return False
+    # Use physical pixel aspect ratio, and page-relative glyph size rather
+    # than the height of a potentially multiline paragraph or display.
+    if not (.8 <= iw / max(1, ih) <= 1.25 and 3 <= ih
+            and 4 <= ih * 1000 / h <= 18 and iw * 1000 / w <= 24):
+        return None
+    bbox = ((left + bounds[0]) * 1000 / w, (top + bounds[1]) * 1000 / h,
+            (left + bounds[2]) * 1000 / w, (top + bounds[3]) * 1000 / h)
     sample = ink.resize((12, 12))
-    edge = [sample.getpixel((x, y)) for x in range(12) for y in range(12)
-            if x in (0, 11) or y in (0, 11)]
+    sides = [
+        [sample.getpixel((x, y)) for x, y in coordinates]
+        for coordinates in (
+            [(x, 0) for x in range(12)], [(x, 11) for x in range(12)],
+            [(0, y) for y in range(12)], [(11, y) for y in range(12)],
+        )
+    ]
     center = [sample.getpixel((x, y)) for x in range(3, 9) for y in range(3, 9)]
-    return sum(edge) / len(edge) > 170 and sum(center) / len(center) < 35
+    if not all(sum(side) / len(side) > 170 for side in sides):
+        return None
+    if sum(center) / len(center) < 35:
+        return r"\(\square\)", bbox
+    if min(sample.getpixel((x, y)) for x in range(12) for y in range(12)) > 210:
+        return r"\(\blacksquare\)", bbox
+    return None
+
+
+def _place_visual_proof_marks(blocks: list[Block]) -> None:
+    """Place recognized squares after nearby text, without affecting detection."""
+    marks = [block for block in blocks if block.metadata.get("reclassification_reason")
+             == "glyph_sized_square_shape"]
+    tails: dict[int, Block] = {}
+    for mark in sorted(marks, key=lambda block: (block.bbox[1], block.bbox[0])):
+        left, top, right, bottom = mark.bbox
+        center = (top + bottom) / 2
+        candidates = [
+            (index, block) for index, block in enumerate(blocks)
+            if block.bbox and block.metadata.get("reclassification_reason") != "glyph_sized_square_shape"
+            and block.kind in {"paragraph", *FORMULA_KINDS}
+            and block.bbox[1] <= center
+            and abs(block.bbox[3] - bottom) <= 3 * (bottom - top)
+            and block.bbox[0] <= right
+            and (block.bbox[2] <= left + 24 or block.bbox[3] <= bottom + 2)
+        ]
+        if not candidates:
+            continue  # Keep OCR order when there is no geometric text anchor.
+        _, anchor = min(candidates, key=lambda item: (
+            abs(item[1].bbox[3] - bottom),
+            max(0, left - item[1].bbox[2]), -item[0],
+        ))
+        after = tails.get(id(anchor), anchor)
+        blocks.pop(next(i for i, block in enumerate(blocks) if block is mark))
+        blocks.insert(next(i for i, block in enumerate(blocks) if block is after) + 1, mark)
+        tails[id(anchor)] = mark
 
 
 def _restore_embedded_proof_marks(
@@ -1648,8 +1847,6 @@ def _restore_embedded_proof_marks(
     return ["visual_embedded_proof_mark_recovered"] if restored else []
 
 
-
-
 def _padded_bbox(
     bbox: tuple[float, float, float, float],
     *,
@@ -1711,11 +1908,13 @@ def _matching_original(bbox, placements, assets: AssetStore):
         candidate = tuple(placement.get("bbox", ()))
         if len(candidate) != 4:
             continue
+        if not _same_figure_extent(bbox, candidate):
+            continue
         overlap = _iou(bbox, candidate)
         if overlap > best_overlap:
             best_overlap = overlap
             best = assets.get(placement.get("asset_id", ""))
-    return best if best_overlap >= 0.25 else None
+    return best
 
 
 def _sanitize_page_links(markdown: str, available_pages: set[int]) -> tuple[str, list[int]]:
@@ -1831,6 +2030,18 @@ def _code_fingerprint(*names: str) -> str:
         digest.update(name.encode())
         digest.update(bytes.fromhex(sha256_file(path)))
     return digest.hexdigest()
+
+
+def _decoder_code_fingerprint() -> str:
+    """Fingerprint code that can change the raw OCR observation itself."""
+    root = Path(__file__).parent
+    names = ["ocr.py", "embedded.py", "quality.py"]
+    names.extend(
+        name
+        for name in ("decoding.py", "block_decoding.py")
+        if (root / name).is_file()
+    )
+    return _code_fingerprint(*names)
 
 
 def _read_json(path: Path):

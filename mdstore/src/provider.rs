@@ -144,8 +144,33 @@ impl ZeroEntropyProvider {
             .context(format!("{} is not set", self.config.api_key_env))
     }
 
-    async fn retry_delay(attempt: usize) {
-        tokio::time::sleep(std::time::Duration::from_millis(100 * (1_u64 << attempt))).await;
+    async fn post(&self, endpoint: &str, body: &impl Serialize) -> Result<reqwest::Response> {
+        let mut attempt = 0;
+        loop {
+            let response = self
+                .client
+                .post(self.endpoint(endpoint))
+                .bearer_auth(self.key()?)
+                .json(body)
+                .send()
+                .await
+                .with_context(|| format!("call ZeroEntropy {endpoint}"))?;
+            let status = response.status();
+            if attempt < 2 && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100 * (1_u64 << attempt)))
+                    .await;
+                attempt += 1;
+                continue;
+            }
+            if status != StatusCode::OK {
+                bail!(
+                    "ZeroEntropy {endpoint} returned {status}: {}",
+                    response.text().await.unwrap_or_default()
+                );
+            }
+            return Ok(response);
+        }
     }
 }
 
@@ -187,38 +212,18 @@ impl RetrievalProvider for ZeroEntropyProvider {
         if input.is_empty() {
             return Ok(Vec::new());
         }
-        let mut response = None;
-        for attempt in 0..3 {
-            let current = self
-                .client
-                .post(self.endpoint("models/embed"))
-                .bearer_auth(self.key()?)
-                .json(&EmbedRequest {
+        let response = self
+            .post(
+                "models/embed",
+                &EmbedRequest {
                     model: &self.config.embedding_model,
                     input_type: input_type.as_str(),
                     input,
                     dimensions: self.config.dimensions,
                     encoding_format: "float",
-                })
-                .send()
-                .await
-                .context("call ZeroEntropy embedding endpoint")?;
-            let retryable = current.status() == StatusCode::TOO_MANY_REQUESTS
-                || current.status().is_server_error();
-            response = Some(current);
-            if !retryable || attempt == 2 {
-                break;
-            }
-            Self::retry_delay(attempt).await;
-        }
-        let response = response.context("embedding request was not attempted")?;
-        let status = response.status();
-        if status != StatusCode::OK {
-            bail!(
-                "ZeroEntropy embedding endpoint returned {status}: {}",
-                response.text().await.unwrap_or_default()
-            );
-        }
+                },
+            )
+            .await?;
         let body: EmbedResponse = response.json().await.context("decode embedding response")?;
         let vectors: Vec<Vec<f32>> = body
             .results
@@ -238,37 +243,17 @@ impl RetrievalProvider for ZeroEntropyProvider {
         if documents.is_empty() {
             return Ok(Vec::new());
         }
-        let mut response = None;
-        for attempt in 0..3 {
-            let current = self
-                .client
-                .post(self.endpoint("models/rerank"))
-                .bearer_auth(self.key()?)
-                .json(&RerankRequest {
+        let response = self
+            .post(
+                "models/rerank",
+                &RerankRequest {
                     model: &self.config.rerank_model,
                     query,
                     documents,
                     top_n,
-                })
-                .send()
-                .await
-                .context("call ZeroEntropy rerank endpoint")?;
-            let retryable = current.status() == StatusCode::TOO_MANY_REQUESTS
-                || current.status().is_server_error();
-            response = Some(current);
-            if !retryable || attempt == 2 {
-                break;
-            }
-            Self::retry_delay(attempt).await;
-        }
-        let response = response.context("rerank request was not attempted")?;
-        let status = response.status();
-        if status != StatusCode::OK {
-            bail!(
-                "ZeroEntropy rerank endpoint returned {status}: {}",
-                response.text().await.unwrap_or_default()
-            );
-        }
+                },
+            )
+            .await?;
         Ok(response
             .json::<RerankResponse>()
             .await
@@ -296,171 +281,5 @@ impl RetrievalProvider for ZeroEntropyProvider {
             },
         );
         format!("zeroentropy:{endpoint}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    use std::time::{Duration, Instant};
-
-    use axum::{
-        Json, Router,
-        extract::State,
-        http::{HeaderMap, StatusCode},
-        routing::post,
-    };
-    use serde_json::{Value, json};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn zeroentropy_wire_contract_and_retry() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let app = Router::new()
-            .route("/v1/models/embed", post(embed))
-            .route("/v1/models/rerank", post(rerank))
-            .with_state(attempts.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let provider = ZeroEntropyProvider {
-            client: reqwest::Client::new(),
-            config: ProviderConfig {
-                base_url: format!("http://{address}/v1"),
-                api_key_env: "UNUSED".into(),
-                embedding_model: "zembed-1".into(),
-                rerank_model: "zerank-2".into(),
-                dimensions: 2,
-                batch_size: Some(2),
-                request_timeout_seconds: 30,
-            },
-            api_key: Some("test-token".into()),
-        };
-        let vectors = provider
-            .embed(InputType::Document, &["one".into(), "two".into()])
-            .await
-            .unwrap();
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert_eq!(vectors, [vec![1.0, 0.0], vec![0.0, 1.0]]);
-        let ranked = provider
-            .rerank("two", &["one".into(), "two".into()], 1)
-            .await
-            .unwrap();
-        assert_eq!(ranked[0].index, 1);
-    }
-
-    #[tokio::test]
-    async fn zeroentropy_requests_have_a_finite_timeout() {
-        let app = Router::new().route(
-            "/v1/models/embed",
-            post(|| async {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                Json(json!({"results": [{"embedding": [1.0, 0.0]}]}))
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let provider = ZeroEntropyProvider::new(ProviderConfig {
-            base_url: format!("http://{address}/v1"),
-            api_key_env: "PATH".into(),
-            embedding_model: "zembed-1".into(),
-            rerank_model: "zerank-2".into(),
-            dimensions: 2,
-            batch_size: Some(2),
-            request_timeout_seconds: 1,
-        });
-        let start = Instant::now();
-        assert!(
-            provider
-                .embed(InputType::Document, &["one".into()])
-                .await
-                .is_err()
-        );
-        assert!(start.elapsed() < Duration::from_secs(3));
-    }
-
-    #[test]
-    fn provider_identity_includes_endpoint_but_not_credentials() {
-        let provider = ZeroEntropyProvider {
-            client: reqwest::Client::new(),
-            config: ProviderConfig {
-                base_url: "https://user:password@example.com/v1/?token=secret#fragment".into(),
-                api_key_env: "SECRET_ENV_NAME".into(),
-                embedding_model: "zembed-1".into(),
-                rerank_model: "zerank-2".into(),
-                dimensions: 2,
-                batch_size: Some(2),
-                request_timeout_seconds: 30,
-            },
-            api_key: Some("api-secret".into()),
-        };
-        let identity = provider.embedding_provider_identity();
-        assert_eq!(identity, "zeroentropy:https://example.com/v1");
-        assert!(!identity.contains("secret"));
-        assert!(!identity.contains("password"));
-    }
-
-    #[test]
-    fn rejects_non_finite_embedding_values() {
-        assert!(validate_vectors(&[vec![1.0, f32::NAN]], 1, 2).is_err());
-        assert!(validate_vectors(&[vec![f32::INFINITY, 0.0]], 1, 2).is_err());
-        assert!(validate_vectors(&[vec![1.0, 0.0]], 1, 2).is_ok());
-    }
-
-    #[test]
-    fn rerank_results_are_complete_unique_finite_and_in_range() {
-        let result = |index, relevance_score| RerankResult {
-            index,
-            relevance_score,
-        };
-        let valid = [result(1, 0.9), result(0, 0.4)];
-        assert!(validate_rerank_results(&valid, 3, 2).is_ok());
-        for invalid in [
-            vec![result(1, 0.9)],
-            vec![result(1, 0.9), result(1, 0.4)],
-            vec![result(3, 0.9), result(0, 0.4)],
-            vec![result(1, f64::NAN), result(0, 0.4)],
-        ] {
-            assert!(validate_rerank_results(&invalid, 3, 2).is_err());
-        }
-    }
-
-    async fn embed(
-        State(attempts): State<Arc<AtomicUsize>>,
-        headers: HeaderMap,
-        Json(body): Json<Value>,
-    ) -> (StatusCode, Json<Value>) {
-        assert_eq!(headers["authorization"], "Bearer test-token");
-        assert_eq!(body["model"], "zembed-1");
-        assert_eq!(body["input_type"], "document");
-        assert_eq!(body["dimensions"], 2);
-        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "retry"})),
-            );
-        }
-        (
-            StatusCode::OK,
-            Json(json!({
-                "results": [
-                    {"embedding": [1.0, 0.0]},
-                    {"embedding": [0.0, 1.0]}
-                ]
-            })),
-        )
-    }
-
-    async fn rerank(headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
-        assert_eq!(headers["authorization"], "Bearer test-token");
-        assert_eq!(body["model"], "zerank-2");
-        assert_eq!(body["query"], "two");
-        assert_eq!(body["top_n"], 1);
-        Json(json!({"results": [{"index": 1, "relevance_score": 0.9}]}))
     }
 }

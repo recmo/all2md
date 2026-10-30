@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import math
 import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
@@ -422,7 +423,60 @@ def _math_glyph_edits(block, alignment, ranges, evidence):
         ):
             continue
         replacements.append((source_start, source_end, replacement))
+    replacements.extend(_math_glyph_run_edits(block, alignment, ranges))
     return replacements
+
+
+def _math_glyph_run_edits(block, alignment, ranges):
+    """Repair two adjacent Latin-for-Greek glyph errors, never whole words.
+
+    Both flanks must already have unique occurrence alignment. The edit changes
+    glyph identities only; TeX grouping and script direction stay untouched.
+    """
+    text, native, matches = alignment.text, alignment.native, alignment.matches
+    edits = []
+    for start in range(4, len(text)-5):
+        end = start+2
+        if start in matches or start+1 in matches:
+            continue
+        left = [matches.get(i) for i in range(start-4,start)]
+        right = [matches.get(i) for i in range(end,end+4)]
+        if None in left or None in right:
+            continue
+        target = left[-1]+1
+        if left != list(range(target-4,target)) or right != list(range(target+2,target+6)):
+            continue
+        if text[start-4:start] != native[target-4:target] or text[end:end+4] != native[target+2:target+6]:
+            continue
+        if (text.count(text[start-4:end+4]) != 1
+                or native.count(native[target-4:target+6]) != 1):
+            continue
+        proposed = []
+        for offset in range(2):
+            old, new = text[start+offset], native[target+offset]
+            if (not old.isascii() or not old.isalpha()
+                    or "GREEK" not in unicodedata.name(new, "")
+                    or old.isupper() != new.isupper()):
+                break
+            glyph = alignment.glyphs[target+offset]
+            if not glyph.get("origin") or tuple(glyph.get("direction",(1,0))) != (1,0):
+                break
+            box = glyph.get("bbox", [])
+            if (len(box) != 4 or not all(math.isfinite(float(v)) for v in box)
+                    or not (0 <= box[0] < box[2] <= 1000 and 0 <= box[1] < box[3] <= 1000)):
+                break
+            a,b = alignment.spans[start+offset]
+            if b-a != 1 or not any(x <= a < b <= y for x,y in ranges):
+                break
+            replacement = _math_replacement(new)
+            if replacement is None:
+                break
+            if replacement.startswith("\\") and re.match(r"[A-Za-z]",block.markdown[b:]):
+                replacement += " "
+            proposed.append((a,b,replacement))
+        if len(proposed)==2:
+            edits.extend(proposed)
+    return edits
 
 
 def _repair_embedded_math_structure(
