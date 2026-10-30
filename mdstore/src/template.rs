@@ -243,43 +243,14 @@ impl Templates {
         after: &HashMap<String, String>,
         moves: &[crate::Move],
     ) -> Result<(), Vec<Finding>> {
-        if moves.is_empty() {
-            return self.validate_changes(before, after);
-        }
-        let endpoints: std::collections::HashSet<_> = moves
-            .iter()
-            .flat_map(|movement| [&movement.from, &movement.to])
-            .collect();
-        let ordinary = |pages: &HashMap<String, String>| {
-            pages
+        self.validate_changes_at(
+            before,
+            after,
+            &moves
                 .iter()
-                .filter(|(path, _)| !endpoints.contains(path))
-                .map(|(path, text)| (path.clone(), text.clone()))
-                .collect()
-        };
-        let mut findings = self
-            .validate_changes(&ordinary(before), &ordinary(after))
-            .err()
-            .unwrap_or_default();
-        // Endpoint identities leave and arrive, even when their filenames are
-        // reused by another document in a chain, swap, or explicit replacement.
-        for path in endpoints {
-            for (old, new) in [(before.get(path), None), (None, after.get(path))] {
-                let image = |text: Option<&String>| {
-                    text.map(|text| (path.clone(), text.clone()))
-                        .into_iter()
-                        .collect()
-                };
-                if let Err(errors) = self.validate_changes(&image(old), &image(new)) {
-                    findings.extend(errors);
-                }
-            }
-        }
-        if findings.is_empty() {
-            Ok(())
-        } else {
-            Err(findings)
-        }
+                .flat_map(|movement| [&movement.from, &movement.to])
+                .collect(),
+        )
     }
 
     /// Validates transition callbacks for changed documents.
@@ -288,13 +259,19 @@ impl Templates {
         before: &HashMap<String, String>,
         after: &HashMap<String, String>,
     ) -> Result<(), Vec<Finding>> {
+        self.validate_changes_at(before, after, &HashSet::new())
+    }
+
+    fn validate_changes_at(
+        &self,
+        before: &HashMap<String, String>,
+        after: &HashMap<String, String>,
+        endpoints: &HashSet<&String>,
+    ) -> Result<(), Vec<Finding>> {
         let mut paths: std::collections::BTreeSet<_> = before.keys().collect();
         paths.extend(after.keys());
         let mut findings = Vec::new();
         for path in paths {
-            if before.get(path) == after.get(path) {
-                continue;
-            }
             let Some((template_path, entry)) = self.applicable(path) else {
                 continue;
             };
@@ -302,35 +279,43 @@ impl Templates {
             if !script.has_change_checks {
                 continue;
             }
-            let parse = |pages: &HashMap<String, String>| {
-                pages
-                    .get(path)
-                    .map(|text| crate::markdown::parse_page(text, &entry.template.links))
+            let parse = |text: Option<&String>| {
+                text.map(|text| crate::markdown::parse_page(text, &entry.template.links))
                     .transpose()
             };
-            let result = (|| {
-                let old = parse(before)?;
-                let new = parse(after)?;
-                if old.is_none() && new.is_none() { return Ok(()); }
-                let old = old
-                    .as_ref()
-                    .map(|page| crate::template_script::document(path, &before[path], page));
-                let new = new
-                    .as_ref()
-                    .map(|page| crate::template_script::document(path, &after[path], page));
-                script.check(old.as_ref(), new.as_ref(), true)
-            })();
-            if let Err(error) = result {
-                let text = after
-                    .get(path)
-                    .or_else(|| before.get(path))
-                    .map_or("", String::as_str);
-                findings.push(crate::template_script::finding(
-                    path,
-                    text,
-                    &template_path,
-                    &error,
-                ));
+            let (old, new) = (before.get(path), after.get(path));
+            // A reused move endpoint represents separate departing and arriving identities.
+            let transitions = if endpoints.contains(path) {
+                [(old, None), (None, new)]
+            } else {
+                [(old, new), (None, None)]
+            };
+            for (old_text, new_text) in transitions {
+                if old_text == new_text {
+                    continue;
+                }
+                let result = (|| {
+                    let old = parse(old_text)?;
+                    let new = parse(new_text)?;
+                    let old = old
+                        .as_ref()
+                        .zip(old_text)
+                        .map(|(page, text)| crate::template_script::document(path, text, page));
+                    let new = new
+                        .as_ref()
+                        .zip(new_text)
+                        .map(|(page, text)| crate::template_script::document(path, text, page));
+                    script.check(old.as_ref(), new.as_ref(), true)
+                })();
+                if let Err(error) = result {
+                    let text = new_text.or(old_text).map_or("", String::as_str);
+                    findings.push(crate::template_script::finding(
+                        path,
+                        text,
+                        &template_path,
+                        &error,
+                    ));
+                }
             }
         }
         if findings.is_empty() {

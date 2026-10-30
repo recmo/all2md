@@ -568,8 +568,7 @@ impl Store {
             Arc::clone(&current.templates)
         };
         if !request.moves.is_empty() {
-            let pre_move = pages.clone();
-            pages = crate::moves::apply(
+            let moved = crate::moves::apply(
                 &current.pages,
                 &pages,
                 &request.moves,
@@ -578,15 +577,18 @@ impl Store {
             )?;
             // Include all implicit backlink changes and both sides of every move
             // in staging, rollback, receipts, and index synchronization.
-            originals = (*current.pages).clone();
-            originals.extend(load_pages(&self.root, &current.head, &config)?);
-            originals.extend((*current.config_files).clone());
-            let all_paths: BTreeSet<_> = pre_move.keys().chain(pages.keys()).cloned().collect();
+            let all_paths: BTreeSet<_> = pages.keys().chain(moved.keys()).cloned().collect();
             for path in all_paths {
-                if pre_move.get(&path) != pages.get(&path) {
-                    changes.insert(path.clone(), pages.get(&path).cloned());
+                if pages.get(&path) != moved.get(&path) {
+                    if !changes.contains_key(&path)
+                        && let Some(text) = pages.get(&path)
+                    {
+                        originals.insert(path.clone(), text.clone());
+                    }
+                    changes.insert(path.clone(), moved.get(&path).cloned());
                 }
             }
+            pages = moved;
             paths = changes.keys().cloned().collect();
         }
         ensure_pages_match_config(&config, &pages)?;

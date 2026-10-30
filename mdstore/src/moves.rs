@@ -86,19 +86,15 @@ pub(crate) fn apply(
 
     // Include deleted identities so replacing their paths cannot silently retarget links.
     let resolver = TargetResolver::new(before.keys().chain(edited.keys()));
-    let final_inventory = edited
-        .keys()
-        .map(|path| mapping.get(path).unwrap_or(path).clone())
-        .collect::<BTreeSet<_>>();
-    let final_resolver = TargetResolver::new(final_inventory.iter());
+    let final_resolver =
+        TargetResolver::new(edited.keys().map(|path| mapping.get(path).unwrap_or(path)));
     let mut output = HashMap::new();
     for (source, text) in edited {
         let destination = mapping.get(source).unwrap_or(source);
         let policy = old_templates.policy(source);
         let links = collect(text, &policy.links)
             .with_context(|| format!("{source}: locate move references"))?;
-        let mut expected = Vec::new();
-        let mut patches = BTreeMap::new();
+        let mut replacements = BTreeMap::new();
         for link in links {
             let Some((target, document)) = resolve(&resolver, source, &link)? else {
                 continue;
@@ -109,73 +105,58 @@ pub(crate) fn apply(
                 );
             }
             let final_target = mapping.get(&target).unwrap_or(&target);
-            expected.push((link.range.start, link.range.end, final_target.clone()));
-            if target == *final_target && source == destination {
-                continue;
-            }
             let raw = &text[link.range.clone()];
-            let suffix = link
-                .target
-                .find(['#', '?'])
-                .map_or("", |index| &link.target[index..]);
-            // Preserve authored suffix bytes; reject encodings we cannot patch exactly.
-            let raw_suffix = if suffix.is_empty() {
-                ""
+            let replacement = if target == *final_target && source == destination {
+                raw.to_owned()
             } else {
-                let index =
-                    suffix_start(raw).context("cannot locate encoded link suffix safely")?;
-                if raw.as_bytes()[index] != suffix.as_bytes()[0] {
-                    bail!("{source}: cannot preserve encoded link suffix safely");
-                }
-                &raw[index..]
+                let authored = link.target.split(['#', '?']).next().unwrap_or_default();
+                let suffix = &link.target[authored.len()..];
+                // Preserve authored suffix bytes; reject encodings we cannot patch exactly.
+                let raw_suffix = if suffix.is_empty() {
+                    ""
+                } else {
+                    let index =
+                        suffix_start(raw).context("cannot locate encoded link suffix safely")?;
+                    if raw.as_bytes()[index] != suffix.as_bytes()[0] {
+                        bail!("{source}: cannot preserve encoded link suffix safely");
+                    }
+                    &raw[index..]
+                };
+                let path = render_path(
+                    destination,
+                    final_target,
+                    authored.starts_with('/'),
+                    document && !link.image && !authored.ends_with(".md"),
+                    link.syntax,
+                );
+                format!("{path}{raw_suffix}")
             };
-            let path = render_path(
-                destination,
-                final_target,
-                link.target.starts_with('/'),
-                document
-                    && !link.image
-                    && !link
-                        .target
-                        .split(['#', '?'])
-                        .next()
-                        .unwrap_or_default()
-                        .ends_with(".md"),
-                link.syntax,
-            );
-            let replacement = format!("{path}{raw_suffix}");
-            if let Some(previous) =
-                patches.insert((link.range.start, link.range.end), replacement.clone())
-                && previous != replacement
-            {
+            let (previous, targets) = replacements
+                .entry((link.range.start, link.range.end))
+                .or_insert_with(|| (replacement.clone(), Vec::new()));
+            if *previous != replacement {
                 bail!("{source}: conflicting link rewrites");
             }
+            targets.push(final_target.clone());
         }
-        for (start, end, _) in &mut expected {
-            let shift: isize = patches
-                .iter()
-                .filter(|((_, patch_end), _)| *patch_end <= *start)
-                .map(|((patch_start, patch_end), replacement)| {
-                    replacement.len() as isize - (patch_end - patch_start) as isize
-                })
-                .sum();
-            let length = patches
-                .get(&(*start, *end))
-                .map_or(*end - *start, String::len);
-            *start = start
-                .checked_add_signed(shift)
-                .context("invalid rewritten link offset")?;
-            *end = *start + length;
-        }
-        let mut rewritten = text.clone();
-        let mut previous = text.len();
-        for ((start, end), replacement) in patches.into_iter().rev() {
-            if end > previous {
+        let mut rewritten = String::with_capacity(text.len());
+        let mut expected = Vec::new();
+        let mut cursor = 0;
+        for ((start, end), (replacement, targets)) in replacements {
+            if start < cursor {
                 bail!("{source}: overlapping link rewrites");
             }
-            rewritten.replace_range(start..end, &replacement);
-            previous = start;
+            rewritten.push_str(&text[cursor..start]);
+            let new_start = rewritten.len();
+            rewritten.push_str(&replacement);
+            expected.extend(
+                targets
+                    .into_iter()
+                    .map(|target| (new_start, rewritten.len(), target)),
+            );
+            cursor = end;
         }
+        rewritten.push_str(&text[cursor..]);
         // Check the new schema's grammar as well as the destination paths. A wiki
         // pattern may not be able to express a new filename or may change by directory.
         let mut actual = Vec::new();

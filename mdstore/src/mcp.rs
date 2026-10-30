@@ -267,15 +267,15 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "edit",
-            "description": "Validate and locally commit an atomic batch of edits and simultaneous document moves. Edits and links use original paths; moves run after edits and rewrite incoming Markdown/wiki links and moved documents' relative links. Moves require expected_commit from read/search. Anchors refer to the pre-edit snapshot and must match at their line numbers. Copy anchors from read/search; on stale errors reread. Replacement text omits hashline prefixes. Whole-file replacement/deletion requires one complete-file anchor. Config/template edits require server permission. Create paths may use {serial:03}; read the parent afterward for allocated paths. Returns {success: true, commit: HASH} or {errors: [{location?, message, schema?}]}.",
+            "description": "Validate and commit one atomic batch. Edits, anchors, and links use original paths/snapshot; moves run after edits. Copy anchors from read/search; reread on stale errors. Replacement text omits hashline prefixes; whole-file edits require a complete-file anchor. Config/template edits require permission. Create paths support {serial:03}; read the parent for allocated names. Returns {success:true,commit} or {errors:[{location?,message,schema?}]}.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "summary": {"type": "string", "minLength": 1},
-                    "expected_commit": {"type": "string", "description": "Snapshot commit from read/search. Required for moves; stale snapshots reject the whole batch."},
+                    "expected_commit": {"type": "string", "description": "Commit from read/search; required for moves. Stale batches fail."},
                     "moves": {
                         "type": "array", "minItems": 1,
-                        "description": "Simultaneous document moves in the original snapshot. Edits use original paths; links are rewritten after edits. Chains and swaps are supported. Occupied destinations must move away or be explicitly deleted.",
+                        "description": "Simultaneous document moves; chains/swaps allowed. Occupied destinations must move or be deleted. Rewrites incoming Markdown/wiki links and rebases outgoing relative links.",
                         "items": {
                             "type": "object",
                             "properties": {"from": {"type": "string", "minLength": 1}, "to": {"type": "string", "minLength": 1}},
@@ -283,7 +283,7 @@ fn tools() -> Vec<Value> {
                         }
                     },
                     "edits": {
-                        "description": "Repository-rooted paths (leading / optional) mapped to operation arrays.",
+                        "description": "Paths (leading / optional) mapped to operations.",
                         "type": "object",
                         "propertyNames": {"minLength": 1},
                         "additionalProperties": {
