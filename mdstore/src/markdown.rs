@@ -21,6 +21,9 @@ pub struct ParsedPage {
     pub headings: Vec<Heading>,
     #[serde(skip)]
     pub(crate) events: Vec<(Event<'static>, Range<usize>)>,
+    #[cfg(feature = "server")]
+    #[serde(skip)]
+    pub(crate) wiki_ranges: Vec<Range<usize>>,
     #[serde(skip)]
     pub(crate) section_headings: Vec<(u8, String, usize, usize)>,
     #[serde(skip)]
@@ -135,6 +138,17 @@ pub struct FindingSource {
     pub line: usize,
 }
 
+/// Uses the native wiki parser only when no custom wiki grammar is configured.
+pub(crate) fn parser_options(links: &crate::config::LinkConfig) -> Options {
+    let mut options = Options::all();
+    // Custom wiki syntax is scanned separately. Native wiki parsing can consume
+    // a wiki-looking label before the enclosing Markdown link is recognized.
+    if !links.wiki.is_empty() {
+        options.remove(Options::ENABLE_WIKILINKS);
+    }
+    options
+}
+
 /// Parses one Markdown page according to configured link syntaxes.
 pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<ParsedPage> {
     let (frontmatter, body_start_line, body) = parse_frontmatter(text)?;
@@ -157,7 +171,7 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
         .iter()
         .map(|wiki| Regex::new(wiki))
         .collect::<Result<Vec<_>, _>>()?;
-    let parser = Parser::new_ext(body, Options::all()).into_offset_iter();
+    let parser = Parser::new_ext(body, parser_options(links)).into_offset_iter();
     for (event, range) in parser {
         let line = body_start_line
             + body[..range.start]
@@ -302,6 +316,11 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
         body_start_line,
         headings,
         events,
+        #[cfg(feature = "server")]
+        wiki_ranges: wiki_ranges
+            .into_iter()
+            .map(|range| body_offset + range.start..body_offset + range.end)
+            .collect(),
         section_headings,
         list_entries,
         code_blocks,
@@ -676,6 +695,11 @@ pub(crate) struct TargetResolver {
 }
 
 impl TargetResolver {
+    #[cfg(feature = "server")]
+    pub(crate) fn contains(&self, path: &str) -> bool {
+        self.exact.contains(path)
+    }
+
     pub(crate) fn new<'a>(paths: impl Iterator<Item = &'a String>) -> Self {
         Self {
             exact: paths.cloned().collect(),

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
+use pulldown_cmark::{Event, LinkType, Parser, Tag};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -28,6 +28,7 @@ struct Destination {
     range: Range<usize>,
     target: String,
     syntax: LinkSyntax,
+    image: bool,
 }
 
 /// Plans all moves and rewrites without touching the checkout.
@@ -133,6 +134,7 @@ pub(crate) fn apply(
                 final_target,
                 link.target.starts_with('/'),
                 document
+                    && !link.image
                     && !link
                         .target
                         .split(['#', '?'])
@@ -201,9 +203,12 @@ fn resolve(
     if path.is_empty() || path.starts_with("//") || markdown::has_uri_scheme(path) {
         return Ok(None);
     }
-    if let Some(target) = resolver
-        .resolve(source, &link.target, link.syntax)
-        .map_err(|error| anyhow!("{source}: {error}"))?
+    // Images name literal asset paths, including extensionless files. They do
+    // not inherit the optional .md extension of document links.
+    if !link.image
+        && let Some(target) = resolver
+            .resolve(source, &link.target, link.syntax)
+            .map_err(|error| anyhow!("{source}: {error}"))?
     {
         return Ok(Some((target, true)));
     }
@@ -221,7 +226,8 @@ fn resolve(
         )
     }
     .map_err(anyhow::Error::msg)?;
-    Ok(Some((target, false)))
+    let document = resolver.contains(&target);
+    Ok(Some((target, document)))
 }
 
 fn render_path(
@@ -285,6 +291,7 @@ fn collect(text: &str, policy: &crate::LinkConfig) -> Result<Vec<Destination>> {
                 range,
                 target: link.target.clone(),
                 syntax: LinkSyntax::Wiki,
+                image: false,
             })
         })
         .collect();
@@ -293,45 +300,48 @@ fn collect(text: &str, policy: &crate::LinkConfig) -> Result<Vec<Destination>> {
     }
     let (_, _, body) = markdown::parse_frontmatter(text)?;
     let offset = text.len() - body.len();
-    let parser = Parser::new_ext(body, Options::all());
+    let mut parser = Parser::new_ext(body, markdown::parser_options(policy)).into_offset_iter();
     let mut spans = BTreeMap::new();
-    for (_, definition) in parser.reference_definitions().iter() {
-        if !is_local(&definition.dest) {
-            continue;
-        }
-        let span = find_span(body, definition.span.clone(), "]:", &definition.dest)?;
-        spans.insert(
-            (offset + span.start, offset + span.end),
-            definition.dest.to_string(),
-        );
-    }
-    for (event, range) in parser.into_offset_iter() {
-        let Event::Start(
-            Tag::Link {
+    while let Some((event, range)) = parser.next() {
+        let (link_type, dest_url, id, image) = match event {
+            Event::Start(Tag::Link {
                 link_type,
                 dest_url,
+                id,
                 ..
-            }
-            | Tag::Image {
+            }) => (link_type, dest_url, id, false),
+            Event::Start(Tag::Image {
                 link_type,
                 dest_url,
+                id,
                 ..
-            },
-        ) = event
-        else {
-            continue;
+            }) => (link_type, dest_url, id, true),
+            _ => continue,
         };
+        // Wiki embeds keep document-link semantics, including optional .md.
+        let image = image && !matches!(link_type, LinkType::WikiLink { .. });
         if !is_local(&dest_url) {
             continue;
         }
-        if result.iter().any(|link| {
-            link.range.start >= offset + range.start && link.range.end <= offset + range.end
-        }) {
+        if page
+            .wiki_ranges
+            .iter()
+            .any(|wiki| wiki.start <= offset + range.start && wiki.end >= offset + range.end)
+        {
             continue;
         }
         let span = match link_type {
             LinkType::Inline => find_span(body, range, "](", &dest_url)?,
-            LinkType::WikiLink { .. } if policy.wiki.is_empty() => {
+            LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
+                // Only referenced definitions are links. Unused definitions may
+                // contain stale targets without becoming corpus dependencies.
+                let definition = parser
+                    .reference_definitions()
+                    .get(&id)
+                    .context("cannot locate Markdown reference definition")?;
+                find_span(body, definition.span.clone(), "]:", &dest_url)?
+            }
+            LinkType::WikiLink { .. } => {
                 // With no custom wiki grammar, validation also recognizes the
                 // Markdown parser's native [[target|label]] syntax.
                 let prefix = if body[range.clone()].starts_with("![[") {
@@ -346,21 +356,23 @@ fn collect(text: &str, policy: &crate::LinkConfig) -> Result<Vec<Destination>> {
                 }
                 start..end
             }
-            LinkType::WikiLink { .. } => {
-                bail!("wiki link is not recognized by the configured grammar")
-            }
             _ => continue,
         };
         spans.insert(
-            (offset + span.start, offset + span.end),
+            (offset + span.start, offset + span.end, image),
             dest_url.into_string(),
         );
     }
-    result.extend(spans.into_iter().map(|((start, end), target)| Destination {
-        range: start..end,
-        target,
-        syntax: LinkSyntax::Markdown,
-    }));
+    result.extend(
+        spans
+            .into_iter()
+            .map(|((start, end, image), target)| Destination {
+                range: start..end,
+                target,
+                syntax: LinkSyntax::Markdown,
+                image,
+            }),
+    );
     Ok(result)
 }
 

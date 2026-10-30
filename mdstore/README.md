@@ -341,9 +341,13 @@ relative destinations inside moved documents, including image and asset links.
 It patches destination bytes only, preserving labels, titles, query strings,
 heading fragments, omitted Markdown extensions, frontmatter/provenance, external
 URLs, and code examples.
-Reference-style Markdown links update their shared definition once. Overlapping
-or unsupported destination spans and rewrites that the destination schema's
-link grammar cannot express reject the batch.
+Image sources use exact asset paths, including files without an extension;
+wiki embeds retain document-link semantics. Reference-style Markdown links and
+images update their shared definition once. Unused definitions remain unchanged
+and do not introduce document dependencies. A custom wiki grammar replaces the
+parser's native wiki syntax, preserving Markdown links whose labels contain
+wiki references. Overlapping or unsupported destination spans and rewrites that
+the destination schema's link grammar cannot express reject the batch.
 
 A surviving link to a deleted document is rejected even if a moved document
 takes over its filename. To intentionally redirect it to the replacement, edit
