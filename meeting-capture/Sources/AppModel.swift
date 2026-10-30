@@ -173,8 +173,10 @@ final class AppModel: ObservableObject {
     }
 
     static func allowsMaintenance(in state: State) -> Bool {
-        if case .idle = state { return true }
-        return false
+        switch state {
+        case .idle, .permissionRequired, .error: true
+        default: false
+        }
     }
 
     static func allowsPermissionCheck(in state: State) -> Bool {

@@ -42,7 +42,7 @@ struct BackgroundWorkerClient: Sendable {
     }
 
     func checkAccess(_ request: WorkerAccessRequest) async throws -> WorkerAccessReport {
-        try await run(command: "check-access", request: request)
+        try await run(command: "check-access", request: request, timeout: 15)
     }
 
     func checkMetadataAccess(_ request: WorkerAccessRequest) async throws -> WorkerAccessReport {
@@ -122,9 +122,15 @@ private struct WorkerInvocation: Sendable {
         process.executableURL = executableURL
         process.arguments = arguments
         process.qualityOfService = .utility
-        let errorPipe = Pipe()
+        // A worker can fill a pipe before exiting, or leave an inherited pipe
+        // open in a subprocess. Neither may defeat the startup deadline.
+        guard let errorStream = tmpfile() else {
+            throw BackgroundWorkerError.launch("Could not capture worker errors: \(String(cString: strerror(errno)))")
+        }
+        defer { fclose(errorStream) }
+        let errorFile = FileHandle(fileDescriptor: fileno(errorStream), closeOnDealloc: false)
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = errorPipe
+        process.standardError = errorFile
         do { try process.run() }
         catch { throw BackgroundWorkerError.launch(error.localizedDescription) }
         if let timeout {
@@ -132,13 +138,20 @@ private struct WorkerInvocation: Sendable {
             while process.isRunning, ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.02) }
             if process.isRunning {
                 // This is our own, still-unreaped child, so its PID cannot be reused.
+                // The worker creates its own process group before launching
+                // tools. Stop those tools too, before deleting their inputs.
+                kill(-process.processIdentifier, SIGKILL)
                 kill(process.processIdentifier, SIGKILL)
                 process.waitUntilExit()
-                throw BackgroundWorkerError.operation("Optional metadata permission check timed out.")
+                let message = arguments.first == "check-access"
+                    ? "The worker storage / archive check timed out. Retry the recording check."
+                    : "Optional metadata permission check timed out."
+                throw BackgroundWorkerError.operation(message)
             }
         }
         process.waitUntilExit()
-        let standardError = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        try errorFile.seek(toOffset: 0)
+        let standardError = errorFile.readDataToEndOfFile()
         guard process.terminationStatus == 0 else {
             if process.terminationReason == .exit,
                let message = String(data: standardError, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),

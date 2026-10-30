@@ -6,6 +6,11 @@ enum MeetingCaptureWorker {
     @MainActor
     static func main() {
         do {
+            // Keep tools launched by this worker in a group the app can stop
+            // when a startup check exceeds its deadline.
+            guard getpgrp() == getpid() || setpgid(0, 0) == 0 else {
+                throw WorkerMainError.processGroup
+            }
             let arguments = Array(CommandLine.arguments.dropFirst())
             guard let command = arguments.first else { throw WorkerMainError.invalidArguments }
             switch command {
@@ -79,5 +84,12 @@ enum MeetingCaptureWorker {
 
 private enum WorkerMainError: LocalizedError {
     case invalidArguments
-    var errorDescription: String? { "invalid worker arguments" }
+    case processGroup
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidArguments: "invalid worker arguments"
+        case .processGroup: "could not isolate worker subprocesses"
+        }
+    }
 }

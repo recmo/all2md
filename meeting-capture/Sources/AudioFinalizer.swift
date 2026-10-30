@@ -1,5 +1,6 @@
 import AVFoundation
 import CryptoKit
+import Darwin
 import Foundation
 
 struct ArchiveResult: Sendable {
@@ -176,20 +177,44 @@ enum AudioFinalizer {
         arguments: [String],
         captureStandardOutput: Bool = false
     ) throws -> Data {
-        let process = Process()
-        process.executableURL = try executable(named: name)
-        process.arguments = arguments
+        let executable = try executable(named: name)
         let standardOutput = Pipe()
-        let standardError = Pipe()
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-        try process.run()
+        guard let errorStream = tmpfile() else {
+            throw CaptureError.writerFailure("Could not capture \(name) errors: \(String(cString: strerror(errno)))")
+        }
+        defer { fclose(errorStream) }
+        let errorFile = FileHandle(fileDescriptor: fileno(errorStream), closeOnDealloc: false)
+        func check(_ status: Int32) throws {
+            guard status == 0 else {
+                throw CaptureError.writerFailure("Could not launch \(name): \(String(cString: strerror(status)))")
+            }
+        }
+        var actions: posix_spawn_file_actions_t? = nil
+        try check(posix_spawn_file_actions_init(&actions))
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        try check(posix_spawn_file_actions_adddup2(&actions, standardOutput.fileHandleForWriting.fileDescriptor, STDOUT_FILENO))
+        try check(posix_spawn_file_actions_adddup2(&actions, errorFile.fileDescriptor, STDERR_FILENO))
+        try check(posix_spawn_file_actions_addclose(&actions, standardOutput.fileHandleForReading.fileDescriptor))
+        try check(posix_spawn_file_actions_addclose(&actions, standardOutput.fileHandleForWriting.fileDescriptor))
+        try check(posix_spawn_file_actions_addclose(&actions, errorFile.fileDescriptor))
+        let strings = ([executable.path] + arguments).map { strdup($0) }
+        defer { strings.forEach { free($0) } }
+        var argv = strings + [nil]
+        var processID: pid_t = 0
+        // Foundation Process creates a separate process group. Spawn directly
+        // so tools stay in the worker's group and its deadline stops them too.
+        try check(posix_spawn(&processID, executable.path, &actions, nil, &argv, _NSGetEnviron().pointee))
+        try standardOutput.fileHandleForWriting.close()
         let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let error = standardError.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        var status: Int32 = 0
+        while waitpid(processID, &status, 0) < 0 {
+            if errno != EINTR { try check(errno) }
+        }
+        try errorFile.seek(toOffset: 0)
+        let error = errorFile.readDataToEndOfFile()
+        guard status == 0 else {
             let message = String(data: error, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw CaptureError.writerFailure("\(name) failed: \(message?.isEmpty == false ? message! : "exit \(process.terminationStatus)")")
+            throw CaptureError.writerFailure("\(name) failed: \(message?.isEmpty == false ? message! : "status \(status)")")
         }
         return captureStandardOutput ? output : Data()
     }

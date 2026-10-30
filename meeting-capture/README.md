@@ -39,7 +39,9 @@ Test audio is deleted and never appears among meetings or recovery files.
 
 The startup check also asks the actual worker to read the disposable audio and
 create, verify, hash, rename, and delete a small archive under the meeting folder.
-This exercises worker folder access and its ffmpeg/ffprobe subprocesses. The same
+This exercises worker folder access and its ffmpeg/ffprobe subprocesses. The
+archive check has a 15-second deadline; a timeout stops the worker and its tools
+and offers Retry instead of leaving recording disabled indefinitely. The same
 worker checks Accessibility trust without prompting and, when authorized, tries
 an Accessibility read and observer creation against the app. The menu reports
 the optional metadata check separately; a target meeting app can still expose
@@ -90,7 +92,9 @@ guarantee that permissions or a meeting application's devices will remain usable
   its live state. Stopping a recording returns the app to monitoring before
   deferred finalization finishes.
 - Interrupted CAF chunks are discovered at launch and can be recovered from
-  the menu only while idle. Recovery remains a secondary maintenance status;
+  the menu while idle or after a recording check or capture error. Recovery does
+  not require a working microphone or recording authorization. It remains a
+  secondary maintenance status;
   it cannot replace detection, countdown, or recording state. Header-only CAF
   files are preserved with an `.unrecoverable.caf` suffix rather than retried
   forever.
