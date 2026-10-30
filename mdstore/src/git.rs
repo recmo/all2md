@@ -448,12 +448,9 @@ pub(crate) fn stage_tree(
                 );
             }
         } else {
-            let pathspec = literal_pathspec(path);
-            let output = run_with_index(
-                root,
-                &index,
-                ["update-index", "--force-remove", "--", &pathspec],
-            )?;
+            // update-index takes exact filenames, not pathspecs.
+            let output =
+                run_with_index(root, &index, ["update-index", "--force-remove", "--", path])?;
             if !output.status.success() {
                 bail!(
                     "git update-index failed for {path}: {}",

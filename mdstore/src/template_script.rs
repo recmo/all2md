@@ -297,6 +297,7 @@ fn alloc_document<'v>(heap: Heap<'v>, doc: &Document<'_>) -> Value<'v> {
                             let links = heap.alloc(AllocList(
                                 page.links
                                     .iter()
+                                    .filter(|link| !link.image)
                                     .filter(|link| (entry.line..=end_line).contains(&link.line))
                                     .map(|link| link.target.as_str()),
                             ));
@@ -327,23 +328,25 @@ fn alloc_document<'v>(heap: Heap<'v>, doc: &Document<'_>) -> Value<'v> {
                 )
             }),
     ));
-    let links = heap.alloc(AllocList(page.links.iter().map(|link| {
-        heap.alloc(AllocDict([
-            ("target", heap.alloc(link.target.as_str())),
-            ("line", heap.alloc(link.line)),
-            (
-                "syntax",
-                heap.alloc(match link.syntax {
-                    crate::markdown::LinkSyntax::Markdown => "markdown",
-                    crate::markdown::LinkSyntax::Wiki => "wiki",
-                }),
-            ),
-            (
-                "sections",
-                heap.alloc(AllocList(link.sections.iter().map(String::as_str))),
-            ),
-        ]))
-    })));
+    let links = heap.alloc(AllocList(page.links.iter().filter(|link| !link.image).map(
+        |link| {
+            heap.alloc(AllocDict([
+                ("target", heap.alloc(link.target.as_str())),
+                ("line", heap.alloc(link.line)),
+                (
+                    "syntax",
+                    heap.alloc(match link.syntax {
+                        crate::markdown::LinkSyntax::Markdown => "markdown",
+                        crate::markdown::LinkSyntax::Wiki => "wiki",
+                    }),
+                ),
+                (
+                    "sections",
+                    heap.alloc(AllocList(link.sections.iter().map(String::as_str))),
+                ),
+            ]))
+        },
+    )));
     heap.alloc(AllocStruct([
         ("path", heap.alloc(doc.path)),
         ("text", heap.alloc(doc.text)),

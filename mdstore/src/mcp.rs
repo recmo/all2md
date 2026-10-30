@@ -271,15 +271,24 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "edit",
-            "description": "Validate and locally commit an atomic batch. Map paths to operation arrays; anchors refer to the pre-edit snapshot and must match at their line numbers. Copy anchors from read/search; on stale errors use the returned current lines or reread that range. Replacement text omits hashline prefixes. Whole-file replacement/deletion requires one complete-file anchor. Config/template edits require server permission. Create paths may use {serial:03}; read the parent afterward for allocated paths. Returns {success: true, commit: HASH} or {errors: [{location?, message, schema?}]}.",
+            "description": "Validate and commit one atomic batch. Edits, anchors, and links use original paths/snapshot; moves run after edits. Copy anchors from read/search; reread on stale errors. Replacement text omits hashline prefixes; whole-file edits require a complete-file anchor. Config/template edits require permission. Create paths support {serial:03}; read the parent for allocated names. Returns {success:true,commit} or {errors:[{location?,message,schema?}]}.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "summary": {"type": "string", "minLength": 1},
+                    "expected_commit": {"type": "string", "description": "Commit from read/search; required for moves. Stale batches fail."},
+                    "moves": {
+                        "type": "array", "minItems": 1,
+                        "description": "Simultaneous document moves; chains/swaps allowed. Occupied destinations must move or be deleted. Rewrites incoming Markdown/wiki links and rebases outgoing relative links.",
+                        "items": {
+                            "type": "object",
+                            "properties": {"from": {"type": "string", "minLength": 1}, "to": {"type": "string", "minLength": 1}},
+                            "required": ["from", "to"], "additionalProperties": false
+                        }
+                    },
                     "edits": {
-                        "description": "Repository-rooted paths (leading / optional) mapped to operation arrays.",
+                        "description": "Paths (leading / optional) mapped to operations.",
                         "type": "object",
-                        "minProperties": 1,
                         "propertyNames": {"minLength": 1},
                         "additionalProperties": {
                             "type": "array",
@@ -288,7 +297,8 @@ fn tools() -> Vec<Value> {
                         }
                     }
                 },
-                "required": ["summary", "edits"],
+                "required": ["summary"],
+                "anyOf": [{"required": ["edits"]}, {"required": ["moves", "expected_commit"]}],
                 "additionalProperties": false
             }
         }),
@@ -354,13 +364,21 @@ impl ApplyOperation {
 #[serde(deny_unknown_fields)]
 struct ApplyArguments {
     summary: String,
+    #[serde(default)]
     edits: std::collections::BTreeMap<String, Vec<ApplyOperation>>,
+    expected_commit: Option<String>,
+    #[serde(default)]
+    moves: Vec<crate::Move>,
 }
 
 impl ApplyArguments {
-    fn into_request(self) -> Result<ApplyEditsRequest> {
-        if self.edits.is_empty() {
-            bail!("edits must contain at least one path");
+    fn into_request(mut self) -> Result<ApplyEditsRequest> {
+        if self.edits.is_empty() && self.moves.is_empty() {
+            bail!("edits or moves must contain at least one path");
+        }
+        for movement in &mut self.moves {
+            strip_root_prefix(&mut movement.from);
+            strip_root_prefix(&mut movement.to);
         }
         let mut paths = std::collections::BTreeMap::new();
         for (mut path, operations) in self.edits {
@@ -384,6 +402,8 @@ impl ApplyArguments {
         Ok(ApplyEditsRequest {
             summary: self.summary,
             edits,
+            expected_commit: self.expected_commit,
+            moves: self.moves,
         })
     }
 }
