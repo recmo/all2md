@@ -7,12 +7,12 @@ struct MeetingCaptureApp: App {
     var body: some Scene {
         MenuBarExtra {
             StatusMenuView(model: model)
+        } label: {
+            Label("Meeting Capture", systemImage: model.statusIcon)
                 .task {
                     model.start()
                     HUDController.shared.attach(to: model)
                 }
-        } label: {
-            Label("Meeting Capture", systemImage: model.statusIcon)
         }
         .menuBarExtraStyle(.window)
     }
