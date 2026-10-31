@@ -200,10 +200,13 @@ enum AudioFinalizer {
         let strings = ([executable.path] + arguments).map { strdup($0) }
         defer { strings.forEach { free($0) } }
         var argv = strings + [nil]
+        let environment = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
+        defer { environment.forEach { free($0) } }
+        var envp = environment + [nil]
         var processID: pid_t = 0
         // Foundation Process creates a separate process group. Spawn directly
         // so tools stay in the worker's group and its deadline stops them too.
-        try check(posix_spawn(&processID, executable.path, &actions, nil, &argv, _NSGetEnviron().pointee))
+        try check(posix_spawn(&processID, executable.path, &actions, nil, &argv, &envp))
         try standardOutput.fileHandleForWriting.close()
         let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
         var status: Int32 = 0
