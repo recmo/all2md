@@ -17,7 +17,6 @@ struct FinalizeCaptureRequest: Codable, Sendable {
     let captureStartedAt: Date
     let captureEndedAt: Date
     let paths: RecordingPaths
-    let accessibilityWorkerProcessID: Int32?
     let trigger: CaptureTrigger
     let metadata: [MetadataEvent]
     let warnings: [String]
@@ -33,10 +32,6 @@ struct AccessibilityProbeRequest: Codable, Sendable {
     let bundleID: String?
     let applicationName: String
     let outputURL: URL
-}
-
-struct WorkerManifestResult: Codable, Sendable {
-    let manifest: URL?
 }
 
 struct WorkerResponse<Value: Codable>: Codable {

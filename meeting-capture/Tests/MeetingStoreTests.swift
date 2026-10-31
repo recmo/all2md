@@ -156,7 +156,7 @@ final class MeetingStoreTests: XCTestCase {
                 microphoneSegments: [CapturedAudioSegment(url: microphone, startedAt: start, endedAt: start.addingTimeInterval(0.1))],
                 participants: participants, participantsStartedAt: start,
                 captureStartedAt: start, captureEndedAt: start.addingTimeInterval(0.1),
-                paths: paths, accessibilityWorkerProcessID: nil,
+                paths: paths,
                 trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: nil),
                 metadata: [], warnings: [], interruptions: []
             )

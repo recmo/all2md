@@ -36,9 +36,8 @@ struct BackgroundWorkerClient: Sendable {
         self.executableURL = candidate
     }
 
-    func finalize(_ request: FinalizeCaptureRequest) async throws -> URL? {
-        let result: WorkerManifestResult = try await run(command: "finalize", request: request)
-        return result.manifest
+    func finalize(_ request: FinalizeCaptureRequest) async throws -> URL {
+        try await run(command: "finalize", request: request)
     }
 
     func checkAccess(_ request: WorkerAccessRequest) async throws -> WorkerAccessReport {
@@ -49,9 +48,8 @@ struct BackgroundWorkerClient: Sendable {
         try await run(command: "check-metadata-access", request: request, timeout: 5)
     }
 
-    func recover(_ request: RecoverCaptureRequest) async throws -> URL? {
-        let result: WorkerManifestResult = try await run(command: "recover", request: request)
-        return result.manifest
+    func recover(_ request: RecoverCaptureRequest) async throws -> URL {
+        try await run(command: "recover", request: request)
     }
 
     func verifyCrashIsolation() async throws {
@@ -185,6 +183,7 @@ private struct WorkerInvocation: Sendable {
 @MainActor
 final class BackgroundWorkerProcess {
     private let process: Process
+    private let lifetimeWriter: FileHandle
     private var expectedTermination = false
 
     init(
@@ -194,6 +193,7 @@ final class BackgroundWorkerProcess {
         onUnexpectedExit: @escaping @MainActor (BackgroundWorkerError) -> Void
     ) {
         self.process = process
+        self.lifetimeWriter = lifetimeWriter
         process.terminationHandler = { [weak self] process in
             // The coordinator releases its handle immediately after stopping.
             // Cleanup and the lifetime pipe must outlive that handle.
@@ -211,12 +211,16 @@ final class BackgroundWorkerProcess {
         }
     }
 
-    @discardableResult
-    func terminate() -> Int32? {
+    func terminate() {
+        guard !expectedTermination else { return }
         expectedTermination = true
-        let processID = process.processIdentifier
-        guard process.isRunning else { return nil }
+        guard process.isRunning else { return }
         process.terminate()
-        return processID
+        // Give the probe time to flush its final snapshot. Closing our pipe
+        // then stops even a hung AX call, without signalling a saved PID.
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            try? lifetimeWriter.close()
+        }
     }
 }

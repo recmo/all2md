@@ -92,7 +92,9 @@ guarantee that permissions or a meeting application's devices will remain usable
   its live state. Stopping a recording returns the app to monitoring before
   deferred finalization finishes.
 - Accessibility workers exit when their recorder's lifetime pipe closes, even
-  if an Accessibility call is stuck. Recovery waits for the metadata writer's
+  if an Accessibility call is stuck. On normal stop, the recorder requests a
+  final snapshot and closes the pipe after a two-second grace period. No worker
+  PID is handed to finalization. Recovery waits for the metadata writer's
   file lock before publishing and checksumming its log. Worker request files
   are removed after loading; normal-exit cleanup also outlives the app's handle.
 - Interrupted CAF chunks are discovered at launch and can be recovered from

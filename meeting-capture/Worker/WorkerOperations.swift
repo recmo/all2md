@@ -53,10 +53,9 @@ enum WorkerOperations {
         return "Accessibility: metadata worker read and observer checks passed."
     }
 
-    static func finalize(_ request: FinalizeCaptureRequest) throws -> WorkerManifestResult {
+    static func finalize(_ request: FinalizeCaptureRequest) throws -> URL {
         let claim = try RecordingClaim(request.paths)
         defer { withExtendedLifetime(claim) {} }
-        waitForAccessibilityWorker(request.accessibilityWorkerProcessID)
         let accessibility = finalizeAccessibilityArtifact(paths: request.paths)
         var metadata = request.metadata
         if let title = accessibilityWindowTitle(request.paths.accessibilityFinal) {
@@ -101,10 +100,10 @@ enum WorkerOperations {
         try MeetingStore().write(manifest, to: request.paths.manifest)
         for segment in request.microphoneSegments { try? FileManager.default.removeItem(at: segment.url) }
         if let participants = request.participants { try? FileManager.default.removeItem(at: participants) }
-        return WorkerManifestResult(manifest: request.paths.manifest)
+        return request.paths.manifest
     }
 
-    static func recover(_ request: RecoverCaptureRequest) throws -> WorkerManifestResult {
+    static func recover(_ request: RecoverCaptureRequest) throws -> URL {
         let store = MeetingStore()
         let paths = store.paths(forInterruptedFile: request.interruptedFile)
         let claim = try RecordingClaim(paths)
@@ -160,7 +159,7 @@ enum WorkerOperations {
         )
         try store.write(manifest, to: paths.manifest)
         for file in relatedFiles { try? FileManager.default.removeItem(at: file) }
-        return WorkerManifestResult(manifest: paths.manifest)
+        return paths.manifest
     }
 
     private static func finalizeAccessibilityArtifact(paths: RecordingPaths) -> AccessibilityArtifact? {
@@ -205,16 +204,6 @@ enum WorkerOperations {
             return record["windowTitle"] as? String
         }
         return nil
-    }
-
-    private static func waitForAccessibilityWorker(_ processID: Int32?) {
-        guard let processID, processID > 0 else { return }
-        let deadline = Date().addingTimeInterval(2)
-        while kill(processID, 0) == 0, Date() < deadline { usleep(20_000) }
-        guard kill(processID, 0) == 0 else { return }
-        _ = kill(processID, SIGKILL)
-        let killDeadline = Date().addingTimeInterval(1)
-        while kill(processID, 0) == 0, Date() < killDeadline { usleep(20_000) }
     }
 
     private static func quarantineEmptyRecoveryFiles(_ files: [URL], archiveTemporary: URL) {

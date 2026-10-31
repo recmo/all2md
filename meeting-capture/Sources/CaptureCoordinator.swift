@@ -129,7 +129,7 @@ final class CaptureCoordinator: ObservableObject {
             ? paths.participantsTemporary
             : nil
         let participantsStartedAt = participants.firstSampleAt
-        let accessibilityWorkerProcessID = accessibilityWorker?.terminate()
+        accessibilityWorker?.terminate()
         accessibilityWorker = nil
         accessibilityWorkerID = nil
         let request = FinalizeCaptureRequest(
@@ -139,7 +139,6 @@ final class CaptureCoordinator: ObservableObject {
             captureStartedAt: start,
             captureEndedAt: end,
             paths: paths,
-            accessibilityWorkerProcessID: accessibilityWorkerProcessID,
             trigger: trigger,
             metadata: metadata,
             warnings: warnings,
@@ -149,7 +148,7 @@ final class CaptureCoordinator: ObservableObject {
         return request
     }
 
-    func finalize(_ request: FinalizeCaptureRequest) async throws -> URL? {
+    func finalize(_ request: FinalizeCaptureRequest) async throws -> URL {
         defer { claimedRecordings.remove(request.paths.manifest) }
         guard let backgroundWorker else { throw BackgroundWorkerError.unavailable }
         return try await backgroundWorker.finalize(request)
@@ -157,7 +156,7 @@ final class CaptureCoordinator: ObservableObject {
 
     func recoverableFiles() -> [URL] { store.interruptedRecordings(excluding: claimedRecordings) }
 
-    func recoverInterruptedRecording(_ file: URL) async throws -> URL? {
+    func recoverInterruptedRecording(_ file: URL) async throws -> URL {
         let identity = store.paths(forInterruptedFile: file).manifest
         guard !claimedRecordings.contains(identity) else {
             throw CaptureError.writerFailure("Recording is already being captured or processed")

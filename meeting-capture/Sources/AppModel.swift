@@ -190,7 +190,7 @@ final class AppModel: ObservableObject {
         finalizationsInProgress += 1
         Task {
             do {
-                if let manifest = try await capture.finalize(request) { lastManifest = manifest }
+                lastManifest = try await capture.finalize(request)
             } catch {
                 recoveryError = error.localizedDescription
             }
