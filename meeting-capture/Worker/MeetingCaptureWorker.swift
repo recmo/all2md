@@ -54,7 +54,28 @@ enum MeetingCaptureWorker {
     private static func runAccessibilityProbe(arguments: [String]) throws {
         guard arguments.count == 2 else { throw WorkerMainError.invalidArguments }
         let requestURL = URL(fileURLWithPath: arguments[1])
+        let requestDirectory = requestURL.deletingLastPathComponent()
+        let removeRequest: @Sendable () -> Void = {
+            _ = unlink(requestURL.path)
+            _ = rmdir(requestDirectory.path)
+        }
+        defer { removeRequest() }
+        DispatchQueue.global(qos: .utility).async {
+            _ = FileHandle.standardInput.readDataToEndOfFile()
+            removeRequest()
+            // Do not wait for the main queue: an AX call may be hung there.
+            // Exiting closes the log and releases its publication lock.
+            _exit(EXIT_SUCCESS)
+        }
         let request = try JSONDecoder().decode(AccessibilityProbeRequest.self, from: Data(contentsOf: requestURL))
+        removeRequest()
+        // Keep this inode in place so recovery and the writer always lock the
+        // same file, including across recorder crashes.
+        let lockURL = request.outputURL.appendingPathExtension("lock")
+        let lock = open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
+        guard lock >= 0 else { throw WorkerMainError.artifactClaim }
+        defer { close(lock) }
+        guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { throw WorkerMainError.artifactClaim }
         let client = AudioClient(
             audioObjectID: 0,
             processID: request.processID,
@@ -85,11 +106,13 @@ enum MeetingCaptureWorker {
 private enum WorkerMainError: LocalizedError {
     case invalidArguments
     case processGroup
+    case artifactClaim
 
     var errorDescription: String? {
         switch self {
         case .invalidArguments: "invalid worker arguments"
         case .processGroup: "could not isolate worker subprocesses"
+        case .artifactClaim: "could not claim the Accessibility log"
         }
     }
 }

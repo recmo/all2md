@@ -77,11 +77,24 @@ struct BackgroundWorkerClient: Sendable {
         process.executableURL = executableURL
         process.arguments = ["accessibility-probe", requestURL.path]
         process.qualityOfService = .utility
+        // Only the recorder holds the write end. EOF also stops a probe whose
+        // main thread is stuck in Accessibility when the recorder crashes.
+        let lifetime = Pipe()
+        guard fcntl(lifetime.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+            try? FileManager.default.removeItem(at: directory)
+            throw BackgroundWorkerError.launch("Could not isolate the metadata worker lifetime pipe")
+        }
+        defer { try? lifetime.fileHandleForReading.close() }
+        process.standardInput = lifetime.fileHandleForReading
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        let handle = BackgroundWorkerProcess(process: process, temporaryDirectory: directory, onUnexpectedExit: onUnexpectedExit)
+        let handle = BackgroundWorkerProcess(
+            process: process, temporaryDirectory: directory,
+            lifetimeWriter: lifetime.fileHandleForWriting, onUnexpectedExit: onUnexpectedExit
+        )
         do { try process.run() }
         catch {
+            try? lifetime.fileHandleForWriting.close()
             try? FileManager.default.removeItem(at: directory)
             throw BackgroundWorkerError.launch(error.localizedDescription)
         }
@@ -172,20 +185,22 @@ private struct WorkerInvocation: Sendable {
 @MainActor
 final class BackgroundWorkerProcess {
     private let process: Process
-    private let temporaryDirectory: URL
     private var expectedTermination = false
 
     init(
         process: Process,
         temporaryDirectory: URL,
+        lifetimeWriter: FileHandle,
         onUnexpectedExit: @escaping @MainActor (BackgroundWorkerError) -> Void
     ) {
         self.process = process
-        self.temporaryDirectory = temporaryDirectory
         process.terminationHandler = { [weak self] process in
+            // The coordinator releases its handle immediately after stopping.
+            // Cleanup and the lifetime pipe must outlive that handle.
+            try? lifetimeWriter.close()
+            try? FileManager.default.removeItem(at: temporaryDirectory)
             Task { @MainActor in
                 guard let self else { return }
-                try? FileManager.default.removeItem(at: self.temporaryDirectory)
                 guard !self.expectedTermination, process.terminationStatus != 0 else { return }
                 onUnexpectedExit(.crashed(
                     command: "accessibility-probe",

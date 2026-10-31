@@ -165,6 +165,16 @@ enum WorkerOperations {
 
     private static func finalizeAccessibilityArtifact(paths: RecordingPaths) -> AccessibilityArtifact? {
         do {
+            // A crashed recorder releases its recording claim before its probe
+            // observes EOF. Wait for that writer to exit before publishing or
+            // hashing the log. The probe's lifetime watcher runs off its AX queue.
+            let lockURL = paths.accessibilityTemporary.appendingPathExtension("lock")
+            let lock = open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
+            guard lock >= 0 else { return nil }
+            defer { close(lock) }
+            while flock(lock, LOCK_EX) != 0 {
+                if errno != EINTR { return nil }
+            }
             if FileManager.default.fileExists(atPath: paths.accessibilityTemporary.path) {
                 if FileManager.default.fileExists(atPath: paths.accessibilityFinal.path) {
                     _ = try FileManager.default.replaceItemAt(paths.accessibilityFinal, withItemAt: paths.accessibilityTemporary)

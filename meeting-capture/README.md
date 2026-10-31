@@ -91,6 +91,10 @@ guarantee that permissions or a meeting application's devices will remain usable
   processes. A worker crash or hang cannot terminate the recorder or replace
   its live state. Stopping a recording returns the app to monitoring before
   deferred finalization finishes.
+- Accessibility workers exit when their recorder's lifetime pipe closes, even
+  if an Accessibility call is stuck. Recovery waits for the metadata writer's
+  file lock before publishing and checksumming its log. Worker request files
+  are removed after loading; normal-exit cleanup also outlives the app's handle.
 - Interrupted CAF chunks are discovered at launch and can be recovered from
   the menu while idle or after a recording check or capture error. Recovery does
   not require a working microphone or recording authorization. It remains a
