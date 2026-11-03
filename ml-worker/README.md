@@ -31,7 +31,7 @@ transport, leases, transfers, progress, cancellation, and publication.
 
 | Job | Local processing | Result |
 | --- | --- | --- |
-| Transcription | Existing speech2md pipeline | Transcript Markdown and voiceprints |
+| Transcription | Existing speech2md pipeline, with evaluated audio preprocessing | Transcript Markdown and voiceprints |
 | OCR | Existing pages2md pipeline | Markdown and declared supporting assets |
 | Embeddings | Explicitly selected local model | Vectors with model/version, dimensions, and source identity |
 
@@ -47,12 +47,64 @@ resume compatible checkpoints. Input or recipe changes must invalidate stale
 results. Run in the foreground first, then add a launchd service with restart
 behavior and explicit paths for credentials, logs, and caches.
 
+## Audio preprocessing
+
+Preprocessing belongs inside the speech2md recipe so it shares the assignment,
+lease, input verification, and checkpoint lifecycle. Transcription, diarization,
+and speaker embeddings already exist; the following work extends that pipeline.
+LLM-based summaries, captions, and extraction remain with external providers.
+
+The current pipeline selects each declared audio stream and converts model inputs
+to 16 kHz mono. It also detects silence and falls back to low-energy boundaries
+when splitting long recordings. These steps are already implemented. Learned
+voice activity detection (VAD) and denoising are not currently implemented.
+
+Evaluate additions in this order:
+
+1. **Audio inspection:** record duration, channel layout, sample rate, clipping,
+   and level statistics per track. Report silent or problematic inputs without
+   changing the canonical recording.
+2. **VAD:** evaluate speech-region detection for chunk boundaries and selecting
+   speaker embedding samples. Retain context around speech and keep the existing
+   silence-based behavior as the baseline. Do not discard quiet speech or overlap
+   based solely on a VAD decision.
+3. **Level adjustment:** evaluate bounded gain and peak protection for quiet
+   tracks. Record the processing parameters and compare with unmodified input.
+4. **Noise suppression:** evaluate an optional pinned speech-enhancement model
+   for noisy recordings. Compare raw and enhanced inputs for both transcription
+   and speaker matching before making enhancement a default for any recipe.
+
+Preserve microphone and participant roles and process their streams separately.
+Every derived waveform must retain the original time axis and duration, including
+inter-track offsets. Do not concatenate detected speech or remove silence;
+transcript timestamps, attendee ranges, corrections, and playback must continue
+to refer to the canonical recording. If a future transform introduces delay,
+compensate and test alignment explicitly.
+
+Keep originals immutable and enhanced audio in the local recipe cache unless
+explicitly declared as an output. Include source hashes, model/checkpoint identity,
+parameters, and preprocessing version in cache keys and publication provenance.
+Only reuse checkpoints produced by a compatible preprocessing configuration.
+Choose the transcription and speaker-embedding input paths independently based
+on evaluation; enhancement need not be used for both.
+
+Before enabling a stage, compare against the current pipeline on clean, noisy,
+quiet, overlapping, and silent audio, including separate-role captures. Check
+transcript word errors, diarization errors, speaker-match accuracy, timestamp
+alignment, and runtime/memory use on the MacBook. Fixture tests can verify timing,
+cache invalidation, cancellation, and no-speech handling; actual quality decisions
+require representative recordings and reviewed reference transcripts/identities.
+Do not add source separation or dereverberation to the initial implementation;
+revisit them only if recordings demonstrate a need.
+
 ## Development sequence
 
 - [ ] Extract the existing worker lifecycle into an independent runner while
   preserving the transcription behavior and CLI until callers are updated.
 - [ ] Dispatch by recipe, advertise installed capabilities, and reject jobs the
   machine cannot execute. Keep model dependencies with their owning projects.
+- [ ] Evaluate and implement audio preprocessing in the order above, retaining
+  the existing path until quality and alignment checks justify each stage.
 - [ ] Add an OCR adapter that downloads the assigned source, invokes pages2md,
   and publishes only the declared Markdown and supporting assets.
 - [ ] Define embedding input/output schemas, versioned model identity, and the
