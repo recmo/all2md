@@ -52,3 +52,8 @@ uses the locally installed Xcode and installs `MeetingCapture.app` under its
 `speech2md` intentionally has one processing path: pinned MOSS transcription
 and diarization plus pinned ReDimNet2 speaker reconciliation, with raw model
 output retained beside the rendered Markdown.
+
+## Planned ML worker
+
+The [MacBook ML worker plan](ml-worker/README.md) extends the leased
+transcription worker to pick up local embeddings, OCR, and transcription jobs.
