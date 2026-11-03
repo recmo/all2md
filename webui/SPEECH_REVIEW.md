@@ -100,3 +100,18 @@ current. Adding a meeting does not retranscribe the archive.
 - Audio is streamed on demand and is not included in automatic offline caching.
 - Binary objects need a separate backup or external LFS hosting; mdstore does not
   expose Git LFS transfer endpoints or configure a client Git remote.
+
+## Planned enhanced audio playback
+
+The [ML worker plan](../ml-worker/README.md#audio-enhancement-for-playback-and-model-input)
+adds per-track level adjustment and optional denoising. This is planned work;
+the current player does not yet offer enhanced audio selection.
+
+Workers will publish time-aligned, browser-playable derived audio, including
+separate role files for shared multi-track containers. The player will offer
+Original/Enhanced selection, preserving the playhead, speed, and transcript
+alignment. Original recordings remain immutable. Missing, stale, or failed
+enhancement will expose its status and fall back to playable original audio
+where available, without playing a different role. Playback selection is
+independent of preprocessing choices for transcription and speaker embeddings
+and does not trigger model jobs.
