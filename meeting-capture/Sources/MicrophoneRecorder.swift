@@ -9,6 +9,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
     private var file: PCMFile?
     private var currentSegmentURL: URL?
     private var currentSegmentStartedAt: Date?
+    private var currentSegmentHostStart: CMTime?
     private var completedSegments: [CapturedAudioSegment] = []
     private let writeLock = NSLock()
     private var configurationObserver: NSObjectProtocol?
@@ -35,14 +36,14 @@ final class MicrophoneRecorder: @unchecked Sendable {
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
     }
 
-    func start(to url: URL, deviceID: AudioDeviceID?, startedAt: Date = Date()) throws {
+    func start(to url: URL, deviceID: AudioDeviceID?, startedAt: Date, startTime: CMTime) throws {
         completedSegments = []
-        try startEngine(deviceID: deviceID, to: url, startedAt: startedAt)
+        try startEngine(deviceID: deviceID, to: url, startedAt: startedAt, startTime: startTime)
     }
 
-    func restart(to url: URL, deviceID: AudioDeviceID?, startedAt: Date) throws {
+    func restart(to url: URL, deviceID: AudioDeviceID?, startedAt: Date, startTime: CMTime) throws {
         stopEngine()
-        try startEngine(deviceID: deviceID, to: url, startedAt: startedAt)
+        try startEngine(deviceID: deviceID, to: url, startedAt: startedAt, startTime: startTime)
     }
 
     func stop() -> [CapturedAudioSegment] {
@@ -52,7 +53,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
         return result
     }
 
-    private func startEngine(deviceID: AudioDeviceID?, to url: URL, startedAt: Date) throws {
+    private func startEngine(deviceID: AudioDeviceID?, to url: URL, startedAt: Date, startTime: CMTime) throws {
         let input = engine.inputNode
         if let deviceID {
             guard let audioUnit = input.audioUnit else {
@@ -76,14 +77,14 @@ final class MicrophoneRecorder: @unchecked Sendable {
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw CaptureError.noMicrophone
         }
-        let hostStart = CMClockGetTime(CMClockGetHostTimeClock()).seconds - Date().timeIntervalSince(startedAt)
-        let file = PCMFile(url: url, startTime: hostStart)
+        let file = PCMFile(url: url, startTime: startTime.seconds)
         format = inputFormat
         self.file = file
         writeFailure = nil
         self.deviceID = deviceID
         currentSegmentURL = url
         currentSegmentStartedAt = startedAt
+        currentSegmentHostStart = startTime
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
             self?.consume(buffer, time: time)
         }
@@ -100,16 +101,19 @@ final class MicrophoneRecorder: @unchecked Sendable {
         guard engine.isRunning || file != nil else { return }
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
-        let endedAt = Date()
+        let endedAt = CMClockGetTime(CMClockGetHostTimeClock())
         writeLock.lock()
         file?.close()
         file = nil
         writeLock.unlock()
-        if let url = currentSegmentURL, let startedAt = currentSegmentStartedAt {
-            completedSegments.append(CapturedAudioSegment(url: url, startedAt: startedAt, endedAt: endedAt))
+        if let url = currentSegmentURL, let startedAt = currentSegmentStartedAt,
+           let hostStart = currentSegmentHostStart {
+            completedSegments.append(CapturedAudioSegment(url: url, startedAt: startedAt,
+                endedAt: startedAt.addingTimeInterval((endedAt - hostStart).seconds)))
         }
         currentSegmentURL = nil
         currentSegmentStartedAt = nil
+        currentSegmentHostStart = nil
         deviceID = nil
     }
 

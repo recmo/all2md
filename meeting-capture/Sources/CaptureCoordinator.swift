@@ -75,8 +75,10 @@ final class CaptureCoordinator: ObservableObject {
             }
         }
         do {
-            let segment = try prepareMicrophoneSegment()
-            try microphone.start(to: segment.url, deviceID: microphoneDevice?.id, startedAt: segment.startedAt)
+            let startTime = CMClockGetTime(CMClockGetHostTimeClock())
+            let segment = try prepareMicrophoneSegment(at: startTime)
+            try microphone.start(to: segment.url, deviceID: microphoneDevice?.id,
+                                 startedAt: segment.startedAt, startTime: startTime)
             if let pid = trigger.processID {
                 session?.participants = paths.participantsTemporary
                 try session?.save()
@@ -110,8 +112,10 @@ final class CaptureCoordinator: ObservableObject {
         guard session?.captureFailed == false else { return }
         let start = captureDate()
         do {
-            let segment = try prepareMicrophoneSegment()
-            try microphone.restart(to: segment.url, deviceID: device?.id, startedAt: segment.startedAt)
+            let startTime = CMClockGetTime(CMClockGetHostTimeClock())
+            let segment = try prepareMicrophoneSegment(at: startTime)
+            try microphone.restart(to: segment.url, deviceID: device?.id,
+                                   startedAt: segment.startedAt, startTime: startTime)
             currentMicrophoneDevice = device
             activeMicrophoneName = device?.name ?? "System default microphone"
             if let device { addMicrophoneMetadata(device) }
@@ -120,9 +124,9 @@ final class CaptureCoordinator: ObservableObject {
         } catch { recordFailure("Could not restart microphone: \(error.localizedDescription)") }
     }
 
-    private func prepareMicrophoneSegment() throws -> CapturedAudioSegment {
+    private func prepareMicrophoneSegment(at hostTime: CMTime) throws -> CapturedAudioSegment {
         guard let session else { throw CaptureError.writerFailure("No active recording") }
-        let date = captureDate()
+        let date = captureDate(at: hostTime)
         let segment = CapturedAudioSegment(url: session.paths.microphoneTemporary(segment: session.microphoneSegments.count + 1),
                                            startedAt: date, endedAt: date)
         self.session?.microphoneSegments.append(segment)
@@ -130,9 +134,9 @@ final class CaptureCoordinator: ObservableObject {
         return segment
     }
 
-    private func captureDate() -> Date {
+    private func captureDate(at hostTime: CMTime = CMClockGetTime(CMClockGetHostTimeClock())) -> Date {
         guard let session else { return Date() }
-        return session.captureStartedAt.addingTimeInterval((CMClockGetTime(CMClockGetHostTimeClock()) - hostStart).seconds)
+        return session.captureStartedAt.addingTimeInterval((hostTime - hostStart).seconds)
     }
 
     private func recordFailure(_ message: String) {

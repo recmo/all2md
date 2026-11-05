@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import CoreGraphics
+import CoreMedia
 import Foundation
 
 struct StartupCaptureReport: Equatable, Sendable {
@@ -37,7 +38,8 @@ enum StartupCaptureCheck {
         let system = SystemAudioRecorder()
         do {
             try await system.startAuthorizationCheck(to: systemURL)
-            try microphone.start(to: microphoneURL, deviceID: nil)
+            let startTime = CMClockGetTime(CMClockGetHostTimeClock())
+            try microphone.start(to: microphoneURL, deviceID: nil, startedAt: Date(), startTime: startTime)
             try await Task.sleep(for: .seconds(1.5))
             _ = microphone.stop()
             try await system.stop()
