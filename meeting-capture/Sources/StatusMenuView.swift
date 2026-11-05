@@ -22,7 +22,6 @@ struct StatusMenuView: View {
                     Text("App and worker storage / archive checks passed.")
                         .font(.caption).foregroundStyle(.secondary)
                     Text(report.accessibility).font(.caption).foregroundStyle(.secondary)
-                    Button("Accessibility Settings (optional)") { model.openAccessibilitySettings() }
                 }
                 Button("Check recording access again") { model.checkPermissions() }
                 Button("Start recording manually") { model.manualStart() }
@@ -67,9 +66,6 @@ struct StatusMenuView: View {
                 Text("Enable access for this installed app, then retry. If macOS requests a restart, quit and reopen Meeting Capture.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Open Screen & System Audio Settings") { model.openScreenRecordingSettings() }
-                Button("Open Microphone Settings") { model.openMicrophoneSettings() }
-                Button("Open Files & Folders Settings") { model.openFilesSettings() }
                 Button("Retry recording check") { model.checkPermissions() }
             case let .error(message):
                 Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
@@ -93,11 +89,40 @@ struct StatusMenuView: View {
                 }
             }
             Divider()
+            Text("Permissions").font(.caption).foregroundStyle(.secondary)
+            permissionRow("Microphone", granted: model.microphoneAccess, pane: "Privacy_Microphone")
+            permissionRow("Screen & System Audio Recording", granted: model.screenRecordingAccess, pane: "Privacy_ScreenCapture")
+            permissionRow("Documents / Files & Folders", granted: model.documentsAccess, pane: "Privacy_FilesAndFolders")
+            permissionRow("Accessibility (optional)", granted: model.accessibilityAccess, pane: "Privacy_Accessibility")
+            Text("✓ Available   ○ Unavailable   — Unknown\nClick a permission to open System Settings.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .disabled(!model.allowsTermination)
         }
         .padding(14)
         .frame(width: 320)
+        .task {
+            while !Task.isCancelled {
+                await model.refreshPermissionStatus()
+                do { try await Task.sleep(for: .seconds(3)) }
+                catch { return }
+            }
+        }
+    }
+
+    private func permissionRow(_ title: String, granted: Bool?, pane: String) -> some View {
+        Button { model.openPermissionSettings(pane) } label: {
+            HStack {
+                Image(systemName: granted == true ? "checkmark" : (granted == false ? "circle" : "minus"))
+                    .frame(width: 16)
+                Text(title)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title): \(granted == true ? "available" : (granted == false ? "unavailable" : "unknown")). Open System Settings")
     }
 }
 

@@ -72,16 +72,8 @@ enum StartupCaptureCheck {
     }
 
     static func validateStorage(_ root: URL) throws {
-        let probe = root.appending(path: ".access-check-\(UUID().uuidString)")
         do {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: probe) }
-            let expected = Data("Meeting Capture storage check".utf8)
-            try expected.write(to: probe, options: .atomic)
-            guard try Data(contentsOf: probe) == expected else {
-                throw CaptureError.writerFailure("Meeting folder readback failed")
-            }
-            try FileManager.default.removeItem(at: probe)
+            try MeetingStore(root: root).validateAccess()
         } catch {
             throw CaptureError.writerFailure("Cannot save to \(root.path). Check folder access and available disk space, then retry. \(error.localizedDescription)")
         }

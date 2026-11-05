@@ -48,6 +48,10 @@ struct BackgroundWorkerClient: Sendable {
         try await run(command: "check-metadata-access", request: request, timeout: 5)
     }
 
+    func checkPermissions(root: URL) async throws -> WorkerPermissionReport {
+        try await run(command: "check-permissions", request: root, timeout: 5)
+    }
+
     func recover(_ request: RecoverCaptureRequest) async throws -> URL {
         try await run(command: "recover", request: request)
     }

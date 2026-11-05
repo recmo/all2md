@@ -1,5 +1,10 @@
 import Foundation
 
+struct WorkerPermissionReport: Codable, Sendable {
+    let documents: Bool
+    let accessibility: Bool
+}
+
 struct WorkerAccessRequest: Codable, Sendable {
     let root: URL
     let microphone: URL

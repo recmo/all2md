@@ -25,7 +25,73 @@ open result/Applications/MeetingCapture.app
 ```
 
 The Nix derivation uses the locally installed Xcode and ad-hoc signs the result
-with the capture entitlement.
+with the capture entitlement. Home Manager in `recmo/nix`,
+[`home/remco/darwin.nix`](https://github.com/recmo/nix/blob/main/home/remco/darwin.nix),
+then copies and developer-signs the app **and worker** with identifier
+`ventures.wicked.MeetingCapture` and one explicit designated requirement. Its
+certificate is `Apple Development: REMCO BLOEMEN (V458N7266F)`; its team is
+`LD6C9WL456` (the suffix in the certificate name is not the team ID).
+
+### Test a PR with the installed identity
+
+On the Mac with that certificate and private key in the login keychain, check
+out the PR branch, then run from the repository root:
+
+```sh
+nix build .#meeting-capture
+test_dir="$(mktemp -d /tmp/meeting-capture-test.XXXXXX)"
+bash meeting-capture/sign-local.sh \
+  result/Applications/MeetingCapture.app "$test_dir/MeetingCapture.app"
+```
+
+The helper reads the designated requirement from
+`~/Applications/MeetingCapture.app`, signs both the test app and worker with it,
+preserves their entitlements, and verifies both against that requirement. It
+leaves the installed app untouched. An optional third argument selects another
+installed app path. Do not launch the ad-hoc-signed `result` directly for this test.
+Apple describes why designated requirements determine whether an updated build
+retains its identity in [TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
+
+Quit Meeting Capture from its menu after stopping any recording and waiting for
+finalization. To test at the same installed path, keep a backup and swap the
+verified build into place (Home Manager marks the installed bundle immutable):
+
+```sh
+installed_app="$HOME/Applications/MeetingCapture.app"
+backup_app="$HOME/Applications/MeetingCapture.before-permission-test.app"
+test ! -e "$backup_app" &&
+  chflags -R nouchg "$installed_app" &&
+  mv "$installed_app" "$backup_app" &&
+  ditto "$test_dir/MeetingCapture.app" "$installed_app" &&
+  open "$installed_app"
+```
+
+Check the four permission rows in both the ready and failed-check menus. Each
+row should open its own Privacy & Security pane, including when it is checked.
+Toggle a permission, return to the menu, and allow a few seconds for its status
+to refresh. Accessibility is optional; Documents is checked only when both the
+app and worker can write, read, and remove a disposable file in the meeting
+folder. A folder failure can also mean disk or filesystem trouble, rather than a
+denied TCC grant. A dash means the worker status could not be obtained.
+
+Use **Check recording access again** / **Retry recording check** to run the
+full recording and archive test; permission checkmarks alone do not validate
+devices or audio. Play audio during that test, then make and stop a short manual
+recording. If macOS requests a restart after a permission change, quit and reopen
+the app. Restoring toggled permissions is part of cleanup; do not reset TCC to
+test identity persistence.
+
+After quitting the test app, restore the backup:
+
+```sh
+mv "$installed_app" "$test_dir/MeetingCapture.tested.app" &&
+  mv "$backup_app" "$installed_app" &&
+  chflags -R uchg "$installed_app" &&
+  open "$installed_app"
+```
+
+Avoid running Home Manager activation while the test build occupies its managed
+path. The helper does not update Home Manager's deployment marker.
 
 At launch, Meeting Capture checks Microphone and Screen & System Audio
 Recording access, requesting authorization if needed, and tests writing to the
@@ -53,6 +119,12 @@ implementation does not use Camera, Input Monitoring, Automation/Apple Events,
 Calendar, Contacts, or notification authorization, and does not require Full
 Disk Access. The audio-input signing entitlement is included in the app package;
 the real microphone probe exercises that capability as well as user consent.
+The menu always lists these four permissions with checkmarks for available
+access, empty circles for unavailable access, and dashes for unknown worker
+status. Clicking any row opens its corresponding Settings pane. Status refreshes
+every three seconds while the menu is open; it never starts an audio recording.
+Accessibility trust is queried in a fresh worker, which is the process that
+collects metadata. Folder probes delete their disposable files after each check.
 
 Failures keep recording disabled and expose Settings links and an explicit Retry
 action. macOS may require quitting and reopening the installed app after a grant.

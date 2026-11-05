@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import AVFoundation
 import CoreGraphics
 import Foundation
 
@@ -18,6 +19,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var state: State = .checkingPermissions
     @Published private(set) var permissionMessage = ""
     @Published private(set) var startupReport: StartupCaptureReport?
+    @Published private(set) var microphoneAccess = false
+    @Published private(set) var screenRecordingAccess = false
+    @Published private(set) var documentsAccess: Bool?
+    @Published private(set) var accessibilityAccess: Bool?
+    private var refreshingPermissions = false
     private let checkCapture: @MainActor () async throws -> StartupCaptureReport
     private var permissionCheckTask: Task<Void, Never>?
     @Published var lastManifest: URL?
@@ -126,23 +132,30 @@ final class AppModel: ObservableObject {
         if startupReport == nil { checkPermissions() } else { state = .idle }
     }
 
-    func openMicrophoneSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else { return }
-        NSWorkspace.shared.open(url)
+    func refreshPermissionStatus() async {
+        guard !refreshingPermissions else { return }
+        refreshingPermissions = true
+        defer { refreshingPermissions = false }
+        microphoneAccess = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        screenRecordingAccess = CGPreflightScreenCaptureAccess()
+        let appDocuments: Bool
+        do {
+            try MeetingStore().validateAccess()
+            appDocuments = true
+        } catch { appDocuments = false }
+        do {
+            let worker = try BackgroundWorkerClient()
+            let report = try await worker.checkPermissions(root: MeetingStore().root)
+            documentsAccess = appDocuments && report.documents
+            accessibilityAccess = report.accessibility
+        } catch {
+            documentsAccess = appDocuments ? nil : false
+            accessibilityAccess = nil
+        }
     }
 
-    func openFilesSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") else { return }
-        NSWorkspace.shared.open(url)
-    }
-
-    func openAccessibilitySettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
-        NSWorkspace.shared.open(url)
-    }
-
-    func openScreenRecordingSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+    func openPermissionSettings(_ pane: String) {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") else { return }
         NSWorkspace.shared.open(url)
     }
 

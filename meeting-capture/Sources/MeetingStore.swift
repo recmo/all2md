@@ -9,6 +9,18 @@ struct MeetingStore: Sendable {
             .appending(path: "Documents/Meetings", directoryHint: .isDirectory)
     }
 
+    func validateAccess() throws {
+        let probe = root.appending(path: ".access-check-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: probe) }
+        let expected = Data("Meeting Capture storage check".utf8)
+        try expected.write(to: probe, options: .atomic)
+        guard try Data(contentsOf: probe) == expected else {
+            throw CaptureError.writerFailure("Meeting folder readback failed")
+        }
+        try FileManager.default.removeItem(at: probe)
+    }
+
     func paths(startedAt: Date, title: String?) throws -> RecordingPaths {
         let calendar = Calendar.current
         let year = String(format: "%04d", calendar.component(.year, from: startedAt))

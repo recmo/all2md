@@ -4,6 +4,15 @@ import AVFoundation
 import ApplicationServices
 
 enum WorkerOperations {
+    static func checkPermissions(_ root: URL) -> WorkerPermissionReport {
+        let documents: Bool
+        do {
+            try MeetingStore(root: root).validateAccess()
+            documents = true
+        } catch { documents = false }
+        return WorkerPermissionReport(documents: documents, accessibility: AXIsProcessTrusted())
+    }
+
     static func checkAccess(_ request: WorkerAccessRequest) throws -> WorkerAccessReport {
         // Check the worker's access to app-created audio and the meeting folder.
         // A successful parent-process write does not verify this execution path.
