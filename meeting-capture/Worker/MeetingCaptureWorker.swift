@@ -14,6 +14,8 @@ enum MeetingCaptureWorker {
             let arguments = Array(CommandLine.arguments.dropFirst())
             guard let command = arguments.first else { throw WorkerMainError.invalidArguments }
             switch command {
+            case "check-permissions":
+                try runRequest(URL.self, arguments: arguments, operation: WorkerOperations.checkPermissions)
             case "check-access":
                 try runRequest(WorkerAccessRequest.self, arguments: arguments, operation: WorkerOperations.checkAccess)
             case "check-metadata-access":

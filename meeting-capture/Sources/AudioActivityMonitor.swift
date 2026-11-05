@@ -32,18 +32,7 @@ final class AudioActivityMonitor {
         let clients = runningClients(from: objectIDs, selector: kAudioProcessPropertyIsRunningInput)
         let outputClients = runningClients(from: objectIDs, selector: kAudioProcessPropertyIsRunningOutput)
         onOutputClientsChanged?(outputClients)
-        if clients.isEmpty, defaultInputIsRunning() {
-            let device = defaultInputDevice().flatMap(audioInputDevice)
-            onClientsChanged?([AudioClient(
-                audioObjectID: 0,
-                processID: 0,
-                bundleID: nil,
-                applicationName: "Unknown microphone client",
-                inputDevices: device.map { [$0] } ?? []
-            )])
-        } else {
-            onClientsChanged?(clients)
-        }
+        onClientsChanged?(clients)
     }
 
     private func runningClients(
@@ -165,30 +154,7 @@ final class AudioActivityMonitor {
         return value.takeRetainedValue() as String
     }
 
-    private func defaultInputIsRunning() -> Bool {
-        guard let device = defaultInputDevice() else { return false }
-        var runningAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-            mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var running: UInt32 = 0
-        var runningSize = UInt32(MemoryLayout<UInt32>.size)
-        return AudioObjectGetPropertyData(device, &runningAddress, 0, nil, &runningSize, &running) == noErr && running != 0
-    }
 
-    private func defaultInputDevice() -> AudioDeviceID? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var device = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr,
-              device != kAudioObjectUnknown else { return nil }
-        return device
-    }
 }
 
 enum ProcessApplicationResolver {

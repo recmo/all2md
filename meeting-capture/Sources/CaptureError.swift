@@ -9,6 +9,20 @@ enum CaptureError: LocalizedError {
     case deviceSelectionFailure(String)
     case writerFailure(String)
 
+    static func details(_ error: Error) -> String {
+        var current: NSError? = error as NSError
+        var messages: [String] = []
+        // Bound traversal in case a framework supplies a cyclic error chain.
+        for _ in 0..<5 {
+            guard let error = current else { break }
+            var message = "\(error.localizedDescription) [\(error.domain): \(error.code)]"
+            if let reason = error.localizedFailureReason { message += " \(reason)" }
+            messages.append(message)
+            current = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return messages.joined(separator: "\nCaused by: ")
+    }
+
     var errorDescription: String? {
         switch self {
         case .noMicrophone: "No usable microphone is available."

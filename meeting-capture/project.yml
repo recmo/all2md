@@ -9,7 +9,7 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "15.0"
     CODE_SIGN_STYLE: Automatic
     CODE_SIGN_IDENTITY: Apple Development
-    DEVELOPMENT_TEAM: V458N7266F
+    DEVELOPMENT_TEAM: LD6C9WL456
 targets:
   MeetingCapture:
     type: application

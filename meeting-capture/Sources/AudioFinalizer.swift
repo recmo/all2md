@@ -40,7 +40,7 @@ enum AudioFinalizer {
         }
 
         try? FileManager.default.removeItem(at: temporaryDestination)
-        var arguments = ["-nostdin", "-v", "error", "-y"]
+        var arguments = ["-nostdin", "-v", "error", "-xerror", "-y"]
         for segment in microphoneSegments { arguments += ["-i", segment.url.path] }
         if let participants { arguments += ["-i", participants.path] }
 
@@ -99,7 +99,7 @@ enum AudioFinalizer {
                 throw CaptureError.writerFailure("archive track \(index) is missing its \(expectedTitle) identity")
             }
             try runTool("ffmpeg", arguments: [
-                "-nostdin", "-v", "error", "-i", temporaryDestination.path,
+                "-nostdin", "-v", "error", "-xerror", "-i", temporaryDestination.path,
                 "-map", "0:a:\(index)", "-f", "null", "-",
             ])
         }
@@ -130,20 +130,6 @@ enum AudioFinalizer {
             ),
             tracks: tracks
         )
-    }
-
-    static func recoveredSegments(from urls: [URL], startedAt: Date) throws -> [CapturedAudioSegment] {
-        var cursor = startedAt
-        return try urls.sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { url in
-            let input = try AVAudioFile(forReading: url)
-            guard input.length > 0 else { return nil }
-            let duration = input.processingFormat.sampleRate > 0
-                ? Double(input.length) / input.processingFormat.sampleRate
-                : 0
-            let segment = CapturedAudioSegment(url: url, startedAt: cursor, endedAt: cursor.addingTimeInterval(duration))
-            cursor = segment.endedAt
-            return segment
-        }
     }
 
     static func containsAudio(_ url: URL) throws -> Bool {

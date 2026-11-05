@@ -22,7 +22,6 @@ struct StatusMenuView: View {
                     Text("App and worker storage / archive checks passed.")
                         .font(.caption).foregroundStyle(.secondary)
                     Text(report.accessibility).font(.caption).foregroundStyle(.secondary)
-                    Button("Accessibility Settings (optional)") { model.openAccessibilitySettings() }
                 }
                 Button("Check recording access again") { model.checkPermissions() }
                 Button("Start recording manually") { model.manualStart() }
@@ -61,18 +60,24 @@ struct StatusMenuView: View {
                 Text("A brief test captures microphone and system audio, then deletes it. Respond to any macOS permission prompts.")
                     .font(.caption).foregroundStyle(.secondary)
             case .permissionRequired:
-                Label("Recording check failed", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                Label {
+                    Text("Recording check failed")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
                 Text(model.permissionMessage)
-                Text("Enable access for this installed app, then retry. If macOS requests a restart, quit and reopen Meeting Capture.")
+                    .textSelection(.enabled)
+                Text("Retry after addressing the error. If you changed macOS permissions, quit and reopen Meeting Capture first.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Open Screen & System Audio Settings") { model.openScreenRecordingSettings() }
-                Button("Open Microphone Settings") { model.openMicrophoneSettings() }
-                Button("Open Files & Folders Settings") { model.openFilesSettings() }
                 Button("Retry recording check") { model.checkPermissions() }
+                Button("Copy error details") { model.copyRecordingCheckError() }
             case let .error(message):
-                Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Label {
+                    Text(message).textSelection(.enabled)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
                 Button("Dismiss") { model.dismissError() }
             }
             if model.showsMaintenance {
@@ -81,23 +86,67 @@ struct StatusMenuView: View {
                     ProgressView("Finalizing \(model.finalizationsInProgress) recording(s) in isolated workers…")
                 }
                 if !model.recoverableFiles.isEmpty {
-                    Text("\(model.recoverableFiles.count) interrupted recording file(s) need recovery").font(.caption).foregroundStyle(.orange)
+                    Label {
+                        Text("\(model.recoverableFiles.count) interrupted recording(s)")
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    }
+                    Text("Choose a recording to recover or inspect. Originals are kept if recovery fails.")
+                        .font(.caption).foregroundStyle(.secondary)
                     if model.recoveryInProgress {
                         ProgressView("Recovering in an isolated worker…")
-                    } else {
-                        Button("Recover interrupted recording") { model.recoverInterruptedRecordings() }
+                    }
+                    Menu("Interrupted recordings") {
+                        ForEach(model.recoverableFiles, id: \.self) { file in
+                            Menu(MeetingStore().paths(forInterruptedFile: file).baseName) {
+                                Button("Recover") { model.recoverInterruptedRecording(file) }
+                                    .disabled(model.recoveryInProgress)
+                                Button("Show files") { model.revealInterruptedRecording(file) }
+                            }
+                        }
                     }
                 }
                 if let recoveryError = model.recoveryError {
-                    Text(recoveryError).font(.caption).foregroundStyle(.orange)
+                    Text(recoveryError)
+                        .font(.callout).foregroundStyle(.primary)
+                        .textSelection(.enabled)
                 }
             }
+            Divider()
+            Text("Permissions").font(.caption).foregroundStyle(.secondary)
+            permissionRow("Microphone", granted: model.microphoneAccess, pane: "Privacy_Microphone")
+            permissionRow("Screen & System Audio Recording", granted: model.screenRecordingAccess, pane: "Privacy_ScreenCapture")
+            permissionRow("Documents / Files & Folders", granted: model.documentsAccess, pane: "Privacy_FilesAndFolders")
+            permissionRow("Accessibility (optional)", granted: model.accessibilityAccess, pane: "Privacy_Accessibility")
+            Text("✓ Available   ○ Unavailable   — Unknown\nClick a permission to open System Settings.")
+                .font(.caption).foregroundStyle(.secondary)
             Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .disabled(!model.allowsTermination)
         }
+        .lineLimit(nil)
+        .multilineTextAlignment(.leading)
+        .fixedSize(horizontal: false, vertical: true)
         .padding(14)
         .frame(width: 320)
+        .task { await model.refreshPermissionStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.refreshPermissionStatus() }
+        }
+    }
+
+    private func permissionRow(_ title: String, granted: Bool?, pane: String) -> some View {
+        Button { model.openPermissionSettings(pane) } label: {
+            HStack {
+                Image(systemName: granted == true ? "checkmark" : (granted == false ? "circle" : "minus"))
+                    .frame(width: 16)
+                Text(title)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title): \(granted == true ? "available" : (granted == false ? "unavailable" : "unknown")). Open System Settings")
     }
 }
 
