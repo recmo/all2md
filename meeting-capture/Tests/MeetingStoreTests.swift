@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreMedia
 import Darwin
 import XCTest
 @testable import MeetingCapture
@@ -175,13 +176,61 @@ final class MeetingStoreTests: XCTestCase {
         }
     }
 
-    func testSystemAudioWriterInputUsesSafePassthroughConstruction() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    func testSystemAudioPCMRoundTripsThroughCAF() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let writer = try AVAssetWriter(outputURL: root, fileType: .caf)
-        let input = try SystemAudioRecorder.makeWriterInput()
-        XCTAssertEqual(input.mediaType, .audio)
-        XCTAssertTrue(writer.canAdd(input))
+        for interleaved in [false, true] {
+            for sampleRate in [44_100.0, 48_000.0] {
+                let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                                       sampleRate: sampleRate, channels: 2,
+                                                       interleaved: interleaved))
+                let pcm = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 64))
+                pcm.frameLength = 64
+                let buffers = UnsafeMutableAudioBufferListPointer(pcm.mutableAudioBufferList)
+                for frame in 0..<64 {
+                    for channel in 0..<2 {
+                        let data = try XCTUnwrap(buffers[interleaved ? 0 : channel].mData)
+                            .assumingMemoryBound(to: Float.self)
+                        data[interleaved ? frame * 2 + channel : frame] = channel == 0 ? 0.25 : -0.5
+                    }
+                }
+                var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: Int32(sampleRate)),
+                                                presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+                var sample: CMSampleBuffer?
+                XCTAssertEqual(CMSampleBufferCreate(
+                    allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: false,
+                    makeDataReadyCallback: nil, refcon: nil, formatDescription: format.formatDescription,
+                    sampleCount: 64, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                    sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &sample
+                ), noErr)
+                let sampleBuffer = try XCTUnwrap(sample)
+                XCTAssertEqual(CMSampleBufferSetDataBufferFromAudioBufferList(
+                    sampleBuffer, blockBufferAllocator: kCFAllocatorDefault,
+                    blockBufferMemoryAllocator: kCFAllocatorDefault, flags: 0, bufferList: pcm.audioBufferList
+                ), noErr)
+                XCTAssertEqual(CMSampleBufferSetDataReady(sampleBuffer), noErr)
+                let url = root.appending(path: "\(interleaved)-\(sampleRate).caf")
+                let writer = SystemAudioFile(url: url)
+                try writer.write(sampleBuffer)
+                try writer.write(sampleBuffer)
+                writer.close()
+
+                let saved = try AVAudioFile(forReading: url)
+                XCTAssertEqual(saved.length, 128)
+                XCTAssertEqual(saved.fileFormat.sampleRate, sampleRate)
+                XCTAssertEqual(saved.fileFormat.channelCount, 2)
+                XCTAssertTrue(saved.fileFormat.isInterleaved)
+                let result = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: saved.processingFormat, frameCapacity: 128))
+                try saved.read(into: result)
+                XCTAssertEqual(result.frameLength, 128)
+                let channels = try XCTUnwrap(result.floatChannelData)
+                for frame in 0..<128 {
+                    XCTAssertEqual(channels[0][frame], 0.25, accuracy: 0.00001)
+                    XCTAssertEqual(channels[1][frame], -0.5, accuracy: 0.00001)
+                }
+            }
+        }
     }
 
     func testAccessibilityTreeDiffRecordsAddedRemovedAndChangedAttributes() {

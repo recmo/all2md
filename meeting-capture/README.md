@@ -156,6 +156,9 @@ guarantee that permissions or a meeting application's devices will remain usable
   follows it with a new segment; the short restart interval is recorded as an
   interruption. Participant audio uses an
   application-filtered ScreenCaptureKit stream and excludes this application.
+  Its incoming PCM format determines the audio buffers; `AVAudioFile` writes
+  interleaved float PCM to CAF, including when ScreenCaptureKit supplies planar
+  samples. The file closes on the delivery queue before finalization reads it.
 - Capture does no live transcoding. After stop, finalization aligns the native
   segments and creates one `.mka` without a meeting mix: microphone is mono
   Opus at 96 kb/s VBR and participants remain stereo Opus at 128 kb/s VBR.

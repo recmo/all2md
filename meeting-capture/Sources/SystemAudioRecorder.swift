@@ -6,9 +6,7 @@ import Foundation
 
 final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private var stream: SCStream?
-    private var writer: AVAssetWriter?
-    private var writerInput: AVAssetWriterInput?
-    private var sessionStarted = false
+    private var audioFile: SystemAudioFile?
     private var deliveryError: Error?
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
     private(set) var firstSampleAt: Date?
@@ -65,58 +63,15 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         configuration.sampleRate = 48_000
         configuration.channelCount = 2
 
-        let writer = try AVAssetWriter(outputURL: url, fileType: .caf)
-        let input = try Self.makeWriterInput()
-        input.expectsMediaDataInRealTime = true
-        guard writer.canAdd(input) else { throw CaptureError.writerFailure("cannot add PCM input") }
-        writer.add(input)
-        guard writer.startWriting() else {
-            throw CaptureError.writerFailure("System audio writer start: \(writer.error.map { CaptureError.details($0) } ?? "could not start")")
+        queue.sync {
+            audioFile = SystemAudioFile(url: url)
+            deliveryError = nil
         }
-        self.writer = writer
-        writerInput = input
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
         self.stream = stream
         try await stream.startCapture()
-    }
-
-    static func makeWriterInput() throws -> AVAssetWriterInput {
-        // ScreenCaptureKit already delivers PCM. Passing an explicit PCM output
-        // dictionary aborts in AVAssetWriterInput on macOS 26.6; passthrough
-        // preserves the sample-buffer format and keeps capture initialization safe.
-        // Passthrough requires a source hint before a CAF writer will accept it.
-        var streamDescription = AudioStreamBasicDescription(
-            mSampleRate: 48_000,
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagsNativeFloatPacked,
-            mBytesPerPacket: 8,
-            mFramesPerPacket: 1,
-            mBytesPerFrame: 8,
-            mChannelsPerFrame: 2,
-            mBitsPerChannel: 32,
-            mReserved: 0
-        )
-        var formatDescription: CMAudioFormatDescription?
-        let status = CMAudioFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault,
-            asbd: &streamDescription,
-            layoutSize: 0,
-            layout: nil,
-            magicCookieSize: 0,
-            magicCookie: nil,
-            extensions: nil,
-            formatDescriptionOut: &formatDescription
-        )
-        guard status == noErr, let formatDescription else {
-            throw CaptureError.writerFailure("could not create PCM source format hint (\(status))")
-        }
-        return AVAssetWriterInput(
-            mediaType: .audio,
-            outputSettings: nil,
-            sourceFormatHint: formatDescription
-        )
     }
 
     static func matchingApplicationIndex(
@@ -135,42 +90,86 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
             do { try await stream.stopCapture() } catch { stopError = error }
         }
         stream = nil
-        // Detach on the delivery queue, including when stopCapture fails, so no
-        // callback can append to a writer while it is being finished.
-        let (completedWriter, hadSession, failure) = queue.sync {
-            let result = (writer, sessionStarted, deliveryError)
-            if sessionStarted { writerInput?.markAsFinished() }
-            else { writer?.cancelWriting() }
-            writer = nil
-            writerInput = nil
-            sessionStarted = false
+        // Close on the delivery queue so no callback can write during teardown.
+        let failure = queue.sync {
+            audioFile?.close()
+            audioFile = nil
+            let failure = deliveryError
             deliveryError = nil
-            return result
+            return failure
         }
         if let failure { stopError = failure }
-        if let writer = completedWriter, hadSession {
-            await writer.finishWriting()
-            if writer.status == .failed {
-                stopError = CaptureError.writerFailure("System audio writer finalization: \(writer.error.map { CaptureError.details($0) } ?? "finalization failed")")
-            }
-        }
         if let stopError { throw stopError }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .audio, sampleBuffer.isValid, let writer, let writerInput else { return }
-        if !sessionStarted {
-            writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
-            sessionStarted = true
-            firstSampleAt = Date()
+        guard type == .audio, sampleBuffer.isValid,
+              CMSampleBufferGetNumSamples(sampleBuffer) > 0,
+              deliveryError == nil, let audioFile else { return }
+        do {
+            try audioFile.write(sampleBuffer)
+            if firstSampleAt == nil { firstSampleAt = Date() }
+            onLevel?(0.35)
+        } catch {
+            deliveryError = CaptureError.writerFailure("System audio PCM write: \(CaptureError.details(error))")
         }
-        if writerInput.isReadyForMoreMediaData, !writerInput.append(sampleBuffer) {
-            deliveryError = CaptureError.writerFailure("System audio writer append: \(writer.error.map { CaptureError.details($0) } ?? "could not write system audio")")
-        }
-        onLevel?(CMSampleBufferGetNumSamples(sampleBuffer) > 0 ? 0.35 : 0)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: any Error) {
-        queue.async { self.deliveryError = error }
+        queue.async {
+            if self.deliveryError == nil { self.deliveryError = error }
+        }
     }
+}
+
+// Confined to the recorder's delivery queue. Use the actual incoming format for
+// buffers, and interleaved PCM on disk; CAF cannot store planar PCM directly.
+final class SystemAudioFile {
+    private let url: URL
+    private var file: AVAudioFile?
+
+    init(url: URL) { self.url = url }
+
+    func write(_ sampleBuffer: CMSampleBuffer) throws {
+        let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frames > 0, frames <= Int(Int32.max),
+              let description = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(description),
+              streamDescription.pointee.mFormatID == kAudioFormatLinearPCM,
+              let format = AVAudioFormat(streamDescription: streamDescription),
+              format.sampleRate > 0, format.channelCount > 0,
+              format.commonFormat != .otherFormat else {
+            throw CaptureError.writerFailure("Invalid system audio PCM buffer")
+        }
+        if file == nil {
+            guard let diskFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                                sampleRate: format.sampleRate,
+                                                channels: format.channelCount, interleaved: true) else {
+                throw CaptureError.writerFailure("Invalid system audio file format")
+            }
+            file = try AVAudioFile(forWriting: url, settings: diskFormat.settings,
+                                   commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+        }
+        guard let file,
+              file.processingFormat.sampleRate == format.sampleRate,
+              file.processingFormat.channelCount == format.channelCount,
+              file.processingFormat.commonFormat == format.commonFormat,
+              file.processingFormat.isInterleaved == format.isInterleaved else {
+            throw CaptureError.writerFailure("System audio format changed during recording")
+        }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
+                                           frameCapacity: AVAudioFrameCount(frames)) else {
+            throw CaptureError.writerFailure("Could not allocate system audio PCM buffer")
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frames), into: buffer.mutableAudioBufferList
+        )
+        guard status == noErr else {
+            throw CaptureError.writerFailure("Could not copy system audio PCM frames (OSStatus \(status))")
+        }
+        try file.write(from: buffer)
+    }
+
+    func close() { file = nil }
 }
