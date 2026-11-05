@@ -60,8 +60,11 @@ struct StatusMenuView: View {
                 Text("A brief test captures microphone and system audio, then deletes it. Respond to any macOS permission prompts.")
                     .font(.caption).foregroundStyle(.secondary)
             case .permissionRequired:
-                Label("Recording check failed", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                Label {
+                    Text("Recording check failed")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
                 Text(model.permissionMessage)
                     .textSelection(.enabled)
                 Text("Retry after addressing the error. If you changed macOS permissions, quit and reopen Meeting Capture first.")
@@ -70,7 +73,11 @@ struct StatusMenuView: View {
                 Button("Retry recording check") { model.checkPermissions() }
                 Button("Copy error details") { model.copyRecordingCheckError() }
             case let .error(message):
-                Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Label {
+                    Text(message).textSelection(.enabled)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
                 Button("Dismiss") { model.dismissError() }
             }
             if model.showsMaintenance {
@@ -79,15 +86,24 @@ struct StatusMenuView: View {
                     ProgressView("Finalizing \(model.finalizationsInProgress) recording(s) in isolated workers…")
                 }
                 if !model.recoverableFiles.isEmpty {
-                    Text("\(model.recoverableFiles.count) interrupted recording file(s) need recovery").font(.caption).foregroundStyle(.orange)
+                    Label {
+                        Text("\(model.recoverableFiles.count) unfinished audio file(s) found")
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    }
+                    Text("These files were left by recordings that did not finish.")
+                        .font(.caption).foregroundStyle(.secondary)
                     if model.recoveryInProgress {
                         ProgressView("Recovering in an isolated worker…")
                     } else {
                         Button("Recover interrupted recording") { model.recoverInterruptedRecordings() }
                     }
+                    Button("Show unfinished files") { model.revealInterruptedRecordings() }
                 }
                 if let recoveryError = model.recoveryError {
-                    Text(recoveryError).font(.caption).foregroundStyle(.orange)
+                    Text(recoveryError)
+                        .font(.callout).foregroundStyle(.primary)
+                        .textSelection(.enabled)
                 }
             }
             Divider()

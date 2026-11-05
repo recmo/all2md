@@ -190,6 +190,10 @@ guarantee that permissions or a meeting application's devices will remain usable
   recordings are excluded from recovery discovery; worker claims are released by
   the operating system even if a worker crashes. Unreadable audio fails processing
   and is preserved for recovery rather than silently omitted and deleted.
+  The menu counts unfinished audio files, not meetings, and offers a Finder link
+  to inspect them. Recovery attempts the first pending recording; an unreadable
+  file remains pending, so retrying can report the same failure. Recovery errors
+  use selectable primary text, with orange reserved for warning icons.
 - Manually started recordings, including those selected from active audio
   applications, continue until explicitly stopped even when the meeting is muted.
 - Generic Accessibility inspection currently contributes the focused window

@@ -221,6 +221,12 @@ final class AppModel: ObservableObject {
         if let lastManifest { NSWorkspace.shared.activateFileViewerSelecting([lastManifest]) }
     }
 
+    func revealInterruptedRecordings() {
+        if let file = recoverableFiles.first {
+            NSWorkspace.shared.activateFileViewerSelecting([file])
+        }
+    }
+
     private func handle(_ clients: [AudioClient]) {
         switch state {
         case .idle:
