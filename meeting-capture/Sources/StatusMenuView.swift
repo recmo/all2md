@@ -63,10 +63,12 @@ struct StatusMenuView: View {
                 Label("Recording check failed", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                 Text(model.permissionMessage)
-                Text("Enable access for this installed app, then retry. If macOS requests a restart, quit and reopen Meeting Capture.")
+                    .textSelection(.enabled)
+                Text("Retry after addressing the error. If you changed macOS permissions, quit and reopen Meeting Capture first.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("Retry recording check") { model.checkPermissions() }
+                Button("Copy error details") { model.copyRecordingCheckError() }
             case let .error(message):
                 Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Button("Dismiss") { model.dismissError() }

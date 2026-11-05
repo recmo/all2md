@@ -73,7 +73,7 @@ final class AppModel: ObservableObject {
                 startupReport = try await checkCapture()
                 startMonitoring()
             } catch {
-                permissionMessage = error.localizedDescription
+                permissionMessage = error is CaptureError ? error.localizedDescription : CaptureError.details(error)
                 state = .permissionRequired
             }
             permissionCheckTask = nil
@@ -157,6 +157,11 @@ final class AppModel: ObservableObject {
     func openPermissionSettings(_ pane: String) {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func copyRecordingCheckError() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(permissionMessage, forType: .string)
     }
 
     func recoverInterruptedRecordings() {

@@ -71,7 +71,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         guard writer.canAdd(input) else { throw CaptureError.writerFailure("cannot add PCM input") }
         writer.add(input)
         guard writer.startWriting() else {
-            throw CaptureError.writerFailure(writer.error?.localizedDescription ?? "could not start")
+            throw CaptureError.writerFailure("System audio writer start: \(writer.error.map { CaptureError.details($0) } ?? "could not start")")
         }
         self.writer = writer
         writerInput = input
@@ -151,7 +151,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         if let writer = completedWriter, hadSession {
             await writer.finishWriting()
             if writer.status == .failed {
-                stopError = CaptureError.writerFailure(writer.error?.localizedDescription ?? "finalization failed")
+                stopError = CaptureError.writerFailure("System audio writer finalization: \(writer.error.map { CaptureError.details($0) } ?? "finalization failed")")
             }
         }
         if let stopError { throw stopError }
@@ -165,7 +165,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
             firstSampleAt = Date()
         }
         if writerInput.isReadyForMoreMediaData, !writerInput.append(sampleBuffer) {
-            deliveryError = CaptureError.writerFailure(writer.error?.localizedDescription ?? "Could not write system audio")
+            deliveryError = CaptureError.writerFailure("System audio writer append: \(writer.error.map { CaptureError.details($0) } ?? "could not write system audio")")
         }
         onLevel?(CMSampleBufferGetNumSamples(sampleBuffer) > 0 ? 0.35 : 0)
     }

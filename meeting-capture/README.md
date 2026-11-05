@@ -54,14 +54,17 @@ retains its identity in [TN3127](https://developer.apple.com/documentation/techn
 
 Quit Meeting Capture from its menu after stopping any recording and waiting for
 finalization. To test at the same installed path, keep a backup and swap the
-verified build into place (Home Manager marks the installed bundle immutable):
+verified build into place (Home Manager marks the installed bundle immutable).
+Keep the backup zipped so macOS cannot register a renamed backup as another app:
 
 ```sh
 installed_app="$HOME/Applications/MeetingCapture.app"
-backup_app="$HOME/Applications/MeetingCapture.before-permission-test.app"
-test ! -e "$backup_app" &&
+backup_dir="$(mktemp -d "$HOME/meeting-capture-backup.XXXXXX")"
+backup_archive="$backup_dir/MeetingCapture.zip"
+ditto -c -k --keepParent "$installed_app" "$backup_archive" &&
+  unzip -t "$backup_archive" &&
   chflags -R nouchg "$installed_app" &&
-  mv "$installed_app" "$backup_app" &&
+  rm -rf "$installed_app" &&
   ditto "$test_dir/MeetingCapture.app" "$installed_app" &&
   open "$installed_app"
 ```
@@ -80,12 +83,16 @@ devices or audio. Play audio during that test, then make and stop a short manual
 recording. If macOS requests a restart after a permission change, quit and reopen
 the app. Restoring toggled permissions is part of cleanup; do not reset TCC to
 test identity persistence.
+If the recording check fails with permissions available, use **Copy error
+details** to capture the failure stage, error domain, code, and underlying error.
 
 After quitting the test app, restore the backup:
 
 ```sh
-mv "$installed_app" "$test_dir/MeetingCapture.tested.app" &&
-  mv "$backup_app" "$installed_app" &&
+unzip -t "$backup_archive" &&
+  chflags -R nouchg "$installed_app" &&
+  rm -rf "$installed_app" &&
+  ditto -x -k "$backup_archive" "$HOME/Applications" &&
   chflags -R uchg "$installed_app" &&
   open "$installed_app"
 ```
