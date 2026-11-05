@@ -100,6 +100,9 @@ struct StatusMenuView: View {
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .disabled(!model.allowsTermination)
         }
+        .lineLimit(nil)
+        .multilineTextAlignment(.leading)
+        .fixedSize(horizontal: false, vertical: true)
         .padding(14)
         .frame(width: 320)
         .task {
