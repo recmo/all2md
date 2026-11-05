@@ -1,42 +1,48 @@
 @preconcurrency import AVFoundation
 import AudioToolbox
 import CoreAudio
+import CoreMedia
 import Foundation
 
 final class MicrophoneRecorder: @unchecked Sendable {
     private let engine = AVAudioEngine()
-    private var file: AVAudioFile?
+    private var file: PCMFile?
     private var currentSegmentURL: URL?
     private var currentSegmentStartedAt: Date?
     private var completedSegments: [CapturedAudioSegment] = []
     private let writeLock = NSLock()
+    private var configurationObserver: NSObjectProtocol?
+    private var writeFailure: Error?
     private(set) var format: AVAudioFormat?
     private(set) var deviceID: AudioDeviceID?
     var onLevel: (@Sendable (Float) -> Void)?
     var onError: (@Sendable (Error) -> Void)?
-
-    func start(to url: URL, deviceID: AudioDeviceID?) throws {
-        completedSegments = []
-        try startEngine(deviceID: deviceID, to: url)
+    var onConfigurationChange: (@Sendable () -> Void)?
+    var isRunning: Bool { engine.isRunning }
+    var failure: Error? {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        return writeFailure
     }
 
-    func switchDevice(
-        to newDeviceID: AudioDeviceID,
-        segmentURL: URL,
-        rollbackURL: URL
-    ) throws {
-        guard newDeviceID != deviceID else { return }
-        let previousDeviceID = deviceID
+    init() {
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in self?.onConfigurationChange?() }
+    }
+
+    deinit {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+    }
+
+    func start(to url: URL, deviceID: AudioDeviceID?, startedAt: Date = Date()) throws {
+        completedSegments = []
+        try startEngine(deviceID: deviceID, to: url, startedAt: startedAt)
+    }
+
+    func restart(to url: URL, deviceID: AudioDeviceID?, startedAt: Date) throws {
         stopEngine()
-        do {
-            try startEngine(deviceID: newDeviceID, to: segmentURL)
-        } catch {
-            try? FileManager.default.removeItem(at: segmentURL)
-            if let previousDeviceID {
-                try? startEngine(deviceID: previousDeviceID, to: rollbackURL)
-            }
-            throw error
-        }
+        try startEngine(deviceID: deviceID, to: url, startedAt: startedAt)
     }
 
     func stop() -> [CapturedAudioSegment] {
@@ -46,7 +52,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
         return result
     }
 
-    private func startEngine(deviceID: AudioDeviceID?, to url: URL) throws {
+    private func startEngine(deviceID: AudioDeviceID?, to url: URL, startedAt: Date) throws {
         let input = engine.inputNode
         if let deviceID {
             guard let audioUnit = input.audioUnit else {
@@ -70,30 +76,22 @@ final class MicrophoneRecorder: @unchecked Sendable {
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw CaptureError.noMicrophone
         }
-        let file = try AVAudioFile(
-            forWriting: url,
-            settings: inputFormat.settings,
-            commonFormat: .pcmFormatFloat32,
-            interleaved: false
-        )
+        let hostStart = CMClockGetTime(CMClockGetHostTimeClock()).seconds - Date().timeIntervalSince(startedAt)
+        let file = PCMFile(url: url, startTime: hostStart)
         format = inputFormat
         self.file = file
+        writeFailure = nil
         self.deviceID = deviceID
         currentSegmentURL = url
-        currentSegmentStartedAt = Date()
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            self?.consume(buffer)
+        currentSegmentStartedAt = startedAt
+        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
+            self?.consume(buffer, time: time)
         }
         engine.prepare()
         do {
             try engine.start()
         } catch {
-            input.removeTap(onBus: 0)
-            self.file = nil
-            self.deviceID = nil
-            currentSegmentURL = nil
-            currentSegmentStartedAt = nil
-            try? FileManager.default.removeItem(at: url)
+            stopEngine() // Preserve any frames delivered before startup failed.
             throw error
         }
     }
@@ -104,6 +102,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
         engine.inputNode.removeTap(onBus: 0)
         let endedAt = Date()
         writeLock.lock()
+        file?.close()
         file = nil
         writeLock.unlock()
         if let url = currentSegmentURL, let startedAt = currentSegmentStartedAt {
@@ -114,12 +113,18 @@ final class MicrophoneRecorder: @unchecked Sendable {
         deviceID = nil
     }
 
-    private func consume(_ buffer: AVAudioPCMBuffer) {
+    private func consume(_ buffer: AVAudioPCMBuffer, time: AVAudioTime) {
         onLevel?(Self.level(buffer))
         writeLock.lock()
-        defer { writeLock.unlock() }
-        do { try file?.write(from: buffer) }
-        catch { onError?(error) }
+        var failure: Error?
+        if writeFailure == nil {
+            do {
+                guard time.isHostTimeValid else { throw CaptureError.writerFailure("Microphone buffer has no host timestamp") }
+                try file?.write(buffer, at: AVAudioTime.seconds(forHostTime: time.hostTime))
+            } catch { writeFailure = error; failure = error }
+        }
+        writeLock.unlock()
+        if let failure { onError?(failure) }
     }
 
     private static func level(_ buffer: AVAudioPCMBuffer) -> Float {

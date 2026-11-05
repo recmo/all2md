@@ -65,6 +65,10 @@ enum WorkerOperations {
     static func finalize(_ request: FinalizeCaptureRequest) throws -> URL {
         let claim = try RecordingClaim(request.paths)
         defer { withExtendedLifetime(claim) {} }
+        return try finish(request)
+    }
+
+    private static func finish(_ request: FinalizeCaptureRequest) throws -> URL {
         let accessibility = finalizeAccessibilityArtifact(paths: request.paths)
         var metadata = request.metadata
         if let title = accessibilityWindowTitle(request.paths.accessibilityFinal) {
@@ -85,7 +89,7 @@ enum WorkerOperations {
             temporaryDestination: request.paths.archiveTemporary,
             finalDestination: request.paths.archiveFinal
         )
-        let status: CaptureManifest.Status = archive.tracks.contains(where: { $0.role == .microphone })
+        let status: CaptureManifest.Status = !request.captureFailed && archive.tracks.contains(where: { $0.role == .microphone })
             && archive.tracks.contains(where: { $0.role == .participants }) ? .complete : .incomplete
         let manifest = CaptureManifest(
             schemaVersion: 2,
@@ -109,6 +113,7 @@ enum WorkerOperations {
         try MeetingStore().write(manifest, to: request.paths.manifest)
         for segment in request.microphoneSegments { try? FileManager.default.removeItem(at: segment.url) }
         if let participants = request.participants { try? FileManager.default.removeItem(at: participants) }
+        try? FileManager.default.removeItem(at: request.paths.session)
         return request.paths.manifest
     }
 
@@ -117,58 +122,53 @@ enum WorkerOperations {
         let paths = store.paths(forInterruptedFile: request.interruptedFile)
         let claim = try RecordingClaim(paths)
         defer { withExtendedLifetime(claim) {} }
-        // This worker owns the claim, so enumerate its inputs directly.
-        let files = try FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasSuffix(".part.caf") }
-        guard files.contains(where: { $0.resolvingSymlinksInPath() == request.interruptedFile.resolvingSymlinksInPath() }) else {
-            throw CaptureError.writerFailure("the selected interrupted recording is no longer available")
+        guard FileManager.default.fileExists(atPath: paths.session.path) else {
+            throw CaptureError.writerFailure("No timing journal exists for \(paths.baseName). Original audio was kept; use Show files for manual salvage.")
         }
-        let relatedFiles = files.filter { store.paths(forInterruptedFile: $0).baseName == paths.baseName }
-        let datedFiles = relatedFiles.compactMap { url -> (URL, Date, Date)? in
-            guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
-            return (url, attributes[.creationDate] as? Date ?? Date(), attributes[.modificationDate] as? Date ?? Date())
+        var session = try FinalizeCaptureRequest.load(from: paths.session)
+        // A journal may only refer to this recording's own files.
+        guard session.paths.directory.resolvingSymlinksInPath() == paths.directory.resolvingSymlinksInPath(),
+              session.paths.baseName == paths.baseName,
+              session.microphoneSegments.allSatisfy({
+                  $0.url.deletingLastPathComponent().resolvingSymlinksInPath() == paths.directory.resolvingSymlinksInPath()
+                      && $0.url.lastPathComponent.hasPrefix(".\(paths.baseName)-microphone-")
+                      && $0.url.lastPathComponent.hasSuffix(".part.caf")
+              }), session.participants == nil || session.participants == paths.participantsTemporary else {
+            throw CaptureError.writerFailure("Invalid recording session paths; original files were kept")
         }
-        let started = datedFiles.map { $0.1 }.min() ?? Date()
-        let ended = max(started, datedFiles.map { $0.2 }.max() ?? Date())
-        let microphoneURLs = relatedFiles.filter { $0.lastPathComponent.contains("-microphone") }
-        let microphoneSegments = try AudioFinalizer.recoveredSegments(from: microphoneURLs, startedAt: started)
-        let participantsURL = try relatedFiles.first { $0.lastPathComponent.hasSuffix("-participants.part.caf") }
-            .flatMap { try AudioFinalizer.containsAudio($0) ? $0 : nil }
-        guard !microphoneSegments.isEmpty || participantsURL != nil else {
-            quarantineEmptyRecoveryFiles(relatedFiles, archiveTemporary: paths.archiveTemporary)
-            throw CaptureError.writerFailure("the interrupted recording contains no audio frames; its empty files were quarantined")
+        var segments: [CapturedAudioSegment] = []
+        for segment in session.microphoneSegments {
+            guard FileManager.default.fileExists(atPath: segment.url.path) else {
+                session.warnings.append("Missing microphone segment: \(segment.url.lastPathComponent)")
+                continue
+            }
+            let input = try AVAudioFile(forReading: segment.url)
+            let end = segment.startedAt.addingTimeInterval(Double(max(0, input.length)) / input.processingFormat.sampleRate)
+            segments.append(CapturedAudioSegment(url: segment.url, startedAt: segment.startedAt, endedAt: end))
+            session.captureEndedAt = max(session.captureEndedAt, end)
         }
-        let archive = try AudioFinalizer.createArchive(
-            microphoneSegments: microphoneSegments,
-            participants: participantsURL,
-            participantsStartedAt: participantsURL == nil ? nil : started,
-            captureStartedAt: started,
-            captureEndedAt: ended,
-            temporaryDestination: paths.archiveTemporary,
-            finalDestination: paths.archiveFinal
-        )
-        let manifest = CaptureManifest(
-            schemaVersion: 2,
-            meetingID: UUID(),
-            slug: String(paths.baseName.dropFirst(min(11, paths.baseName.count))),
-            title: nil,
-            platform: nil,
-            calendarEventID: nil,
-            startedAt: started,
-            endedAt: ended,
-            timeZone: TimeZone.current.identifier,
-            trigger: CaptureTrigger(method: .deviceRunning, processID: nil, bundleID: nil, applicationName: nil),
-            container: archive.container,
-            accessibility: finalizeAccessibilityArtifact(paths: paths),
-            audio: archive.tracks,
-            interruptions: [CaptureTimeRange(startedAt: started, endedAt: ended, reason: "application interruption")],
-            metadataEvents: [],
-            warnings: ["Recovered from crash-safe temporary audio; capture metadata may be incomplete."],
-            status: .incomplete
-        )
-        try store.write(manifest, to: paths.manifest)
-        for file in relatedFiles { try? FileManager.default.removeItem(at: file) }
-        return paths.manifest
+        session.microphoneSegments = segments
+        var hasParticipantAudio = false
+        if let url = session.participants, FileManager.default.fileExists(atPath: url.path) {
+            let input = try AVAudioFile(forReading: url)
+            if input.length > 0 {
+                hasParticipantAudio = true
+                let end = (session.participantsStartedAt ?? session.captureStartedAt)
+                    .addingTimeInterval(Double(input.length) / input.processingFormat.sampleRate)
+                session.captureEndedAt = max(session.captureEndedAt, end)
+            }
+        } else { session.participants = nil }
+        guard segments.contains(where: { $0.endedAt > $0.startedAt }) || hasParticipantAudio else {
+            let files = try FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)
+                .filter { store.paths(forInterruptedFile: $0).baseName == paths.baseName && $0.path.hasSuffix(".part.caf") }
+            quarantineEmptyRecoveryFiles(files, archiveTemporary: paths.archiveTemporary)
+            quarantine(paths.session, replacing: ".session.json", with: ".unrecoverable.json")
+            throw CaptureError.writerFailure("No audio frames were saved; empty files were marked unrecoverable")
+        }
+        session.captureFailed = true
+        session.warnings.append("Recovered after an interrupted recording; saved segment timing was preserved.")
+        try session.save()
+        return try finish(session)
     }
 
     private static func finalizeAccessibilityArtifact(paths: RecordingPaths) -> AccessibilityArtifact? {

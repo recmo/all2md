@@ -48,17 +48,23 @@ struct MeetingStore: Sendable {
     func interruptedRecordings(excluding claimed: Set<URL> = []) -> [URL] {
         guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
         let identities = Set(claimed.map { $0.deletingLastPathComponent().resolvingSymlinksInPath().appending(path: $0.lastPathComponent) })
-        return enumerator.compactMap { $0 as? URL }.filter {
-            guard $0.lastPathComponent.hasSuffix(".part.caf") else { return false }
-            let paths = paths(forInterruptedFile: $0)
+        var recordings: [URL: URL] = [:]
+        for file in enumerator.compactMap({ $0 as? URL }) {
+            guard file.lastPathComponent.hasSuffix(".part.caf") || file.lastPathComponent.hasSuffix(".session.json") else { continue }
+            let paths = paths(forInterruptedFile: file)
             let identity = paths.directory.resolvingSymlinksInPath().appending(path: paths.manifest.lastPathComponent)
-            return !identities.contains(identity) && RecordingClaim.isAvailable(paths)
+            guard !identities.contains(identity), RecordingClaim.isAvailable(paths) else { continue }
+            if recordings[identity] == nil || file.path.hasSuffix(".session.json") { recordings[identity] = file }
         }
+        return recordings.values.sorted { $0.path < $1.path }
     }
 
     func paths(forInterruptedFile file: URL) -> RecordingPaths {
         var name = file.lastPathComponent
         if name.hasPrefix(".") { name.removeFirst() }
+        if name.hasSuffix(".session.json") {
+            return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: String(name.dropLast(".session.json".count)))
+        }
         let markers = ["-microphone-", "-microphone.part.caf", "-participants.part.caf"]
         let baseName = markers.compactMap { marker in
             name.range(of: marker, options: .backwards).map { String(name[..<$0.lowerBound]) }

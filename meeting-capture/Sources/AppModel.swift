@@ -34,15 +34,25 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeOutputClients: [AudioClient] = []
     let capture = CaptureCoordinator()
 
-    private let monitor = AudioActivityMonitor()
+    private let monitor: AudioActivityMonitor?
     private var countdownTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
     private var ignoredUntil: [String: Date] = [:]
     private var started = false
     private var recordingMethod: TriggerMethod = .audioProcess
+    private var activeMicrophoneClients = Set<pid_t>()
+    private var suppressedClients = Set<pid_t>()
+    private var captureFailure: String?
 
-    init(checkCapture: @escaping @MainActor () async throws -> StartupCaptureReport = StartupCaptureCheck.run) {
+    init(checkCapture: @escaping @MainActor () async throws -> StartupCaptureReport = StartupCaptureCheck.run,
+         monitor: AudioActivityMonitor? = AudioActivityMonitor()) {
         self.checkCapture = checkCapture
+        self.monitor = monitor
+        capture.onFailure = { [weak self] message in
+            guard let self else { return }
+            self.captureFailure = message
+            if case .recording = self.state { self.stopRecording() }
+        }
     }
 
     var statusIcon: String {
@@ -64,7 +74,7 @@ final class AppModel: ObservableObject {
     func checkPermissions() {
         guard permissionCheckTask == nil else { return }
         guard Self.allowsPermissionCheck(in: state) else { return }
-        monitor.stop()
+        monitor?.stop()
         startupReport = nil
         state = .checkingPermissions
         permissionMessage = "Checking microphone and system-audio recording…"
@@ -92,6 +102,8 @@ final class AppModel: ObservableObject {
     }
 
     func skip() {
+        guard case let .countdown(client, _) = state else { return }
+        suppressedClients.insert(client.processID)
         countdownTask?.cancel()
         countdownTask = nil
         state = .idle
@@ -112,13 +124,15 @@ final class AppModel: ObservableObject {
     }
 
     func stopRecording() {
-        guard case .recording = state else { return }
+        guard case let .recording(client) = state else { return }
+        if client.processID == 0 { suppressedClients.formUnion(activeMicrophoneClients) }
+        else { suppressedClients.insert(client.processID) }
         stopTask?.cancel(); stopTask = nil
         state = .finalizing
         Task {
             do {
                 let request = try await capture.stop()
-                state = .idle
+                state = captureFailure.map(State.error) ?? .idle
                 finalizeInBackground(request)
             }
             catch {
@@ -138,11 +152,10 @@ final class AppModel: ObservableObject {
         defer { refreshingPermissions = false }
         microphoneAccess = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         screenRecordingAccess = CGPreflightScreenCaptureAccess()
-        let appDocuments: Bool
-        do {
-            try MeetingStore().validateAccess()
-            appDocuments = true
-        } catch { appDocuments = false }
+        let appDocuments = await Task.detached {
+            do { try MeetingStore().validateAccess(); return true }
+            catch { return false }
+        }.value
         do {
             let worker = try BackgroundWorkerClient()
             let report = try await worker.checkPermissions(root: MeetingStore().root)
@@ -164,9 +177,9 @@ final class AppModel: ObservableObject {
         NSPasteboard.general.setString(permissionMessage, forType: .string)
     }
 
-    func recoverInterruptedRecordings() {
+    func recoverInterruptedRecording(_ interruptedFile: URL) {
         guard Self.allowsMaintenance(in: state), !recoveryInProgress,
-              let interruptedFile = recoverableFiles.first else { return }
+              recoverableFiles.contains(interruptedFile) else { return }
         recoveryInProgress = true
         recoveryError = nil
         Task {
@@ -221,20 +234,25 @@ final class AppModel: ObservableObject {
         if let lastManifest { NSWorkspace.shared.activateFileViewerSelecting([lastManifest]) }
     }
 
-    func revealInterruptedRecordings() {
-        if let file = recoverableFiles.first {
-            NSWorkspace.shared.activateFileViewerSelecting([file])
+    func revealInterruptedRecording(_ file: URL) {
+        let paths = MeetingStore().paths(forInterruptedFile: file)
+        let files = (try? FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)) ?? []
+        let related = files.filter {
+            $0.lastPathComponent.hasPrefix(".\(paths.baseName)-") || $0 == paths.session
         }
+        NSWorkspace.shared.activateFileViewerSelecting(related.isEmpty ? [file] : related)
     }
 
-    private func handle(_ clients: [AudioClient]) {
+    func handle(_ clients: [AudioClient], now: Date = Date()) {
+        activeMicrophoneClients = Set(clients.map(\.processID))
+        suppressedClients.formIntersection(activeMicrophoneClients)
         switch state {
         case .idle:
             guard let candidate = clients.first(where: { !isIgnored($0) }) else { return }
-            state = .detecting(candidate, since: Date())
+            state = .detecting(candidate, since: now)
         case let .detecting(candidate, since):
             guard let current = clients.first(where: { $0.processID == candidate.processID }) else { state = .idle; return }
-            if Date().timeIntervalSince(since) >= 2 { beginCountdown(current) }
+            if now.timeIntervalSince(since) >= 2 { beginCountdown(current) }
             else if current != candidate { state = .detecting(current, since: since) }
         case let .countdown(candidate, remaining):
             guard let current = clients.first(where: { $0.processID == candidate.processID }) else { state = .idle; return }
@@ -283,16 +301,21 @@ final class AppModel: ObservableObject {
         stopTask?.cancel(); stopTask = nil
         recordingMethod = method
         state = .finalizing
-        let resolvedMethod: TriggerMethod = method == .manual ? .manual : (client.processID > 0 ? .audioProcess : .deviceRunning)
-        let trigger = CaptureTrigger(method: resolvedMethod, processID: client.processID > 0 ? client.processID : nil, bundleID: client.bundleID, applicationName: client.applicationName)
+        captureFailure = nil
+        let trigger = CaptureTrigger(method: method, processID: client.processID > 0 ? client.processID : nil, bundleID: client.bundleID, applicationName: client.applicationName)
         Task {
-            do { try await capture.start(trigger: trigger, microphoneDevice: client.primaryInputDevice); state = .recording(client) }
+            do {
+                try await capture.start(trigger: trigger, microphoneDevice: client.primaryInputDevice)
+                state = .recording(client)
+                if captureFailure != nil { stopRecording() }
+            }
             catch {
+                recoverableFiles = capture.recoverableFiles()
                 if let captureError = error as? CaptureError {
                     switch captureError {
                     case .screenRecordingPermissionRequired, .microphonePermissionRequired:
                         startupReport = nil
-                        monitor.stop()
+                        monitor?.stop()
                         permissionMessage = error.localizedDescription
                         state = .permissionRequired
                         return
@@ -307,17 +330,18 @@ final class AppModel: ObservableObject {
     static func shouldAutoStop(method: TriggerMethod) -> Bool { method != .manual }
 
     private func startMonitoring() {
-        monitor.onClientsChanged = { [weak self] clients in self?.handle(clients) }
-        monitor.onOutputClientsChanged = { [weak self] clients in
+        monitor?.onClientsChanged = { [weak self] clients in self?.handle(clients) }
+        monitor?.onOutputClientsChanged = { [weak self] clients in
             self?.activeOutputClients = clients
         }
         state = .idle
-        monitor.start()
+        monitor?.start()
     }
 
     private func key(_ client: AudioClient) -> String { client.bundleID ?? "name:\(client.applicationName)" }
 
     private func isIgnored(_ client: AudioClient) -> Bool {
+        if suppressedClients.contains(client.processID) { return true }
         let value = key(client)
         if ignoredUntil[value, default: .distantPast] > Date() { return true }
         return Set(UserDefaults.standard.stringArray(forKey: "excludedBundleIDs") ?? []).contains(value)

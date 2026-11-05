@@ -87,18 +87,24 @@ struct StatusMenuView: View {
                 }
                 if !model.recoverableFiles.isEmpty {
                     Label {
-                        Text("\(model.recoverableFiles.count) unfinished audio file(s) found")
+                        Text("\(model.recoverableFiles.count) interrupted recording(s)")
                     } icon: {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
-                    Text("These files were left by recordings that did not finish.")
+                    Text("Choose a recording to recover or inspect. Originals are kept if recovery fails.")
                         .font(.caption).foregroundStyle(.secondary)
                     if model.recoveryInProgress {
                         ProgressView("Recovering in an isolated worker…")
-                    } else {
-                        Button("Recover interrupted recording") { model.recoverInterruptedRecordings() }
                     }
-                    Button("Show unfinished files") { model.revealInterruptedRecordings() }
+                    Menu("Interrupted recordings") {
+                        ForEach(model.recoverableFiles, id: \.self) { file in
+                            Menu(MeetingStore().paths(forInterruptedFile: file).baseName) {
+                                Button("Recover") { model.recoverInterruptedRecording(file) }
+                                    .disabled(model.recoveryInProgress)
+                                Button("Show files") { model.revealInterruptedRecording(file) }
+                            }
+                        }
+                    }
                 }
                 if let recoveryError = model.recoveryError {
                     Text(recoveryError)
@@ -123,12 +129,9 @@ struct StatusMenuView: View {
         .fixedSize(horizontal: false, vertical: true)
         .padding(14)
         .frame(width: 320)
-        .task {
-            while !Task.isCancelled {
-                await model.refreshPermissionStatus()
-                do { try await Task.sleep(for: .seconds(3)) }
-                catch { return }
-            }
+        .task { await model.refreshPermissionStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.refreshPermissionStatus() }
         }
     }
 

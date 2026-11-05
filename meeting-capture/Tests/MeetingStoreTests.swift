@@ -39,7 +39,7 @@ final class MeetingStoreTests: XCTestCase {
         let model = AppModel(checkCapture: {
             attempts += 1
             throw CaptureError.microphonePermissionRequired
-        })
+        }, monitor: nil)
         XCTAssertEqual(model.state, .checkingPermissions)
         model.manualStart()
         XCTAssertEqual(model.state, .checkingPermissions)
@@ -61,7 +61,7 @@ final class MeetingStoreTests: XCTestCase {
         var finish: CheckedContinuation<StartupCaptureReport, Error>?
         let model = AppModel(checkCapture: {
             try await withCheckedThrowingContinuation { finish = $0 }
-        })
+        }, monitor: nil)
         model.start()
         for _ in 0..<100 where finish == nil { await Task.yield() }
         XCTAssertEqual(model.state, .checkingPermissions)
@@ -117,6 +117,12 @@ final class MeetingStoreTests: XCTestCase {
         let input = paths.microphoneTemporary(segment: 1)
         try writeTone(to: input, sampleRate: 48_000, channels: 1, duration: 0.1)
         let original = try Data(contentsOf: input)
+        try FinalizeCaptureRequest(
+            microphoneSegments: [CapturedAudioSegment(url: input, startedAt: Date(), endedAt: Date())],
+            participants: nil, participantsStartedAt: nil, captureStartedAt: Date(), captureEndedAt: Date(),
+            paths: paths, trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: nil),
+            metadata: [], warnings: [], interruptions: []
+        ).save()
         var claim: RecordingClaim? = try RecordingClaim(paths)
         XCTAssertTrue(store.interruptedRecordings().isEmpty)
         let worker = try BackgroundWorkerClient()
@@ -128,7 +134,7 @@ final class MeetingStoreTests: XCTestCase {
         }
         withExtendedLifetime(claim) {}
         claim = nil
-        XCTAssertEqual(store.interruptedRecordings().map { $0.resolvingSymlinksInPath() }, [input.resolvingSymlinksInPath()])
+        XCTAssertEqual(store.interruptedRecordings().map { $0.resolvingSymlinksInPath() }, [paths.session.resolvingSymlinksInPath()])
         XCTAssertTrue(store.interruptedRecordings(excluding: [paths.manifest]).isEmpty)
         XCTAssertEqual(try Data(contentsOf: input), original)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.archiveFinal.path))
@@ -161,6 +167,7 @@ final class MeetingStoreTests: XCTestCase {
                 trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: nil),
                 metadata: [], warnings: [], interruptions: []
             )
+            try request.save()
             do {
                 _ = try await worker.finalize(request)
                 XCTFail("Unreadable inputs must fail finalization")
@@ -195,39 +202,28 @@ final class MeetingStoreTests: XCTestCase {
                         data[interleaved ? frame * 2 + channel : frame] = channel == 0 ? 0.25 : -0.5
                     }
                 }
-                var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: Int32(sampleRate)),
-                                                presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
-                var sample: CMSampleBuffer?
-                XCTAssertEqual(CMSampleBufferCreate(
-                    allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: false,
-                    makeDataReadyCallback: nil, refcon: nil, formatDescription: format.formatDescription,
-                    sampleCount: 64, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
-                    sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &sample
-                ), noErr)
-                let sampleBuffer = try XCTUnwrap(sample)
-                XCTAssertEqual(CMSampleBufferSetDataBufferFromAudioBufferList(
-                    sampleBuffer, blockBufferAllocator: kCFAllocatorDefault,
-                    blockBufferMemoryAllocator: kCFAllocatorDefault, flags: 0, bufferList: pcm.audioBufferList
-                ), noErr)
-                XCTAssertEqual(CMSampleBufferSetDataReady(sampleBuffer), noErr)
                 let url = root.appending(path: "\(interleaved)-\(sampleRate).caf")
-                let writer = SystemAudioFile(url: url)
-                try writer.write(sampleBuffer)
-                try writer.write(sampleBuffer)
-                writer.close()
+                let writer = SystemAudioFile(url: url, startTime: .zero)
+                let first = try sampleBuffer(pcm, at: CMTime(value: 64, timescale: Int32(sampleRate)))
+                try writer.write(first) // Leading silence, then 64 frames of audio.
+                try writer.write(first) // A duplicated callback must not add time.
+                try writer.write(sampleBuffer(pcm, at: CMTime(value: 192, timescale: Int32(sampleRate))))
+                try writer.write(sampleBuffer(pcm, at: CMTime(value: 224, timescale: Int32(sampleRate))))
+                writer.close() // The overlapping final buffer adds only 32 frames.
 
                 let saved = try AVAudioFile(forReading: url)
-                XCTAssertEqual(saved.length, 128)
+                XCTAssertEqual(saved.length, 288)
                 XCTAssertEqual(saved.fileFormat.sampleRate, sampleRate)
                 XCTAssertEqual(saved.fileFormat.channelCount, 2)
                 XCTAssertTrue(saved.fileFormat.isInterleaved)
-                let result = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: saved.processingFormat, frameCapacity: 128))
+                let result = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: saved.processingFormat, frameCapacity: 288))
                 try saved.read(into: result)
-                XCTAssertEqual(result.frameLength, 128)
+                XCTAssertEqual(result.frameLength, 288)
                 let channels = try XCTUnwrap(result.floatChannelData)
-                for frame in 0..<128 {
-                    XCTAssertEqual(channels[0][frame], 0.25, accuracy: 0.00001)
-                    XCTAssertEqual(channels[1][frame], -0.5, accuracy: 0.00001)
+                for frame in 0..<288 {
+                    let silent = frame < 64 || (128..<192).contains(frame)
+                    XCTAssertEqual(channels[0][frame], silent ? 0 : 0.25, accuracy: 0.00001)
+                    XCTAssertEqual(channels[1][frame], silent ? 0 : -0.5, accuracy: 0.00001)
                 }
             }
         }
@@ -404,9 +400,7 @@ final class MeetingStoreTests: XCTestCase {
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
         _ = try AVAudioFile(forWriting: empty, settings: format.settings)
 
-        let segments = try AudioFinalizer.recoveredSegments(from: [empty], startedAt: Date())
-
-        XCTAssertTrue(segments.isEmpty)
+        XCTAssertFalse(try AudioFinalizer.containsAudio(empty))
     }
 
     @MainActor
@@ -461,6 +455,112 @@ final class MeetingStoreTests: XCTestCase {
             SystemAudioRecorder.matchingApplicationIndex(processID: 999, bundleID: "com.brave.Browser", candidates: candidates),
             0
         )
+    }
+
+    private func sampleBuffer(_ pcm: AVAudioPCMBuffer, at time: CMTime) throws -> CMSampleBuffer {
+        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: Int32(pcm.format.sampleRate)),
+                                        presentationTimeStamp: time, decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        XCTAssertEqual(CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: false,
+            makeDataReadyCallback: nil, refcon: nil, formatDescription: pcm.format.formatDescription,
+            sampleCount: Int(pcm.frameLength), sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &sample
+        ), noErr)
+        let sampleBuffer = try XCTUnwrap(sample)
+        XCTAssertEqual(CMSampleBufferSetDataBufferFromAudioBufferList(
+            sampleBuffer, blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault, flags: 0, bufferList: pcm.audioBufferList
+        ), noErr)
+        XCTAssertEqual(CMSampleBufferSetDataReady(sampleBuffer), noErr)
+        return sampleBuffer
+    }
+
+    @MainActor
+    func testSkipSuppressesOnlyTheCurrentMicrophoneSession() async {
+        let model = AppModel(checkCapture: { StartupCaptureReport(systemAudioObserved: false) }, monitor: nil)
+        model.start()
+        for _ in 0..<100 where model.state == .checkingPermissions { await Task.yield() }
+        let client = AudioClient(audioObjectID: 1, processID: 42, bundleID: "test.meeting", applicationName: "Meeting", inputDevices: [])
+        let start = Date()
+        model.handle([client], now: start)
+        model.handle([client], now: start.addingTimeInterval(3))
+        guard case .countdown = model.state else { return XCTFail("Expected countdown") }
+        model.skip()
+        for offset in 4...20 { model.handle([client], now: start.addingTimeInterval(Double(offset))) }
+        XCTAssertEqual(model.state, .idle)
+        model.handle([], now: start.addingTimeInterval(21))
+        model.handle([client], now: start.addingTimeInterval(22))
+        guard case .detecting = model.state else { return XCTFail("A new microphone session should be eligible") }
+    }
+
+    func testJournalRecoveryPreservesGapsAndFailureStatus() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let start = Date()
+        let paths = try store.paths(startedAt: start, title: "journal")
+        let first = paths.microphoneTemporary(segment: 1)
+        let second = paths.microphoneTemporary(segment: 2)
+        try writeTone(to: first, sampleRate: 48_000, channels: 1, duration: 0.1)
+        try writeTone(to: second, sampleRate: 48_000, channels: 1, duration: 0.1)
+        try writeTone(to: paths.participantsTemporary, sampleRate: 48_000, channels: 2, duration: 1)
+        var session = FinalizeCaptureRequest(
+            microphoneSegments: [
+                CapturedAudioSegment(url: first, startedAt: start, endedAt: start),
+                CapturedAudioSegment(url: second, startedAt: start.addingTimeInterval(0.4), endedAt: start.addingTimeInterval(0.4))
+            ], participants: paths.participantsTemporary, participantsStartedAt: start,
+            captureStartedAt: start, captureEndedAt: start, paths: paths,
+            trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: "Test"),
+            metadata: [], warnings: [], interruptions: []
+        )
+        try session.save()
+        XCTAssertEqual(store.interruptedRecordings(), [paths.session])
+        let loaded = try FinalizeCaptureRequest.load(from: paths.session)
+        XCTAssertEqual(loaded.microphoneSegments.map(\.startedAt), session.microphoneSegments.map(\.startedAt))
+        let worker = try BackgroundWorkerClient()
+        let manifestURL = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let manifest = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: manifestURL))
+        XCTAssertEqual(manifest.status, .incomplete)
+        XCTAssertEqual(manifest.audio.count, 2)
+        XCTAssertTrue(store.interruptedRecordings().isEmpty)
+        let restored = root.appending(path: "recovered-microphone.caf")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["ffmpeg", "-nostdin", "-v", "error", "-i", paths.archiveFinal.path,
+                             "-map", "0:a:0", "-c:a", "pcm_f32le", restored.path]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let audio = try AVAudioFile(forReading: restored)
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: audio.processingFormat, frameCapacity: AVAudioFrameCount(audio.length)))
+        try audio.read(into: buffer)
+        let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+        XCTAssertGreaterThan(buffer.frameLength, 23_000)
+        let middle = (10_000..<14_000).map { abs(samples[$0]) }.max() ?? 1
+        let resumed = (20_000..<23_000).map { abs(samples[$0]) }.max() ?? 0
+        XCTAssertLessThan(middle, 0.001)
+        XCTAssertGreaterThan(resumed, 0.01)
+
+        // A readable two-track recording with a capture error is still incomplete.
+        let failedPaths = try store.paths(startedAt: start, title: "failed")
+        let mic = failedPaths.microphoneTemporary(segment: 1)
+        try writeTone(to: mic, sampleRate: 48_000, channels: 1, duration: 0.1)
+        try writeTone(to: failedPaths.participantsTemporary, sampleRate: 48_000, channels: 2, duration: 0.1)
+        session = FinalizeCaptureRequest(
+            microphoneSegments: [CapturedAudioSegment(url: mic, startedAt: start, endedAt: start.addingTimeInterval(0.1))],
+            participants: failedPaths.participantsTemporary, participantsStartedAt: start,
+            captureStartedAt: start, captureEndedAt: start.addingTimeInterval(0.1), paths: failedPaths,
+            trigger: session.trigger, metadata: [], warnings: ["Capture stopped after a write error"], interruptions: [], captureFailed: true
+        )
+        try session.save()
+        let failedManifest = try await worker.finalize(session)
+        let failed = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: failedManifest))
+        XCTAssertEqual(failed.audio.count, 2)
+        XCTAssertEqual(failed.status, .incomplete)
+        XCTAssertFalse(failed.warnings.isEmpty)
     }
 
     private func writeTone(to url: URL, sampleRate: Double, channels: AVAudioChannelCount, duration: Double) throws {

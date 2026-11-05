@@ -118,4 +118,5 @@ struct RecordingPaths: Codable, Sendable {
     var accessibilityTemporary: URL { directory.appending(path: ".\(baseName)-accessibility.part.jsonl") }
     var accessibilityFinal: URL { directory.appending(path: "\(baseName)-accessibility.jsonl") }
     var manifest: URL { directory.appending(path: "\(baseName)-capture.json") }
+    var session: URL { directory.appending(path: ".\(baseName).session.json") }
 }

@@ -8,97 +8,48 @@ Records are written to `~/Documents/Meetings/YYYY/MM/`. The canonical archive
 is one audio-only Matroska (`.mka`) file with independently selectable Opus
 streams; a versioned JSON manifest carries capture provenance for `speech2md`.
 
-## Development
+## Build, test, and install locally
+
+Quit Meeting Capture, then run this one command from the repository root:
 
 ```sh
-nix develop .#meeting-capture
+bash meeting-capture/install-local.sh
+```
+
+This builds the Nix package, runs the macOS XCTest suite in the Nix development
+shell, and signs both the app and worker using the installed app's designated
+requirement. Only after those checks pass does it replace
+`~/Applications/MeetingCapture.app` and reopen it. It creates no backups and
+refuses to replace a running app. The app also refuses Quit while recording or
+starting/stopping capture. The `result` link retains the Nix runtime dependencies.
+
+Signing follows
+[`recmo/nix/home/remco/darwin.nix`](https://github.com/recmo/nix/blob/main/home/remco/darwin.nix):
+identifier `ventures.wicked.MeetingCapture`, certificate
+`Apple Development: REMCO BLOEMEN (V458N7266F)`, team `LD6C9WL456`. The
+certificate and private key must already be in the login keychain, and the
+installed developer-signed app must exist. `sign-local.sh` copies its exact
+requirement, preserves entitlements, and verifies both signed executables.
+The Nix package itself is ad-hoc signed; launch the installed copy for permission
+testing. Home Manager's deployment marker is left unchanged.
+
+For an interactive development shell:
+
+```sh
+nix develop .#meeting-capture --command bash --noprofile --norc
 cd meeting-capture
 xcodegen generate
-xcodebuild -project MeetingCapture.xcodeproj -scheme MeetingCapture build
+xcodebuild -project MeetingCapture.xcodeproj -scheme MeetingCapture test
 ```
 
-To build the installable app through Nix:
-
-```sh
-nix build .#meeting-capture
-open result/Applications/MeetingCapture.app
-```
-
-The Nix derivation uses the locally installed Xcode and ad-hoc signs the result
-with the capture entitlement. Home Manager in `recmo/nix`,
-[`home/remco/darwin.nix`](https://github.com/recmo/nix/blob/main/home/remco/darwin.nix),
-then copies and developer-signs the app **and worker** with identifier
-`ventures.wicked.MeetingCapture` and one explicit designated requirement. Its
-certificate is `Apple Development: REMCO BLOEMEN (V458N7266F)`; its team is
-`LD6C9WL456` (the suffix in the certificate name is not the team ID).
-
-### Test a PR with the installed identity
-
-On the Mac with that certificate and private key in the login keychain, check
-out the PR branch, then run from the repository root:
-
-```sh
-nix build .#meeting-capture
-test_dir="$(mktemp -d /tmp/meeting-capture-test.XXXXXX)"
-bash meeting-capture/sign-local.sh \
-  result/Applications/MeetingCapture.app "$test_dir/MeetingCapture.app"
-```
-
-The helper reads the designated requirement from
-`~/Applications/MeetingCapture.app`, signs both the test app and worker with it,
-preserves their entitlements, and verifies both against that requirement. It
-leaves the installed app untouched. An optional third argument selects another
-installed app path. Do not launch the ad-hoc-signed `result` directly for this test.
-Apple describes why designated requirements determine whether an updated build
-retains its identity in [TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
-
-Quit Meeting Capture from its menu after stopping any recording and waiting for
-finalization. To test at the same installed path, keep a backup and swap the
-verified build into place (Home Manager marks the installed bundle immutable).
-Keep the backup zipped so macOS cannot register a renamed backup as another app:
-
-```sh
-installed_app="$HOME/Applications/MeetingCapture.app"
-backup_dir="$(mktemp -d "$HOME/meeting-capture-backup.XXXXXX")"
-backup_archive="$backup_dir/MeetingCapture.zip"
-ditto -c -k --keepParent "$installed_app" "$backup_archive" &&
-  unzip -t "$backup_archive" &&
-  chflags -R nouchg "$installed_app" &&
-  rm -rf "$installed_app" &&
-  ditto "$test_dir/MeetingCapture.app" "$installed_app" &&
-  open "$installed_app"
-```
-
-Check the four permission rows in both the ready and failed-check menus. Each
-row should open its own Privacy & Security pane, including when it is checked.
-Toggle a permission, return to the menu, and allow a few seconds for its status
-to refresh. Accessibility is optional; Documents is checked only when both the
-app and worker can write, read, and remove a disposable file in the meeting
-folder. A folder failure can also mean disk or filesystem trouble, rather than a
-denied TCC grant. A dash means the worker status could not be obtained.
-
-Use **Check recording access again** / **Retry recording check** to run the
-full recording and archive test; permission checkmarks alone do not validate
-devices or audio. Play audio during that test, then make and stop a short manual
-recording. If macOS requests a restart after a permission change, quit and reopen
-the app. Restoring toggled permissions is part of cleanup; do not reset TCC to
-test identity persistence.
-If the recording check fails with permissions available, use **Copy error
-details** to capture the failure stage, error domain, code, and underlying error.
-
-After quitting the test app, restore the backup:
-
-```sh
-unzip -t "$backup_archive" &&
-  chflags -R nouchg "$installed_app" &&
-  rm -rf "$installed_app" &&
-  ditto -x -k "$backup_archive" "$HOME/Applications" &&
-  chflags -R uchg "$installed_app" &&
-  open "$installed_app"
-```
-
-Avoid running Home Manager activation while the test build occupies its managed
-path. The helper does not update Home Manager's deployment marker.
+Check each permission row opens its own Settings pane, toggle access, return to
+the menu, and retry the recording check. If macOS requests a restart, quit and
+reopen the app. Use **Copy error details** on failure. With audio playing, make
+an attributed manual recording and check the separate microphone and participant
+tracks. Also verify Skip/Stop suppress the current microphone session, input
+device/format changes create a new segment, and interrupted recordings can be
+selected independently for recovery. Raw Accessibility traces remain enabled
+for future speaker attribution.
 
 At launch, Meeting Capture checks Microphone and Screen & System Audio
 Recording access, requesting authorization if needed, and tests writing to the
@@ -129,7 +80,8 @@ the real microphone probe exercises that capability as well as user consent.
 The menu always lists these four permissions with checkmarks for available
 access, empty circles for unavailable access, and dashes for unknown worker
 status. Clicking any row opens its corresponding Settings pane. Status refreshes
-every three seconds while the menu is open; it never starts an audio recording.
+when the menu opens and when the app becomes active again; folder probes run
+off the UI thread. Status refreshes never start an audio recording.
 Accessibility trust is queried in a fresh worker, which is the process that
 collects metadata. Folder probes delete their disposable files after each check.
 
@@ -144,21 +96,27 @@ guarantee that permissions or a meeting application's devices will remain usable
 ## Current capture path
 
 - Core Audio process objects drive automatic detection. Browser helper
-  processes are resolved to their owning application, with default-input device
-  activity as the unattributed fallback.
+  processes are resolved to their owning application. Unattributed device activity
+  never triggers automatic recording, so the recorder cannot trigger itself.
 - For attributed clients, the process object's input-scoped device list identifies
   the microphone selected by the meeting application, even when it is not the
   macOS default. The active device is shown in the menu and recorded as a
   `microphoneDevice` metadata event.
 - Two seconds of sustained activity opens a ten-second, vetoable countdown.
+  Skip and Stop suppress that process until its microphone activity ends.
 - The microphone is captured to crash-safe PCM CAF segments in each device's
-  native format. If the meeting application changes input devices, capture
-  follows it with a new segment; the short restart interval is recorded as an
+  native format. Device changes and AVAudioEngine configuration changes restart
+  the microphone into a new segment; the short restart interval is recorded as an
   interruption. Participant audio uses an
   application-filtered ScreenCaptureKit stream and excludes this application.
-  Its incoming PCM format determines the audio buffers; `AVAudioFile` writes
+  Both capture paths share a timestamp-aware PCM writer. The incoming format
+  determines the audio buffers; `AVAudioFile` writes
   interleaved float PCM to CAF, including when ScreenCaptureKit supplies planar
-  samples. The file closes on the delivery queue before finalization reads it.
+  samples. Sample timestamps determine the file position: missing time is filled
+  with bounded silence buffers, and duplicate/overlapping frames are trimmed.
+  Leading silence aligns participant audio to the session start. The file closes
+  on the delivery queue before finalization reads it. Capture failures stop
+  recording visibly and produce an incomplete archive, even if both tracks exist.
 - Capture does no live transcoding. After stop, finalization aligns the native
   segments and creates one `.mka` without a meeting mix: microphone is mono
   Opus at 96 kb/s VBR and participants remain stereo Opus at 128 kb/s VBR.
@@ -190,10 +148,14 @@ guarantee that permissions or a meeting application's devices will remain usable
   recordings are excluded from recovery discovery; worker claims are released by
   the operating system even if a worker crashes. Unreadable audio fails processing
   and is preserved for recovery rather than silently omitted and deleted.
-  The menu counts unfinished audio files, not meetings, and offers a Finder link
-  to inspect them. Recovery attempts the first pending recording; an unreadable
-  file remains pending, so retrying can report the same failure. Recovery errors
-  use selectable primary text, with orange reserved for warning icons.
+  The menu groups unfinished files by recording and offers Recover and Show files
+  for each one. A damaged recording does not block selecting another. An atomic,
+  synchronized session journal records segment start times, metadata, failures,
+  and interruptions; normal finalization and recovery use the same record.
+  Recovery derives saved segment lengths from the audio while preserving their
+  recorded offsets. Old files without a journal are kept for manual salvage
+  rather than guessed into a potentially misaligned archive. Recovery errors use
+  selectable primary text, with orange reserved for warning icons.
 - Manually started recordings, including those selected from active audio
   applications, continue until explicitly stopped even when the meeting is muted.
 - Generic Accessibility inspection currently contributes the focused window
