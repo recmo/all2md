@@ -174,7 +174,8 @@ impl MarkdownLint {
             None,
             Some(&self.config),
         ) {
-            Ok(warnings) => findings.extend(warnings.into_iter().map(|warning| Finding { source: None,
+            Ok(warnings) => findings.extend(warnings.into_iter().map(|warning| Finding {
+                source: None,
                 path: path.into(),
                 line: Some(warning.line),
                 message: format!(
@@ -183,7 +184,8 @@ impl MarkdownLint {
                     warning.message
                 ),
             })),
-            Err(error) => findings.push(Finding { source: None,
+            Err(error) => findings.push(Finding {
+                source: None,
                 path: path.into(),
                 line: None,
                 message: format!("Markdown lint failed: {error}"),

@@ -171,7 +171,9 @@ pub struct Finding {
 /// A one-based source location in a schema document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FindingSource {
+    /// Repository path of the schema.
     pub path: String,
+    /// One-based source line.
     pub line: usize,
 }
 
@@ -734,6 +736,12 @@ fn validate_reciprocals(
 ) {
     let set: std::collections::HashSet<_> = edges.iter().cloned().collect();
     for edge in edges {
+        if policies
+            .get(&edge.target)
+            .is_some_and(|policy| policy.backlinks.as_ref().is_some_and(|rule| !rule.required))
+        {
+            continue;
+        }
         let config = &policies[&edge.source];
         let reciprocal = config
             .relations

@@ -3,3 +3,19 @@
 `mdstore` is a Git-backed Markdown daemon for validated search and editing over MCP. Documents, root `config.yaml`, and directory `schema.md` files are canonical; templates define document structure, relationships, link syntax, and change rules. Embedding sidecars are disposable and must be ignored by Git. Build with `nix develop .#mdstore --command cargo build --manifest-path mdstore/Cargo.toml`, then run `mdstore --root /path/to/repository serve`. Configure retrieval, Git synchronization, and the listen address in `config.yaml`; deploy behind trusted network access controls.
 
 MCP exposes `read`, `search`, and `edit`. Reads return a snapshot commit and numbered hashline anchors. Edits use those anchors; atomic moves additionally require `expected_commit`. Edits address original paths, then moves apply simultaneously, supporting chains, swaps, and explicitly vacated destinations. The server preserves document identity while rewriting Markdown/wiki links and rebasing relative assets, leaving labels, fragments, provenance, URLs, and code examples intact. Ambiguous rewrites, collisions, and invalid final schemas reject the batch. Successful edits, moves, backlinks, and deletions publish in one Git commit with retry receipts. See the MCP tool schemas for request details and the [task template](examples/tasks/v1/schema.md) for schema examples.
+
+## ML workers and file resources
+
+Declare derived outputs in root `config.yaml` under `derivations`; see the
+[ML worker](../ml-worker/README.md) for recipes, model versions, and configuration.
+Set `MDSTORE_WORKER_TOKEN` on the daemon and worker to a separate worker credential.
+Workers claim leased jobs through `/worker`, fetch only assigned inputs, and submit
+assigned outputs. The daemon validates and commits publications, fences stale
+leases, and protects generated files from ordinary edits and moves.
+
+Repository files also have URLs at `/<path>`. GET streams content and supports
+conditional/range requests for assets. PUT and DELETE require `If-Match` or
+`If-None-Match: *`; text writes use the same validation and atomic commit path as
+MCP edits. `Accept: application/vnd.mdstore.page+json` requests WebUI metadata.
+`/health` includes job status; `/mcp/events` streams repository and job invalidations.
+The trusted-network access model remains the same as the MCP listener.

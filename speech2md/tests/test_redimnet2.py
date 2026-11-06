@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 from pathlib import Path
 
 import pytest
@@ -423,17 +424,17 @@ def test_voiceprints_collapse_samples_to_one_normalized_embedding_per_handle(tmp
     assert np.linalg.norm(embeddings, axis=1).tolist() == pytest.approx([1.0, 1.0])
     assert embeddings[1, 0] > embeddings[1, 1]
 
-    path = tmp_path / "meeting.voiceprints.npz"
+    path = tmp_path / "meeting.voiceprints.json"
     write_voiceprints(profiles, path)
-    with np.load(path, allow_pickle=False) as voiceprints:
-        assert voiceprints.files == ["handles", "embeddings"]
-        assert voiceprints["handles"].dtype.kind == "U"
-        assert voiceprints["embeddings"].dtype == np.float32
+    voiceprints = json.loads(path.read_text())
+    assert voiceprints["space"]["dimensions"] == 192
+    assert [record["id"] for record in voiceprints["records"]] == handles.tolist()
+    assert np.allclose([record["vector"] for record in voiceprints["records"]], embeddings)
 
 
 def test_empty_voiceprints_have_stable_shapes(tmp_path: Path):
-    path = tmp_path / "empty.voiceprints.npz"
+    path = tmp_path / "empty.voiceprints.json"
     write_voiceprints({}, path)
-    with np.load(path, allow_pickle=False) as voiceprints:
-        assert voiceprints["handles"].shape == (0,)
-        assert voiceprints["embeddings"].shape == (0, 192)
+    voiceprints = json.loads(path.read_text())
+    assert voiceprints["records"] == []
+    assert voiceprints["space"]["dimensions"] == 192

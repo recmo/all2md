@@ -209,3 +209,11 @@ so both local and server validation reject dangling dependencies. Rewriting uses
 the portable Rust resolver, preserves wiki labels/fragments and YAML comments,
 and stages all affected documents together. A move is rejected if its new names
 cannot preserve references under the governing schema.
+
+## Recording review and imports
+
+The application lives at `/webui/`, alongside the daemon API at the origin root.
+Import stages Markdown as drafts and uploads media using conditional file writes.
+Recording documents open the [recording review](SPEECH_REVIEW.md) view, with playback,
+transcription status, and human speaker corrections. Generated transcripts remain
+read-only. Repository and job changes arrive through `/mcp/events`.

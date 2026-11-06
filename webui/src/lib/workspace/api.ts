@@ -1,4 +1,7 @@
 export type Page = {
+  readonly?: boolean;
+  asset?: { oid: string; size: number };
+  hash?: string | null;
   revision?: string;
   path: string;
   exists: boolean;
@@ -52,23 +55,34 @@ function errorLocation(location: string): { path: string; line?: number } {
 }
 
 async function mcp<T>(name: string, args: unknown): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch('/mcp', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: crypto.randomUUID(),
-        method: 'tools/call',
-        params: { name, arguments: args }
-      }),
-      signal: AbortSignal.timeout(15000)
-    });
-  } catch {
-    throw new ApiError('Daemon unavailable. Check the connection and retry.');
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
+    id: crypto.randomUUID(),
+    method: 'tools/call',
+    params: { name, arguments: args }
+  });
+  // Identical edit bytes use mdstore's durable commit receipt on retry.
+  const attempts = name === 'edit' ? 2 : 1;
+  let response!: Response;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      response = await fetch('/mcp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        signal: AbortSignal.timeout(15000)
+      });
+      if (response.status >= 500 && attempt + 1 < attempts) {
+        await response.body?.cancel();
+        continue;
+      }
+      break;
+    } catch {
+      if (attempt + 1 === attempts)
+        throw new ApiError(
+          'Daemon unavailable. Check the connection and retry.'
+        );
+    }
   }
   const value = await response.json().catch(() => {
     throw new ApiError(
@@ -143,72 +157,37 @@ export async function completeAnchor(text: string): Promise<string> {
     : `${first}..${await hash(lines.length - 1)}`;
 }
 
-async function rawRead(path: string): Promise<Response> {
-  const url =
-    '/path/' +
-    path.replace(/^\//, '').split('/').map(encodeURIComponent).join('/');
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      cache: 'no-cache',
-      signal: AbortSignal.timeout(15000)
-    });
-  } catch {
-    throw new ApiError('Daemon unavailable. Check the connection and retry.');
-  }
-  if (!response.ok && response.status !== 404) {
-    throw new ApiError(await response.text(), response.status);
-  }
-  return response;
+export function fileUrl(path: string) {
+  return (
+    '/' + path.replace(/^\//, '').split('/').map(encodeURIComponent).join('/')
+  );
 }
-
-function readRevision(response: Response): string {
-  const commit = response.headers.get('x-mdstore-commit');
-  if (!commit)
-    throw new ApiError(
-      `Cannot load documents: ${new URL(response.url).pathname} is missing its repository revision (X-Mdstore-Commit). Check that the reverse proxy forwards /path/ to mdstore, and deploy matching daemon and WebUI versions.`,
-      502
-    );
-  return commit;
-}
-
+export type Api = typeof api;
 export const api = {
-  async page(path: string): Promise<Page> {
-    const response = await rawRead(path);
-    const link = response.headers
-      .get('link')
-      ?.match(/<([^>]+)>;\s*rel="describedby"/)?.[1];
-    const template = link
-      ? decodeURIComponent(
-          new URL(link, 'http://mdstore.invalid').pathname.slice(
-            '/path/'.length
-          )
-        )
-      : null;
-    return {
-      path: path.replace(/^\//, ''),
-      revision: readRevision(response),
-      template: template ? { path: template } : null,
-      exists: response.ok,
-      text: response.ok ? await response.text() : ''
-    };
-  },
-  async directory(path = '/'): Promise<Directory> {
-    const response = await rawRead(path);
+  async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const response = await fetch(path, {
+      ...init,
+      headers: {
+        ...init.headers
+      }
+    });
+    if (response.status === 204) return undefined as T;
+    const value = await response.json().catch(() => ({}));
     if (!response.ok)
-      throw new ApiError(await response.text(), response.status);
-    const text = await response.text();
-    return {
-      path: path === '/' ? '/' : path.replace(/^\//, ''),
-      revision: readRevision(response),
-      children: text
-        .split('\n')
-        .filter(Boolean)
-        .map((path) => ({
-          path: path.replace(/^\//, ''),
-          kind: path.endsWith('/') ? 'directory' : 'file'
-        }))
-    };
+      throw new ApiError(
+        value.detail || value.title || response.statusText,
+        response.status,
+        value.findings || []
+      );
+    return value as T;
+  },
+  page(path: string) {
+    return this.request<Page>(fileUrl(path), {
+      headers: { Accept: 'application/vnd.mdstore.page+json' }
+    });
+  },
+  directory(path = '/') {
+    return this.request<Directory>(fileUrl(path));
   },
   async search(query: string, variants: string[] = []) {
     const response = await mcp<{

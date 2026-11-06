@@ -26,6 +26,9 @@ def relation(name, selector, reciprocal=None):
         _definition["relations"] = []
     _definition["relations"].append({"name": name, "selector": selector, "reciprocal": reciprocal})
 
+def backlinks(required=True):
+    _declare("backlinks", {"required": required})
+
 def structure(level=None, order="unrestricted", additional_sections=True):
     if _definition["sections"]:
         fail("declare structure before sections")

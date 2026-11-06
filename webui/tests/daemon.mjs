@@ -8,6 +8,7 @@ const root = mkdtempSync(join(tmpdir(), 'mdstore-spa-test-'));
 writeFileSync(
   join(root, 'config.yaml'),
   'server:\n  listen: 127.0.0.1:43133\n' +
+    (process.env.MDSTORE_TEST_ADMIN ? '  allow_config_edits: true\n' : '') +
     'documents:\n  include: ["**/*.md"]\ngit:\n  push: false\nprovider:\n  api_key_env: MDSTORE_TEST_NO_KEY\n'
 );
 writeFileSync(
@@ -36,7 +37,10 @@ for (const args of [
 const daemon = spawn(
   fileURLToPath(new URL('../../mdstore/target/debug/mdstore', import.meta.url)),
   ['--root', root, 'serve'],
-  { stdio: 'inherit' }
+  {
+    stdio: 'inherit',
+    env: { ...process.env, MDSTORE_WORKER_TOKEN: 'browser-test-worker' }
+  }
 );
 process.env.MDSTORE_URL = 'http://127.0.0.1:43133';
 const ui = await preview({

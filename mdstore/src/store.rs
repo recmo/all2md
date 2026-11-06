@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use fs2::FileExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -28,9 +28,14 @@ use crate::{
     sidecar::{self, Sidecar},
 };
 
+pub(crate) mod artifacts;
+mod changes;
+mod files;
+
 /// Daemon-owned coherent view of one Git-backed Markdown repository.
 pub struct Store {
     root: PathBuf,
+    changes: tokio::sync::watch::Sender<changes::Change>,
     state: RwLock<Arc<StoreState>>,
     provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
     reindex_lock: tokio::sync::Mutex<()>,
@@ -71,6 +76,7 @@ impl fmt::Display for WriteBlock {
 
 #[derive(Clone)]
 pub(crate) struct StoreState {
+    artifacts: Arc<artifacts::Manifest>,
     pub(crate) head: String,
     templates: Arc<crate::template::Templates>,
     config: Config,
@@ -318,6 +324,12 @@ impl Store {
         };
         Ok(Arc::new(Self {
             root,
+            changes: tokio::sync::watch::channel(changes::Change {
+                revision: snapshot.head.clone(),
+                jobs: 0,
+                shutdown: false,
+            })
+            .0,
             state: RwLock::new(Arc::new(snapshot)),
             provider_factory,
             reindex_lock: tokio::sync::Mutex::new(()),
@@ -385,6 +397,13 @@ impl Store {
 
     /// Validates and commits one atomic hashline edit batch, returning its Git commit ID.
     pub fn apply_edits(&self, request: &ApplyEditsRequest) -> Result<String> {
+        let _lock = self.lock_repository()?;
+        git::recover_worktree(&self.root)?;
+        self.refresh_external_commit()?;
+        self.apply_edits_locked(request)
+    }
+
+    fn apply_edits_locked(&self, request: &ApplyEditsRequest) -> Result<String> {
         if request.summary.trim().is_empty() {
             bail!("summary must be non-empty");
         }
@@ -395,9 +414,6 @@ impl Store {
             bail!("moves require expected_commit from read/search");
         }
         let digest = request_digest(request)?;
-        let _lock = self.lock_repository()?;
-        git::recover_worktree(&self.root)?;
-        self.refresh_external_commit()?;
         if let Some(response) = self.read_receipt(&digest)? {
             return Ok(response);
         }
@@ -506,6 +522,7 @@ impl Store {
         }
         let applied = apply_operations(&originals, &edits)?;
         let mut changes = applied;
+        current.artifacts.check_edits(&current.config, &changes)?;
         let mut pages = (*current.pages).clone();
         let mut extra = (*current.config_files).clone();
         for (path, content) in &changes {
@@ -592,6 +609,9 @@ impl Store {
             paths = changes.keys().cloned().collect();
         }
         ensure_pages_match_config(&config, &pages)?;
+        current.artifacts.check_edits(&current.config, &changes)?;
+        current.artifacts.check_config(&config, &self.root)?;
+        current.artifacts.check_pages(&config, &pages)?;
         let (parsed, edges) = crate::markdown::validate_incremental(
             &pages,
             &templates,
@@ -626,56 +646,8 @@ impl Store {
             .iter()
             .map(|path| (path.clone(), changes.get(path).cloned().flatten()))
             .collect();
-        let path_list: Vec<String> = paths.iter().cloned().collect();
         let (preimages, postimages) = edit_images(&originals, &changes);
-        if let Err(error) = git::write_changes(&self.root, &ordered) {
-            return Err(rollback_failure(&self.root, &path_list, error));
-        }
-        let tree = match git::stage_tree(&self.root, &base_head, &ordered) {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(rollback_failure(&self.root, &path_list, error));
-            }
-        };
-        if let Some(tree) = tree {
-            let pending = PendingReceipt {
-                base_head: base_head.clone(),
-                tree,
-                preimages: preimages.clone(),
-                postimages: postimages.clone(),
-            };
-            if let Err(error) = self.write_pending(&digest, &pending) {
-                return Err(rollback_failure(&self.root, &path_list, error));
-            }
-            let commit = match git::commit_tree(
-                &self.root,
-                &pending.tree,
-                &pending.base_head,
-                &request.summary,
-            ) {
-                Ok(commit) => commit,
-                Err(error) => {
-                    let error = rollback_failure(&self.root, &path_list, error);
-                    return match self.remove_pending(&digest) {
-                        Ok(()) => Err(error),
-                        Err(cleanup) => {
-                            Err(anyhow!("{error}; pending cleanup also failed: {cleanup}"))
-                        }
-                    };
-                }
-            };
-            if let Err(error) = git::sync_index(&self.root, &commit, &path_list) {
-                return Err(rollback_failure(&self.root, &path_list, error));
-            }
-            base_head = commit.clone();
-            if git::head(&self.root)? != commit {
-                return Err(rollback_failure(
-                    &self.root,
-                    &path_list,
-                    anyhow!("repository HEAD advanced during edit publication; retry the request"),
-                ));
-            }
-        }
+        let tree = git::stage_tree(&self.root, &base_head, &ordered)?;
         let index = build_index(
             &self.root,
             &config,
@@ -684,7 +656,8 @@ impl Store {
             &edges,
             provider.as_ref(),
         );
-        *self.state.write() = Arc::new(StoreState {
+        let candidate = StoreState {
+            artifacts: Arc::clone(&current.artifacts),
             head: base_head.clone(),
             templates,
             config,
@@ -699,12 +672,67 @@ impl Store {
             index: Arc::new(index),
             provider,
             generation: current.generation + 1,
-        });
+        };
+        if let Some(tree) = tree {
+            let pending = PendingReceipt {
+                base_head: base_head.clone(),
+                tree: tree.clone(),
+                preimages: preimages.clone(),
+                postimages: postimages.clone(),
+            };
+            self.write_pending(&digest, &pending)?;
+            match self.commit_candidate(&base_head, &tree, &ordered, &request.summary, candidate) {
+                Ok(commit) => base_head = commit,
+                Err(error) => {
+                    // Keep the receipt if HEAD advanced: retry can recover a completed commit.
+                    if git::head(&self.root)? == pending.base_head {
+                        self.remove_pending(&digest)?;
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            self.publish_snapshot(candidate);
+        }
         self.write_receipt(&digest, &base_head, &preimages, &postimages)?;
         self.remove_pending(&digest)?;
+        Ok(base_head)
+    }
+
+    // Callers validate their own edit/publication policy before entering this path.
+    fn commit_candidate(
+        &self,
+        base: &str,
+        tree: &str,
+        changes: &[(String, Option<String>)],
+        summary: &str,
+        mut candidate: StoreState,
+    ) -> Result<String> {
+        let paths = changes
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        let commit = (|| {
+            git::write_changes(&self.root, changes)?;
+            let commit = git::commit_tree(&self.root, tree, base, summary)?;
+            git::sync_index(&self.root, &commit, &paths)?;
+            ensure!(
+                git::head(&self.root)? == commit,
+                "repository HEAD advanced during publication; retry the request"
+            );
+            Ok(commit)
+        })()
+        .map_err(|error| rollback_failure(&self.root, &paths, error))?;
+        candidate.head = commit.clone();
+        self.publish_snapshot(candidate);
+        Ok(commit)
+    }
+
+    fn publish_snapshot(&self, state: StoreState) {
+        *self.state.write() = Arc::new(state);
+        self.publish_revision();
         self.sync_notify.notify_one();
         self.reindex_notify.notify_one();
-        Ok(base_head)
     }
 
     /// Rebuilds every embedding sidecar and the search index.
@@ -937,6 +965,7 @@ impl Store {
                     }
                     git::activate_candidate(&self.root, &local, &incoming)?;
                     *self.state.write() = Arc::new(state);
+                    self.publish_revision();
                     self.reindex_notify.notify_one();
                     local = incoming;
                 } else if !git::is_ancestor(&self.root, &incoming, &local)? {
@@ -985,6 +1014,7 @@ impl Store {
             let _ = self.set_external_blocked(error.to_string());
         })?;
         *self.state.write() = Arc::new(state);
+        self.publish_revision();
         self.reindex_notify.notify_one();
         if matches!(*self.blocked.read(), Some(WriteBlock::ExternalCommit(_))) {
             self.set_blocked(None)?;
@@ -1215,7 +1245,10 @@ fn load_snapshot(
     provider: Arc<dyn RetrievalProvider>,
     generation: u64,
 ) -> Result<StoreState> {
+    let artifacts = artifacts::load_manifest(root, &head)?;
+    artifacts.check_config(&config, root)?;
     let pages = load_pages(root, &head, &config)?;
+    artifacts.check_pages(&config, &pages)?;
     let config_files = load_config_files(root, &head)?;
     let templates = crate::template::Templates::compile(&config_files)
         .map_err(|findings| ValidationError { findings })?;
@@ -1232,6 +1265,7 @@ fn load_snapshot(
     git::ensure_ignored_at(root, &head, sidecars.iter().map(String::as_str))?;
     let index = build_index(root, &config, &pages, &parsed, &edges, provider.as_ref());
     Ok(StoreState {
+        artifacts: Arc::new(artifacts),
         head,
         config,
         provider,
@@ -1508,7 +1542,12 @@ impl StoreState {
         };
         let mut children = std::collections::BTreeSet::new();
         let mut found = prefix.is_empty();
-        for file in self.pages.keys().chain(self.config_files.keys()) {
+        for file in self
+            .pages
+            .keys()
+            .chain(self.config_files.keys())
+            .chain(self.artifacts.assets.keys())
+        {
             let Some(relative) = file.strip_prefix(prefix) else {
                 continue;
             };

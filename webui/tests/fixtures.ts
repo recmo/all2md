@@ -7,7 +7,8 @@ export const test = base.extend<{ daemon: void }>({
   daemon: [
     async ({}, use) => {
       const child = spawn(process.execPath, ['tests/daemon.mjs'], {
-        stdio: ['ignore', 'ignore', 'pipe']
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: process.env
       });
       let errors = '';
       child.stderr.on('data', (chunk) => {

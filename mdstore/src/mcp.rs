@@ -4,8 +4,9 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    extract::{Path, Request, State},
+    http::{HeaderMap, HeaderValue, Request as HttpRequest, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -22,15 +23,48 @@ use crate::{
 /// Preferred MCP protocol revision.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
+#[derive(Clone)]
+struct AppState {
+    store: Arc<Store>,
+    worker_token: Option<String>,
+}
+
+mod events;
+mod files;
+mod problem;
+mod transfers;
+mod worker;
+
 fn router(store: Arc<Store>) -> Router {
+    let state = AppState {
+        store,
+        worker_token: std::env::var("MDSTORE_WORKER_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty()),
+    };
+    application(state)
+}
+
+fn application(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
         .route("/path", get(raw_root))
         .route("/path/", get(raw_root))
         .route("/path/{*path}", get(raw_path))
-        .layer(TraceLayer::new_for_http())
-        .with_state(store)
+        .route("/mcp/events", get(events::subscribe))
+        .route("/worker", post(worker::handle))
+        .merge(files::routes())
+        .layer(middleware::from_fn_with_state(state.clone(), authorize))
+        .layer(middleware::from_fn(problem::normalize))
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &HttpRequest<axum::body::Body>| {
+                // Worker attempts are capabilities; never log query strings or headers.
+                let path = request.uri().path();
+                tracing::debug_span!("http-request", method = %request.method(), path)
+            },
+        ))
+        .with_state(state)
 }
 
 /// Serves the daemon until shutdown on the configured socket.
@@ -47,24 +81,28 @@ pub async fn serve_listener(listener: tokio::net::TcpListener, store: Arc<Store>
     tracing::info!(%listen, "mdstore listening");
     let sync = Arc::clone(&store).synchronize();
     let embeddings = Arc::clone(&store).maintain_embeddings();
+    let jobs = Arc::clone(&store).maintain_jobs();
+    let shutdown_store = Arc::clone(&store);
     let server = axum::serve(listener, router(store))
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            shutdown_store.stop_changes();
         })
         .into_future();
     tokio::select! {
         result = server => result?,
         _ = sync => bail!("synchronization worker stopped"),
         _ = embeddings => bail!("embedding worker stopped"),
+        _ = jobs => bail!("job reconciliation stopped"),
     }
     Ok(())
 }
 
-async fn health(State(store): State<Arc<Store>>) -> Response {
-    match run_blocking(move || store.status()).await {
-        Ok(status) => (
+async fn health(State(state): State<AppState>) -> Response {
+    match run_blocking(move || Ok((state.store.status()?, state.store.jobs()?))).await {
+        Ok((status, jobs)) => (
             StatusCode::OK,
-            Json(json!({"status": "ok", "store": status})),
+            Json(json!({"status": "ok", "store": status, "jobs": jobs})),
         )
             .into_response(),
         Err(error) => (
@@ -75,16 +113,16 @@ async fn health(State(store): State<Arc<Store>>) -> Response {
     }
 }
 
-async fn raw_root(State(store): State<Arc<Store>>, headers: HeaderMap) -> Response {
-    raw_document(&store, "/", &headers)
+async fn raw_root(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    raw_document(&state.store, "/", &headers)
 }
 
 async fn raw_path(
-    State(store): State<Arc<Store>>,
+    State(state): State<AppState>,
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    raw_document(&store, &path, &headers)
+    raw_document(&state.store, &path, &headers)
 }
 
 fn raw_document(store: &Store, path: &str, headers: &HeaderMap) -> Response {
@@ -171,7 +209,33 @@ where
         .context("blocking daemon operation failed")?
 }
 
-async fn mcp(State(store): State<Arc<Store>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn authorize(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let worker = state.worker_token.as_deref().is_some_and(|token| {
+        request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            == Some(&format!("Bearer {token}"))
+    });
+    let path = request.uri().path();
+    if worker
+        && (path == "/health"
+            || path == "/path"
+            || path.starts_with("/path/")
+            || path == "/mcp"
+            || path.starts_with("/mcp/"))
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
+}
+
+async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let store = state.store;
     if let Some(version) = headers.get("mcp-protocol-version") {
         let Ok(version) = version.to_str() else {
             return StatusCode::BAD_REQUEST.into_response();

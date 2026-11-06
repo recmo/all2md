@@ -42,8 +42,8 @@
       pkgs = nixpkgs.legacyPackages.${system};
       pagesProject = ./pages2md;
       speechProject = ./speech2md;
-      reviewProject = ./speech-review;
       docProject = ./doc2md;
+      mlProject = ./ml-worker;
       pagesVersion =
         if self ? rev then
           self.rev
@@ -100,10 +100,61 @@
         name = "speech2md";
         project = speechProject;
       };
-      reviewEnvironment = mkPythonEnvironment {
-        name = "speech-review";
-        project = reviewProject;
+      mlEnvironment = mkPythonEnvironment {
+        name = "ml-worker";
+        project = mlProject;
       };
+      # nixpkgs packages only the LADSPA plugin. Build the upstream Rust CLI
+      # from that same fixed source/cargo closure, with DFN3 weights embedded.
+      mkDeepFilter = mlSystem:
+        let
+          deepfilternet = nixpkgs.legacyPackages.${mlSystem}.deepfilternet;
+        in
+        assert deepfilternet.version == "0.5.6";
+        deepfilternet.overrideAttrs {
+          pname = "deep-filter";
+          buildAndTestSubdir = "libDF";
+          cargoBuildFlags = [
+            "--bin" "deep-filter"
+            "--features" "bin,tract,wav-utils,transforms,default-model"
+          ];
+          # Upstream lib tests import the optional training/dataset module.
+          # The worker check below exercises the installed CLI and actual model.
+          doCheck = false;
+          postInstall = "";
+        };
+      ml-worker = pkgs.writeShellApplication {
+        name = "ml-worker";
+        runtimeInputs = [ pkgs.ffmpeg (mkDeepFilter system) speech2md ];
+        text = ''
+          export SPEECH2MD_VERSION=${pagesVersion}
+          exec ${mlEnvironment}/bin/ml-worker "$@"
+        '';
+      };
+      mkMlWorkerCheck = mlSystem:
+        let systemPkgs = nixpkgs.legacyPackages.${mlSystem};
+        in systemPkgs.runCommand "ml-worker-tests" {
+          nativeBuildInputs = [
+            (systemPkgs.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.pytest ]))
+            systemPkgs.ffmpeg
+            (mkDeepFilter mlSystem)
+          ];
+        } ''
+          export PYTHONPATH=${mlProject}/src
+          export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+          pytest -q -p no:cacheprovider ${mlProject}/tests
+          touch "$out"
+        '';
+      mkMlWorkerShell = mlSystem:
+        let systemPkgs = nixpkgs.legacyPackages.${mlSystem};
+        in systemPkgs.mkShell {
+          packages = [
+            (systemPkgs.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.pytest ]))
+            systemPkgs.uv
+            systemPkgs.ffmpeg
+            (mkDeepFilter mlSystem)
+          ];
+        };
       pagesTestEnvironment = mkPythonEnvironment {
         name = "pages2md";
         project = pagesProject;
@@ -134,13 +185,6 @@
           export TORCH_HOME="$cache_root/torch"
           export SPEECH2MD_VERSION=${pagesVersion}
           exec ${speechEnvironment}/bin/speech2md "$@"
-        '';
-      };
-      speech-review = pkgs.writeShellApplication {
-        name = "speech-review";
-        runtimeInputs = [ speech2md ];
-        text = ''
-          exec ${reviewEnvironment}/bin/speech-review "$@"
         '';
       };
       meeting-capture = pkgs.callPackage ./meeting-capture/package.nix { };
@@ -336,14 +380,16 @@
           doc2md = mkDoc2md docSystem;
           mdstore = mkMdstore docSystem;
           webui = mkMdstoreWeb docSystem;
+          deep-filter = mkDeepFilter docSystem;
         })
         // {
           ${system} = {
             default = pages2md;
+            deep-filter = mkDeepFilter system;
             inherit
               meeting-capture
               pages2md
-              speech-review
+              ml-worker
               speech2md
               ;
             doc2md = mkDoc2md system;
@@ -367,9 +413,9 @@
               type = "app";
               program = "${speech2md}/bin/speech2md";
             };
-            speech-review = {
+            ml-worker = {
               type = "app";
-              program = "${speech-review}/bin/speech-review";
+              program = "${ml-worker}/bin/ml-worker";
             };
             doc2md = mkDocApp system;
             mdstore = mkMdstoreApp system;
@@ -381,9 +427,11 @@
           doc2md = mkDoc2md docSystem;
           doc2md-independence = mkDocIndependenceCheck docSystem;
           mdstore = mkMdstore docSystem;
+          ml-worker = mkMlWorkerCheck docSystem;
         })
         // {
           ${system} = {
+            ml-worker = mkMlWorkerCheck system;
             pages2md-source =
               pkgs.runCommand "pages2md-source-check"
                 {
@@ -426,6 +474,7 @@
               pkgs.runCommand "speech2md-tests"
                 {
                   nativeBuildInputs = [
+                    pkgs.ffmpeg
                     (pkgs.python3.withPackages (ps: [
                       ps.numpy
                       ps.pytest
@@ -441,33 +490,6 @@
                   pytest -q ${speechProject}/tests
                   touch "$out"
                 '';
-            speech-review-source =
-              pkgs.runCommand "speech-review-source-check"
-                {
-                  nativeBuildInputs = [ pkgs.python3 ];
-                }
-                ''
-                  export PYTHONPYCACHEPREFIX="$out/pycache"
-                  python -m compileall -q ${reviewProject}/src
-                  touch "$out/passed"
-                '';
-            speech-review-tests =
-              pkgs.runCommand "speech-review-tests"
-                {
-                  nativeBuildInputs = [
-                    (pkgs.python3.withPackages (ps: [
-                      ps.numpy
-                      ps.pytest
-                      ps.pyyaml
-                    ]))
-                  ];
-                }
-                ''
-                  export PYTHONPATH=${reviewProject}/src
-                  export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-                  pytest -q ${reviewProject}/tests
-                  touch "$out"
-                '';
             packaged-clis =
               pkgs.runCommand "packaged-clis"
                 {
@@ -475,7 +497,7 @@
                     pages2md
                     pkgs.darwin.cctools
                     speech2md
-                    speech-review
+                    ml-worker
                   ];
                 }
                 ''
@@ -487,8 +509,8 @@
                   ${pagesEnvironment}/bin/python -c 'from mlx_vlm import load'
                   speech2md --help > /dev/null
                   speech2md --version | grep -Eq '^speech2md [0-9a-f]{40,64}$'
-                  speech-review --help > /dev/null
-                  ${reviewEnvironment}/bin/python -c 'from speech_review.server import STATIC; assert (STATIC / "index.html").is_file()'
+                  ml-worker --help > /dev/null
+                  ml-worker --list-recipes | grep -q text-embeddings-zembed-1-v1
                   for extension in \
                     ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
                     ${speechEnvironment}/lib/python*/site-packages/mlx/core*.so; do
@@ -510,6 +532,7 @@
           doc2md = mkDocShell docSystem;
           mdstore = mkMdstoreShell docSystem;
           webui = mkWebuiShell docSystem;
+          ml-worker = mkMlWorkerShell docSystem;
         })
         // {
           ${system} = rec {
@@ -549,19 +572,12 @@
               '';
             };
 
-            speech-review = pkgs.mkShell {
-              packages = [
-                pkgs.python3
-                pkgs.uv
-              ];
-              shellHook = ''
-                echo "Run: uv sync --project speech-review --extra dev"
-              '';
-            };
+
 
             doc2md = mkDocShell system;
             mdstore = mkMdstoreShell system;
             webui = mkWebuiShell system;
+            ml-worker = mkMlWorkerShell system;
             default = pages2md;
           };
         };

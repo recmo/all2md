@@ -12,8 +12,8 @@ Local-first tools that turn source material into auditable Markdown.
 - [`speech2md`](speech2md/README.md) uses MOSS locally to transcribe and
   diarize recordings, with ReDimNet2 voice embeddings for stable speaker
   labels across processing windows.
-- [`speech-review`](speech-review/README.md) provides a local web editor for
-  playback, speaker identity hints, attendees, and localized corrections.
+- [`webui`](webui/README.md) includes recording playback, speaker guidance,
+  attendees, and localized corrections, backed by mdstore.
 - [`doc2md`](doc2md/README.md) extracts Google Docs and Notion pages into
   durable Markdown with source metadata, assets, and synchronization safety.
 - [`mdstore`](mdstore/README.md) serves a Git-tracked Markdown corpus through
@@ -34,7 +34,7 @@ only model weights and checkpoints are populated in user caches on demand.
 nix run github:recmo/all2md#pages2md -- --help
 nix run github:recmo/all2md#speech2md -- --help
 nix run github:recmo/all2md#doc2md -- --help
-nix run github:recmo/all2md#speech-review -- ~/Meetings
+nix run github:recmo/all2md#ml-worker -- --help
 nix run github:recmo/all2md#mdstore -- --help
 nix build github:recmo/all2md#meeting-capture
 nix develop .#pages2md
@@ -52,3 +52,8 @@ uses the locally installed Xcode and installs `MeetingCapture.app` under its
 `speech2md` intentionally has one processing path: pinned MOSS transcription
 and diarization plus pinned ReDimNet2 speaker reconciliation, with raw model
 output retained beside the rendered Markdown.
+
+## ML worker
+
+The [MacBook ML worker](ml-worker/README.md) runs leased transcription, denoising,
+level adjustment, text embedding, and reranking jobs. OCR integration is planned.

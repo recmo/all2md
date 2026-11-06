@@ -82,6 +82,26 @@ pub enum EditOperation {
 }
 
 impl EditOperation {
+    pub(crate) fn replace_file(path: String, base: Option<&str>, content: String) -> Self {
+        let anchor = base.map(|text| {
+            let rendered = render(text, None);
+            let anchors: Vec<_> = rendered
+                .lines()
+                .filter_map(|line| line.split_once('|').map(|(a, _)| a))
+                .collect();
+            match anchors.as_slice() {
+                [] => "0:".into(),
+                [one] => (*one).into(),
+                _ => format!("{}..{}", anchors[0], anchors[anchors.len() - 1]),
+            }
+        });
+        Self::Replace {
+            path,
+            anchor,
+            content,
+        }
+    }
+
     /// Returns the repository-relative target path.
     #[must_use]
     pub fn path(&self) -> &str {

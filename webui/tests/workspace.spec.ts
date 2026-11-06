@@ -4,7 +4,7 @@ import { test, expect } from './fixtures';
 test('browser history visits documents and workspace views without duplicate entries', async ({
   page
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await expect(
     page.getByRole('treeitem', { name: 'welcome.md', exact: true })
   ).toBeVisible();
@@ -55,16 +55,20 @@ test('drafts are isolated per tab, survive refresh, and search requires a connec
   const calls: string[] = [];
   page.on('request', (r) => {
     if (r.url().endsWith('/mcp')) calls.push(r.postDataJSON().params.name);
-    if (new URL(r.url()).pathname.startsWith('/path/')) calls.push('GET /path');
+    if (
+      r.method() === 'GET' &&
+      r.headers().accept === 'application/vnd.mdstore.page+json'
+    )
+      calls.push('GET page');
   });
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'welcome.md', exact: true }).click();
   await replaceDocument(page, '# Welcome\n\nSaved local draft.\n');
   await expect(page.locator('.document-header')).toContainText('Valid');
   await page.reload();
   await expect(page.locator('#preview')).toContainText('Saved local draft.');
   const secondTab = await context.newPage();
-  await secondTab.goto('/#welcome.md');
+  await secondTab.goto('/webui/#welcome.md');
   await expect(secondTab.locator('#preview')).toContainText(
     'A knowledge garden for your ideas.'
   );
@@ -77,7 +81,7 @@ test('drafts are isolated per tab, survive refresh, and search requires a connec
   await expect(page.locator('#preview')).toContainText('Saved local draft.');
   await secondTab.close();
   const freshTab = await context.newPage();
-  await freshTab.goto('/#welcome.md');
+  await freshTab.goto('/webui/#welcome.md');
   await expect(freshTab.locator('#preview')).toContainText(
     'A knowledge garden for your ideas.'
   );
@@ -94,7 +98,7 @@ test('drafts are isolated per tab, survive refresh, and search requires a connec
   await page.locator('#search').press('Enter');
   await expect(page.getByText(/MCP RESULTS/)).toBeVisible();
   expect(calls).toContain('search');
-  expect(calls).toContain('GET /path');
+  expect(calls).toContain('GET page');
   await context.setOffline(true);
   await expect(page.locator('#search')).toBeDisabled();
   await expect(
@@ -117,7 +121,7 @@ test('submit pane reviews validation and diffs, then commits the full staged bat
   page,
   context
 }) => {
-  await page.goto('/');
+  await page.goto('/webui/');
   await page.getByRole('treeitem', { name: 'other.md', exact: true }).click();
   await replaceDocument(
     page,

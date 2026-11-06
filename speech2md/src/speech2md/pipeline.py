@@ -8,8 +8,9 @@ import time
 from tqdm.auto import tqdm
 
 from . import __version__
-from .hints import apply_edits, hint_path, load_hints, validate_hints
-from .media import probe, resolve_input, sha256
+from .hints import apply_edits, parse_hints, validate_hints
+from .recording import frontmatter, resolve_recording
+from .media import probe, sha256
 from .model import TranscriptState
 from .moss import (
     MossGuidanceRequired,
@@ -35,10 +36,11 @@ def transcribe(
     emit_progress("preparing", completed_seconds=0)
     if not re.fullmatch(r"[0-9a-f]{40,64}", __version__):
         raise RuntimeError("speech2md source commit is unavailable")
-    resolved = resolve_input(requested)
-    hints = load_hints(hint_path(resolved))
+    metadata = frontmatter(requested)
+    resolved = resolve_recording(requested, metadata)
+    hints = parse_hints(metadata)
     source_hash = sha256(resolved.requested)
-    voiceprints_path = resolved.markdown_path.with_suffix(".voiceprints.npz")
+    voiceprints_path = resolved.markdown_path.with_suffix(".voiceprints.json")
     outputs = [resolved.markdown_path, voiceprints_path]
     existing = [path for path in outputs if path.exists()]
     if existing and not force:
@@ -216,7 +218,7 @@ def transcribe(
         }
         if len(voiceprint_profiles) != len(speaker_profiles):
             raise ValueError("speaker handles collide in rendered voiceprints")
-        write_voiceprints(voiceprint_profiles, staged_voiceprints)
+        write_voiceprints(voiceprint_profiles, staged_voiceprints, identities={a.handle: a.identity for a in hints.attendees if a.identity})
         write_text(render_markdown(state), staged_markdown)
         staged_voiceprints.replace(voiceprints_path)
         staged_markdown.replace(resolved.markdown_path)

@@ -21,10 +21,17 @@ pub(crate) struct Template {
     markdown: Option<String>,
     pub(crate) links: crate::LinkConfig,
     pub(crate) relations: Vec<crate::RelationRule>,
+    pub(crate) backlinks: Option<Backlinks>,
     pub(crate) metadata: std::collections::BTreeMap<String, String>,
     structure: Structure,
     preamble: Rules,
     sections: Vec<Section>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Backlinks {
+    pub(crate) required: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -128,7 +135,9 @@ struct CompiledTemplate {
 
 impl std::fmt::Debug for Templates {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Templates").field("paths", &self.entries.keys()).finish_non_exhaustive()
+        f.debug_struct("Templates")
+            .field("paths", &self.entries.keys())
+            .finish_non_exhaustive()
     }
 }
 
@@ -147,7 +156,8 @@ impl Templates {
                 Ok(template) => {
                     entries.insert(path.clone(), template);
                 }
-                Err(error) => findings.push(Finding { source: None,
+                Err(error) => findings.push(Finding {
+                    source: None,
                     path: path.clone(),
                     line: None,
                     message: format!("invalid template: {error}"),
@@ -573,7 +583,8 @@ fn validate_page(
             .find(path)
             .is_some_and(|found| found.start() == 0 && found.end() == path.len())
         {
-            findings.push(Finding { source: None,
+            findings.push(Finding {
+                source: None,
                 path: path.into(),
                 line: None,
                 message: format!(
@@ -585,7 +596,8 @@ fn validate_page(
     }
     if let Some(validator) = &entry.schema {
         for error in validator.iter_errors(&page.frontmatter) {
-            findings.push(Finding { source: None,
+            findings.push(Finding {
+                source: None,
                 path: path.to_owned(),
                 line: Some(crate::template_script::field_line(
                     text,
@@ -614,7 +626,8 @@ fn validate_page(
     let events = &page.events;
     let headings = &page.section_headings;
     let mut report = |offset: usize, message: String| {
-        findings.push(Finding { source: None,
+        findings.push(Finding {
+            source: None,
             path: path.to_owned(),
             line: Some(offsets.partition_point(|start| *start <= offset)),
             message: {

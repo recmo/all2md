@@ -12,6 +12,8 @@ mod markdown_lint;
 #[cfg(feature = "server")]
 mod mcp;
 #[cfg(feature = "server")]
+mod media;
+#[cfg(feature = "server")]
 mod moves;
 #[cfg(feature = "server")]
 mod provider;
@@ -26,9 +28,9 @@ mod template;
 mod template_script;
 
 pub use config::{
-    ChunkConfig, Config, DateOrder, DocumentConfig, GitConfig, LinkConfig, ProviderConfig,
-    RelationLinkSyntax, RelationRule, RelationSelector, SearchConfig, SectionListRule,
-    ServerConfig,
+    ChunkConfig, Config, DateOrder, DerivationConfig, DocumentConfig, GitConfig, LinkConfig,
+    ProviderConfig, RelationLinkSyntax, RelationRule, RelationSelector, SearchConfig,
+    SectionListRule, ServerConfig,
 };
 #[cfg(feature = "server")]
 pub use git::PushState;
@@ -50,3 +52,6 @@ pub use store::{
 
 /// Reusable document parsing and schema validation.
 pub mod validation;
+
+#[cfg(feature = "server")]
+pub mod vectors;

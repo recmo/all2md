@@ -17,23 +17,35 @@ struct ScriptError {
     source: Option<crate::markdown::FindingSource>,
 }
 impl std::fmt::Display for ScriptError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 impl std::error::Error for ScriptError {}
 
 fn script_error(error: starlark::Error) -> anyhow::Error {
     // require() fails inside the built-in prelude: use its closest user caller.
-    let location = error.span().into_iter()
-        .chain(error.call_stack().frames.iter().rev().filter_map(|frame| frame.location.as_ref()))
+    let location = error
+        .span()
+        .into_iter()
+        .chain(
+            error
+                .call_stack()
+                .frames
+                .iter()
+                .rev()
+                .filter_map(|frame| frame.location.as_ref()),
+        )
         .find(|span| !span.filename().starts_with('<'));
     let source = location.map(|span| crate::markdown::FindingSource {
-        path: span.filename().into(), line: span.file.resolve_span(span.span).begin.line + 1,
+        path: span.filename().into(),
+        line: span.file.resolve_span(span.span).begin.line + 1,
     });
     let message = match error.kind() {
         starlark::ErrorKind::Fail(message) => message.to_string(),
         _ => error.without_diagnostic().to_string(),
     };
-    ScriptError {message, source}.into()
+    ScriptError { message, source }.into()
 }
 
 pub(crate) struct Script {
@@ -134,8 +146,7 @@ impl Script {
             &Dialect::Standard,
         )
         .map_err(script_error)?;
-        let ast = AstModule::parse(path, source, &Dialect::Standard)
-            .map_err(script_error)?;
+        let ast = AstModule::parse(path, source, &Dialect::Standard).map_err(script_error)?;
         Module::with_temp_heap(|module| {
             let definition;
             {
@@ -350,7 +361,16 @@ fn alloc_document<'v>(heap: Heap<'v>, doc: &Document<'_>) -> Value<'v> {
     heap.alloc(AllocStruct([
         ("path", heap.alloc(doc.path)),
         ("text", heap.alloc(doc.text)),
-        ("title", heap.alloc(page.headings.iter().find(|heading| heading.level == 1).map(|heading| heading.text.as_str()).unwrap_or(""))),
+        (
+            "title",
+            heap.alloc(
+                page.headings
+                    .iter()
+                    .find(|heading| heading.level == 1)
+                    .map(|heading| heading.text.as_str())
+                    .unwrap_or(""),
+            ),
+        ),
         ("frontmatter", heap.alloc(&page.frontmatter)),
         ("sections", sections),
         ("links", links),
@@ -373,13 +393,17 @@ pub(crate) fn finding(path: &str, text: &str, _template: &str, error: &anyhow::E
                 .map(|field| field_line(text, field))
         });
     Finding {
-        source: error.downcast_ref::<ScriptError>().and_then(|error| error.source.clone()),
+        source: error
+            .downcast_ref::<ScriptError>()
+            .and_then(|error| error.source.clone()),
         path: path.to_owned(),
         line,
         message: {
             let mut clean = message.trim();
             while clean.starts_with("[mdstore-line:") || clean.starts_with("[mdstore-field:") {
-                let Some((_, rest)) = clean.split_once(']') else { break; };
+                let Some((_, rest)) = clean.split_once(']') else {
+                    break;
+                };
                 clean = rest.trim_start();
             }
             clean.to_owned()

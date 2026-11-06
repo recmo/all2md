@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -924,14 +925,18 @@ def test_render_coalesces_only_same_speaker():
 def test_transcribe_refuses_to_overwrite_before_loading_model(tmp_path: Path):
     media = tmp_path / "meeting.mp4"
     media.touch()
-    (tmp_path / "meeting.md").write_text("existing")
+    recording = tmp_path / "recording.md"
+    recording.write_text("---\naudio: meeting.mp4\n---\n# Recording\n")
+    (tmp_path / "transcript.md").write_text("existing")
     with pytest.raises(FileExistsError, match="--force"):
-        transcribe(media)
+        transcribe(recording)
 
 
 def test_transcribe_can_require_a_current_moss_cache(tmp_path: Path, monkeypatch):
     media = tmp_path / "meeting.mp4"
     media.touch()
+    recording = tmp_path / "recording.md"
+    recording.write_text("---\naudio: meeting.mp4\n---\n# Recording\n")
     resolved = SimpleNamespace(
         requested=media,
         markdown_path=tmp_path / "meeting.md",
@@ -941,7 +946,7 @@ def test_transcribe_can_require_a_current_moss_cache(tmp_path: Path, monkeypatch
         calendar_event=None,
         sources=((media, "mixed", None, 0),),
     )
-    monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
+    monkeypatch.setattr(pipeline, "resolve_recording", lambda *_: resolved)
     monkeypatch.setattr(
         pipeline,
         "probe",
@@ -956,7 +961,7 @@ def test_transcribe_can_require_a_current_moss_cache(tmp_path: Path, monkeypatch
     )
 
     with pytest.raises(pipeline.MossCacheMiss, match="cache is unavailable"):
-        transcribe(media, require_moss_cache=True)
+        transcribe(recording, require_moss_cache=True)
 
 
 def test_cache_only_transcribe_reports_when_speaker_guidance_is_needed(
@@ -965,6 +970,8 @@ def test_cache_only_transcribe_reports_when_speaker_guidance_is_needed(
 ):
     media = tmp_path / "meeting.mp4"
     media.touch()
+    recording = tmp_path / "recording.md"
+    recording.write_text("---\naudio: meeting.mp4\n---\n# Recording\n")
     resolved = SimpleNamespace(
         requested=media,
         markdown_path=tmp_path / "meeting.md",
@@ -975,7 +982,7 @@ def test_cache_only_transcribe_reports_when_speaker_guidance_is_needed(
         sources=((media, "mixed", None, 0),),
     )
     source = AudioSource(str(media), "mixed", "a" * 64, 10.0, "wav")
-    monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
+    monkeypatch.setattr(pipeline, "resolve_recording", lambda *_: resolved)
     monkeypatch.setattr(
         pipeline,
         "probe",
@@ -1001,17 +1008,18 @@ def test_cache_only_transcribe_reports_when_speaker_guidance_is_needed(
     )
 
     with pytest.raises(pipeline.MossCacheMiss, match="needs guided decoding"):
-        transcribe(media, require_moss_cache=True)
+        transcribe(recording, require_moss_cache=True)
 
 
 def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeypatch):
-    requested = tmp_path / "capture.json"
+    requested = tmp_path / "recording.md"
     microphone = tmp_path / "microphone.flac"
     participants = tmp_path / "participants.flac"
     microphone.touch()
     participants.touch()
     requested.touch()
-    (tmp_path / "capture.hint.yaml").write_text(
+    requested.write_text(
+        "---\nmanifest: capture.json\n"
         "hotwords:\n"
         "  - ProveKit\n"
         "  - F2Z\n"
@@ -1022,6 +1030,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         "      - track: participants\n"
         "        start: 1\n"
         "        end: 2\n"
+        "---\n# Recording\n"
     )
     resolved = SimpleNamespace(
         requested=requested,
@@ -1063,7 +1072,7 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
         def update(self, amount):
             self.completed += amount
 
-    monkeypatch.setattr(pipeline, "resolve_input", lambda _: resolved)
+    monkeypatch.setattr(pipeline, "resolve_recording", lambda *_: resolved)
     monkeypatch.setattr(
         pipeline,
         "probe",
@@ -1144,17 +1153,16 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert "participants window 1/1 prefill" in progress_bars[0].postfixes
     assert "participants window 1/1 transcribing" in progress_bars[0].postfixes
     assert sorted(path.name for path in tmp_path.iterdir()) == [
-        "capture.hint.yaml",
-        "capture.json",
-        "capture.md",
+                "capture.md",
         "capture.moss.npz",
-        "capture.voiceprints.npz",
+        "capture.voiceprints.json",
         "microphone.flac",
         "participants.flac",
+        "recording.md",
     ]
     metadata = yaml.safe_load((tmp_path / "capture.md").read_text().split("---", 2)[1])
     assert metadata["source_sha256"] == (
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        hashlib.sha256(requested.read_bytes()).hexdigest()
     )
     assert len(metadata["speech2md_version"]) == 40
     assert len(metadata["hints_sha256"]) == 64
@@ -1168,19 +1176,16 @@ def test_transcribe_loads_one_moss_engine_for_all_tracks(tmp_path: Path, monkeyp
     assert "speaker-1:** Mine" in (tmp_path / "capture.md").read_text()
     assert "Alice:** Hello" in (tmp_path / "capture.md").read_text()
 
-    (tmp_path / "capture.hint.yaml").write_text(
-        (tmp_path / "capture.hint.yaml").read_text() + "title: Renamed meeting\n"
-    )
+    requested.write_text(requested.read_text().replace("hotwords:", "title: Renamed meeting\nhotwords:"))
     pipeline.transcribe(requested, force=True)
 
     assert load_calls == [True]
     assert seen_engines[-2:] == [None, None]
     assert all(item is not None for item in seen_cached_generations[-2:])
-    with np.load(tmp_path / "capture.voiceprints.npz", allow_pickle=False) as voiceprints:
-        assert voiceprints.files == ["handles", "embeddings"]
-        assert voiceprints["handles"].tolist() == ["Alice", "speaker-1"]
-        assert voiceprints["embeddings"].shape == (2, 192)
-    assert (tmp_path / "capture.voiceprints.npz").stat().st_mode & 0o777 == 0o600
+    voiceprints = json.loads((tmp_path / "capture.voiceprints.json").read_text())
+    assert [r["id"] for r in voiceprints["records"]] == ["Alice", "speaker-1"]
+    assert all(len(r["vector"]) == 192 for r in voiceprints["records"])
+    assert (tmp_path / "capture.voiceprints.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_transcribe_track_replays_cached_moss_without_engine_or_ffmpeg(tmp_path: Path):

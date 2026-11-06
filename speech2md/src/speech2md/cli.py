@@ -15,7 +15,7 @@ def parser() -> argparse.ArgumentParser:
         description="Transcribe local meeting audio with MOSS and ReDimNet2",
     )
     command.add_argument("--version", action="version", version=f"speech2md {__version__}")
-    command.add_argument("input", type=Path)
+    command.add_argument("input", type=Path, help="authored recording.md document")
     command.add_argument("--force", action="store_true", help="replace existing derived output")
     command.add_argument("--require-moss-cache", action="store_true", help=argparse.SUPPRESS)
     return command
