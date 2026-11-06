@@ -17,8 +17,7 @@ struct WorkerAccessReport: Codable, Equatable, Sendable {
 
 struct FinalizeCaptureRequest: Codable, Sendable {
     var microphoneSegments: [CapturedAudioSegment]
-    var participants: URL?
-    let participantsStartedAt: Date?
+    var processTracks: [CapturedProcessTrack]
     let captureStartedAt: Date
     var captureEndedAt: Date
     let paths: RecordingPaths

@@ -2,8 +2,7 @@ import Foundation
 
 enum CaptureError: LocalizedError {
     case noMicrophone
-    case noDisplay
-    case screenRecordingPermissionRequired
+    case systemAudioCaptureFailure(String)
     case microphonePermissionRequired
     case triggeringApplicationUnavailable
     case deviceSelectionFailure(String)
@@ -26,10 +25,9 @@ enum CaptureError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noMicrophone: "No usable microphone is available."
-        case .noDisplay: "No display is available for system-audio capture."
-        case .screenRecordingPermissionRequired: "Allow Meeting Capture in Privacy & Security > Screen & System Audio Recording, then reopen the app."
+        case let .systemAudioCaptureFailure(message): "\(message). Check Meeting Capture in Privacy & Security > Screen & System Audio Recording, then retry the recording check."
         case .microphonePermissionRequired: "Allow Meeting Capture in Privacy & Security > Microphone, then retry the recording check."
-        case .triggeringApplicationUnavailable: "The triggering application's audio is unavailable."
+        case .triggeringApplicationUnavailable: "The triggering audio process is no longer available. Retry while the call is active."
         case let .deviceSelectionFailure(message): "Could not select microphone: \(message)"
         case let .writerFailure(message): "Audio writer failed: \(message)"
         }

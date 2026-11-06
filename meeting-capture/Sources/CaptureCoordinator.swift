@@ -6,13 +6,16 @@ import Foundation
 @MainActor
 final class CaptureCoordinator: ObservableObject {
     @Published private(set) var microphoneLevel: Float = 0
-    @Published private(set) var participantsLevel: Float = 0
+    @Published private(set) var processAudioLevel: Float = 0
     @Published private(set) var activeMicrophoneName: String?
     @Published private(set) var startedAt: Date?
     var onFailure: ((String) -> Void)?
 
     private let microphone = MicrophoneRecorder()
-    private let participants = SystemAudioRecorder()
+    private let processMonitor = AudioActivityMonitor()
+    private var processRecorders: [UInt32: (processID: Int32, trackID: UUID, recorder: SystemAudioRecorder)] = [:]
+    private var processCaptureTask: Task<Void, Never>?
+    @Published private(set) var processTrackCount = 0
     private var accessibilityWorker: BackgroundWorkerProcess?
     private var accessibilityWorkerID: UUID?
     private let backgroundWorker = try? BackgroundWorkerClient()
@@ -34,7 +37,7 @@ final class CaptureCoordinator: ObservableObject {
         recordingClaim = try RecordingClaim(paths)
         claimedRecordings.insert(paths.manifest)
         session = FinalizeCaptureRequest(
-            microphoneSegments: [], participants: nil, participantsStartedAt: start,
+            microphoneSegments: [], processTracks: [],
             captureStartedAt: start, captureEndedAt: start, paths: paths, trigger: trigger,
             metadata: [], warnings: [], interruptions: []
         )
@@ -52,12 +55,6 @@ final class CaptureCoordinator: ObservableObject {
                 self?.microphoneLevel = level
             }
         }
-        participants.onLevel = { [weak self] level in
-            Task { @MainActor in
-                guard self?.session?.paths.manifest == identity else { return }
-                self?.participantsLevel = level
-            }
-        }
         let failed: @Sendable (Error) -> Void = { [weak self] error in
             let message = error.localizedDescription
             Task { @MainActor in
@@ -66,7 +63,6 @@ final class CaptureCoordinator: ObservableObject {
             }
         }
         microphone.onError = failed
-        participants.onError = failed
         microphone.onConfigurationChange = { [weak self] in
             Task { @MainActor in
                 guard let self, self.session?.paths.manifest == identity,
@@ -79,13 +75,19 @@ final class CaptureCoordinator: ObservableObject {
             let segment = try prepareMicrophoneSegment(at: startTime)
             try microphone.start(to: segment.url, deviceID: microphoneDevice?.id,
                                  startedAt: segment.startedAt, startTime: startTime)
-            if let pid = trigger.processID {
-                session?.participants = paths.participantsTemporary
-                try session?.save()
-                try await participants.start(processID: pid, bundleID: trigger.bundleID,
-                                             to: paths.participantsTemporary, startTime: hostStart)
-            } else {
-                session?.warnings.append("Manual microphone-only recording; no audio application was selected.")
+            try await captureOutputProcesses()
+            processCaptureTask = Task { [weak self] in
+                do {
+                    while !Task.isCancelled {
+                        try await Task.sleep(for: .milliseconds(250))
+                        guard let self, !self.stopping else { return }
+                        try await self.captureOutputProcesses()
+                    }
+                } catch is CancellationError {
+                    // Stopping waits for any in-flight tap startup below.
+                } catch {
+                    self?.recordFailure("Process audio capture: \(error.localizedDescription)")
+                }
             }
             if let processID = trigger.processID, let applicationName = trigger.applicationName {
                 startAccessibilityWorker(client: AudioClient(audioObjectID: 0, processID: processID,
@@ -98,6 +100,63 @@ final class CaptureCoordinator: ObservableObject {
             _ = try? await stop()
             claimedRecordings.remove(identity)
             throw error
+        }
+    }
+
+    private func captureOutputProcesses() async throws {
+        guard let active = session, !stopping else { return }
+        let snapshot = try processMonitor.outputProcesses()
+        // Quiet processes keep their tap so resumed audio stays on the same
+        // track. Exited processes release HAL resources but retain their files.
+        for objectID in processRecorders.keys.filter({ !snapshot.all.contains($0) }) {
+            if let previous = processRecorders.removeValue(forKey: objectID) {
+                try await previous.recorder.stop()
+            }
+        }
+        for process in snapshot.active {
+            guard !stopping, !Task.isCancelled else { return }
+            if processRecorders[process.objectID]?.processID == process.processID { continue }
+            if let previous = processRecorders.removeValue(forKey: process.objectID) {
+                try await previous.recorder.stop()
+            }
+            let id = UUID()
+            let startTime = CMClockGetTime(CMClockGetHostTimeClock())
+            let track = CapturedProcessTrack(id: id, process: process,
+                url: active.paths.processTemporary(id), startedAt: captureDate(at: startTime))
+            session?.processTracks.append(track)
+            try session?.save() // Journal identity and timing before opening a file.
+            let recorder = SystemAudioRecorder()
+            processRecorders[process.objectID] = (process.processID, id, recorder)
+            let identity = active.paths.manifest
+            recorder.onLevel = { [weak self] level in
+                Task { @MainActor in
+                    guard self?.session?.paths.manifest == identity else { return }
+                    self?.processAudioLevel = level
+                }
+            }
+            recorder.onError = { [weak self] error in
+                let message = "\(process.title): \(error.localizedDescription)"
+                Task { @MainActor in
+                    guard let self, self.session?.paths.manifest == identity,
+                          self.processRecorders[process.objectID]?.trackID == id else { return }
+                    // An ordinary process exit is not a failed meeting capture.
+                    if let live = try? self.processMonitor.processObjectIDs(), !live.contains(process.objectID) { return }
+                    self.recordFailure(message)
+                }
+            }
+            do {
+                try await recorder.start(processObject: process.objectID, to: track.url, startTime: startTime)
+            } catch {
+                processRecorders.removeValue(forKey: process.objectID)
+                try? await recorder.stop()
+                if let live = try? processMonitor.processObjectIDs(), !live.contains(process.objectID) {
+                    session?.warnings.append("\(process.title) exited before audio capture started.")
+                    try session?.save()
+                    continue
+                }
+                throw CaptureError.writerFailure("\(process.title): \(error.localizedDescription)")
+            }
+            processTrackCount = session?.processTracks.count ?? 0
         }
     }
 
@@ -151,19 +210,26 @@ final class CaptureCoordinator: ObservableObject {
     }
 
     func stop() async throws -> FinalizeCaptureRequest {
-        guard let active = session else { throw CaptureError.writerFailure("No active recording") }
+        guard session != nil else { throw CaptureError.writerFailure("No active recording") }
         stopping = true
         defer { reset() }
         session?.microphoneSegments = microphone.stop()
         if let failure = microphone.failure { recordFailure(failure.localizedDescription) }
-        do { try await participants.stop() } catch { recordFailure(error.localizedDescription) }
-        session?.captureEndedAt = captureDate()
-        if !FileManager.default.fileExists(atPath: active.paths.participantsTemporary.path) { session?.participants = nil }
+        processCaptureTask?.cancel()
+        await processCaptureTask?.value
+        processCaptureTask = nil
+        for entry in processRecorders.values {
+            do { try await entry.recorder.stop() } catch { recordFailure(error.localizedDescription) }
+        }
+        processRecorders.removeAll()
+        let endedAt = captureDate()
+        session?.captureEndedAt = endedAt
+        session?.processTracks.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
         accessibilityWorker?.terminate()
         guard let finished = session else { throw CaptureError.writerFailure("No active recording") }
         do { try finished.save() }
-        catch { claimedRecordings.remove(active.paths.manifest); throw error }
-        if finished.microphoneSegments.isEmpty, finished.participants == nil {
+        catch { claimedRecordings.remove(finished.paths.manifest); throw error }
+        if finished.microphoneSegments.isEmpty, finished.processTracks.isEmpty {
             try? FileManager.default.removeItem(at: finished.paths.session)
         }
         return finished
@@ -193,7 +259,7 @@ final class CaptureCoordinator: ObservableObject {
         session = nil
         stopping = false
         microphoneLevel = 0
-        participantsLevel = 0
+        processAudioLevel = 0
         startedAt = nil
         currentMicrophoneDevice = nil
         activeMicrophoneName = nil
@@ -202,11 +268,12 @@ final class CaptureCoordinator: ObservableObject {
         accessibilityWorkerID = nil
         microphone.onError = nil
         microphone.onConfigurationChange = nil
-        participants.onError = nil
+        processTrackCount = 0
     }
 
     private func addMicrophoneMetadata(_ device: AudioInputDevice) {
-        session?.metadata.append(MetadataEvent(timestamp: captureDate(), kind: .microphoneDevice,
+        let timestamp = captureDate()
+        session?.metadata.append(MetadataEvent(timestamp: timestamp, kind: .microphoneDevice,
                                               value: device.manifestValue, confidence: 1))
     }
 

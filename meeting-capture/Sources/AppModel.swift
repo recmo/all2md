@@ -1,6 +1,5 @@
 import AppKit
 @preconcurrency import AVFoundation
-import CoreGraphics
 import Foundation
 
 @MainActor
@@ -20,7 +19,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var permissionMessage = ""
     @Published private(set) var startupReport: StartupCaptureReport?
     @Published private(set) var microphoneAccess = false
-    @Published private(set) var screenRecordingAccess = false
+    @Published private(set) var systemAudioAccess: Bool?
     @Published private(set) var documentsAccess: Bool?
     @Published private(set) var accessibilityAccess: Bool?
     private var refreshingPermissions = false
@@ -31,7 +30,6 @@ final class AppModel: ObservableObject {
     @Published private(set) var recoveryInProgress = false
     @Published private(set) var recoveryError: String?
     @Published private(set) var finalizationsInProgress = 0
-    @Published private(set) var activeOutputClients: [AudioClient] = []
     let capture = CaptureCoordinator()
 
     private let monitor: AudioActivityMonitor?
@@ -81,8 +79,10 @@ final class AppModel: ObservableObject {
         permissionCheckTask = Task {
             do {
                 startupReport = try await checkCapture()
+                systemAudioAccess = true
                 startMonitoring()
             } catch {
+                if case CaptureError.systemAudioCaptureFailure = error { systemAudioAccess = false }
                 permissionMessage = error is CaptureError ? error.localizedDescription : CaptureError.details(error)
                 state = .permissionRequired
             }
@@ -94,10 +94,6 @@ final class AppModel: ObservableObject {
 
     func manualStart() {
         let client = AudioClient(audioObjectID: 0, processID: 0, bundleID: nil, applicationName: "Manual recording", inputDevices: [])
-        beginRecording(client, method: .manual)
-    }
-
-    func manualStart(client: AudioClient) {
         beginRecording(client, method: .manual)
     }
 
@@ -151,7 +147,6 @@ final class AppModel: ObservableObject {
         refreshingPermissions = true
         defer { refreshingPermissions = false }
         microphoneAccess = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        screenRecordingAccess = CGPreflightScreenCaptureAccess()
         let appDocuments = await Task.detached {
             do { try MeetingStore().validateAccess(); return true }
             catch { return false }
@@ -313,7 +308,8 @@ final class AppModel: ObservableObject {
                 recoverableFiles = capture.recoverableFiles()
                 if let captureError = error as? CaptureError {
                     switch captureError {
-                    case .screenRecordingPermissionRequired, .microphonePermissionRequired:
+                    case .systemAudioCaptureFailure, .microphonePermissionRequired:
+                        if case .systemAudioCaptureFailure = captureError { systemAudioAccess = false }
                         startupReport = nil
                         monitor?.stop()
                         permissionMessage = error.localizedDescription
@@ -331,9 +327,6 @@ final class AppModel: ObservableObject {
 
     private func startMonitoring() {
         monitor?.onClientsChanged = { [weak self] clients in self?.handle(clients) }
-        monitor?.onOutputClientsChanged = { [weak self] clients in
-            self?.activeOutputClients = clients
-        }
         state = .idle
         monitor?.start()
     }

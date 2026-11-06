@@ -23,7 +23,7 @@ uv run --project speech2md speech2md meeting.mp4
 ```
 
 The input may be an ordinary audio/video file or a Meeting Capture manifest.
-Both legacy v1 per-file tracks and v2 Matroska containers are accepted. For v2,
+Legacy v1 per-file tracks and v2/v3 Matroska containers are accepted. For v2/v3,
 each role is read from its declared audio stream in the shared container.
 Manifest checksums are verified before inference. Canonical audio is never
 changed.
@@ -184,3 +184,8 @@ populate the PyTorch model cache (`$XDG_CACHE_HOME/speech2md/torch` through the
 Nix wrapper). A load, checksum or inference failure stops processing clearly;
 canonical audio remains unchanged. Existing derived artifacts require `--force`
 to replace.
+
+Meeting Capture v3 process streams use `process-<track UUID>` as their source
+identity. Each process is transcribed independently; its stream index selects the
+correct audio from the shared Matroska archive. These identities also distinguish
+speaker hints, cached transcription, and review edits across processes.
