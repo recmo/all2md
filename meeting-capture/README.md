@@ -40,10 +40,12 @@ For an interactive development shell:
 
 ```sh
 nix develop .#meeting-capture --command bash --noprofile --norc
-cd meeting-capture
-xcodegen generate
-xcodebuild -project MeetingCapture.xcodeproj -scheme MeetingCapture test
+bash meeting-capture/test-local.sh
 ```
+
+The test script builds the app and test bundle, then runs XCTest directly. It
+works for headless CI accounts without a GUI `testmanagerd` session. Live audio
+capture is opt-in; ordinary tests do not request recording permissions.
 
 Check each permission row opens its own Settings pane, toggle access, return to
 the menu, and retry the recording check. If macOS requests a restart, quit and
@@ -204,10 +206,8 @@ on macOS. The optional windowless tone test exercises real process-tap delivery
 and two start/stop cycles:
 
 ```sh
-TEST_RUNNER_MEETING_CAPTURE_TEST_PROCESS_TAP=1 nix develop .#meeting-capture --command \
-  xcodebuild -project meeting-capture/MeetingCapture.xcodeproj \
-  -scheme MeetingCapture test \
-  -only-testing:MeetingCaptureTests/MeetingStoreTests/testWindowlessProcessTapRecordsTone
+MEETING_CAPTURE_TEST_PROCESS_TAP=1 nix develop .#meeting-capture --command \
+  bash meeting-capture/test-local.sh
 ```
 
 No countdown audio is persisted. A skipped trigger therefore leaves no audio

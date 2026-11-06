@@ -66,7 +66,7 @@ final class MeetingStoreTests: XCTestCase {
         let microphone = root.appending(path: "test.caf")
         try writeTone(to: microphone, sampleRate: 48_000, channels: 1, duration: 0.1)
         let original = try Data(contentsOf: microphone)
-        let worker = try BackgroundWorkerClient()
+        let worker = try workerClient()
         let report = try await worker.checkAccess(WorkerAccessRequest(
             root: root, microphone: microphone,
             applicationProcessID: ProcessInfo.processInfo.processIdentifier
@@ -178,7 +178,7 @@ final class MeetingStoreTests: XCTestCase {
         ).save()
         var claim: RecordingClaim? = try RecordingClaim(paths)
         XCTAssertTrue(store.interruptedRecordings().isEmpty)
-        let worker = try BackgroundWorkerClient()
+        let worker = try workerClient()
         do {
             _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: input))
             XCTFail("Recovery must reject a recording owned by capture or finalization")
@@ -200,7 +200,7 @@ final class MeetingStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = MeetingStore(root: root)
-        let worker = try BackgroundWorkerClient()
+        let worker = try workerClient()
         for corruptMicrophone in [false, true] {
             let start = Date()
             let paths = try store.paths(startedAt: start, title: "corrupt-\(corruptMicrophone)")
@@ -478,7 +478,7 @@ final class MeetingStoreTests: XCTestCase {
     }
 
     func testWorkerSegfaultDoesNotCrashHost() async throws {
-        let worker = try BackgroundWorkerClient()
+        let worker = try workerClient()
         do {
             try await worker.verifyCrashIsolation()
             XCTFail("The crash-test worker unexpectedly succeeded")
@@ -549,7 +549,7 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(store.interruptedRecordings(), [paths.session])
         let loaded = try FinalizeCaptureRequest.load(from: paths.session)
         XCTAssertEqual(loaded.microphoneSegments.map(\.startedAt), session.microphoneSegments.map(\.startedAt))
-        let worker = try BackgroundWorkerClient()
+        let worker = try workerClient()
         let manifestURL = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -595,6 +595,12 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(failed.audio.count, 2)
         XCTAssertEqual(failed.status, .incomplete)
         XCTAssertFalse(failed.warnings.isEmpty)
+    }
+
+    private func workerClient() throws -> BackgroundWorkerClient {
+        let application = Bundle(for: MeetingStoreTests.self).bundleURL
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        return try BackgroundWorkerClient(executableURL: application.appending(path: "Contents/Helpers/MeetingCaptureWorker"))
     }
 
     private func processTrack(_ paths: RecordingPaths, startedAt: Date, processID: Int32 = 42) -> CapturedProcessTrack {

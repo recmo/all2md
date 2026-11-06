@@ -17,15 +17,7 @@ staging="$(mktemp -d "$HOME/Applications/.meeting-capture-install.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 
 nix build .#meeting-capture
-# The single quotes intentionally leave $1 for the development shell.
-# shellcheck disable=SC2016
-nix develop .#meeting-capture --command bash --noprofile --norc -c '
-    set -e
-    cd meeting-capture
-    xcodegen generate
-    xcodebuild -project MeetingCapture.xcodeproj -scheme MeetingCapture \
-      -derivedDataPath "$1" CODE_SIGNING_ALLOWED=NO test
-' bash "$staging/DerivedData"
+nix develop .#meeting-capture --command bash meeting-capture/test-local.sh
 bash meeting-capture/sign-local.sh \
     result/Applications/MeetingCapture.app "$staging/MeetingCapture.app" "$installed"
 
