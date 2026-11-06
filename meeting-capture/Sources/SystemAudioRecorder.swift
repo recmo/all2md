@@ -9,7 +9,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
     private var deviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private var formatListener: AudioObjectPropertyListenerBlock?
-    private var audioFile: PCMFile?
+    private var writer: TapPCMWriter?
     private var deliveryError: Error?
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
@@ -67,7 +67,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
                 let status = AudioObjectGetPropertyData(self.tapID, &currentAddress, 0, nil,
                                                         &currentSize, &current)
                 if status != noErr || AVAudioFormat(streamDescription: &current)?.isEqual(format) != true {
-                    self.reportFailure(CaptureError.writerFailure("Audio process tap format changed; restart recording."))
+                    self.reportFailure(CaptureError.processTapFailure("Audio process tap format changed; restart recording."))
                 }
             }
             let aggregate: [String: Any] = [
@@ -81,16 +81,20 @@ final class SystemAudioRecorder: @unchecked Sendable {
                 ]],
             ]
             try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &deviceID), "Create tap device")
-            lock.withLock {
-                audioFile = PCMFile(url: url, startTime: startTime.seconds)
-                deliveryError = nil
-                sampleAt = nil
+            let writer = try TapPCMWriter(format: format, url: url, startTime: startTime.seconds)
+            writer.onSample = { [weak self] in
+                guard let self else { return }
+                self.lock.withLock { if self.sampleAt == nil { self.sampleAt = Date() } }
+                self.onLevel?(0.35)
             }
+            writer.onError = { [weak self] in self?.reportFailure($0) }
+            self.writer = writer
+            lock.withLock { deliveryError = nil; sampleAt = nil }
             try check(AudioObjectAddPropertyListenerBlock(tapID, &address, queue, listener), "Watch tap format")
             formatListener = listener
             try check(AudioDeviceCreateIOProcIDWithBlock(&ioProcID, deviceID, queue) {
-                [weak self] _, input, timestamp, _, _ in
-                self?.consume(input, timestamp: timestamp.pointee, format: format)
+                _, input, timestamp, _, _ in
+                writer.enqueue(input, timestamp: timestamp.pointee)
             }, "Create tap audio callback")
             try check(AudioDeviceStart(deviceID, ioProcID), "Start audio process tap")
         } catch {
@@ -99,14 +103,19 @@ final class SystemAudioRecorder: @unchecked Sendable {
         }
     }
 
-    func stop() async throws { try stopCapture() }
+    func stop(processExited: Bool = false) async throws {
+        do { try stopCapture() }
+        catch where processExited && CaptureError.isProcessTapFailure(error) {
+            // HAL can invalidate a tap when its process exits. Saved PCM is intact.
+        }
+    }
 
     private func stopCapture() throws {
         // Stop callbacks before destroying their device or closing their file.
         var failure: Error?
         func cleanup(_ status: OSStatus, _ operation: String) {
             if status != noErr, failure == nil {
-                failure = CaptureError.writerFailure("\(operation) (OSStatus \(status))")
+                failure = CaptureError.processTapFailure("\(operation) (OSStatus \(status))")
             }
         }
         if let formatListener {
@@ -129,41 +138,21 @@ final class SystemAudioRecorder: @unchecked Sendable {
             cleanup(AudioHardwareDestroyProcessTap(tapID), "Destroy process tap")
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
+        // The callback has stopped; drain copied samples before closing the file.
+        writer?.finish()
+        writer = nil
         lock.withLock {
-            audioFile?.close()
-            audioFile = nil
             failure = deliveryError ?? failure
             deliveryError = nil
         }
         if let failure { throw failure }
     }
 
-    private func consume(_ input: UnsafePointer<AudioBufferList>, timestamp: AudioTimeStamp, format: AVAudioFormat) {
-        lock.lock()
-        guard deliveryError == nil, let audioFile else { lock.unlock(); return }
-        do {
-            let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
-            guard buffers.contains(where: { $0.mDataByteSize > 0 }) else { lock.unlock(); return }
-            guard timestamp.mFlags.contains(.hostTimeValid),
-                  let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input, deallocator: nil) else {
-                throw CaptureError.writerFailure("Invalid audio process tap buffer or timestamp")
-            }
-            guard buffer.frameLength > 0 else { lock.unlock(); return }
-            try audioFile.write(buffer, at: AVAudioTime.seconds(forHostTime: timestamp.mHostTime))
-            if sampleAt == nil { sampleAt = Date() }
-            lock.unlock()
-            onLevel?(0.35)
-        } catch {
-            let failure = CaptureError.writerFailure("Process tap PCM write: \(CaptureError.details(error))")
-            deliveryError = failure
-            lock.unlock()
-            onError?(failure)
-        }
-    }
-
     private func reportFailure(_ error: Error) {
         let first = lock.withLock {
-            guard deliveryError == nil else { return false }
+            // A real writer failure must survive a concurrent process-exit error.
+            if let previous = deliveryError,
+               !CaptureError.isProcessTapFailure(previous) || CaptureError.isProcessTapFailure(error) { return false }
             deliveryError = error
             return true
         }
@@ -179,6 +168,104 @@ final class SystemAudioRecorder: @unchecked Sendable {
     private func check(_ status: OSStatus, _ operation: String) throws {
         guard status == noErr else {
             throw CaptureError.systemAudioCaptureFailure("\(operation) failed (OSStatus \(status))")
+        }
+    }
+}
+
+// HAL invokes IO blocks synchronously. Copy into preallocated slots and return;
+// only this separate queue may allocate PCMFile buffers or touch the filesystem.
+final class TapPCMWriter: @unchecked Sendable {
+    private let file: PCMFile
+    private let buffers: [AVAudioPCMBuffer]
+    private var timestamps: [UInt64]
+    private var readIndex = 0
+    private var writeIndex = 0
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.pcm-writer")
+    private let source: DispatchSourceUserDataOr
+    private var failed = false // Writer queue only.
+    var onSample: (@Sendable () -> Void)?
+    var onError: (@Sendable (Error) -> Void)?
+
+    init(format: AVAudioFormat, url: URL, startTime: Double) throws {
+        file = PCMFile(url: url, startTime: startTime)
+        // Bounded storage: 32 callbacks of up to 8192 frames each.
+        buffers = try (0..<32).map { _ in
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192) else {
+                throw CaptureError.writerFailure("Could not allocate process audio queue")
+            }
+            return buffer
+        }
+        timestamps = Array(repeating: 0, count: buffers.count)
+        source = DispatchSource.makeUserDataOrSource(queue: queue)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            let events = self.source.data
+            if events & 2 != 0 { self.fail("Process audio queue overflow; audio could not be saved fast enough") }
+            if events & 4 != 0 { self.fail("Invalid process audio buffer or timestamp") }
+            self.drain()
+        }
+        source.resume()
+    }
+
+    func enqueue(_ input: UnsafePointer<AudioBufferList>, timestamp: AudioTimeStamp) {
+        let incoming = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
+        guard incoming.contains(where: { $0.mDataByteSize > 0 }) else { return }
+        guard timestamp.mFlags.contains(.hostTimeValid) else { source.or(data: 4); return }
+        // Never wait on the writer, even while it briefly advances a ring index.
+        guard lock.try() else { source.or(data: 2); return }
+        defer { lock.unlock() }
+        guard writeIndex - readIndex < buffers.count else { source.or(data: 2); return }
+        let index = writeIndex % buffers.count
+        let buffer = buffers[index]
+        let bytesPerFrame = Int(buffer.format.streamDescription.pointee.mBytesPerFrame)
+        let destination = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let bytes = Int(incoming[0].mDataByteSize)
+        guard bytesPerFrame > 0, bytes % bytesPerFrame == 0,
+              bytes / bytesPerFrame <= Int(buffer.frameCapacity), incoming.count == destination.count else {
+            source.or(data: 4); return
+        }
+        for channel in incoming.indices {
+            guard incoming[channel].mDataByteSize == bytes,
+                  let from = incoming[channel].mData, let to = destination[channel].mData else {
+                source.or(data: 4); return
+            }
+            to.copyMemory(from: from, byteCount: bytes)
+        }
+        buffer.frameLength = AVAudioFrameCount(bytes / bytesPerFrame)
+        timestamps[index] = timestamp.mHostTime
+        writeIndex += 1
+        source.or(data: 1)
+    }
+
+    private func drain() {
+        while let index = lock.withLock({ readIndex < writeIndex ? readIndex % buffers.count : nil }) {
+            if !failed {
+                do {
+                    try file.write(buffers[index], at: AVAudioTime.seconds(forHostTime: timestamps[index]))
+                    onSample?()
+                } catch { fail("Process tap PCM write: \(CaptureError.details(error))") }
+            }
+            // This slot stays owned by the writer until disk I/O completes.
+            lock.withLock { readIndex += 1 }
+        }
+    }
+
+    private func fail(_ message: String) {
+        guard !failed else { return }
+        failed = true
+        onError?(CaptureError.writerFailure(message))
+    }
+
+    func finish() {
+        queue.sync {
+            // Read pending flags too: a final overflow may precede stop().
+            let events = source.data
+            if events & 2 != 0 { fail("Process audio queue overflow; audio could not be saved fast enough") }
+            if events & 4 != 0 { fail("Invalid process audio buffer or timestamp") }
+            drain()
+            file.close()
+            source.cancel()
         }
     }
 }

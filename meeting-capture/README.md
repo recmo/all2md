@@ -139,14 +139,18 @@ for manual salvage rather than guessed into the new format.
   Sample timestamps determine the file position: missing time is filled
   with bounded silence buffers, and duplicate/overlapping frames are trimmed.
   Per-track start times align process audio to the session start. The file closes
-  after callbacks stop and the delivery queue drains, before finalization reads it.
+  after callbacks stop and the writer queue drains, before finalization reads it.
+  Tap callbacks only copy into 32 preallocated buffers (up to 8192 frames each);
+  a separate queue writes them to disk. A full queue fails capture visibly.
+  Process exit releases its tap without failing the session; disk errors remain fatal.
   Capture failures stop
   recording visibly and produce an incomplete archive, even if audio files exist.
 - Capture does no live transcoding. After stop, finalization aligns the native
   segments and creates one `.mka` without a meeting mix: microphone is mono
   Opus at 96 kb/s VBR and each process is stereo Opus at 128 kb/s VBR.
   All tracks use 48 kHz, the Opus audio application, 20 ms frames, complexity 10,
-  and no DTX.
+  and no DTX. Every stream is padded with silence through the session end, so
+  short-lived processes remain readable in later transcription windows.
 - Finalization probes the stream contract, decodes every stream, atomically
   publishes the archive, records its SHA-256 in the v3 manifest, and only then
   deletes the temporary PCM files. A failed finalization leaves the PCM files

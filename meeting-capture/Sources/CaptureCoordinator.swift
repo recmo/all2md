@@ -110,14 +110,14 @@ final class CaptureCoordinator: ObservableObject {
         // track. Exited processes release HAL resources but retain their files.
         for objectID in processRecorders.keys.filter({ !snapshot.all.contains($0) }) {
             if let previous = processRecorders.removeValue(forKey: objectID) {
-                try await previous.recorder.stop()
+                try await previous.recorder.stop(processExited: true)
             }
         }
         for process in snapshot.active {
             guard !stopping, !Task.isCancelled else { return }
             if processRecorders[process.objectID]?.processID == process.processID { continue }
             if let previous = processRecorders.removeValue(forKey: process.objectID) {
-                try await previous.recorder.stop()
+                try await previous.recorder.stop(processExited: true)
             }
             let id = UUID()
             let startTime = CMClockGetTime(CMClockGetHostTimeClock())
@@ -140,7 +140,8 @@ final class CaptureCoordinator: ObservableObject {
                     guard let self, self.session?.paths.manifest == identity,
                           self.processRecorders[process.objectID]?.trackID == id else { return }
                     // An ordinary process exit is not a failed meeting capture.
-                    if let live = try? self.processMonitor.processObjectIDs(), !live.contains(process.objectID) { return }
+                    if CaptureError.isProcessTapFailure(error),
+                       let live = try? self.processMonitor.processObjectIDs(), !live.contains(process.objectID) { return }
                     self.recordFailure(message)
                 }
             }
@@ -149,7 +150,8 @@ final class CaptureCoordinator: ObservableObject {
             } catch {
                 processRecorders.removeValue(forKey: process.objectID)
                 try? await recorder.stop()
-                if let live = try? processMonitor.processObjectIDs(), !live.contains(process.objectID) {
+                if CaptureError.isProcessTapFailure(error),
+                   let live = try? processMonitor.processObjectIDs(), !live.contains(process.objectID) {
                     session?.warnings.append("\(process.title) exited before audio capture started.")
                     try session?.save()
                     continue
@@ -218,8 +220,10 @@ final class CaptureCoordinator: ObservableObject {
         processCaptureTask?.cancel()
         await processCaptureTask?.value
         processCaptureTask = nil
-        for entry in processRecorders.values {
-            do { try await entry.recorder.stop() } catch { recordFailure(error.localizedDescription) }
+        let liveProcesses = try? processMonitor.processObjectIDs()
+        for (objectID, entry) in processRecorders {
+            do { try await entry.recorder.stop(processExited: liveProcesses?.contains(objectID) == false) }
+            catch { recordFailure(error.localizedDescription) }
         }
         processRecorders.removeAll()
         let endedAt = captureDate()

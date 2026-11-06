@@ -54,14 +54,14 @@ enum AudioFinalizer {
                 filters.append("[\(index):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono,adelay=\(delay):all=1[\(label)]")
                 labels.append("[\(label)]")
             }
-            filters.append("\(labels.joined())amix=inputs=\(labels.count):duration=longest:normalize=0,atrim=duration=\(duration),asetpts=PTS-STARTPTS[microphone]")
+            filters.append("\(labels.joined())amix=inputs=\(labels.count):duration=longest:normalize=0,apad=whole_dur=\(duration),atrim=duration=\(duration),asetpts=PTS-STARTPTS[microphone]")
             maps.append(("microphone", .microphone, 96_000, 1, "Microphone", nil))
         }
         for (index, track) in processTracks.enumerated() {
             let inputIndex = microphoneSegments.count + index
             let label = "process\(index)"
             let delay = max(0, Int(track.startedAt.timeIntervalSince(captureStartedAt) * 1_000))
-            filters.append("[\(inputIndex):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=\(delay):all=1,atrim=duration=\(duration),asetpts=PTS-STARTPTS[\(label)]")
+            filters.append("[\(inputIndex):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=\(delay):all=1,apad=whole_dur=\(duration),atrim=duration=\(duration),asetpts=PTS-STARTPTS[\(label)]")
             maps.append((label, .process, 128_000, 2, track.process.title, track))
         }
 

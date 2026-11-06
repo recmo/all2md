@@ -265,6 +265,26 @@ final class MeetingStoreTests: XCTestCase {
                 try writer.write(pcm, at: 224 / sampleRate)
                 writer.close() // The overlapping final buffer adds only 32 frames.
 
+                // The tap queue owns a copy, and finish must drain it before close.
+                let queuedURL = root.appending(path: "queued-\(interleaved)-\(sampleRate).caf")
+                let timestamp = AudioGetCurrentHostTime()
+                let queued = try TapPCMWriter(format: format, url: queuedURL,
+                    startTime: AVAudioTime.seconds(forHostTime: timestamp))
+                var time = AudioTimeStamp()
+                time.mFlags = .hostTimeValid
+                time.mHostTime = timestamp
+                queued.enqueue(pcm.audioBufferList, timestamp: time)
+                for buffer in buffers { memset(buffer.mData, 0, Int(buffer.mDataByteSize)) }
+                queued.finish()
+                let copied = try AVAudioFile(forReading: queuedURL)
+                XCTAssertEqual(copied.length, 64)
+                let copy = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: copied.processingFormat, frameCapacity: 64))
+                try copied.read(into: copy)
+                for frame in 0..<64 {
+                    XCTAssertEqual(copy.floatChannelData?[0][frame] ?? 0, 0.25, accuracy: 0.00001)
+                    XCTAssertEqual(copy.floatChannelData?[1][frame] ?? 0, -0.5, accuracy: 0.00001)
+                }
+
                 let saved = try AVAudioFile(forReading: url)
                 XCTAssertEqual(saved.length, 288)
                 XCTAssertEqual(saved.fileFormat.sampleRate, sampleRate)
@@ -432,6 +452,33 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: temporary.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: microphone1.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: participants.path))
+
+        // Each track must decode through the full session, including apps that
+        // stopped early. Later transcription windows must contain silence.
+        for index in 0..<3 {
+            let decoder = Process()
+            decoder.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            decoder.arguments = ["ffmpeg",
+                "-nostdin", "-v", "error", "-i", final.path, "-map", "0:a:\(index)",
+                "-ac", "1", "-ar", "8000", "-f", "f32le", "-",
+            ]
+            let pipe = Pipe()
+            decoder.standardOutput = pipe
+            try decoder.run()
+            let pcm = pipe.fileHandleForReading.readDataToEndOfFile()
+            decoder.waitUntilExit()
+            XCTAssertEqual(decoder.terminationStatus, 0)
+            XCTAssertEqual(Double(pcm.count) / 4 / 8000, 0.55, accuracy: 0.002)
+            if index == 2 {
+                let tail: [Float] = pcm.withUnsafeBytes { bytes in
+                    stride(from: Int(0.50 * 8000) * 4, to: bytes.count, by: 4).map {
+                        bytes.loadUnaligned(fromByteOffset: $0, as: Float.self)
+                    }
+                }
+                XCTAssertFalse(tail.isEmpty)
+                XCTAssertTrue(tail.allSatisfy { abs($0) < 0.002 })
+            }
+        }
 
         let retried = try AudioFinalizer.createArchive(
             microphoneSegments: [
