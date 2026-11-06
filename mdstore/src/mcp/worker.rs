@@ -69,11 +69,16 @@ pub(super) async fn handle(
         WorkerRequest::Claim { recipes } => {
             if let Some(assignment) = state
                 .store
-                .with_retrieval(|queue, texts| queue.claim(&recipes, texts))?
+                .with_retrieval(|queue, texts| queue.claim(&recipes, texts, false))?
             {
                 Ok(assignment)
+            } else if let Some(assignment) = state.store.claim_job(&recipes)? {
+                Ok(serde_json::to_value(assignment)?)
             } else {
-                Ok(serde_json::to_value(state.store.claim_job(&recipes)?)?)
+                Ok(state
+                    .store
+                    .with_retrieval(|queue, texts| queue.claim(&recipes, texts, true))?
+                    .unwrap_or(Value::Null))
             }
         }
         WorkerRequest::Heartbeat {
@@ -189,10 +194,20 @@ mod tests {
                 edits: vec![crate::EditOperation::Append {
                     path: "recording.md".into(),
                     anchor: None,
-                    content: "Recording content to search.\n".into(),
+                    content: "Recording content to search.\n\n## Details\n\nAdditional recording details.\n".into(),
                 }],
                 expected_commit: None,
                 moves: vec![],
+            })
+            .unwrap();
+        fixture
+            .create_derivation(crate::DerivationConfig {
+                source: "recording.md".into(),
+                recipe: "fixture-v1".into(),
+                fields: vec!["hotwords".into()],
+                inputs: vec![],
+                outputs: vec!["transcript.md".into()],
+                reference_namespace: None,
             })
             .unwrap();
         drop(fixture);
@@ -212,6 +227,15 @@ mod tests {
                 .iter()
                 .all(|job| job.state.status == "queued")
         );
+        // Interactive queries precede declared jobs, which precede background indexing.
+        let interactive = store.retrieval_queue().submit(EMBED_RECIPE,
+            json!({"texts":[{"id":"0","text":"Which recording?"}],"input_type":"query","namespace":"search"}), false, 30).unwrap();
+        let all_recipes = json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE,"fixture-v1"]});
+        let (_, query) = request(&app, all_recipes.clone()).await;
+        assert_eq!(query["job"]["id"], interactive);
+        assert_eq!(request(&app, result(&query)).await.0, StatusCode::OK);
+        let (_, declared) = request(&app, all_recipes.clone()).await;
+        assert_eq!(declared["job"]["recipe"], "fixture-v1");
         let (_, assignment) = request(&app, claim.clone()).await;
         assert_eq!(assignment["parameters"]["ml"]["input_type"], "document");
         let completion = result(&assignment);
@@ -244,6 +268,11 @@ mod tests {
         );
         assert_eq!(request(&app, completion.clone()).await.0, StatusCode::OK);
         assert_eq!(request(&app, completion).await.0, StatusCode::OK);
+        assert!(store.reindex_missing().await.is_err());
+        let partial = store.status().unwrap();
+        assert!(partial.vectors_ready > 0 && partial.vectors_ready < partial.vectors_total);
+        let (_, second_chunk) = request(&app, claim.clone()).await;
+        assert_eq!(request(&app, result(&second_chunk)).await.0, StatusCode::OK);
         store.reindex_missing().await.unwrap();
         assert_eq!(
             store.status().unwrap().vectors_ready,

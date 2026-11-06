@@ -1,6 +1,6 @@
 //! Durable retrieval requests served by the same pull workers as derivations.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -11,7 +11,10 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{provider::validate_result, store::artifacts::secret};
+use crate::{
+    provider::{revision, validate_result},
+    store::artifacts::secret,
+};
 
 pub(crate) const OUTPUT: &str = "retrieval/result.json";
 const LEASE_SECONDS: u64 = 300;
@@ -23,6 +26,7 @@ pub(crate) struct Queue(PathBuf);
 struct Job {
     id: String,
     recipe: String,
+    revision: String,
     parameters: Value,
     document: bool,
     deadline: u64,
@@ -30,7 +34,7 @@ struct Job {
     expires: u64,
     failures: u32,
     error: Option<String>,
-    result: Option<String>,
+    complete: bool,
 }
 
 fn now() -> u64 {
@@ -72,6 +76,19 @@ impl Queue {
             .context("read retrieval job")
     }
 
+    fn result_path(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.path(id)?.with_extension("result"))
+    }
+
+    fn remove(&self, job: &Job) -> Result<()> {
+        fs::remove_file(self.path(&job.id)?)?;
+        match fs::remove_file(self.result_path(&job.id)?) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn save(&self, job: &Job) -> Result<()> {
         crate::store::write_atomic(&self.path(&job.id)?, &serde_json::to_vec(job)?)
     }
@@ -82,6 +99,11 @@ impl Queue {
             let path = entry?.path();
             if path.extension().is_some_and(|v| v == "json") {
                 jobs.push(serde_json::from_slice::<Job>(&fs::read(path)?)?);
+            } else if path.extension().is_some_and(|v| v == "result")
+                && !path.with_extension("json").exists()
+            {
+                // Recover an interrupted cleanup after the job metadata was removed.
+                fs::remove_file(path)?;
             }
         }
         Ok(jobs)
@@ -95,15 +117,19 @@ impl Queue {
         timeout: u64,
     ) -> Result<String> {
         self.locked(|| {
+            let revision = revision(recipe)?;
             let nonce = if document { String::new() } else { secret()? };
             let id = format!(
                 "retrieval-{}",
-                crate::validation::source_hash(&format!("{recipe}:{parameters}:{nonce}"))
+                crate::validation::source_hash(&format!(
+                    "{recipe}:{revision}:{parameters}:{nonce}"
+                ))
             );
             if !self.path(&id)?.exists() {
                 self.save(&Job {
                     id: id.clone(),
                     recipe: recipe.into(),
+                    revision: revision.into(),
                     parameters,
                     document,
                     deadline: now() + if document { 86400 * 7 } else { timeout },
@@ -111,7 +137,7 @@ impl Queue {
                     expires: 0,
                     failures: 0,
                     error: None,
-                    result: None,
+                    complete: false,
                 })?;
             }
             Ok(id)
@@ -124,12 +150,17 @@ impl Queue {
             if let Some(error) = job.error {
                 bail!("ML worker: {error}");
             }
-            Ok(job.result)
+            if job.complete {
+                Ok(Some(fs::read_to_string(self.result_path(id)?)?))
+            } else {
+                Ok(None)
+            }
         })
     }
 
-    fn current(job: &Job, texts: &std::collections::HashSet<&str>) -> bool {
+    fn current(job: &Job, texts: &HashSet<&str>) -> bool {
         job.deadline > now()
+            && revision(&job.recipe).is_ok_and(|revision| revision == job.revision)
             && (!job.document
                 || job.parameters["texts"].as_array().is_some_and(|items| {
                     items.iter().all(|item| {
@@ -144,7 +175,7 @@ impl Queue {
         self.locked(|| {
             for job in self.jobs()? {
                 if job.document {
-                    fs::remove_file(self.path(&job.id)?)?;
+                    self.remove(&job)?;
                 }
             }
             Ok(())
@@ -158,11 +189,14 @@ impl Queue {
                 job.document,
                 "retry interactive inference by searching again"
             );
+            ensure!(
+                !job.complete,
+                "completed document embeddings require a full reindex"
+            );
             job.attempt = None;
             job.error = None;
             job.failures = 0;
             job.expires = 0;
-            job.result = None;
             job.deadline = now() + 86400 * 7;
             self.save(&job)
         })
@@ -170,17 +204,17 @@ impl Queue {
 
     pub(crate) fn summaries(
         &self,
-        texts: &std::collections::HashSet<&str>,
+        texts: &HashSet<&str>,
     ) -> Result<(Vec<crate::store::artifacts::Job>, bool)> {
         self.locked(|| {
             let mut summaries = Vec::new();
             for job in self.jobs()? {
                 if !Self::current(&job, texts) {
-                    fs::remove_file(self.path(&job.id)?)?;
+                    self.remove(&job)?;
                     continue;
                 }
                 // Completed retrieval requests are internal cache entries, not published artifacts.
-                if job.result.is_some() {
+                if job.complete {
                     continue;
                 }
                 summaries.push(crate::store::artifacts::Job {
@@ -228,20 +262,21 @@ impl Queue {
     pub(crate) fn claim(
         &self,
         recipes: &[String],
-        texts: &std::collections::HashSet<&str>,
+        texts: &HashSet<&str>,
+        document: bool,
     ) -> Result<Option<Value>> {
         self.locked(|| {
             let mut jobs = self.jobs()?;
-            // Interactive work takes priority over background document indexing.
-            jobs.sort_by_key(|job| (job.document, job.deadline, job.id.clone()));
+            jobs.sort_by_key(|job| (job.deadline, job.id.clone()));
             let mut assignment = None;
             for mut job in jobs {
                 if !Self::current(&job, texts) {
-                    fs::remove_file(self.path(&job.id)?)?;
+                    self.remove(&job)?;
                     continue;
                 }
                 if assignment.is_some()
-                    || job.result.is_some()
+                    || job.document != document
+                    || job.complete
                     || job.error.is_some()
                     || job.expires > now()
                     || !recipes.contains(&job.recipe)
@@ -263,12 +298,7 @@ impl Queue {
         })
     }
 
-    fn leased(
-        &self,
-        id: &str,
-        attempt: &str,
-        texts: &std::collections::HashSet<&str>,
-    ) -> Result<Job> {
+    fn leased(&self, id: &str, attempt: &str, texts: &HashSet<&str>) -> Result<Job> {
         let job = self.read(id)?;
         ensure!(Self::current(&job, texts), "stale retrieval input");
         ensure!(
@@ -283,7 +313,7 @@ impl Queue {
         id: &str,
         attempt: &str,
         failure: Option<String>,
-        texts: &std::collections::HashSet<&str>,
+        texts: &HashSet<&str>,
     ) -> Result<()> {
         self.locked(|| {
             let mut job = self.leased(id, attempt, texts)?;
@@ -305,7 +335,7 @@ impl Queue {
         id: &str,
         attempt: &str,
         outputs: &BTreeMap<String, String>,
-        texts: &std::collections::HashSet<&str>,
+        texts: &HashSet<&str>,
     ) -> Result<()> {
         self.locked(|| {
             let mut job = self.read(id)?;
@@ -316,8 +346,11 @@ impl Queue {
             );
             ensure!(outputs.len() == 1, "retrieval requires exactly one result");
             let output = outputs.get(OUTPUT).context("missing retrieval result")?;
-            if let Some(previous) = &job.result {
-                ensure!(previous == output, "conflicting completion replay");
+            if job.complete {
+                ensure!(
+                    fs::read_to_string(self.result_path(id)?)? == *output,
+                    "conflicting completion replay"
+                );
                 return Ok(());
             }
             ensure!(job.expires > now(), "expired worker lease");
@@ -328,7 +361,8 @@ impl Queue {
                 "wrong retrieval provenance"
             );
             validate_result(&job.recipe, &job.parameters, output)?;
-            job.result = Some(output.clone());
+            crate::store::write_atomic(&self.result_path(id)?, output.as_bytes())?;
+            job.complete = true;
             self.save(&job)
         })
     }

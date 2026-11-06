@@ -98,6 +98,14 @@ const EMBED_REVISION: &str = "cf13c81f3274394053d166740294f7eea4586f7a";
 const RERANK_MODEL: &str = "zeroentropy/zerank-2-reranker";
 const RERANK_REVISION: &str = "5eae30d5ee3c6b2df2ef6d723bde45172d761c4c";
 
+pub(crate) fn revision(recipe: &str) -> Result<&'static str> {
+    match recipe {
+        EMBED_RECIPE => Ok(EMBED_REVISION),
+        RERANK_RECIPE => Ok(RERANK_REVISION),
+        _ => bail!("unknown retrieval recipe: {recipe}"),
+    }
+}
+
 #[derive(Debug, Clone)]
 /// Posts all retrieval inference to mdstore's durable ML worker queue.
 pub struct WorkerProvider {
@@ -250,8 +258,11 @@ impl RetrievalProvider for WorkerProvider {
         let result = self
             .request(
                 EMBED_RECIPE,
-                serde_json::json!({"texts": texts(input),
-            "input_type": if document { "document" } else { "query" }, "namespace": "search"}),
+                serde_json::json!({
+                    "texts": texts(input),
+                    "input_type": if document { "document" } else { "query" },
+                    "namespace": "search"
+                }),
                 document,
             )
             .await?;
@@ -279,8 +290,10 @@ impl RetrievalProvider for WorkerProvider {
         let result = self
             .request(
                 RERANK_RECIPE,
-                serde_json::json!({"texts": texts(documents),
-            "query": query, "top_n": top_n.min(documents.len())}),
+                serde_json::json!({
+                    "texts": texts(documents), "query": query,
+                    "top_n": top_n.min(documents.len())
+                }),
                 false,
             )
             .await?;

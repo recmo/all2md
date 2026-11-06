@@ -191,7 +191,9 @@ and reranking through these same recipes. Workers claim these retrieval assignme
 through `/worker` and return their JSON inline in completion. Mdstore validates the
 pinned model, revision, input IDs, dimensions, normalization, and lease before
 installing document vectors into its sidecars and live search index. Retrieval
-assignments do not publish repository artifacts or create Git commits. See
+assignments do not publish repository artifacts or create Git commits. Their local
+workspaces are removed when the attempt ends. Workers claim the next job immediately
+after processing one and wait only when idle or after an error. See
 [mdstore](../mdstore/README.md) for configuration and migration.
 
 ### Reranking

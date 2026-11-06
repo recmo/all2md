@@ -138,6 +138,9 @@ impl Config {
         if self.chunking.target_tokens == 0 || self.chunking.max_chars == 0 {
             bail!("chunking limits must be greater than zero");
         }
+        if self.chunking.max_chars > 32768 {
+            bail!("chunking.max_chars must be at most 32768 for the local embedding recipe");
+        }
         if self.chunking.overlap_percent >= 100 {
             bail!("chunking.overlap_percent must be less than 100");
         }

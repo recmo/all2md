@@ -43,15 +43,19 @@ def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORK
     job_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (job_root / ".worker.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fingerprint = job["fingerprint"]
-        # Hash the label rather than trusting a server string as a cache path.
-        root = job_root / hashlib.sha256(fingerprint.encode()).hexdigest()
-        # Retain this workspace for retries and the shared MOSS cache at job_root.
-        for previous in job_root.iterdir():
-            if previous.is_dir() and previous != root:
-                shutil.rmtree(previous)
-        root.mkdir(exist_ok=True, mode=0o700)
-        _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock.fileno())
+        try:
+            fingerprint = job["fingerprint"]
+            # Hash the label rather than trusting a server string as a cache path.
+            root = job_root / hashlib.sha256(fingerprint.encode()).hexdigest()
+            # Retain this workspace for retries and the shared MOSS cache at job_root.
+            for previous in job_root.iterdir():
+                if previous.is_dir() and previous != root:
+                    shutil.rmtree(previous)
+            root.mkdir(exist_ok=True, mode=0o700)
+            _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock.fileno())
+        finally:
+            if assignment.get("retrieval", False):
+                shutil.rmtree(job_root)
 
 
 def _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock_fd):
@@ -181,6 +185,8 @@ def main(argv=None):
                     execute(client, assignment, args.cache, device=args.device, token_env=args.token_env)
                 if args.once:
                     return 0
+                if assignment:
+                    continue
             except Exception as error:
                 print(f"worker: {error}", file=sys.stderr)
                 if args.once:

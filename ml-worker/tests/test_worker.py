@@ -197,6 +197,9 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
                         '--cache', str(tmp_path/'cache')]) == 0
     assert len(state['completed']) == 1 and not state['failed']
     assert state['completion_requests'] == 2
+    if retrieval:
+        assert not list((tmp_path/'cache').rglob('.assignment.json'))
+        assert not list((tmp_path/'cache').rglob('.worker.lock'))
     complete = state['completed'][0]
     assert set(complete['assets']) == {p for p in outputs if not p.endswith('.md') and not retrieval}
     assert set(complete['outputs']) == {p for p in outputs if p.endswith('.md') or retrieval}
@@ -232,11 +235,13 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
         assert len(result['records'][0]['vector']) == text.DIMENSIONS
 
 
-def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeypatch):
+@pytest.mark.parametrize('retrieval', [False, True])
+def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeypatch, retrieval):
     client, state = server
     marker = tmp_path/'started'
     processes = fixture_models(monkeypatch, started=marker)
     state['assignment'] = assignment(text.EMBED_RECIPE, {'texts': [{'id':'x','text':'hello'}]}, {}, ['jobs/result.json'])
+    state['assignment']['retrieval'] = retrieval
     state['lose_lease'] = marker.exists
     started = time.monotonic()
     with pytest.raises(RuntimeError, match='lease lost'):
@@ -244,6 +249,9 @@ def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeyp
     assert time.monotonic()-started < 5
     assert processes and all(p.poll() is not None for p in processes)
     assert not state['outputs'] and not state['completed']
+    if retrieval:
+        assert not list((tmp_path/'cache').rglob('.assignment.json'))
+        assert not list((tmp_path/'cache').rglob('.worker.lock'))
 
 
 def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):

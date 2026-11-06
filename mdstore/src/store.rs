@@ -23,7 +23,7 @@ use crate::{
     git::{self, PushState},
     hashline::{EditOperation, apply_operations, render},
     markdown::{Edge, Finding, ParsedPage, validate_corpus},
-    provider::{InputType, RetrievalProvider, WorkerProvider},
+    provider::{InputType, RetrievalProvider, WorkerProvider, validate_vectors},
     search::{PageChunks, SearchIndex, SearchResponse, SearchResult},
     sidecar::{self, Sidecar},
 };
@@ -825,6 +825,7 @@ impl Store {
             return Ok(());
         }
         let mut incomplete = false;
+        let mut failure = None;
         for action in context.actions {
             match action {
                 ReindexAction::Remove(path) => {
@@ -864,10 +865,18 @@ impl Store {
                             .provider
                             .embed(InputType::Document, &input)
                             .await
-                        {
-                            Ok(batch) => vectors.extend(batch),
+                            .and_then(|vectors| {
+                                validate_vectors(&vectors, batch.len(), context.dimensions)?;
+                                Ok(vectors)
+                            }) {
+                            Ok(batch) => vectors.extend(batch.into_iter().map(Some)),
                             Err(error) => {
-                                tracing::debug!(%error, %path, "document embeddings pending");
+                                if !error.is::<crate::provider::PendingEmbeddings>()
+                                    && failure.is_none()
+                                {
+                                    failure = Some(error.context(format!("embed document {path}")));
+                                }
+                                vectors.extend(std::iter::repeat_n(None, batch.len()));
                                 pending = true;
                             }
                         }
@@ -880,12 +889,12 @@ impl Store {
                     }
                     if pending {
                         incomplete = true;
-                        context.ready.insert(
-                            path,
-                            chunks.into_iter().map(|chunk| (chunk, None)).collect(),
-                        );
+                        context
+                            .ready
+                            .insert(path, chunks.into_iter().zip(vectors).collect());
                         continue;
                     }
+                    let vectors: Vec<_> = vectors.into_iter().flatten().collect();
                     let provider_identity = context.provider_identity.clone();
                     let model = context.model.clone();
                     let dimensions = context.dimensions;
@@ -924,6 +933,9 @@ impl Store {
         let mut current = self.state.write();
         if current.generation == generation {
             Arc::make_mut(&mut current).index = Arc::new(index);
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
         if incomplete {
             return Err(crate::provider::PendingEmbeddings.into());
