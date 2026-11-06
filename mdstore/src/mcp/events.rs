@@ -3,37 +3,22 @@ use super::*;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use std::{convert::Infallible, time::Duration};
 
-pub(super) async fn subscribe(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let receiver = state.store.subscribe();
+pub(super) async fn subscribe(State(state): State<AppState>) -> Response {
     let stream = futures_util::stream::unfold(
-        (receiver, true, state, headers),
-        |(mut receiver, mut first, state, headers)| async move {
-            loop {
-                let changed = if first {
-                    true
-                } else {
-                    tokio::select! {
-                        result = receiver.changed() => { if result.is_err() { return None; } true },
-                        _ = tokio::time::sleep(Duration::from_secs(15)) => false,
-                    }
-                };
-                if !changed {
-                    continue;
-                }
-                first = false;
-                let change = receiver.borrow_and_update().clone();
-                if change.shutdown {
-                    return None;
-                }
-                let event = Event::default()
-                    .event("change")
-                    .json_data(change)
-                    .expect("change serializes");
-                return Some((
-                    Ok::<_, Infallible>(event),
-                    (receiver, first, state, headers),
-                ));
+        (state.store.subscribe(), true),
+        |(mut receiver, first)| async move {
+            if !first && receiver.changed().await.is_err() {
+                return None;
             }
+            let change = receiver.borrow_and_update().clone();
+            if change.shutdown {
+                return None;
+            }
+            let event = Event::default()
+                .event("change")
+                .json_data(change)
+                .expect("change serializes");
+            Some((Ok::<_, Infallible>(event), (receiver, false)))
         },
     );
     let mut response = Sse::new(stream)

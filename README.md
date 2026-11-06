@@ -34,7 +34,7 @@ only model weights and checkpoints are populated in user caches on demand.
 nix run github:recmo/all2md#pages2md -- --help
 nix run github:recmo/all2md#speech2md -- --help
 nix run github:recmo/all2md#doc2md -- --help
-nix run github:recmo/all2md#speech2md-worker -- --help
+nix run github:recmo/all2md#ml-worker -- --help
 nix run github:recmo/all2md#mdstore -- --help
 nix build github:recmo/all2md#meeting-capture
 nix develop .#pages2md

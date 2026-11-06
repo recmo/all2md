@@ -31,7 +31,7 @@ def waveform(path, *, channels=1, amplitude=0.01):
 @pytest.fixture
 def server():
     state = {"inputs": {}, "outputs": {}, "completed": [], "failed": [], "assignment": None,
-             "lose_lease": lambda: False, "corrupt": False}
+             "lose_lease": lambda: False, "corrupt": False, "completion_requests": 0}
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -74,7 +74,14 @@ def server():
             if value['op'] == 'search':
                 self.respond({'results': [{'metadata': {'identity': 'people/alice.md'}}]})
                 return
-            if value['op'] == 'complete': state['completed'].append(value)
+            if value['op'] == 'complete':
+                state['completion_requests'] += 1
+                if value not in state['completed']:
+                    state['completed'].append(value)
+                # Commit succeeds but the response is lost; retry must use the same bytes.
+                if state['completion_requests'] == 1:
+                    self.close_connection = True
+                    return
             if value.get('failure'): state['failed'].append(value['failure'])
             if value['op'] == 'heartbeat' and state['lose_lease']():
                 self.respond({'error': 'expired'}, 409)
@@ -181,6 +188,7 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
     assert worker.main(['--server', client.server, '--once', '--recipes', recipe,
                         '--cache', str(tmp_path/'cache')]) == 0
     assert len(state['completed']) == 1 and not state['failed']
+    assert state['completion_requests'] == 2
     complete = state['completed'][0]
     assert set(complete['assets']) == {p for p in outputs if not p.endswith('.md')}
     assert set(complete['outputs']) == {p for p in outputs if p.endswith('.md')}

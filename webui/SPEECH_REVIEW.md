@@ -1,7 +1,7 @@
 # Recording review and derived documents
 
 Recording review now lives in webui. `speech2md` consumes authored recording
-Markdown directly and `speech2md-worker` pulls durable jobs from mdstore. The
+Markdown directly and `ml-worker` pulls durable jobs from mdstore. The
 standalone speech-review server and hint-sidecar input format are removed.
 
 ## Recording lifecycle
@@ -17,7 +17,7 @@ standalone speech-review server and hint-sidecar input format are removed.
    write access. Capture manifests and their
    constituent files can also be uploaded through `PUT /<path>` with `If-None-Match: *`.
 3. Run a worker with a separate `MDSTORE_WORKER_TOKEN`:
-   `speech2md-worker --server https://your-store.example`. The server must have
+   `ml-worker --recipes speech2md-v1 --server https://your-store.example`. The server must have
    the same worker token configured. This starts no worker on browser clients.
 4. The worker downloads assigned inputs, verifies their hashes, runs speech2md,
    uploads voiceprints, and submits the transcript. mdstore validates the result

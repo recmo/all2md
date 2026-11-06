@@ -187,17 +187,6 @@
           exec ${speechEnvironment}/bin/speech2md "$@"
         '';
       };
-      speech2md-worker = pkgs.writeShellApplication {
-        name = "speech2md-worker";
-        runtimeInputs = [ pkgs.ffmpeg ];
-        text = ''
-          export SPEECH2MD_VERSION=${pagesVersion}
-          cache_root="''${XDG_CACHE_HOME:-$HOME/.cache}/speech2md"
-          mkdir -p "$cache_root/torch"
-          export TORCH_HOME="$cache_root/torch"
-          exec ${speechEnvironment}/bin/speech2md-worker "$@"
-        '';
-      };
       meeting-capture = pkgs.callPackage ./meeting-capture/package.nix { };
       mkDoc2md =
         docSystem:
@@ -400,7 +389,6 @@
             inherit
               meeting-capture
               pages2md
-              speech2md-worker
               ml-worker
               speech2md
               ;
@@ -428,10 +416,6 @@
             ml-worker = {
               type = "app";
               program = "${ml-worker}/bin/ml-worker";
-            };
-            speech2md-worker = {
-              type = "app";
-              program = "${speech2md-worker}/bin/speech2md-worker";
             };
             doc2md = mkDocApp system;
             mdstore = mkMdstoreApp system;
@@ -512,7 +496,6 @@
                     pages2md
                     pkgs.darwin.cctools
                     speech2md
-                    speech2md-worker
                     ml-worker
                   ];
                 }
@@ -525,7 +508,6 @@
                   ${pagesEnvironment}/bin/python -c 'from mlx_vlm import load'
                   speech2md --help > /dev/null
                   speech2md --version | grep -Eq '^speech2md [0-9a-f]{40,64}$'
-                  speech2md-worker --help > /dev/null
                   ml-worker --help > /dev/null
                   ml-worker --list-recipes | grep -q text-embeddings-zembed-1-v1
                   for extension in \

@@ -44,7 +44,7 @@ embeds the DeepFilterNet3 model. The two text models download pinned weights int
 the Hugging Face cache on first use; loading disables remote Python code and
 requires safetensors. No packages or toolchains are installed at runtime.
 
-The original `speech2md-worker` remains available for transcription-only setups.
+Use `--recipes speech2md-v1` for a transcription-only worker.
 Use `ml-worker` for the additional recipes; its transcription recipe invokes the
 existing speech2md CLI and retains leased speaker-reference matching.
 

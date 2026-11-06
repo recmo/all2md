@@ -196,26 +196,6 @@ to replace.
 
 ## mdstore worker
 
-Run the daemon with `MDSTORE_WORKER_TOKEN` set to a separate worker credential.
-Run an available Apple Silicon worker with the same credential in its environment:
-
-```sh
-speech2md-worker --server https://your-mdstore-host --cache ~/.cache/speech2md/worker
-```
-
-`--once` claims at most one job. Workers pull `speech2md-v1` jobs, heartbeat leases,
-verify input digests and manifest paths, and submit only assigned outputs. The
-server validates and commits publications; the worker never edits its repository.
-Keep the recipe identifier fixed for a deployment; use a new `--recipe` identifier
-and matching derivation definition for incompatible pipeline changes.
-
-The local cache retains original inputs and MOSS intermediates across attempts.
-Published speaker vectors use JSON with a versioned embedding-space identity,
-normalized vectors, and confirmed person associations. Only confirmed references
-are used for cross-meeting suggestions; suggestions do not become confirmed
-identities automatically. GPU inference is unchanged and is not run by tests.
-
-Meeting Capture v3 process streams use `process-<track UUID>` as their source
-identity. Each process is transcribed independently; its stream index selects the
-correct audio from the shared Matroska archive. These identities also distinguish
-speaker hints, cached transcription, and review edits across processes.
+Use the [ML worker](../ml-worker/README.md) to run leased `speech2md-v1` jobs.
+`speech2md` remains the standalone transcription CLI; the ML worker owns transport,
+leases, cancellation, and publication.

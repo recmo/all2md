@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use fs2::FileExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -189,35 +189,6 @@ pub struct PageResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-/// Hashline-rendered page or configuration resource.
-pub(crate) struct FilePageResponse {
-    /// Server-enforced ownership prevents ordinary edits of generated documents.
-    pub readonly: bool,
-    /// Binary asset metadata. Bytes are fetched separately through the asset route.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub asset: Option<serde_json::Value>,
-    /// Published Git revision shared by all fields in this response.
-    pub revision: String,
-    /// SHA-256 of exact source, absent for a missing page.
-    pub hash: Option<String>,
-    /// Whether the requested file exists in the published tree.
-    pub exists: bool,
-    /// Applicable directory template, including guidance and hard rules.
-    pub template: Option<serde_json::Value>,
-    /// Exact repository-relative path.
-    pub path: String,
-    /// Raw Markdown or configuration text with hashline prefixes.
-    pub content: String,
-    /// Exact source text for full-page reads, absent for line windows.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Repository-configured projected frontmatter metadata.
-    pub metadata: serde_json::Value,
-    /// Typed relations authored by this page.
-    pub relations: Vec<Edge>,
-}
-
-#[derive(Debug, Clone, Serialize)]
 /// Operational daemon and derived-index status.
 pub struct StatusResponse {
     /// Local-to-remote replication progress, independent of embedding state.
@@ -386,155 +357,6 @@ impl Store {
     /// Retains one published state without holding the lock during the read.
     pub(crate) fn read_state(&self) -> Arc<StoreState> {
         Arc::clone(&self.state.read())
-    }
-
-    /// Lists direct children of a directory in the published document tree.
-    /// Root is `/`; other directory paths must end with `/`.
-    pub fn get_directory(&self, path: &str) -> Result<serde_json::Value> {
-        let prefix = if path == "/" {
-            ""
-        } else {
-            let directory = path
-                .strip_suffix('/')
-                .context("directory path must end with /")?;
-            validate_repo_path(directory)?;
-            path
-        };
-        let state = self.state.read();
-        let mut children = std::collections::BTreeMap::new();
-        for (file, text) in state.pages.iter().chain(state.config_files.iter()) {
-            let Some(relative) = file.strip_prefix(prefix) else {
-                continue;
-            };
-            if let Some((directory, _)) = relative.split_once('/') {
-                let child = format!("{prefix}{directory}/");
-                children.insert(
-                    child.clone(),
-                    serde_json::json!({"path": child, "kind": "directory"}),
-                );
-            } else {
-                children.insert(file.clone(), serde_json::json!({"path": file, "kind": "file", "hash": crate::validation::source_hash(text)}));
-            }
-        }
-        for (file, asset) in &state.artifacts.assets {
-            let Some(relative) = file.strip_prefix(prefix) else {
-                continue;
-            };
-            if let Some((directory, _)) = relative.split_once('/') {
-                let child = format!("{prefix}{directory}/");
-                children.insert(
-                    child.clone(),
-                    serde_json::json!({"path": child, "kind": "directory"}),
-                );
-            } else {
-                children.insert(file.clone(), serde_json::json!({"path": file, "kind": "file", "hash": asset.oid, "asset": asset}));
-            }
-        }
-        if !prefix.is_empty() && children.is_empty() {
-            bail!("directory not found: {path}");
-        }
-        Ok(serde_json::json!({
-            "path": path, "kind": "directory", "revision": state.head,
-            "repository": format!("{:x}", Sha256::digest(self.root.to_string_lossy().as_bytes())),
-            "children": children.into_values().collect::<Vec<_>>(),
-            "allow_template_edits": state.config.server.allow_template_edits,
-            "allow_config_edits": state.config.server.allow_config_edits,
-        }))
-    }
-
-    /// Reads an exact page or configuration resource as hashlines.
-    pub(crate) fn get_page(
-        &self,
-        path: &str,
-        window: Option<(usize, usize)>,
-    ) -> Result<FilePageResponse> {
-        validate_repo_path(path)?;
-        let state = self.state.read();
-        if let Some(asset) = state.artifacts.assets.get(path) {
-            return Ok(FilePageResponse {
-                readonly: state.artifacts.owned(path),
-                asset: Some(serde_json::to_value(asset)?),
-                revision: state.head.clone(),
-                hash: Some(asset.oid.clone()),
-                exists: true,
-                template: None,
-                path: path.into(),
-                content: String::new(),
-                text: Some(String::new()),
-                metadata: serde_json::json!({}),
-                relations: vec![],
-            });
-        }
-        if let Some(text) = state.pages.get(path) {
-            let page = state.parsed.get(path).context("page was not parsed")?;
-            return Ok(FilePageResponse {
-                asset: None,
-                readonly: state.artifacts.owned(path),
-                revision: state.head.clone(),
-                hash: Some(crate::validation::source_hash(text)),
-                exists: true,
-                template: state
-                    .templates
-                    .template_path(path)
-                    .map(|path| serde_json::json!({"path": path.trim_start_matches('/')})),
-                path: path.into(),
-                content: render(text, window),
-                text: window.is_none().then(|| text.clone()),
-                metadata: page.metadata.clone(),
-                relations: state
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.source == path || edge.target == path)
-                    .cloned()
-                    .collect(),
-            });
-        }
-        if (is_config_resource_path(path) || crate::template::is_template(path))
-            && let Some(text) = state.config_files.get(path)
-        {
-            return Ok(FilePageResponse {
-                asset: None,
-                readonly: if crate::template::is_template(path) {
-                    !state.config.server.allow_template_edits
-                } else {
-                    !state.config.server.allow_config_edits
-                },
-                revision: state.head.clone(),
-                hash: Some(crate::validation::source_hash(text)),
-                exists: true,
-                template: None,
-                path: path.into(),
-                content: render(text, window),
-                text: window.is_none().then(|| text.clone()),
-                metadata: serde_json::json!({}),
-                relations: Vec::new(),
-            });
-        }
-        if (path.ends_with(".md")
-            || (crate::config::is_lint_config(path) && state.config.server.allow_config_edits))
-            && (!crate::template::is_template(path) || state.config.server.allow_template_edits)
-        {
-            if !crate::template::is_template(path) && !crate::config::is_lint_config(path) {
-                ensure_paths_match_config(&state.config, [&path.to_owned()])?;
-            }
-            return Ok(FilePageResponse {
-                asset: None,
-                readonly: state.artifacts.owned(path),
-                revision: state.head.clone(),
-                hash: None,
-                exists: false,
-                template: state
-                    .templates
-                    .template_path(path)
-                    .map(|path| serde_json::json!({"path": path.trim_start_matches('/')})),
-                path: path.into(),
-                content: String::new(),
-                text: Some(String::new()),
-                metadata: serde_json::json!({}),
-                relations: Vec::new(),
-            });
-        }
-        bail!("page or configuration resource not found: {path}")
     }
 
     /// Searches one published snapshot and returns anchored source excerpts.
@@ -824,56 +646,8 @@ impl Store {
             .iter()
             .map(|path| (path.clone(), changes.get(path).cloned().flatten()))
             .collect();
-        let path_list: Vec<String> = paths.iter().cloned().collect();
         let (preimages, postimages) = edit_images(&originals, &changes);
-        if let Err(error) = git::write_changes(&self.root, &ordered) {
-            return Err(rollback_failure(&self.root, &path_list, error));
-        }
-        let tree = match git::stage_tree(&self.root, &base_head, &ordered) {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(rollback_failure(&self.root, &path_list, error));
-            }
-        };
-        if let Some(tree) = tree {
-            let pending = PendingReceipt {
-                base_head: base_head.clone(),
-                tree,
-                preimages: preimages.clone(),
-                postimages: postimages.clone(),
-            };
-            if let Err(error) = self.write_pending(&digest, &pending) {
-                return Err(rollback_failure(&self.root, &path_list, error));
-            }
-            let commit = match git::commit_tree(
-                &self.root,
-                &pending.tree,
-                &pending.base_head,
-                &request.summary,
-            ) {
-                Ok(commit) => commit,
-                Err(error) => {
-                    let error = rollback_failure(&self.root, &path_list, error);
-                    return match self.remove_pending(&digest) {
-                        Ok(()) => Err(error),
-                        Err(cleanup) => {
-                            Err(anyhow!("{error}; pending cleanup also failed: {cleanup}"))
-                        }
-                    };
-                }
-            };
-            if let Err(error) = git::sync_index(&self.root, &commit, &path_list) {
-                return Err(rollback_failure(&self.root, &path_list, error));
-            }
-            base_head = commit.clone();
-            if git::head(&self.root)? != commit {
-                return Err(rollback_failure(
-                    &self.root,
-                    &path_list,
-                    anyhow!("repository HEAD advanced during edit publication; retry the request"),
-                ));
-            }
-        }
+        let tree = git::stage_tree(&self.root, &base_head, &ordered)?;
         let index = build_index(
             &self.root,
             &config,
@@ -882,7 +656,7 @@ impl Store {
             &edges,
             provider.as_ref(),
         );
-        *self.state.write() = Arc::new(StoreState {
+        let candidate = StoreState {
             artifacts: Arc::new(artifacts),
             head: base_head.clone(),
             templates,
@@ -898,13 +672,67 @@ impl Store {
             index: Arc::new(index),
             provider,
             generation: current.generation + 1,
-        });
-        self.publish_revision();
+        };
+        if let Some(tree) = tree {
+            let pending = PendingReceipt {
+                base_head: base_head.clone(),
+                tree: tree.clone(),
+                preimages: preimages.clone(),
+                postimages: postimages.clone(),
+            };
+            self.write_pending(&digest, &pending)?;
+            match self.commit_candidate(&base_head, &tree, &ordered, &request.summary, candidate) {
+                Ok(commit) => base_head = commit,
+                Err(error) => {
+                    // Keep the receipt if HEAD advanced: retry can recover a completed commit.
+                    if git::head(&self.root)? == pending.base_head {
+                        self.remove_pending(&digest)?;
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            self.publish_snapshot(candidate);
+        }
         self.write_receipt(&digest, &base_head, &preimages, &postimages)?;
         self.remove_pending(&digest)?;
+        Ok(base_head)
+    }
+
+    // Callers validate their own edit/publication policy before entering this path.
+    fn commit_candidate(
+        &self,
+        base: &str,
+        tree: &str,
+        changes: &[(String, Option<String>)],
+        summary: &str,
+        mut candidate: StoreState,
+    ) -> Result<String> {
+        let paths = changes
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        let commit = (|| {
+            git::write_changes(&self.root, changes)?;
+            let commit = git::commit_tree(&self.root, tree, base, summary)?;
+            git::sync_index(&self.root, &commit, &paths)?;
+            ensure!(
+                git::head(&self.root)? == commit,
+                "repository HEAD advanced during publication; retry the request"
+            );
+            Ok(commit)
+        })()
+        .map_err(|error| rollback_failure(&self.root, &paths, error))?;
+        candidate.head = commit.clone();
+        self.publish_snapshot(candidate);
+        Ok(commit)
+    }
+
+    fn publish_snapshot(&self, state: StoreState) {
+        *self.state.write() = Arc::new(state);
+        self.publish_revision();
         self.sync_notify.notify_one();
         self.reindex_notify.notify_one();
-        Ok(base_head)
     }
 
     /// Rebuilds every embedding sidecar and the search index.

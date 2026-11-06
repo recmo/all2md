@@ -15,7 +15,7 @@ async fn root(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if worker(&state, &headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match run_blocking(move || state.store.get_directory("/")).await {
+    match run_blocking(move || state.store.read_state().file_directory("/")).await {
         Ok(value) => json_read(&value, &headers).unwrap_or_else(problem::error),
         Err(e) => problem::error(e),
     }
@@ -91,7 +91,7 @@ async fn read(
             Some(state.store.leased_asset(job, attempt, &path)?)
         } else {
             if path.ends_with('/') {
-                return json_read(&state.store.get_directory(&path)?, &headers);
+                return json_read(&state.store.read_state().file_directory(&path)?, &headers);
             }
             validate_repo_path(&path)?;
             state.store.asset(&path).ok()
@@ -101,14 +101,14 @@ async fn read(
                 .get("accept")
                 .is_some_and(|value| value == "application/vnd.mdstore.page+json");
         let mut response = if metadata {
-            return json_read(&state.store.get_page(&path, None)?, &headers);
+            return json_read(&state.store.file_page(&path)?, &headers);
         } else if let Some(asset) = asset {
             if etag(&headers, &asset.oid) {
                 return Ok(not_modified(&asset.oid));
             }
             transfers::serve_asset(&state.store, asset, &headers).await?
         } else {
-            let page = match state.store.get_page(&path, None) {
+            let page = match state.store.file_page(&path) {
                 Ok(page) if page.exists => page,
                 _ => return Ok(StatusCode::NOT_FOUND.into_response()),
             };
@@ -306,7 +306,7 @@ mod tests {
         )
         .await;
         async fn configure(app: &Router, store: &Store, declarations: Value) -> StatusCode {
-            let page = store.get_page("config.yaml", None).unwrap();
+            let page = store.file_page("config.yaml").unwrap();
             let mut config = crate::config::Config::from_yaml(page.text.as_ref().unwrap()).unwrap();
             config.derivations = serde_json::from_value(declarations).unwrap();
             let response = send(
@@ -327,7 +327,7 @@ mod tests {
             configure(&app, &store, json!({"recording": definition})).await,
             StatusCode::OK
         );
-        let head = store.get_page("config.yaml", None).unwrap().revision;
+        let head = store.file_page("config.yaml").unwrap().revision;
         assert!(
             !configure(
                 &app,
@@ -337,7 +337,7 @@ mod tests {
             .await
             .is_success()
         );
-        assert_eq!(store.get_page("config.yaml", None).unwrap().revision, head);
+        assert_eq!(store.file_page("config.yaml").unwrap().revision, head);
         for (name, args) in [
             ("get", json!({"resource":"jobs"})),
             ("get", json!({"resource":"derivations"})),
@@ -414,13 +414,14 @@ mod tests {
         let claimed = store.claim_job(&["fixture".into()]).unwrap().unwrap();
         assert_eq!(configure(&app, &store, json!({})).await, StatusCode::OK);
         assert!(store.jobs().unwrap().is_empty());
-        assert!(store.get_page("transcript.md", None).unwrap().readonly);
+        assert!(store.file_page("transcript.md").unwrap().readonly);
         let (status, _, _) = send(
             &app,
             "POST",
             "/worker",
             &[worker, ("content-type", "application/json")],
-            json!({"op":"heartbeat","id":"recording","attempt":claimed.job.attempt}).to_string(),
+            json!({"op":"heartbeat","id":"recording","attempt":claimed.job.state.attempt})
+                .to_string(),
         )
         .await;
         assert!(!status.is_success());
@@ -462,6 +463,9 @@ mod tests {
         let (_, raw, _) = send(&app, "GET", "/recording.md", &[auth], "").await;
         let (_, meta, bytes) = send(&app, "GET", "/recording.md", &[auth, accept], "").await;
         let value: Value = serde_json::from_slice(&bytes).unwrap();
+        for unused in ["content", "metadata", "relations"] {
+            assert!(value.get(unused).is_none());
+        }
         let content_tag = raw["etag"].to_str().unwrap();
         let meta_tag = meta["etag"].to_str().unwrap();
         assert_ne!(meta_tag, content_tag);
@@ -652,7 +656,7 @@ mod tests {
             String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap()
         }
         let initial = event(&mut stream).await;
-        assert!(initial.contains(&store.get_page("recording.md", None).unwrap().revision));
+        assert!(initial.contains(&store.file_page("recording.md").unwrap().revision));
         store.jobs().unwrap();
         assert!(event(&mut stream).await.contains("\"jobs\":1"));
         store.jobs().unwrap(); // No notification for unchanged state.
@@ -672,7 +676,7 @@ mod tests {
         assert!(
             event(&mut stream)
                 .await
-                .contains(&store.get_page("new.md", None).unwrap().revision)
+                .contains(&store.file_page("new.md").unwrap().revision)
         );
     }
 
@@ -827,10 +831,7 @@ mod tests {
                 .0,
             StatusCode::PRECONDITION_FAILED
         );
-        let hash = format!(
-            "\"{}\"",
-            store.get_page("note.md", None).unwrap().hash.unwrap()
-        );
+        let hash = format!("\"{}\"", store.file_page("note.md").unwrap().hash.unwrap());
         assert_eq!(
             send(&app, "DELETE", "/note.md", &[auth, ("if-match", &hash)], "")
                 .await
@@ -875,7 +876,7 @@ mod tests {
         };
         let id = store.create_derivation(definition).unwrap();
         let assignment = store.claim_job(&["fixture".into()]).unwrap().unwrap();
-        let attempt = assignment.job.attempt.unwrap();
+        let attempt = assignment.job.state.attempt.unwrap();
         let url = format!("/audio.wav?job={id}&attempt={attempt}");
         assert_eq!(
             send(&app, "GET", "/", &[worker], "").await.0,
@@ -923,7 +924,7 @@ mod tests {
             .unwrap();
         let hash = format!(
             "\"{}\"",
-            store.get_page("transcript.md", None).unwrap().hash.unwrap()
+            store.file_page("transcript.md").unwrap().hash.unwrap()
         );
         assert_eq!(
             send(

@@ -55,20 +55,16 @@ pub(crate) struct Publication {
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
     pub assets: BTreeMap<String, Asset>,
-    #[serde(rename = "publications", alias = "derivations")]
+    #[serde(rename = "publications")]
     pub derivations: BTreeMap<String, Derivation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Job {
+pub(crate) struct JobState {
     pub id: String,
-    pub source: String,
-    pub recipe: String,
     pub fingerprint: String,
     pub source_revision: String,
     pub status: String,
-    #[serde(default)]
-    pub published: bool,
     pub attempt: Option<String>,
     pub expires: u64,
     pub error: Option<String>,
@@ -78,6 +74,26 @@ pub(crate) struct Job {
     pub references: BTreeMap<String, Asset>,
     #[serde(default)]
     pub rerun: bool,
+}
+
+/// Job metadata is projected from the current declaration, never persisted twice.
+#[derive(Debug, Serialize)]
+pub(crate) struct Job {
+    pub source: String,
+    pub recipe: String,
+    pub published: bool,
+    #[serde(flatten)]
+    pub state: JobState,
+}
+impl Job {
+    fn new(state: JobState, definition: &Derivation) -> Self {
+        Self {
+            source: definition.source.clone(),
+            recipe: definition.recipe.clone(),
+            published: definition.publication.is_some(),
+            state,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -467,7 +483,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn create_derivation(&self, definition: Derivation) -> Result<String> {
         let id = crate::validation::source_hash(&serde_json::to_string(&definition)?);
-        let base = self.get_page("config.yaml", None)?.text.unwrap();
+        let base = self.file_page("config.yaml")?.text.unwrap();
         let mut config = Config::from_yaml(&base)?;
         config.derivations.insert(
             id.clone(),
@@ -567,26 +583,14 @@ impl Store {
             .templates
             .validate_changes(&current.pages, &candidate.pages)
             .map_err(|findings| ValidationError { findings })?;
-        let paths = changes.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
-        git::write_changes(&self.root, &changes)
-            .map_err(|error| rollback_failure(&self.root, &paths, error))?;
-        let commit = git::commit_tree(&self.root, &tree, &current.head, summary)
-            .map_err(|error| rollback_failure(&self.root, &paths, error))?;
-        git::sync_index(&self.root, &commit, &paths)?;
-        let mut state = candidate;
-        state.head = commit.clone();
-        *self.state.write() = Arc::new(state);
-        self.publish_revision();
-        self.reindex_notify.notify_one();
-        self.sync_notify.notify_one();
-        Ok(commit)
+        self.commit_candidate(&current.head, &tree, &changes, summary, candidate)
     }
 
     fn jobs_path(&self) -> PathBuf {
         self.git_dir.join("mdstore/jobs.json")
     }
 
-    fn save_jobs(&self, jobs: &BTreeMap<String, Job>) -> Result<()> {
+    fn save_jobs(&self, jobs: &BTreeMap<String, JobState>) -> Result<()> {
         let bytes = serde_json::to_vec(jobs)?;
         let previous = match fs::read(self.jobs_path()) {
             Ok(bytes) => bytes,
@@ -602,11 +606,11 @@ impl Store {
         Ok(())
     }
 
-    fn reconcile_jobs(&self) -> Result<(Manifest, BTreeMap<String, Job>)> {
+    fn reconcile_jobs(&self) -> Result<(Manifest, BTreeMap<String, JobState>)> {
         let state = self.state.read();
         let manifest = (*state.artifacts).clone();
         let path = self.jobs_path();
-        let mut jobs: BTreeMap<String, Job> = if path.exists() {
+        let mut jobs: BTreeMap<String, JobState> = if path.exists() {
             serde_json::from_slice(&fs::read(path)?)?
         } else {
             BTreeMap::new()
@@ -622,14 +626,11 @@ impl Store {
                 .publication
                 .as_ref()
                 .is_some_and(|p| p.fingerprint == fingerprint);
-            let job = jobs.entry(id.clone()).or_insert_with(|| Job {
+            let job = jobs.entry(id.clone()).or_insert_with(|| JobState {
                 id: id.clone(),
-                source: definition.source.clone(),
-                recipe: definition.recipe.clone(),
                 fingerprint: fingerprint.clone(),
                 source_revision: state.head.clone(),
                 status: "queued".into(),
-                published: false,
                 attempt: None,
                 expires: 0,
                 error: None,
@@ -638,9 +639,6 @@ impl Store {
                 references: BTreeMap::new(),
                 rerun: false,
             });
-            job.source.clone_from(&definition.source);
-            job.recipe.clone_from(&definition.recipe);
-            job.published = definition.publication.is_some();
             if job.fingerprint != fingerprint {
                 job.fingerprint = fingerprint;
                 job.status = "queued".into();
@@ -671,13 +669,14 @@ impl Store {
     pub(crate) fn jobs(&self) -> Result<Vec<Job>> {
         let _guard = self.lock_repository()?;
         self.refresh_external_commit()?;
-        let (_, jobs) = self.reconcile_jobs()?;
+        let (manifest, jobs) = self.reconcile_jobs()?;
         self.save_jobs(&jobs)?;
         Ok(jobs
             .into_values()
             .map(|mut j| {
                 j.attempt = None;
-                j
+                let definition = &manifest.derivations[&j.id];
+                Job::new(j, definition)
             })
             .collect())
     }
@@ -701,10 +700,11 @@ impl Store {
         let _guard = self.lock_repository()?;
         self.refresh_external_commit()?;
         let (manifest, mut jobs) = self.reconcile_jobs()?;
-        let assignment = if let Some(job) = jobs
-            .values_mut()
-            .find(|j| j.status == "queued" && j.expires <= now() && recipes.contains(&j.recipe))
-        {
+        let assignment = if let Some(job) = jobs.values_mut().find(|j| {
+            j.status == "queued"
+                && j.expires <= now()
+                && recipes.contains(&manifest.derivations[&j.id].recipe)
+        }) {
             job.source_revision = self.state.read().head.clone();
             job.status = "running".into();
             job.attempt = Some(secret()?);
@@ -728,15 +728,15 @@ impl Store {
                 }
             }
             Some(Assignment {
-                job: job.clone(),
-                recording: self.state.read().pages[&job.source].clone(),
+                job: Job::new(job.clone(), definition),
+                recording: self.state.read().pages[&definition.source].clone(),
                 parameters: definition
                     .fields
                     .iter()
                     .map(|key| {
                         (
                             key.clone(),
-                            self.state.read().parsed[&job.source]
+                            self.state.read().parsed[&definition.source]
                                 .frontmatter
                                 .get(key)
                                 .cloned()
@@ -1037,14 +1037,15 @@ pub(crate) mod tests {
             .claim_job(&["fixture-v1".into()])
             .unwrap()
             .unwrap()
-            .job;
+            .job
+            .state;
         store
             .complete_job(
                 &id,
                 completion(job.attempt.as_deref().unwrap(), "# Transcript\n"),
             )
             .unwrap();
-        let base = store.get_page("config.yaml", None).unwrap().text.unwrap();
+        let base = store.file_page("config.yaml").unwrap().text.unwrap();
         let mut config = Config::from_yaml(&base).unwrap();
         config.derivations.clear();
         store
@@ -1059,31 +1060,9 @@ pub(crate) mod tests {
                 )],
             })
             .unwrap();
-        // Previous versions called the provenance map 'derivations'.
-        let path = dir.path().join(MANIFEST);
-        let mut manifest: Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        let publications = manifest
-            .as_object_mut()
-            .unwrap()
-            .remove("publications")
-            .unwrap();
-        manifest["derivations"] = publications;
-        fs::write(path, serde_json::to_string(&manifest).unwrap()).unwrap();
-        git(dir.path(), &["add", MANIFEST]);
-        git(
-            dir.path(),
-            &[
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-qm",
-                "Old provenance format",
-            ],
-        );
         let reopened = Store::open_with_provider(dir.path(), Arc::new(Provider)).unwrap();
         assert!(reopened.jobs().unwrap().is_empty());
-        assert!(reopened.get_page("transcript.md", None).unwrap().readonly);
+        assert!(reopened.file_page("transcript.md").unwrap().readonly);
     }
 
     #[test]
@@ -1096,13 +1075,36 @@ pub(crate) mod tests {
             assignment.parameters["hotwords"],
             serde_json::json!(["hello"])
         );
-        let attempt = assignment.job.attempt.unwrap();
+        let attempt = assignment.job.state.attempt.unwrap();
         assert!(
             store
                 .complete_job(&id, completion(&attempt, "[broken](missing.md)\n"))
                 .is_err()
         );
-        assert!(!store.get_page("transcript.md", None).unwrap().exists);
+        assert!(!store.file_page("transcript.md").unwrap().exists);
+        // Both authored writes and worker publications roll back a failed Git commit.
+        let before = store.file_page("recording.md").unwrap();
+        git(dir.path(), &["config", "user.name", ""]);
+        let error = store
+            .edit_file(
+                "recording.md",
+                before.hash.as_deref(),
+                Some("# Changed\n".into()),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("commit-tree"));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("recording.md")).unwrap(),
+            before.text.unwrap()
+        );
+        assert_eq!(git::head(dir.path()).unwrap(), before.revision);
+        let error = store
+            .complete_job(&id, completion(&attempt, "# Transcript\nHello\n"))
+            .unwrap_err();
+        assert!(error.to_string().contains("commit-tree"));
+        assert!(!dir.path().join("transcript.md").exists());
+        assert_eq!(git::head(dir.path()).unwrap(), before.revision);
+        git(dir.path(), &["config", "user.name", "Fixture"]);
         store
             .complete_job(&id, completion(&attempt, "# Transcript\nHello\n"))
             .unwrap();
@@ -1114,7 +1116,7 @@ pub(crate) mod tests {
                 .complete_job(&id, completion(&attempt, "# Different replay\n"))
                 .is_err()
         );
-        assert!(store.get_page("transcript.md", None).unwrap().readonly);
+        assert!(store.file_page("transcript.md").unwrap().readonly);
         assert!(
             store
                 .apply_edits(&ApplyEditsRequest {
@@ -1131,14 +1133,14 @@ pub(crate) mod tests {
         );
         drop(store);
         let reopened = Store::open_with_provider(dir.path(), Arc::new(Provider)).unwrap();
-        assert_eq!(reopened.jobs().unwrap()[0].status, "current");
-        assert!(reopened.get_page("transcript.md", None).unwrap().readonly);
-        let revision = reopened.get_page("transcript.md", None).unwrap().revision;
+        assert_eq!(reopened.jobs().unwrap()[0].state.status, "current");
+        assert!(reopened.file_page("transcript.md").unwrap().readonly);
+        let revision = reopened.file_page("transcript.md").unwrap().revision;
         reopened
             .complete_job(&id, completion(&attempt, "# Transcript\nHello\n"))
             .unwrap();
         assert_eq!(
-            reopened.get_page("transcript.md", None).unwrap().revision,
+            reopened.file_page("transcript.md").unwrap().revision,
             revision
         );
     }
@@ -1150,8 +1152,9 @@ pub(crate) mod tests {
             .claim_job(&["fixture-v1".into()])
             .unwrap()
             .unwrap()
-            .job;
-        let before = store.get_page("recording.md", None).unwrap().text.unwrap();
+            .job
+            .state;
+        let before = store.file_page("recording.md").unwrap().text.unwrap();
         let notes = format!("{before}\nHuman notes.\n");
         store
             .apply_edits(&ApplyEditsRequest {
@@ -1165,7 +1168,7 @@ pub(crate) mod tests {
                 )],
             })
             .unwrap();
-        assert_eq!(store.jobs().unwrap()[0].fingerprint, job.fingerprint);
+        assert_eq!(store.jobs().unwrap()[0].state.fingerprint, job.fingerprint);
         store
             .apply_edits(&ApplyEditsRequest {
                 summary: "guidance".into(),
@@ -1187,8 +1190,8 @@ pub(crate) mod tests {
                 .is_err()
         );
         let fresh = store.claim_job(&["fixture-v1".into()]).unwrap().unwrap();
-        assert_ne!(fresh.job.fingerprint, job.fingerprint);
-        let base = store.get_page("config.yaml", None).unwrap().text.unwrap();
+        assert_ne!(fresh.job.state.fingerprint, job.fingerprint);
+        let base = store.file_page("config.yaml").unwrap().text.unwrap();
         let mut config = Config::from_yaml(&base).unwrap();
         let definition = config.derivations.get_mut(&id).unwrap();
         definition.source = "other.md".into();
@@ -1212,12 +1215,17 @@ pub(crate) mod tests {
         let queued = &store.jobs().unwrap()[0];
         assert_eq!(queued.source, "other.md");
         assert_eq!(queued.recipe, "fixture-v2");
-        assert_eq!(queued.status, "queued");
+        assert_eq!(queued.state.status, "queued");
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(store.jobs_path()).unwrap()).unwrap();
+        assert!(persisted[&id].get("source").is_none());
+        assert!(persisted[&id].get("recipe").is_none());
+        assert!(persisted[&id].get("published").is_none());
         assert!(
             store
                 .complete_job(
                     &id,
-                    completion(fresh.job.attempt.as_deref().unwrap(), "# Stale\n")
+                    completion(fresh.job.state.attempt.as_deref().unwrap(), "# Stale\n")
                 )
                 .is_err()
         );
@@ -1233,12 +1241,12 @@ pub(crate) mod tests {
             .complete_job(
                 &id,
                 completion(
-                    updated.job.attempt.as_deref().unwrap(),
+                    updated.job.state.attempt.as_deref().unwrap(),
                     "# Updated transcript\n",
                 ),
             )
             .unwrap();
-        assert_eq!(store.jobs().unwrap()[0].status, "current");
+        assert_eq!(store.jobs().unwrap()[0].state.status, "current");
     }
     #[test]
     fn reference_vectors_are_frozen_filtered_and_fenced() {
@@ -1260,16 +1268,21 @@ pub(crate) mod tests {
         ]})).unwrap()).unwrap();
         let asset = store.store_object(file).unwrap();
         while let Some(assignment) = store.claim_job(&["fixture-v1".into()]).unwrap() {
-            let result = if assignment.job.id == reference {
+            let result = if assignment.job.state.id == reference {
                 Completion {
-                    attempt: assignment.job.attempt.unwrap(),
+                    attempt: assignment.job.state.attempt.unwrap(),
                     outputs: BTreeMap::new(),
                     assets: BTreeMap::from([("reference.json".into(), asset.clone())]),
                 }
             } else {
-                completion(assignment.job.attempt.as_deref().unwrap(), "# Transcript\n")
+                completion(
+                    assignment.job.state.attempt.as_deref().unwrap(),
+                    "# Transcript\n",
+                )
             };
-            store.complete_job(&assignment.job.id, result).unwrap();
+            store
+                .complete_job(&assignment.job.state.id, result)
+                .unwrap();
         }
         let mut definition = store.state.read().artifacts.derivations[&first].clone();
         definition.publication = None;
@@ -1284,7 +1297,7 @@ pub(crate) mod tests {
                 vec![1.0, 0.0],
                 5,
                 BTreeMap::from([("confirmed".into(), Value::Bool(true))]),
-                (next.clone(), assignment.job.attempt.clone().unwrap()),
+                (next.clone(), assignment.job.state.attempt.clone().unwrap()),
             )
             .unwrap();
         assert_eq!(matches.as_array().unwrap().len(), 1);
@@ -1297,13 +1310,13 @@ pub(crate) mod tests {
             store
                 .leased_asset(
                     &next,
-                    assignment.job.attempt.as_deref().unwrap(),
+                    assignment.job.state.attempt.as_deref().unwrap(),
                     "reference.json"
                 )
                 .is_err()
         );
         let fresh = store.claim_job(&["fixture-v1".into()]).unwrap().unwrap();
-        assert_ne!(fresh.job.attempt, assignment.job.attempt);
+        assert_ne!(fresh.job.state.attempt, assignment.job.state.attempt);
     }
 
     #[test]
@@ -1315,20 +1328,21 @@ pub(crate) mod tests {
             .claim_job(&["fixture-v1".into()])
             .unwrap()
             .unwrap()
-            .job;
+            .job
+            .state;
         assert!(
             store
                 .leased_asset(&id, job.attempt.as_deref().unwrap(), "other.m4a")
                 .is_err()
         );
-        let mut jobs: BTreeMap<String, Job> =
+        let mut jobs: BTreeMap<String, JobState> =
             serde_json::from_slice(&fs::read(store.jobs_path()).unwrap()).unwrap();
         jobs.get_mut(&id).unwrap().expires = 0;
         write_atomic(&store.jobs_path(), &serde_json::to_vec(&jobs).unwrap()).unwrap();
         drop(store);
         let store = Store::open_with_provider(dir.path(), Arc::new(Provider)).unwrap();
         let next = store.claim_job(&["fixture-v1".into()]).unwrap().unwrap();
-        assert_ne!(next.job.attempt, job.attempt);
+        assert_ne!(next.job.state.attempt, job.attempt);
         assert!(
             store
                 .complete_job(&id, completion(job.attempt.as_deref().unwrap(), "# Old\n"))
@@ -1337,7 +1351,7 @@ pub(crate) mod tests {
     }
 }
 
-fn check_lease(job: Option<&Job>, attempt: &str) -> Result<()> {
+fn check_lease(job: Option<&JobState>, attempt: &str) -> Result<()> {
     let job = job.context("unknown job")?;
     ensure!(
         job.status == "running" && job.expires > now() && job.attempt.as_deref() == Some(attempt),
