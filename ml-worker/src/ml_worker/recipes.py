@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 import subprocess
 
@@ -65,7 +66,19 @@ def _speech(assignment, root, source, inputs, outputs):
     transcript = source.with_name("transcript.md") if source.name == "recording.md" else source.with_suffix(".transcript.md")
     if set(outputs) != {transcript, transcript.with_suffix(".voiceprints.json")}:
         raise ValueError("speech output paths do not match the recording")
-    subprocess.run(["speech2md", str(source), "--force"], check=True, stdin=subprocess.DEVNULL)
+    # The job lock protects this shared cache. speech2md validates audio, model,
+    # hotwords and inference settings before using any saved generation.
+    moss = transcript.with_suffix(".moss.npz")
+    cached = root.parent / "speech.moss.npz"
+    if not moss.exists() and cached.is_file():
+        shutil.copyfile(cached, moss)
+    try:
+        subprocess.run(["speech2md", str(source), "--force"], check=True, stdin=subprocess.DEVNULL)
+    finally:
+        if moss.is_file():
+            temporary = cached.with_suffix(".part")
+            shutil.copyfile(moss, temporary)
+            temporary.replace(cached)
 
 
 def execute(assignment, root, *, device="auto", scratch=None):

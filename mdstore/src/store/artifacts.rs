@@ -1,5 +1,6 @@
 //! Repository-owned assets, derivations, and durable worker leases.
 use super::*;
+use crate::config::DerivationConfig;
 use anyhow::ensure;
 use serde_json::Value;
 use std::io::Read;
@@ -25,29 +26,12 @@ impl Asset {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Derivation {
-    pub source: String,
-    pub recipe: String,
-    /// Top-level frontmatter properties consumed by the recipe.
-    pub fields: Vec<String>,
-    /// Explicit repository-relative content-addressed asset dependencies.
-    pub inputs: Vec<String>,
-    /// Exact output paths reserved for this derivation.
-    pub outputs: Vec<String>,
-    #[serde(default)]
-    pub reference_namespace: Option<String>,
-    #[serde(default)]
-    pub publication: Option<Publication>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Publication {
+    pub definition: DerivationConfig,
     pub fingerprint: String,
     pub source_revision: String,
     pub attempt: String,
     pub hashes: BTreeMap<String, String>,
-    #[serde(default)]
     pub references: BTreeMap<String, Asset>,
 }
 
@@ -55,8 +39,7 @@ pub(crate) struct Publication {
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
     pub assets: BTreeMap<String, Asset>,
-    #[serde(rename = "publications")]
-    pub derivations: BTreeMap<String, Derivation>,
+    pub publications: BTreeMap<String, Publication>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,9 +53,7 @@ pub(crate) struct JobState {
     pub error: Option<String>,
     pub progress: Option<Value>,
     pub failures: u32,
-    #[serde(default)]
     pub references: BTreeMap<String, Asset>,
-    #[serde(default)]
     pub rerun: bool,
 }
 
@@ -86,11 +67,11 @@ pub(crate) struct Job {
     pub state: JobState,
 }
 impl Job {
-    fn new(state: JobState, definition: &Derivation) -> Self {
+    fn new(state: JobState, definition: &DerivationConfig, published: bool) -> Self {
         Self {
             source: definition.source.clone(),
             recipe: definition.recipe.clone(),
-            published: definition.publication.is_some(),
+            published,
             state,
         }
     }
@@ -162,24 +143,20 @@ pub(super) fn load_manifest(root: &Path, revision: &str) -> Result<Manifest> {
             }
         }
     }
-    for derivation in manifest.derivations.values() {
-        validate_repo_path(&derivation.source)?;
-        for path in &derivation.outputs {
+    for publication in manifest.publications.values() {
+        validate_repo_path(&publication.definition.source)?;
+        ensure!(
+            publication.hashes.keys().collect::<BTreeSet<_>>()
+                == publication.definition.outputs.iter().collect(),
+            "publication output mismatch"
+        );
+        for (path, hash) in &publication.hashes {
             validate_repo_path(path)?;
             ensure!(owned.insert(path), "output has multiple owners: {path}");
-        }
-        if let Some(publication) = &derivation.publication {
             ensure!(
-                publication.hashes.keys().collect::<BTreeSet<_>>()
-                    == derivation.outputs.iter().collect(),
-                "publication output mismatch"
+                crate::validation::source_hash(&git::read_text(root, revision, path)?) == *hash,
+                "derived output was modified outside publication: {path}"
             );
-            for (path, hash) in &publication.hashes {
-                ensure!(
-                    crate::validation::source_hash(&git::read_text(root, revision, path)?) == *hash,
-                    "derived output was modified outside publication: {path}"
-                );
-            }
         }
     }
     Ok(manifest)
@@ -196,7 +173,11 @@ pub(crate) fn validate_oid(oid: &str) -> Result<()> {
     Ok(())
 }
 
-fn fingerprint(definition: &Derivation, state: &StoreState, manifest: &Manifest) -> Result<String> {
+fn fingerprint(
+    definition: &DerivationConfig,
+    state: &StoreState,
+    manifest: &Manifest,
+) -> Result<String> {
     let page = state
         .parsed
         .get(&definition.source)
@@ -232,29 +213,33 @@ fn fingerprint(definition: &Derivation, state: &StoreState, manifest: &Manifest)
 }
 
 fn reference_is_current(path: &str, state: &StoreState, manifest: &Manifest) -> Result<bool> {
-    if let Some(definition) = manifest
-        .derivations
-        .values()
-        .find(|d| d.outputs.iter().any(|p| p == path))
-    {
-        return Ok(definition.publication.as_ref().is_some_and(|p| {
-            fingerprint(definition, state, manifest).is_ok_and(|f| p.fingerprint == f)
-        }));
-    }
-    Ok(false)
+    Ok(manifest
+        .publications
+        .iter()
+        .find(|(_, p)| p.hashes.contains_key(path))
+        .is_some_and(|(id, publication)| {
+            let definition = state
+                .config
+                .derivations
+                .get(id)
+                .unwrap_or(&publication.definition);
+            fingerprint(definition, state, manifest).is_ok_and(|f| publication.fingerprint == f)
+        }))
 }
 
 impl Manifest {
-    pub(super) fn configured(&self, config: &Config, root: &Path) -> Result<Self> {
-        let mut result = self.clone();
-        result
-            .derivations
-            .retain(|id, d| d.publication.is_some() || config.derivations.contains_key(id));
+    pub(super) fn check_config(&self, config: &Config, root: &Path) -> Result<()> {
+        let mut owners = BTreeMap::new();
+        for (id, publication) in &self.publications {
+            for path in publication.hashes.keys() {
+                owners.insert(path, id);
+            }
+        }
         for (id, definition) in &config.derivations {
-            let previous = self.derivations.get(id);
-            if let Some(previous) = previous.filter(|d| d.publication.is_some()) {
+            let previous = self.publications.get(id);
+            if let Some(previous) = previous {
                 ensure!(
-                    previous.outputs.iter().collect::<BTreeSet<_>>()
+                    previous.definition.outputs.iter().collect::<BTreeSet<_>>()
                         == definition.outputs.iter().collect(),
                     "published output paths cannot change; use a new derivation name"
                 );
@@ -266,68 +251,67 @@ impl Manifest {
                 );
             }
             for output in &definition.outputs {
-                let already_owned = previous.is_some_and(|d| d.outputs.contains(output));
+                ensure!(
+                    owners.get(output).is_none_or(|owner| *owner == id),
+                    "output has multiple owners: {output}"
+                );
+                let already_owned = previous.is_some_and(|p| p.hashes.contains_key(output));
                 ensure!(
                     already_owned
                         || (!git::is_tracked(root, output)?
                             && fs::symlink_metadata(root.join(output)).is_err()),
                     "output already exists: {output}"
                 );
-            }
-            result.derivations.insert(
-                id.clone(),
-                Derivation {
-                    source: definition.source.clone(),
-                    recipe: definition.recipe.clone(),
-                    fields: definition.fields.clone(),
-                    inputs: definition.inputs.clone(),
-                    outputs: definition.outputs.clone(),
-                    reference_namespace: definition.reference_namespace.clone(),
-                    publication: previous.and_then(|d| d.publication.clone()),
-                },
-            );
-        }
-        let mut owned = BTreeSet::new();
-        for definition in result.derivations.values() {
-            for path in &definition.outputs {
-                ensure!(owned.insert(path), "output has multiple owners: {path}");
-            }
-        }
-        Ok(result)
-    }
-
-    pub(super) fn check_pages(
-        &self,
-        pages: &std::collections::HashMap<String, String>,
-    ) -> Result<()> {
-        for definition in self.derivations.values() {
-            ensure!(
-                pages.contains_key(&definition.source),
-                "derivation source must remain in the corpus: {}",
-                definition.source
-            );
-            if definition.publication.is_some() {
-                for path in definition.outputs.iter().filter(|p| p.ends_with(".md")) {
-                    ensure!(
-                        pages.contains_key(path),
-                        "derived document must remain in the corpus: {path}"
-                    );
-                }
+                owners.insert(output, id);
             }
         }
         Ok(())
     }
 
-    pub(super) fn owned(&self, path: &str) -> bool {
-        self.derivations
-            .values()
-            .any(|d| d.outputs.iter().any(|p| p == path))
-    }
-    pub(super) fn check_edits(&self, changes: &HashMap<String, Option<String>>) -> Result<()> {
-        for (path, content) in changes {
-            ensure!(!self.owned(path), "derived document is read-only: {path}");
+    pub(super) fn check_pages(
+        &self,
+        config: &Config,
+        pages: &HashMap<String, String>,
+    ) -> Result<()> {
+        for definition in config.derivations.values() {
             ensure!(
-                content.is_some() || !self.derivations.values().any(|d| d.source == *path),
+                pages.contains_key(&definition.source),
+                "derivation source must remain in the corpus: {}",
+                definition.source
+            );
+        }
+        for publication in self.publications.values() {
+            for path in publication.hashes.keys().filter(|p| p.ends_with(".md")) {
+                ensure!(
+                    pages.contains_key(path),
+                    "derived document must remain in the corpus: {path}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn owned(&self, config: &Config, path: &str) -> bool {
+        self.publications
+            .values()
+            .any(|p| p.hashes.contains_key(path))
+            || config
+                .derivations
+                .values()
+                .any(|d| d.outputs.iter().any(|p| p == path))
+    }
+    pub(super) fn check_edits(
+        &self,
+        config: &Config,
+        changes: &HashMap<String, Option<String>>,
+    ) -> Result<()> {
+        for (path, content) in changes {
+            ensure!(
+                !self.owned(config, path),
+                "derived document is read-only: {path}"
+            );
+            ensure!(
+                content.is_some() || !config.derivations.values().any(|d| d.source == *path),
                 "remove the derivation before deleting its source: {path}"
             );
         }
@@ -418,7 +402,10 @@ impl Store {
         );
         let current = self.state.read().clone();
         let mut manifest = (*current.artifacts).clone();
-        ensure!(!manifest.owned(&path), "derived asset is read-only");
+        ensure!(
+            !manifest.owned(&current.config, &path),
+            "derived asset is read-only"
+        );
         if manifest.assets.get(&path).map(|a| &a.oid) != expected.as_ref() {
             return Err(PreconditionFailed.into());
         }
@@ -452,9 +439,13 @@ impl Store {
         if manifest.assets.get(path).map(|a| a.oid.as_str()) != Some(expected) {
             return Err(PreconditionFailed.into());
         }
-        ensure!(!manifest.owned(path), "derived asset is read-only");
         ensure!(
-            !manifest
+            !manifest.owned(&current.config, path),
+            "derived asset is read-only"
+        );
+        ensure!(
+            !current
+                .config
                 .derivations
                 .values()
                 .any(|d| d.inputs.iter().any(|p| p == path)),
@@ -481,21 +472,11 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub(crate) fn create_derivation(&self, definition: Derivation) -> Result<String> {
+    pub(crate) fn create_derivation(&self, definition: DerivationConfig) -> Result<String> {
         let id = crate::validation::source_hash(&serde_json::to_string(&definition)?);
         let base = self.file_page("config.yaml")?.text.unwrap();
         let mut config = Config::from_yaml(&base)?;
-        config.derivations.insert(
-            id.clone(),
-            crate::config::DerivationConfig {
-                source: definition.source,
-                recipe: definition.recipe,
-                fields: definition.fields,
-                inputs: definition.inputs,
-                outputs: definition.outputs,
-                reference_namespace: definition.reference_namespace,
-            },
-        );
+        config.derivations.insert(id.clone(), definition);
         self.apply_edits(&ApplyEditsRequest {
             summary: "Configure derivation".into(),
             expected_commit: None,
@@ -559,14 +540,9 @@ impl Store {
         if !attributes.is_empty() || git::is_tracked(&self.root, ".gitattributes")? {
             changes.push((".gitattributes".into(), Some(attributes)));
         }
-        // Configuration owns pending declarations; this file records published provenance only.
-        let mut persisted = manifest.clone();
-        persisted
-            .derivations
-            .retain(|_, definition| definition.publication.is_some());
         changes.push((
             MANIFEST.into(),
-            Some(serde_json::to_string_pretty(&persisted)?),
+            Some(serde_json::to_string_pretty(manifest)?),
         ));
         for (path, _) in &changes {
             ensure_repository_path_safe(&self.root, path)?;
@@ -616,16 +592,10 @@ impl Store {
             BTreeMap::new()
         };
         jobs.retain(|id, _| state.config.derivations.contains_key(id));
-        for (id, definition) in manifest
-            .derivations
-            .iter()
-            .filter(|(id, _)| state.config.derivations.contains_key(*id))
-        {
+        for (id, definition) in &state.config.derivations {
             let fingerprint = fingerprint(definition, &state, &manifest)?;
-            let published = definition
-                .publication
-                .as_ref()
-                .is_some_and(|p| p.fingerprint == fingerprint);
+            let publication = manifest.publications.get(id);
+            let published = publication.is_some_and(|p| p.fingerprint == fingerprint);
             let job = jobs.entry(id.clone()).or_insert_with(|| JobState {
                 id: id.clone(),
                 fingerprint: fingerprint.clone(),
@@ -650,10 +620,7 @@ impl Store {
             }
             if published
                 && (!job.rerun
-                    || definition
-                        .publication
-                        .as_ref()
-                        .is_some_and(|p| Some(&p.attempt) == job.attempt.as_ref()))
+                    || publication.is_some_and(|p| Some(&p.attempt) == job.attempt.as_ref()))
             {
                 job.status = "current".into();
                 job.attempt = None;
@@ -675,8 +642,10 @@ impl Store {
             .into_values()
             .map(|mut j| {
                 j.attempt = None;
-                let definition = &manifest.derivations[&j.id];
-                Job::new(j, definition)
+                let state = self.read_state();
+                let definition = &state.config.derivations[&j.id];
+                let published = manifest.publications.contains_key(&j.id);
+                Job::new(j, definition, published)
             })
             .collect())
     }
@@ -700,22 +669,23 @@ impl Store {
         let _guard = self.lock_repository()?;
         self.refresh_external_commit()?;
         let (manifest, mut jobs) = self.reconcile_jobs()?;
+        let state = self.read_state();
         let assignment = if let Some(job) = jobs.values_mut().find(|j| {
             j.status == "queued"
                 && j.expires <= now()
-                && recipes.contains(&manifest.derivations[&j.id].recipe)
+                && recipes.contains(&state.config.derivations[&j.id].recipe)
         }) {
-            job.source_revision = self.state.read().head.clone();
+            job.source_revision = state.head.clone();
             job.status = "running".into();
             job.attempt = Some(secret()?);
             job.expires = now() + LEASE_SECONDS;
-            let definition = &manifest.derivations[&job.id];
+            let definition = &state.config.derivations[&job.id];
             job.references.clear();
             if let Some(namespace) = &definition.reference_namespace {
                 for (path, asset) in &manifest.assets {
                     if definition.outputs.contains(path)
                         || asset.size > 16 * 1024 * 1024
-                        || !reference_is_current(path, &self.state.read(), &manifest)?
+                        || !reference_is_current(path, &state, &manifest)?
                     {
                         continue;
                     }
@@ -728,15 +698,19 @@ impl Store {
                 }
             }
             Some(Assignment {
-                job: Job::new(job.clone(), definition),
-                recording: self.state.read().pages[&definition.source].clone(),
+                job: Job::new(
+                    job.clone(),
+                    definition,
+                    manifest.publications.contains_key(&job.id),
+                ),
+                recording: state.pages[&definition.source].clone(),
                 parameters: definition
                     .fields
                     .iter()
                     .map(|key| {
                         (
                             key.clone(),
-                            self.state.read().parsed[&definition.source]
+                            state.parsed[&definition.source]
                                 .frontmatter
                                 .get(key)
                                 .cloned()
@@ -767,7 +741,10 @@ impl Store {
             return Ok(asset.clone());
         }
         ensure!(
-            manifest.derivations[id].inputs.iter().any(|p| p == path),
+            self.state.read().config.derivations[id]
+                .inputs
+                .iter()
+                .any(|p| p == path),
             "input is not assigned to this job"
         );
         Ok(manifest.assets[path].clone())
@@ -775,10 +752,14 @@ impl Store {
 
     pub(crate) fn check_output_lease(&self, id: &str, attempt: &str, path: &str) -> Result<()> {
         let _guard = self.lock_repository()?;
-        let (manifest, jobs) = self.reconcile_jobs()?;
+        let (_, jobs) = self.reconcile_jobs()?;
         check_lease(jobs.get(id), attempt)?;
         ensure!(
-            !path.ends_with(".md") && manifest.derivations[id].outputs.iter().any(|p| p == path),
+            !path.ends_with(".md")
+                && self.state.read().config.derivations[id]
+                    .outputs
+                    .iter()
+                    .any(|p| p == path),
             "output is not assigned to this job"
         );
         Ok(())
@@ -816,10 +797,9 @@ impl Store {
         let _guard = self.lock_repository()?;
         self.refresh_external_commit()?;
         let (mut manifest, jobs) = self.reconcile_jobs()?;
-        let definition = manifest.derivations.get(id).context("unknown derivation")?;
-        if let Some(publication) = definition
-            .publication
-            .as_ref()
+        if let Some(publication) = manifest
+            .publications
+            .get(id)
             .filter(|p| p.attempt == completion.attempt)
         {
             let mut hashes: BTreeMap<_, _> = completion
@@ -847,6 +827,12 @@ impl Store {
             );
             return Ok(());
         }
+        let state = self.read_state();
+        let definition = state
+            .config
+            .derivations
+            .get(id)
+            .context("unknown derivation")?;
         check_lease(jobs.get(id), &completion.attempt)?;
         for (path, asset) in &jobs[id].references {
             ensure!(
@@ -872,14 +858,6 @@ impl Store {
                 == definition.outputs.iter().collect(),
             "outputs do not match assignment"
         );
-        // Preserve rejected candidates for diagnosis/revalidation without another inference run.
-        write_atomic(
-            &self
-                .git_dir
-                .join("mdstore/candidates")
-                .join(format!("{}.json", completion.attempt)),
-            &serde_json::to_vec(&completion)?,
-        )?;
         let mut outputs = completion.outputs;
         for (path, asset) in completion.assets {
             ensure!(
@@ -889,20 +867,20 @@ impl Store {
             outputs.insert(path.clone(), self.asset_representation(&path, &asset)?);
             manifest.assets.insert(path, asset);
         }
-        let definition = manifest
-            .derivations
-            .get_mut(id)
-            .context("unknown derivation")?;
-        definition.publication = Some(Publication {
-            fingerprint: jobs[id].fingerprint.clone(),
-            source_revision: jobs[id].source_revision.clone(),
-            attempt: completion.attempt,
-            references: jobs[id].references.clone(),
-            hashes: outputs
-                .iter()
-                .map(|(p, t)| (p.clone(), crate::validation::source_hash(t)))
-                .collect(),
-        });
+        manifest.publications.insert(
+            id.into(),
+            Publication {
+                definition: definition.clone(),
+                fingerprint: jobs[id].fingerprint.clone(),
+                source_revision: jobs[id].source_revision.clone(),
+                attempt: completion.attempt,
+                references: jobs[id].references.clone(),
+                hashes: outputs
+                    .iter()
+                    .map(|(p, t)| (p.clone(), crate::validation::source_hash(t)))
+                    .collect(),
+            },
+        );
         let current = self.state.read().clone();
         self.commit_artifacts(
             &current,
@@ -982,13 +960,12 @@ pub(crate) mod tests {
         let asset = store.store_object(file).unwrap();
         store.put_asset("audio.m4a".into(), asset, None).unwrap();
         store
-            .create_derivation(Derivation {
+            .create_derivation(DerivationConfig {
                 source: "recording.md".into(),
                 recipe: "fixture-v1".into(),
                 fields: vec!["hotwords".into()],
                 inputs: vec!["audio.m4a".into()],
                 outputs: vec!["transcript.md".into()],
-                publication: None,
                 reference_namespace: None,
             })
             .unwrap()
@@ -1191,6 +1168,17 @@ pub(crate) mod tests {
         );
         let fresh = store.claim_job(&["fixture-v1".into()]).unwrap().unwrap();
         assert_ne!(fresh.job.state.fingerprint, job.fingerprint);
+        store
+            .complete_job(
+                &id,
+                completion(
+                    fresh.job.state.attempt.as_deref().unwrap(),
+                    "# Original transcript\n",
+                ),
+            )
+            .unwrap();
+        let original =
+            serde_json::to_value(&store.read_state().artifacts.publications[&id]).unwrap();
         let base = store.file_page("config.yaml").unwrap().text.unwrap();
         let mut config = Config::from_yaml(&base).unwrap();
         let definition = config.derivations.get_mut(&id).unwrap();
@@ -1230,6 +1218,18 @@ pub(crate) mod tests {
                 .is_err()
         );
         assert!(store.claim_job(&["fixture-v1".into()]).unwrap().is_none());
+        // An unrelated artifact commit must not relabel the old publication.
+        let mut object = store.object_temporary().unwrap();
+        object.write_all(b"{}").unwrap();
+        let asset = store.store_object(object).unwrap();
+        store.put_asset("marker.json".into(), asset, None).unwrap();
+        let persisted: Value = serde_json::from_str(
+            &git::read_text(dir.path(), &git::head(dir.path()).unwrap(), MANIFEST).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["publications"][&id], original);
+        assert_eq!(original["definition"]["source"], "recording.md");
+        assert_eq!(original["definition"]["recipe"], "fixture-v1");
         drop(store);
         let store = Store::open_with_provider(dir.path(), Arc::new(Provider)).unwrap();
         let updated = store.claim_job(&["fixture-v2".into()]).unwrap().unwrap();
@@ -1252,7 +1252,7 @@ pub(crate) mod tests {
     fn reference_vectors_are_frozen_filtered_and_fenced() {
         let (_dir, store) = fixture();
         let first = setup(&store);
-        let mut definition = store.state.read().artifacts.derivations[&first].clone();
+        let mut definition = store.state.read().config.derivations[&first].clone();
         definition.outputs = vec!["reference.json".into()];
         let reference = store.create_derivation(definition).unwrap();
         // Complete both queued jobs, publishing a confirmed reference vector.
@@ -1284,8 +1284,7 @@ pub(crate) mod tests {
                 .complete_job(&assignment.job.state.id, result)
                 .unwrap();
         }
-        let mut definition = store.state.read().artifacts.derivations[&first].clone();
-        definition.publication = None;
+        let mut definition = store.state.read().config.derivations[&first].clone();
         definition.outputs = vec!["next.md".into()];
         definition.reference_namespace = Some("speakers".into());
         let next = store.create_derivation(definition).unwrap();

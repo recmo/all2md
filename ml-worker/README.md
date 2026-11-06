@@ -18,7 +18,9 @@ recipes. Inference runs in a child process; lease loss or interruption kills its
 process group, including audio tools. Inputs are verified by SHA-256, outputs
 must match the assignment, and mdstore fences stale attempts and validates atomic
 publication. Worker credentials are removed from the inference subprocess.
-Caches are isolated by server, job, and fingerprint; a file lock prevents two
+Workspaces are isolated by server, job, and fingerprint. The MOSS cache is shared
+across a job’s fingerprints and validated by speech2md before reuse, so speaker
+corrections can replay compatible generations. A file lock prevents two
 attempts from concurrently using a job's workspace, including a child whose parent
 crashed. Disposable enhancement waveforms are cleaned up after completion or
 cancellation, and stale scratch is removed before retrying. Failed attempts cannot

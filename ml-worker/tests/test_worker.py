@@ -149,6 +149,12 @@ def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, captur
 import json, sys
 recording=Path(sys.argv[1])
 assert sys.argv[2] == '--force'
+moss = recording.with_suffix('.transcript.moss.npz')
+if 'Alice' in recording.read_text():
+    assert moss.read_bytes() == b'raw MOSS generation'
+else:
+    assert not moss.exists()
+moss.write_bytes(b'raw MOSS generation')
 recording.with_suffix('.transcript.md').write_text('# Transcript\\n')
 recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'space':{}, 'records':[{'id':'speaker','vector':[1.0], 'metadata':{}}]}))
 ''')
@@ -197,6 +203,15 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
     result = json.loads(state['outputs'][outputs[-1]])
     if recipe == recipes.SPEECH_RECIPE:
         assert result['records'][0]['metadata']['suggestions'][0]['metadata']['identity'] == 'people/alice.md'
+        # A speaker correction changes the job fingerprint, but not its raw inference cache.
+        state['assignment']['job']['fingerprint'] = 'speaker-correction'
+        state['assignment']['recording'] = state['assignment']['recording'].replace('\n---\n', '\nattendees: [{handle: Alice, identity: ""}]\n---\n')
+        state['completed'].clear()
+        state['completion_requests'] = 0
+        assert worker.main(['--server', client.server, '--once', '--recipes', recipe,
+                            '--cache', str(tmp_path/'cache')]) == 0
+        assert len(state['completed']) == 1 and not state['failed']
+        assert state['completion_requests'] == 2
         return
     assert result['provenance']['fingerprint'] == 'fingerprint'
     if recipe == recipes.LEVELS_RECIPE:

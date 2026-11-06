@@ -41,7 +41,7 @@ impl StoreState {
             (source.text, source.template)
         };
         Ok(FilePageResponse {
-            readonly: self.artifacts.owned(path)
+            readonly: self.artifacts.owned(&self.config, path)
                 || (crate::template::is_template(path) && !self.config.server.allow_template_edits)
                 || (is_config_resource_path(path) && !self.config.server.allow_config_edits),
             hash: asset.as_ref().map(|asset| asset.oid.clone()).or_else(|| {

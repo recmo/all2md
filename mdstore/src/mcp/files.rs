@@ -865,14 +865,13 @@ mod tests {
             "audio",
         )
         .await;
-        let definition = crate::store::artifacts::Derivation {
+        let definition = crate::config::DerivationConfig {
             source: "recording.md".into(),
             recipe: "fixture".into(),
             fields: vec!["hotwords".into()],
             inputs: vec!["audio.wav".into()],
             outputs: vec!["transcript.md".into(), "vectors.json".into()],
             reference_namespace: None,
-            publication: None,
         };
         let id = store.create_derivation(definition).unwrap();
         let assignment = store.claim_job(&["fixture".into()]).unwrap().unwrap();

@@ -522,7 +522,7 @@ impl Store {
         }
         let applied = apply_operations(&originals, &edits)?;
         let mut changes = applied;
-        current.artifacts.check_edits(&changes)?;
+        current.artifacts.check_edits(&current.config, &changes)?;
         let mut pages = (*current.pages).clone();
         let mut extra = (*current.config_files).clone();
         for (path, content) in &changes {
@@ -609,9 +609,9 @@ impl Store {
             paths = changes.keys().cloned().collect();
         }
         ensure_pages_match_config(&config, &pages)?;
-        current.artifacts.check_edits(&changes)?;
-        let artifacts = current.artifacts.configured(&config, &self.root)?;
-        artifacts.check_pages(&pages)?;
+        current.artifacts.check_edits(&current.config, &changes)?;
+        current.artifacts.check_config(&config, &self.root)?;
+        current.artifacts.check_pages(&config, &pages)?;
         let (parsed, edges) = crate::markdown::validate_incremental(
             &pages,
             &templates,
@@ -657,7 +657,7 @@ impl Store {
             provider.as_ref(),
         );
         let candidate = StoreState {
-            artifacts: Arc::new(artifacts),
+            artifacts: Arc::clone(&current.artifacts),
             head: base_head.clone(),
             templates,
             config,
@@ -1245,9 +1245,10 @@ fn load_snapshot(
     provider: Arc<dyn RetrievalProvider>,
     generation: u64,
 ) -> Result<StoreState> {
-    let artifacts = artifacts::load_manifest(root, &head)?.configured(&config, root)?;
+    let artifacts = artifacts::load_manifest(root, &head)?;
+    artifacts.check_config(&config, root)?;
     let pages = load_pages(root, &head, &config)?;
-    artifacts.check_pages(&pages)?;
+    artifacts.check_pages(&config, &pages)?;
     let config_files = load_config_files(root, &head)?;
     let templates = crate::template::Templates::compile(&config_files)
         .map_err(|findings| ValidationError { findings })?;

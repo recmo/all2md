@@ -43,22 +43,17 @@ changed input hashes invalidate in-flight results. Removing a declaration from
 outputs remain read-only and retain their provenance. Status comes from `/health`;
 retry and regeneration use `/worker`.
 
-Existing stores using the earlier registration API must move their declarations
-from `.mdstore-artifacts.json` into `config.yaml` under `derivations`, preserving
-each job ID and omitting the server-owned `publication` field. Old provenance is
-still readable, but registrations outside config no longer schedule jobs.
-
 ## Storage and provenance
 
 `config.yaml` owns processing definitions. The committed `.mdstore-artifacts.json`
-records asset paths, output ownership, and publication provenance, including the
+records asset paths, output ownership, and publication provenance, including an immutable snapshot of its declaration, the
 source Git revision and input fingerprint for each result. It is not a second configuration surface.
 Source audio/video use internal Git LFS pointers and objects. JSON voiceprints
 and published Markdown stay in ordinary Git. File URLs hide the storage choice. Each publication records the exact
 source revision, input fingerprint, output hashes, worker attempt, and frozen
 reference objects. External changes to owned output bytes fail provenance checks.
 
-Operational jobs, leases, progress, and retained candidate results live under
+Operational jobs, leases, and progress live under
 `.git/mdstore/`. LFS objects live under `.git/lfs/objects/`. Back up both Git history
 and LFS objects; pushing Git commits alone does not transfer these objects.
 Compatible MOSS inference caches stay on the worker, outside Git.
@@ -94,24 +89,12 @@ current. Adding a meeting does not retranscribe the archive.
 - Corrected references fence in-flight results and are excluded from new jobs.
   Already published identification suggestions require explicit regeneration;
   automatic matching-only invalidation is not implemented.
-- Rejected candidates are retained for diagnosis. Retrying currently reruns the
-  pipeline with its compatible inference cache; there is no candidate-only
-  revalidation endpoint.
 - Audio is streamed on demand.
 - Binary objects need a separate backup or external LFS hosting; mdstore does not
   expose Git LFS transfer endpoints or configure a client Git remote.
 
-## Planned enhanced audio playback
+## Enhanced audio
 
-The [ML worker plan](../ml-worker/README.md#audio-enhancement-for-playback-and-model-input)
-implements per-track level adjustment and optional denoising. The enhanced files
-can be opened with the file player; integrated selection is still planned.
-
-Workers will publish time-aligned, browser-playable derived audio, including
-separate role files for shared multi-track containers. The player will offer
-Original/Enhanced selection, preserving the playhead, speed, and transcript
-alignment. Original recordings remain immutable. Missing, stale, or failed
-enhancement will expose its status and fall back to playable original audio
-where available, without playing a different role. Playback selection is
-independent of preprocessing choices for transcription and speaker embeddings
-and does not trigger model jobs.
+The [ML worker](../ml-worker/README.md#audio-enhancement-for-playback-and-model-input)
+provides per-track level adjustment and optional denoising. Enhanced files can be
+opened with the file player; an integrated Original/Enhanced selector is not implemented.
