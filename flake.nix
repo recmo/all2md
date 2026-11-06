@@ -56,32 +56,37 @@
           name,
           project,
           extras ? [ ],
+          pythonSystem ? system,
         }:
         let
+          pythonPkgs = nixpkgs.legacyPackages.${pythonSystem};
           workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = project; };
           overlay = workspace.mkPyprojectOverlay { sourcePreference = "wheel"; };
-          buildSystemOverrides = final: prev: {
-            mlx = prev.mlx.overrideAttrs (old: {
-              nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.darwin.cctools ];
-              postFixup = (old.postFixup or "") + ''
-                for extension in "$out"/lib/python*/site-packages/mlx/core*.so; do
-                  install_name_tool \
-                    -rpath @loader_path/lib \
-                    ${final."mlx-metal"}/lib/python${pkgs.python313.pythonVersion}/site-packages/mlx/lib \
-                    "$extension"
-                done
-              '';
-            });
-            mlx-vlm = prev.mlx-vlm.overrideAttrs (old: {
-              nativeBuildInputs =
-                (old.nativeBuildInputs or [ ])
-                ++ final.resolveBuildSystem {
-                  setuptools = [ ];
-                };
-            });
-          };
+          buildSystemOverrides =
+            final: prev:
+            nixpkgs.lib.optionalAttrs pythonPkgs.stdenv.hostPlatform.isDarwin {
+              mlx = prev.mlx.overrideAttrs (old: {
+                nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pythonPkgs.darwin.cctools ];
+                postFixup = (old.postFixup or "") + ''
+                  for extension in "$out"/lib/python*/site-packages/mlx/core*.so; do
+                    install_name_tool \
+                      -rpath @loader_path/lib \
+                      ${final."mlx-metal"}/lib/python${pythonPkgs.python313.pythonVersion}/site-packages/mlx/lib \
+                      "$extension"
+                  done
+                '';
+              });
+              mlx-vlm = prev.mlx-vlm.overrideAttrs (old: {
+                nativeBuildInputs =
+                  (old.nativeBuildInputs or [ ])
+                  ++ final.resolveBuildSystem {
+                    setuptools = [ ];
+                  };
+              });
+            };
           pythonSet =
-            (pkgs.callPackage pyproject-nix.build.packages { python = pkgs.python313; }).overrideScope
+            (pythonPkgs.callPackage pyproject-nix.build.packages { python = pythonPkgs.python313; })
+            .overrideScope
               (
                 nixpkgs.lib.composeManyExtensions [
                   pyproject-build-systems.overlays.wheel
@@ -99,10 +104,6 @@
       speechEnvironment = mkPythonEnvironment {
         name = "speech2md";
         project = speechProject;
-      };
-      mlEnvironment = mkPythonEnvironment {
-        name = "ml-worker";
-        project = mlProject;
       };
       # nixpkgs packages only the LADSPA plugin. Build the upstream Rust CLI
       # from that same fixed source/cargo closure, with DFN3 weights embedded.
@@ -123,14 +124,26 @@
           doCheck = false;
           postInstall = "";
         };
-      ml-worker = pkgs.writeShellApplication {
-        name = "ml-worker";
-        runtimeInputs = [ pkgs.ffmpeg (mkDeepFilter system) speech2md ];
-        text = ''
-          export SPEECH2MD_VERSION=${pagesVersion}
-          exec ${mlEnvironment}/bin/ml-worker "$@"
-        '';
-      };
+      mkMlWorker =
+        mlSystem:
+        let
+          systemPkgs = nixpkgs.legacyPackages.${mlSystem};
+          environment = mkPythonEnvironment {
+            name = "ml-worker";
+            project = mlProject;
+            pythonSystem = mlSystem;
+          };
+        in
+        systemPkgs.writeShellApplication {
+          name = "ml-worker";
+          runtimeInputs = [
+            systemPkgs.ffmpeg
+            (mkDeepFilter mlSystem)
+          ]
+          ++ nixpkgs.lib.optionals systemPkgs.stdenv.hostPlatform.isDarwin [ speech2md ];
+          text = ''exec ${environment}/bin/ml-worker "$@"'';
+        };
+      ml-worker = mkMlWorker system;
       mkMlWorkerCheck = mlSystem:
         let systemPkgs = nixpkgs.legacyPackages.${mlSystem};
         in systemPkgs.runCommand "ml-worker-tests" {
@@ -154,6 +167,9 @@
             systemPkgs.ffmpeg
             (mkDeepFilter mlSystem)
           ];
+          shellHook = nixpkgs.lib.optionalString systemPkgs.stdenv.hostPlatform.isLinux ''
+            export LD_LIBRARY_PATH="${nixpkgs.lib.makeLibraryPath [ systemPkgs.stdenv.cc.cc.lib ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          '';
         };
       pagesTestEnvironment = mkPythonEnvironment {
         name = "pages2md";
@@ -381,6 +397,7 @@
           mdstore = mkMdstore docSystem;
           webui = mkMdstoreWeb docSystem;
           deep-filter = mkDeepFilter docSystem;
+          ml-worker = mkMlWorker docSystem;
         })
         // {
           ${system} = {
@@ -402,6 +419,10 @@
         forDocSystems (docSystem: {
           doc2md = mkDocApp docSystem;
           mdstore = mkMdstoreApp docSystem;
+          ml-worker = {
+            type = "app";
+            program = "${mkMlWorker docSystem}/bin/ml-worker";
+          };
         })
         // {
           ${system} = {

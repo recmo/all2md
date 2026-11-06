@@ -41,7 +41,8 @@ def _load(model_id, revision, *, classifier, device):
     tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision, trust_remote_code=False)
     factory = AutoModelForCausalLM if classifier else AutoModel
     model = factory.from_pretrained(model_id, revision=revision, trust_remote_code=False,
-                                   use_safetensors=True, dtype=torch.bfloat16).to(device).eval()
+                                   use_safetensors=True,
+                                   dtype=torch.float32 if device == "cpu" else torch.bfloat16).to(device).eval()
     return tokenizer, model, device
 
 

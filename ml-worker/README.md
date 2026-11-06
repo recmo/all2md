@@ -1,8 +1,9 @@
-# MacBook ML worker
+# ML worker
 
-`ml-worker` pulls jobs from mdstore and runs one recipe at a time on an Apple
-Silicon MacBook: transcription, audio enhancement, text embeddings, and reranking.
-It does not run generative LLM jobs.
+`ml-worker` pulls jobs from mdstore and runs one recipe at a time. Apple Silicon
+supports transcription, audio enhancement, text embeddings, and reranking. Linux
+CPU supports audio enhancement and text models; transcription requires MLX and
+is not included in the Linux package. It does not run generative LLM jobs.
 
 | Recipe | Processing | Outputs |
 | --- | --- | --- |
@@ -28,8 +29,8 @@ publish old outputs left in the cache.
 
 ## Run
 
-On Apple Silicon, with Nix and the same separate worker credential configured on
-mdstore and in `MDSTORE_WORKER_TOKEN`:
+On Apple Silicon or Linux, with Nix and the same separate worker credential
+configured on mdstore and in `MDSTORE_WORKER_TOKEN`:
 
 ```sh
 nix run .#ml-worker -- --list-recipes
@@ -41,10 +42,15 @@ nix run .#ml-worker -- --server https://your-mdstore-host --once \
 
 `--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
 when available, otherwise CPU; `--device cpu` forces CPU for text models.
+Text models use FP32 on CPU and BF16 on MPS. Allow roughly 16 GiB for one CPU
+text-model process; `OMP_NUM_THREADS=4` can limit its CPU parallelism.
 DeepFilterNet uses its native Rust/CPU runtime. Nix packages the dependencies and
 embeds the DeepFilterNet3 model. The two text models download pinned weights into
 the Hugging Face cache on first use; loading disables remote Python code and
 requires safetensors. No packages or toolchains are installed at runtime.
+
+See [Zawrat CPU measurements](benchmarks.md) before scheduling the 4B text models
+on a CPU. These queued recipes do not provide synchronous mdstore retrieval.
 
 Use `--recipes speech2md-v1` for a transcription-only worker.
 Use `ml-worker` for the additional recipes; its transcription recipe invokes the
