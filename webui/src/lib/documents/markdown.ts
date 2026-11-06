@@ -10,6 +10,110 @@ const parser = new MarkdownIt({
   linkify: true,
   typographer: false
 });
+export type LinkContext = { paths?: string[]; sourcePath?: string };
+
+function wikiPath(path: string): string | undefined {
+  const parts: string[] = [];
+  for (const part of path.split('/')) {
+    if (part === '..') {
+      if (!parts.length) return undefined;
+      parts.pop();
+    } else if (part && part !== '.') parts.push(part);
+  }
+  const normalized = parts.join('/');
+  return normalized.endsWith('.md') ? normalized : normalized + '.md';
+}
+
+// Wiki paths are source-relative unless a leading slash selects the repository root.
+parser.inline.ruler.before('link', 'wiki_links', (state, silent) => {
+  // Label lookahead must leave brackets to Markdown's own nesting scanner.
+  if (
+    silent ||
+    state.linkLevel ||
+    state.src.slice(state.pos, state.pos + 2) !== '[['
+  )
+    return false;
+  const end = state.src.indexOf(']]', state.pos + 2);
+  if (end < 0 || end + 2 > state.posMax) return false;
+  const content = state.src.slice(state.pos + 2, end);
+  if (/[\n\r\[\]]/.test(content)) return false;
+  const separator = content.indexOf('|');
+  const target = (separator < 0 ? content : content.slice(0, separator)).trim();
+  const label = separator < 0 ? target : content.slice(separator + 1).trim();
+  if (!target || /^(?:[a-z][a-z\d+.-]*:|\/\/)|[\\\x00-\x1f]/i.test(target))
+    return false;
+  const boundary = target.search(/[?#]/);
+  const rawPath = boundary < 0 ? target : target.slice(0, boundary);
+  const suffix = boundary < 0 ? '' : target.slice(boundary);
+  const { paths, sourcePath = '' } = state.env as LinkContext;
+  const parent = sourcePath.split('/').slice(0, -1).join('/');
+  const resolved = wikiPath(
+    rawPath.startsWith('/')
+      ? rawPath.slice(1)
+      : [parent, rawPath].filter(Boolean).join('/')
+  );
+  if (!resolved) return false;
+  const open = state.push('link_open', 'a', 1);
+  open.attrSet(
+    'href',
+    rawPath
+      ? '/' + resolved.split('/').map(encodeURIComponent).join('/') + suffix
+      : suffix
+  );
+  state.push('text', '', 0).content = label;
+  state.push('link_close', 'a', -1);
+  state.pos = end + 2;
+  return true;
+});
+parser.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
+  const context = (env || {}) as LinkContext;
+  const token = tokens[index];
+  const href = String(token.attrGet('href') || '');
+  const external = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href);
+  token.attrJoin('class', external ? 'external-link' : 'internal-link');
+  if (external) {
+    token.attrSet('rel', 'noopener noreferrer');
+    token.attrSet('title', 'Opens externally');
+  } else if (href && !/^[#?]/.test(href)) {
+    try {
+      const boundary = href.search(/[?#]/);
+      const rawPath = boundary < 0 ? href : href.slice(0, boundary);
+      const suffix = boundary < 0 ? '' : href.slice(boundary);
+      const components = rawPath.split('/').map(decodeURIComponent);
+      if (components.some((part) => /[/\\\x00-\x1f]/.test(part)))
+        throw Error('Invalid path component');
+      const path = components.join('/');
+      const name = components.at(-1) || '';
+      if (!name.includes('.') || name.endsWith('.md')) {
+        const parent = (context.sourcePath || '')
+          .split('/')
+          .slice(0, -1)
+          .join('/');
+        const target = wikiPath(
+          path.startsWith('/')
+            ? path.slice(1)
+            : [parent, path].filter(Boolean).join('/')
+        );
+        if (!target) throw Error('Path escapes the repository');
+        token.attrSet(
+          'href',
+          '/' + target.split('/').map(encodeURIComponent).join('/') + suffix
+        );
+        if (context.paths && !context.paths.includes(target)) {
+          token.attrJoin('class', 'broken-link');
+          token.attrSet('aria-invalid', 'true');
+          token.attrSet('title', `Missing document: ${target}`);
+        }
+      }
+    } catch {
+      token.attrSet('href', '');
+      token.attrJoin('class', 'broken-link');
+      token.attrSet('aria-invalid', 'true');
+      token.attrSet('title', 'Invalid document path');
+    }
+  }
+  return renderer.renderToken(tokens, index, options);
+};
 // Recognize task markers only at the start of a list item's first paragraph.
 parser.core.ruler.after('inline', 'task_lists', (state) => {
   for (let i = 2; i < state.tokens.length; i++) {
@@ -49,12 +153,16 @@ function propertyValue(value: unknown): string {
       .map((v) => `<span class="property-pill">${escape(v)}</span>`)
       .join(' ');
   if (typeof value === 'string' && /^https?:\/\//i.test(value))
-    return `<a href="${escape(value)}" rel="noreferrer">${escape(value)}</a>`;
+    return `<a class="external-link" href="${escape(value)}" rel="noopener noreferrer" title="Opens externally">${escape(value)}</a>`;
   return escape(
     typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)
   );
 }
-export function renderMarkdown(text: string, schema?: PropertySchema): string {
+export function renderMarkdown(
+  text: string,
+  schema?: PropertySchema,
+  links: LinkContext = {}
+): string {
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (!frontmatter && /^---\r?\n/.test(text))
     return (
@@ -63,7 +171,8 @@ export function renderMarkdown(text: string, schema?: PropertySchema): string {
       '</code></pre>'
     );
   let html = parser.render(
-    frontmatter ? text.slice(frontmatter[0].length) : text
+    frontmatter ? text.slice(frontmatter[0].length) : text,
+    links
   );
   if (frontmatter) {
     try {

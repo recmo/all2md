@@ -1,4 +1,4 @@
-//! One authenticated stream for repository and job invalidation notifications.
+//! One stream for repository and job invalidation notifications.
 use super::*;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use std::{convert::Infallible, time::Duration};
@@ -17,18 +17,6 @@ pub(super) async fn subscribe(State(state): State<AppState>, headers: HeaderMap)
                         _ = tokio::time::sleep(Duration::from_secs(15)) => false,
                     }
                 };
-                // An open connection must not outlive logout or expiry.
-                let bearer = state.bearer_token.as_deref().is_some_and(|token| {
-                    headers
-                        .get("authorization")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.strip_prefix("Bearer "))
-                        == Some(token)
-                });
-                if state.bearer_token.is_some() && !bearer && !session::authorized(&state, &headers)
-                {
-                    return None;
-                }
                 if !changed {
                     continue;
                 }

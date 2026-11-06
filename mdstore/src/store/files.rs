@@ -7,7 +7,7 @@ impl Store {
         path: &str,
         expected: Option<&str>,
         content: Option<String>,
-    ) -> Result<Option<PageResponse>> {
+    ) -> Result<Option<FilePageResponse>> {
         if path.contains(['{', '}']) {
             bail!("file URLs must be literal; use apply_edits for allocated paths");
         }
@@ -18,25 +18,18 @@ impl Store {
         if page.hash.as_deref() != expected {
             return Err(artifacts::PreconditionFailed.into());
         }
-        let edit = match content {
-            Some(content) if page.exists => EditOperation::ReplacePage {
-                path: path.into(),
-                base: page.text.unwrap_or_default(),
-                content,
-            },
-            Some(content) => EditOperation::CreatePage {
-                path: path.into(),
-                content,
-            },
-            None => EditOperation::DeletePage {
-                path: path.into(),
-                base: page.text.unwrap_or_default(),
-            },
-        };
-        let deleted = matches!(edit, EditOperation::DeletePage { .. });
+        let deleted = content.is_none();
+        let edit = EditOperation::replace_file(
+            path.into(),
+            page.exists
+                .then_some(page.text.as_deref().unwrap_or_default()),
+            content.unwrap_or_default(),
+        );
         self.apply_edits_locked(&ApplyEditsRequest {
-            edit_summary: format!("{} {path}", if deleted { "Delete" } else { "Write" }),
+            summary: format!("{} {path}", if deleted { "Delete" } else { "Write" }),
             edits: vec![edit],
+            expected_commit: None,
+            moves: vec![],
         })?;
         if deleted {
             Ok(None)

@@ -1,11 +1,15 @@
 import { File } from '@pierre/diffs';
-import { renderMarkdown, type PropertySchema } from './markdown';
+import {
+  renderMarkdown,
+  type PropertySchema,
+  type LinkContext
+} from './markdown';
 import { fenceLanguage } from './pierre';
 
 // Svelte action: sanitized prose plus locally rendered Pierre code blocks.
 export function markdownView(
   node: HTMLElement,
-  text: string | { text: string; schema?: PropertySchema }
+  text: string | ({ text: string; schema?: PropertySchema } & LinkContext)
 ) {
   let files: File[] = [];
   function clear() {
@@ -16,7 +20,8 @@ export function markdownView(
     clear();
     node.innerHTML = renderMarkdown(
       typeof value === 'string' ? value : value.text,
-      typeof value === 'string' ? undefined : value.schema
+      typeof value === 'string' ? undefined : value.schema,
+      typeof value === 'string' ? undefined : value
     );
     for (const code of node.querySelectorAll('pre > code')) {
       const source = code.textContent || '';

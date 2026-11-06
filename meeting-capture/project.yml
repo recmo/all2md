@@ -9,15 +9,29 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "15.0"
     CODE_SIGN_STYLE: Automatic
     CODE_SIGN_IDENTITY: Apple Development
-    DEVELOPMENT_TEAM: V458N7266F
+    DEVELOPMENT_TEAM: LD6C9WL456
 targets:
   MeetingCapture:
     type: application
     platform: macOS
     sources:
       - Sources
+      - Shared
       - path: Assets.xcassets
         buildPhase: resources
+    dependencies:
+      - target: MeetingCaptureWorker
+        embed: false
+    postBuildScripts:
+      - name: Embed background worker
+        script: |
+          helper_dir="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
+          mkdir -p "$helper_dir"
+          cp "$BUILT_PRODUCTS_DIR/MeetingCaptureWorker" "$helper_dir/MeetingCaptureWorker"
+        inputFiles:
+          - $(BUILT_PRODUCTS_DIR)/MeetingCaptureWorker
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/MeetingCaptureWorker
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ventures.wicked.MeetingCapture
@@ -29,12 +43,28 @@ targets:
         INFOPLIST_KEY_NSAudioCaptureUsageDescription: Meeting Capture records participant audio from meeting applications.
         INFOPLIST_KEY_NSAccessibilityUsageDescription: Meeting Capture can read meeting titles and participant metadata.
         CODE_SIGN_ENTITLEMENTS: MeetingCapture.entitlements
+  MeetingCaptureWorker:
+    type: tool
+    platform: macOS
+    sources:
+      - Worker
+      - Shared
+      - Sources/AccessibilityProbe.swift
+      - Sources/AudioFinalizer.swift
+      - Sources/CaptureError.swift
+      - Sources/MeetingStore.swift
+      - Sources/Models.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ventures.wicked.MeetingCapture.worker
+        PRODUCT_NAME: MeetingCaptureWorker
   MeetingCaptureTests:
     type: bundle.unit-test
     platform: macOS
     sources: [Tests]
     dependencies:
       - target: MeetingCapture
+      - target: MeetingCaptureWorker
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES

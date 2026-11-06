@@ -1,5 +1,6 @@
 import AVFoundation
 import CryptoKit
+import Darwin
 import Foundation
 
 struct ArchiveResult: Sendable {
@@ -25,27 +26,26 @@ enum AudioFinalizer {
 
     static func createArchive(
         microphoneSegments: [CapturedAudioSegment],
-        participants: URL?,
-        participantsStartedAt: Date?,
+        processTracks: [CapturedProcessTrack],
         captureStartedAt: Date,
         captureEndedAt: Date,
         temporaryDestination: URL,
         finalDestination: URL
     ) throws -> ArchiveResult {
-        let microphoneSegments = microphoneSegments.filter { FileManager.default.fileExists(atPath: $0.url.path) }
-        let participants = participants.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
-        guard !microphoneSegments.isEmpty || participants != nil else {
+        let microphoneSegments = try microphoneSegments.filter { try containsAudio($0.url) }
+        let processTracks = try processTracks.filter { try containsAudio($0.url) }
+        guard !microphoneSegments.isEmpty || !processTracks.isEmpty else {
             throw CaptureError.writerFailure("no captured audio is available for finalization")
         }
 
         try? FileManager.default.removeItem(at: temporaryDestination)
-        var arguments = ["-nostdin", "-v", "error", "-y"]
+        var arguments = ["-nostdin", "-v", "error", "-xerror", "-y"]
         for segment in microphoneSegments { arguments += ["-i", segment.url.path] }
-        if let participants { arguments += ["-i", participants.path] }
+        for track in processTracks { arguments += ["-i", track.url.path] }
 
         let duration = max(0, captureEndedAt.timeIntervalSince(captureStartedAt))
         var filters: [String] = []
-        var maps: [(label: String, role: AudioTrack.Role, bitrate: Int, channels: Int)] = []
+        var maps: [(label: String, role: AudioTrack.Role, bitrate: Int, channels: Int, title: String, track: CapturedProcessTrack?)] = []
         if !microphoneSegments.isEmpty {
             var labels: [String] = []
             for (index, segment) in microphoneSegments.enumerated() {
@@ -54,14 +54,15 @@ enum AudioFinalizer {
                 filters.append("[\(index):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono,adelay=\(delay):all=1[\(label)]")
                 labels.append("[\(label)]")
             }
-            filters.append("\(labels.joined())amix=inputs=\(labels.count):duration=longest:normalize=0,atrim=duration=\(duration),asetpts=PTS-STARTPTS[microphone]")
-            maps.append(("microphone", .microphone, 96_000, 1))
+            filters.append("\(labels.joined())amix=inputs=\(labels.count):duration=longest:normalize=0,apad=whole_dur=\(duration),atrim=duration=\(duration),asetpts=PTS-STARTPTS[microphone]")
+            maps.append(("microphone", .microphone, 96_000, 1, "Microphone", nil))
         }
-        if participants != nil {
-            let inputIndex = microphoneSegments.count
-            let delay = max(0, Int((participantsStartedAt ?? captureStartedAt).timeIntervalSince(captureStartedAt) * 1_000))
-            filters.append("[\(inputIndex):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=\(delay):all=1,atrim=duration=\(duration),asetpts=PTS-STARTPTS[participants]")
-            maps.append(("participants", .participants, 128_000, 2))
+        for (index, track) in processTracks.enumerated() {
+            let inputIndex = microphoneSegments.count + index
+            let label = "process\(index)"
+            let delay = max(0, Int(track.startedAt.timeIntervalSince(captureStartedAt) * 1_000))
+            filters.append("[\(inputIndex):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=\(delay):all=1,apad=whole_dur=\(duration),atrim=duration=\(duration),asetpts=PTS-STARTPTS[\(label)]")
+            maps.append((label, .process, 128_000, 2, track.process.title, track))
         }
 
         arguments += ["-filter_complex", filters.joined(separator: ";")]
@@ -74,7 +75,7 @@ enum AudioFinalizer {
                 "-application:a:\(index)", "audio",
                 "-frame_duration:a:\(index)", "20",
                 "-compression_level:a:\(index)", "10",
-                "-metadata:s:a:\(index)", "title=\(map.role == .microphone ? "Microphone" : "Participants")",
+                "-metadata:s:a:\(index)", "title=\(map.title)",
                 "-disposition:a:\(index)", "0",
             ]
         }
@@ -93,12 +94,12 @@ enum AudioFinalizer {
                   stream.channels == expected.channels else {
                 throw CaptureError.writerFailure("archive track \(index) does not match the \(expected.role.rawValue) contract")
             }
-            let expectedTitle = expected.role == .microphone ? "Microphone" : "Participants"
+            let expectedTitle = expected.title
             guard stream.tags?["title"] == expectedTitle else {
                 throw CaptureError.writerFailure("archive track \(index) is missing its \(expectedTitle) identity")
             }
             try runTool("ffmpeg", arguments: [
-                "-nostdin", "-v", "error", "-i", temporaryDestination.path,
+                "-nostdin", "-v", "error", "-xerror", "-i", temporaryDestination.path,
                 "-map", "0:a:\(index)", "-f", "null", "-",
             ])
         }
@@ -118,7 +119,9 @@ enum AudioFinalizer {
                 sampleRate: Double(stream.sample_rate) ?? 48_000,
                 channels: stream.channels,
                 durationSeconds: Double(stream.duration ?? "") ?? archiveDuration,
-                bitrate: map.bitrate
+                bitrate: map.bitrate,
+                id: map.track?.id,
+                process: map.track?.process
             )
         }
         return ArchiveResult(
@@ -131,16 +134,11 @@ enum AudioFinalizer {
         )
     }
 
-    static func recoveredSegments(from urls: [URL], startedAt: Date) throws -> [CapturedAudioSegment] {
-        var cursor = startedAt
-        return try urls.sorted { $0.lastPathComponent < $1.lastPathComponent }.map { url in
-            let input = try AVAudioFile(forReading: url)
-            let duration = input.processingFormat.sampleRate > 0
-                ? Double(input.length) / input.processingFormat.sampleRate
-                : 0
-            let segment = CapturedAudioSegment(url: url, startedAt: cursor, endedAt: cursor.addingTimeInterval(duration))
-            cursor = segment.endedAt
-            return segment
+    static func containsAudio(_ url: URL) throws -> Bool {
+        do {
+            return try AVAudioFile(forReading: url).length > 0
+        } catch {
+            throw CaptureError.writerFailure("Cannot read \(url.lastPathComponent); original audio preserved: \(error.localizedDescription)")
         }
     }
 
@@ -167,20 +165,47 @@ enum AudioFinalizer {
         arguments: [String],
         captureStandardOutput: Bool = false
     ) throws -> Data {
-        let process = Process()
-        process.executableURL = try executable(named: name)
-        process.arguments = arguments
+        let executable = try executable(named: name)
         let standardOutput = Pipe()
-        let standardError = Pipe()
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-        try process.run()
+        guard let errorStream = tmpfile() else {
+            throw CaptureError.writerFailure("Could not capture \(name) errors: \(String(cString: strerror(errno)))")
+        }
+        defer { fclose(errorStream) }
+        let errorFile = FileHandle(fileDescriptor: fileno(errorStream), closeOnDealloc: false)
+        func check(_ status: Int32) throws {
+            guard status == 0 else {
+                throw CaptureError.writerFailure("Could not launch \(name): \(String(cString: strerror(status)))")
+            }
+        }
+        var actions: posix_spawn_file_actions_t? = nil
+        try check(posix_spawn_file_actions_init(&actions))
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        try check(posix_spawn_file_actions_adddup2(&actions, standardOutput.fileHandleForWriting.fileDescriptor, STDOUT_FILENO))
+        try check(posix_spawn_file_actions_adddup2(&actions, errorFile.fileDescriptor, STDERR_FILENO))
+        try check(posix_spawn_file_actions_addclose(&actions, standardOutput.fileHandleForReading.fileDescriptor))
+        try check(posix_spawn_file_actions_addclose(&actions, standardOutput.fileHandleForWriting.fileDescriptor))
+        try check(posix_spawn_file_actions_addclose(&actions, errorFile.fileDescriptor))
+        let strings = ([executable.path] + arguments).map { strdup($0) }
+        defer { strings.forEach { free($0) } }
+        var argv = strings + [nil]
+        let environment = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
+        defer { environment.forEach { free($0) } }
+        var envp = environment + [nil]
+        var processID: pid_t = 0
+        // Foundation Process creates a separate process group. Spawn directly
+        // so tools stay in the worker's group and its deadline stops them too.
+        try check(posix_spawn(&processID, executable.path, &actions, nil, &argv, &envp))
+        try standardOutput.fileHandleForWriting.close()
         let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let error = standardError.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        var status: Int32 = 0
+        while waitpid(processID, &status, 0) < 0 {
+            if errno != EINTR { try check(errno) }
+        }
+        try errorFile.seek(toOffset: 0)
+        let error = errorFile.readDataToEndOfFile()
+        guard status == 0 else {
             let message = String(data: error, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw CaptureError.writerFailure("\(name) failed: \(message?.isEmpty == false ? message! : "exit \(process.terminationStatus)")")
+            throw CaptureError.writerFailure("\(name) failed: \(message?.isEmpty == false ? message! : "status \(status)")")
         }
         return captureStandardOutput ? output : Data()
     }
@@ -189,6 +214,11 @@ enum AudioFinalizer {
         if let bundled = Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "bin"),
            FileManager.default.isExecutableFile(atPath: bundled.path) {
             return bundled
+        }
+        if let executable = Bundle.main.executableURL {
+            let appBundled = executable.deletingLastPathComponent().deletingLastPathComponent()
+                .appending(path: "Resources/bin/\(name)")
+            if FileManager.default.isExecutableFile(atPath: appBundled.path) { return appBundled }
         }
         var paths = ProcessInfo.processInfo.environment["PATH"]?.split(separator: ":").map(String.init) ?? []
         paths += [

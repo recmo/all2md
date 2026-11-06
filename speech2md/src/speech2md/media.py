@@ -73,7 +73,7 @@ def resolve_input(requested: Path) -> ResolvedInput:
 
     value = json.loads(requested.read_text())
     schema_version = value.get("schemaVersion")
-    if schema_version not in {1, 2}:
+    if schema_version not in {1, 2, 3}:
         raise ValueError("unsupported meeting capture schema version")
     required = {"meetingID", "audio", "status", "startedAt", "endedAt"}
     missing = required - value.keys()
@@ -93,7 +93,14 @@ def resolve_input(requested: Path) -> ResolvedInput:
         for track in value["audio"]:
             if not {"streamIndex", "role"} <= track.keys():
                 raise ValueError("capture audio track is incomplete")
-            sources.append((container_path, track["role"], container["sha256"], int(track["streamIndex"])))
+            role = track["role"]
+            if schema_version == 3 and role == "process":
+                if not track.get("id") or not isinstance(track.get("process"), dict):
+                    raise ValueError("capture process track is missing its identity")
+                role = f"process-{track['id']}"
+            sources.append((container_path, role, container["sha256"], int(track["streamIndex"])))
+        if len({source[1] for source in sources}) != len(sources):
+            raise ValueError("capture track identities must be unique")
     base = requested.name.removesuffix("-capture.json")
     return ResolvedInput(
         requested=requested,

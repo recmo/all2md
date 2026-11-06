@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::Range, path::Path};
 
-use anyhow::{Context, Result};
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use anyhow::{Context, Result, bail};
+use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,7 @@ pub struct ParsedPage {
     pub code_blocks: Vec<SourceRange>,
     /// Source lines that begin or end structural blocks.
     pub structural_boundaries: Vec<usize>,
-    /// Authored Markdown and configured wiki links.
+    /// Authored Markdown links, images, and configured wiki links.
     pub links: Vec<RawLink>,
 }
 
@@ -66,15 +66,55 @@ pub struct Heading {
 pub struct RawLink {
     /// Raw authored target.
     pub target: String,
-    /// Byte range of a configured wiki target in the complete document source.
+    /// Editable destination bytes in the complete source; absent if not safely locatable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_range: Option<Range<usize>>,
+    /// Whether the destination is a literal image asset rather than a document link.
+    #[serde(default)]
+    pub image: bool,
     /// One-based source line.
     pub line: usize,
     /// Syntax that produced the link.
     pub syntax: LinkSyntax,
     /// Containing heading breadcrumb.
     pub sections: Vec<String>,
+}
+
+impl RawLink {
+    /// Preserves authored query/fragment bytes, rejecting ambiguous entity encodings.
+    #[cfg(feature = "server")]
+    pub(crate) fn source_suffix<'a>(&self, text: &'a str) -> Result<&'a str> {
+        let Some(separator) = self.target.find(['#', '?']) else {
+            return Ok("");
+        };
+        let range = self
+            .target_range
+            .as_ref()
+            .context("missing link destination span")?;
+        let raw = &text[range.clone()];
+        let bytes = raw.as_bytes();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            // A numeric character reference can contain a '#' belonging to the path.
+            if bytes[cursor] == b'&'
+                && let Some(end) = raw[cursor..].find(';')
+                && raw[cursor + 1..cursor + end]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'#')
+            {
+                cursor += end + 1;
+                continue;
+            }
+            if matches!(bytes[cursor], b'#' | b'?') {
+                if bytes[cursor] == self.target.as_bytes()[separator] {
+                    return Ok(&raw[cursor..]);
+                }
+                break;
+            }
+            cursor += 1;
+        }
+        bail!("cannot preserve encoded link suffix safely")
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -131,8 +171,21 @@ pub struct Finding {
 /// A one-based source location in a schema document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FindingSource {
+    /// Repository path of the schema.
     pub path: String,
+    /// One-based source line.
     pub line: usize,
+}
+
+/// Uses the native wiki parser only when no custom wiki grammar is configured.
+fn parser_options(links: &crate::config::LinkConfig) -> Options {
+    let mut options = Options::all();
+    // Custom wiki syntax is scanned separately. Native wiki parsing can consume
+    // a wiki-looking label before the enclosing Markdown link is recognized.
+    if !links.wiki.is_empty() {
+        options.remove(Options::ENABLE_WIKILINKS);
+    }
+    options
 }
 
 /// Parses one Markdown page according to configured link syntaxes.
@@ -157,8 +210,8 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
         .iter()
         .map(|wiki| Regex::new(wiki))
         .collect::<Result<Vec<_>, _>>()?;
-    let parser = Parser::new_ext(body, Options::all()).into_offset_iter();
-    for (event, range) in parser {
+    let mut parser = Parser::new_ext(body, parser_options(links)).into_offset_iter();
+    while let Some((event, range)) = parser.next() {
         let line = body_start_line
             + body[..range.start]
                 .bytes()
@@ -253,11 +306,50 @@ pub fn parse_page(text: &str, links: &crate::config::LinkConfig) -> Result<Parse
                     });
                 }
             }
-            Event::Start(Tag::Link { dest_url, .. }) if links.markdown => {
+            Event::Start(tag @ (Tag::Link { .. } | Tag::Image { .. })) if links.markdown => {
+                let (link_type, dest_url, id, image) = match tag {
+                    Tag::Link {
+                        link_type,
+                        dest_url,
+                        id,
+                        ..
+                    } => (link_type, dest_url, id, false),
+                    Tag::Image {
+                        link_type,
+                        dest_url,
+                        id,
+                        ..
+                    } => (
+                        link_type,
+                        dest_url,
+                        id,
+                        !matches!(link_type, LinkType::WikiLink { .. }),
+                    ),
+                    _ => unreachable!(),
+                };
+                let target_range = match link_type {
+                    LinkType::Inline => find_span(body, range.clone(), "](", &dest_url).ok(),
+                    LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => parser
+                        .reference_definitions()
+                        .get(&id)
+                        .and_then(|definition| {
+                            find_span(body, definition.span.clone(), "]:", &dest_url).ok()
+                        }),
+                    LinkType::WikiLink { .. } => {
+                        let start =
+                            range.start + 2 + usize::from(body[range.clone()].starts_with('!'));
+                        let end = start + dest_url.len();
+                        (end <= range.end && body.get(start..end) == Some(dest_url.as_ref()))
+                            .then_some(start..end)
+                    }
+                    _ => None,
+                }
+                .map(|range| body_offset + range.start..body_offset + range.end);
                 markdown_links.push((
                     RawLink {
                         target: dest_url.to_string(),
-                        target_range: None,
+                        target_range,
+                        image,
                         line,
                         syntax: LinkSyntax::Markdown,
                         sections: heading_stack.clone(),
@@ -364,6 +456,7 @@ fn scan_wiki_links(
                 RawLink {
                     target,
                     target_range: Some(target_range),
+                    image: false,
                     line,
                     syntax: LinkSyntax::Wiki,
                     sections: heading_stack.clone(),
@@ -422,11 +515,6 @@ pub fn parse_frontmatter(text: &str) -> Result<(serde_json::Value, usize, &str)>
     anyhow::bail!("unterminated YAML frontmatter")
 }
 
-#[cfg(test)]
-thread_local! {
-    static VALIDATED_PAGES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 /// Successful parsed corpus and relation graph, or all validation findings.
 pub type CorpusValidation = Result<(HashMap<String, ParsedPage>, Vec<Edge>), Vec<Finding>>;
 
@@ -466,7 +554,7 @@ fn validate_with_baseline(
     let mut parsed = HashMap::new();
     let mut policies = HashMap::new();
     let mut affected = std::collections::HashSet::new();
-    // Adding a path can make a previously unique short-name target ambiguous.
+    // Inventory changes can add or remove the exact destination of an authored link.
     // Inventory changes therefore re-resolve all authored targets, without reparsing.
     let inventory_changed = baseline.as_ref().is_none_or(|base| {
         base.pages.len() != pages.len() || base.pages.keys().any(|path| !pages.contains_key(path))
@@ -486,8 +574,6 @@ fn validate_with_baseline(
             continue;
         }
         affected.insert(path.clone());
-        #[cfg(test)]
-        VALIDATED_PAGES.with_borrow_mut(|paths| paths.push(path.clone()));
         match parse_page(text, &config.links) {
             Ok(mut page) => {
                 page.metadata = project_metadata(config, &page.frontmatter);
@@ -517,7 +603,7 @@ fn validate_with_baseline(
         if !affected.contains(path) {
             continue;
         }
-        for link in &page.links {
+        for link in page.links.iter().filter(|link| !link.image) {
             match resolver.resolve(path, &link.target, link.syntax) {
                 Ok(Some(target)) => {
                     resolved_links
@@ -615,7 +701,7 @@ fn validate_with_baseline(
                                 });
                                 continue;
                             };
-                            match resolver.resolve(source, target, LinkSyntax::Wiki) {
+                            match resolver.resolve_reference(target) {
                                 Ok(Some(target)) => edges.push(Edge {
                                     source: source.clone(),
                                     relation: rule.name.clone(),
@@ -650,9 +736,10 @@ fn validate_reciprocals(
 ) {
     let set: std::collections::HashSet<_> = edges.iter().cloned().collect();
     for edge in edges {
-        if policies.get(&edge.target).is_some_and(|policy| {
-            policy.backlinks.as_ref().is_some_and(|rule| !rule.required)
-        }) {
+        if policies
+            .get(&edge.target)
+            .is_some_and(|policy| policy.backlinks.as_ref().is_some_and(|rule| !rule.required))
+        {
             continue;
         }
         let config = &policies[&edge.source];
@@ -683,31 +770,57 @@ fn validate_reciprocals(
     }
 }
 
-struct TargetResolver {
+pub(crate) struct TargetResolver {
     exact: std::collections::HashSet<String>,
-    stems: HashMap<String, Vec<String>>,
 }
 
 impl TargetResolver {
-    fn new<'a>(paths: impl Iterator<Item = &'a String>) -> Self {
-        let mut exact = std::collections::HashSet::new();
-        let mut stems: HashMap<String, Vec<String>> = HashMap::new();
-        for path in paths {
-            exact.insert(path.clone());
-            let without_extension = path.strip_suffix(".md").unwrap_or(path);
-            stems
-                .entry(without_extension.into())
-                .or_default()
-                .push(path.clone());
-            if let Some(name) = Path::new(without_extension)
-                .file_name()
-                .and_then(|v| v.to_str())
-                .filter(|name| *name != without_extension)
-            {
-                stems.entry(name.into()).or_default().push(path.clone());
-            }
+    #[cfg(feature = "server")]
+    pub(crate) fn resolve_link(
+        &self,
+        source: &str,
+        link: &RawLink,
+    ) -> Result<Option<(String, bool)>> {
+        let path = link.target.split(['#', '?']).next().unwrap_or_default();
+        if path.is_empty() || is_external(path, link.syntax) {
+            return Ok(None);
         }
-        Self { exact, stems }
+        // Images name literal asset paths, including extensionless files. They do
+        // not inherit the optional .md extension of document links.
+        if !link.image
+            && let Some(target) = self
+                .resolve(source, &link.target, link.syntax)
+                .map_err(|error| anyhow::anyhow!("{source}: {error}"))?
+        {
+            return Ok(Some((target, true)));
+        }
+        // The corpus resolver deliberately ignores assets. Their relative paths still
+        // need rebasing when their source document moves.
+        let decoded = decode_markdown_path(path).map_err(anyhow::Error::msg)?;
+        let target = if let Some(rooted) = decoded.strip_prefix('/') {
+            normalize_path(Path::new(rooted))
+        } else {
+            normalize_path(
+                &Path::new(source)
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .join(decoded),
+            )
+        }
+        .map_err(anyhow::Error::msg)?;
+        let document = self.exact.contains(&target);
+        Ok(Some((target, document)))
+    }
+
+    pub(crate) fn new<'a>(paths: impl Iterator<Item = &'a String>) -> Self {
+        Self {
+            exact: paths.cloned().collect(),
+        }
+    }
+
+    // Frontmatter relation fields store repository paths, not authored links.
+    fn resolve_reference(&self, raw: &str) -> Result<Option<String>, String> {
+        self.resolve("", raw, LinkSyntax::Wiki)
     }
 
     fn resolve(
@@ -717,14 +830,11 @@ impl TargetResolver {
         syntax: LinkSyntax,
     ) -> Result<Option<String>, String> {
         let raw = raw.split(['#', '?']).next().unwrap_or_default();
-        if raw.is_empty() {
+        if raw.is_empty() || is_external(raw, syntax) {
             return Ok(None);
         }
         let decoded;
         let target = if matches!(syntax, LinkSyntax::Markdown) {
-            if raw.starts_with("//") || has_uri_scheme(raw) {
-                return Ok(None);
-            }
             decoded = decode_markdown_path(raw)?;
             if Path::new(&decoded)
                 .extension()
@@ -736,28 +846,21 @@ impl TargetResolver {
         } else {
             raw
         };
-        if target.starts_with('/') {
-            return Err(format!("absolute internal link is not allowed: {target}"));
-        }
-        let candidate = if matches!(syntax, LinkSyntax::Markdown) {
+        let candidate = if let Some(root_path) = target.strip_prefix('/') {
+            normalize_path(Path::new(root_path))?
+        } else {
             let parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
             normalize_path(&parent.join(target))?
-        } else {
-            normalize_path(Path::new(target))?
         };
         let with_extension = if candidate.ends_with(".md") {
-            candidate.clone()
+            candidate
         } else {
             format!("{candidate}.md")
         };
         if self.exact.contains(&with_extension) {
-            return Ok(Some(with_extension));
-        }
-        let stem = candidate.strip_suffix(".md").unwrap_or(&candidate);
-        match self.stems.get(stem).map(Vec::as_slice) {
-            Some([only]) => Ok(Some(only.clone())),
-            Some(many) => Err(format!("ambiguous internal target {raw:?}: {many:?}")),
-            None => Err(format!("dangling internal target {raw:?}")),
+            Ok(Some(with_extension))
+        } else {
+            Err(format!("dangling internal target {raw:?}"))
         }
     }
 }
@@ -812,7 +915,11 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn has_uri_scheme(target: &str) -> bool {
+fn is_external(target: &str, syntax: LinkSyntax) -> bool {
+    matches!(syntax, LinkSyntax::Markdown) && (target.starts_with("//") || has_uri_scheme(target))
+}
+
+pub(crate) fn has_uri_scheme(target: &str) -> bool {
     let Some((scheme, _)) = target.split_once(':') else {
         return false;
     };
@@ -825,7 +932,7 @@ fn has_uri_scheme(target: &str) -> bool {
         })
 }
 
-fn normalize_path(path: &Path) -> Result<String, String> {
+pub(crate) fn normalize_path(path: &Path) -> Result<String, String> {
     let mut parts = Vec::new();
     for part in path.components() {
         match part {
@@ -857,447 +964,6 @@ pub(crate) fn project_metadata(
     serde_json::Value::Object(output)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::LinkConfig;
-    use crate::template::test_templates;
-
-    #[test]
-    fn wiki_links_ignore_code_and_escaped_examples() {
-        let page = parse_page(
-            "# Links\n\n{{real}}\n\n[[not configured]]\n\n`{{inline}}`\n\n```md\n{{fenced}}\n```\n\n\\{{escaped}}\n",
-            &LinkConfig {
-                markdown: false,
-                wiki: vec![r"\{\{(?P<target>[^}|#]+)(?:#[^}|]+)?(?:\|[^}]+)?\}\}".into()],
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            page.links
-                .iter()
-                .map(|link| link.target.as_str())
-                .collect::<Vec<_>>(),
-            ["real"]
-        );
-    }
-
-    #[test]
-    fn configured_wiki_links_take_precedence_over_markdown_parsing() {
-        let templates = test_templates(
-            r#"```starlark
-structure(additional_sections=True)
-links(markdown=True, wiki=["\\[\\[(?P<target>[^\\]|#]+)(?:#[^\\]|]+)?(?:\\|[^\\]]+)?\\]\\]"])
-relation(name="markdown", selector={"kind": "markdown_links", "syntax": "markdown"})
-relation(name="wiki", selector={"kind": "markdown_links", "syntax": "wiki"})
-```
-"#,
-        )
-        .unwrap();
-        let pages = HashMap::from([
-            ("a.md".into(), "[[b#Part|Bee]]\n".into()),
-            ("b.md".into(), "B\n".into()),
-        ]);
-        let (_, edges) = validate_corpus(&pages, &templates).unwrap();
-        assert_eq!(
-            edges,
-            [Edge {
-                source: "a.md".into(),
-                relation: "wiki".into(),
-                target: "b.md".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn markdown_relation_selectors_keep_types_separate() {
-        let templates = test_templates(
-            r#"```starlark
-structure(additional_sections=True)
-links(markdown=True)
-relation(name="friend", reciprocal="friend", selector={"kind": "markdown_links", "section": "Friends"})
-relation(name="source", reciprocal="source", selector={"kind": "markdown_links", "section": "Sources"})
-```
-"#,
-        )
-        .unwrap();
-        let pages = HashMap::from([
-            (
-                "a.md".into(),
-                "# Friends\n\n[B](b.md)\n\n# Sources\n\n[C](c.md)\n".into(),
-            ),
-            ("b.md".into(), "# Friends\n\n[A](a.md)\n".into()),
-            ("c.md".into(), "# Sources\n\n[A](a.md)\n".into()),
-        ]);
-        let (_, edges) = validate_corpus(&pages, &templates).unwrap();
-        assert_eq!(edges.len(), 4);
-        assert!(edges.iter().all(|edge| {
-            (edge.relation == "friend" && edge.source != "c.md" && edge.target != "c.md")
-                || (edge.relation == "source" && edge.source != "b.md" && edge.target != "b.md")
-        }));
-    }
-
-    #[test]
-    fn required_sections_are_enforced_by_templates() {
-        let templates = test_templates("```starlark\nstructure(additional_sections=True)\nsection(\"Notes\", required=True, level=1)\n```\n").unwrap();
-        let pages = HashMap::from([("page.md".into(), "# Other\n".into())]);
-        assert!(validate_corpus(&pages, &templates).is_err());
-    }
-
-    #[test]
-    fn directory_templates_select_heterogeneous_page_types() {
-        let templates = Templates::compile(&HashMap::from([
-            (
-                "people/schema.md".into(),
-                "```starlark\nstructure(additional_sections=False)\nsection(\"Biography\", required=True, level=1)\n```\n".into(),
-            ),
-            (
-                "tasks/schema.md".into(),
-                "```starlark\nstructure(additional_sections=False)\nsection(\"Status\", required=True, level=1)\n```\n".into(),
-            ),
-        ]))
-        .unwrap();
-        let mut pages = HashMap::from([
-            ("people/alice.md".into(), "# Biography\n\nPerson.\n".into()),
-            ("tasks/one.md".into(), "# Status\n\nOpen.\n".into()),
-        ]);
-        assert!(validate_corpus(&pages, &templates).is_ok());
-        pages.insert("people/alice.md".into(), "# Status\n\nActive.\n".into());
-        let findings = validate_corpus(&pages, &templates).unwrap_err();
-        assert!(!findings.is_empty());
-        assert!(
-            findings
-                .iter()
-                .all(|finding| finding.path == "people/alice.md")
-        );
-    }
-
-    #[test]
-    fn non_page_markdown_destinations_are_not_internal_links() {
-        let paths = [
-            "notes/page.md".to_owned(),
-            "notes/other.md".to_owned(),
-            "notes/other note.md".to_owned(),
-            "notes/café.md".to_owned(),
-            "notes/hash#tag.md".to_owned(),
-            "notes/wiki%20name.md".to_owned(),
-        ];
-        let resolver = TargetResolver::new(paths.iter());
-        for target in [
-            "../assets/paper.pdf",
-            "ftp://example.com/file",
-            "urn:isbn:9780140328721",
-            "//cdn.example.com/file",
-        ] {
-            assert_eq!(
-                resolver.resolve("notes/page.md", target, LinkSyntax::Markdown),
-                Ok(None),
-                "resolved {target:?} as a page"
-            );
-        }
-        assert_eq!(
-            resolver.resolve("notes/page.md", "other.md?view=1", LinkSyntax::Markdown),
-            Ok(Some("notes/other.md".into()))
-        );
-        assert_eq!(
-            resolver.resolve(
-                "notes/page.md",
-                "other%20note.md?view=1#details",
-                LinkSyntax::Markdown
-            ),
-            Ok(Some("notes/other note.md".into()))
-        );
-        assert_eq!(
-            resolver.resolve("notes/page.md", "caf%C3%A9.md", LinkSyntax::Markdown),
-            Ok(Some("notes/café.md".into()))
-        );
-        assert_eq!(
-            resolver.resolve("notes/page.md", "hash%23tag.md", LinkSyntax::Markdown),
-            Ok(Some("notes/hash#tag.md".into()))
-        );
-        assert_eq!(
-            resolver.resolve("notes/page.md", "wiki%20name", LinkSyntax::Wiki),
-            Ok(Some("notes/wiki%20name.md".into()))
-        );
-
-        let templates = Templates::compile(&HashMap::new()).unwrap();
-        let pages = HashMap::from([
-            (
-                "notes/page.md".into(),
-                "[Other](other%20note.md?view=1#details)\n".into(),
-            ),
-            ("notes/other note.md".into(), "Other.\n".into()),
-        ]);
-        assert!(validate_corpus(&pages, &templates).is_ok());
-    }
-
-    #[test]
-    fn root_page_stems_resolve_once() {
-        let paths = ["page.md".to_owned()];
-        let resolver = TargetResolver::new(paths.iter());
-
-        assert_eq!(
-            resolver.resolve("source.md", "page", LinkSyntax::Wiki),
-            Ok(Some("page.md".into()))
-        );
-    }
-
-    #[test]
-    fn markdown_link_decoding_rejects_invalid_or_escaping_paths() {
-        let paths = ["notes/page.md".to_owned()];
-        let resolver = TargetResolver::new(paths.iter());
-        for target in [
-            "bad%.md",
-            "bad%GG.md",
-            "bad%00.md",
-            "bad%2Fname.md",
-            "bad%5Cname.md",
-            "bad%FF.md",
-            "%2e%2e/%2e%2e/outside.md",
-        ] {
-            assert!(
-                resolver
-                    .resolve("notes/page.md", target, LinkSyntax::Markdown)
-                    .is_err(),
-                "accepted {target:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn template_schema_errors_are_reported_once_and_page_errors_per_page() {
-        let invalid =
-            test_templates("```starlark\nfrontmatter(x=field({\"type\": \"not_a_type\"}))\n```\n")
-                .err()
-                .unwrap();
-        assert_eq!(invalid.len(), 1);
-        assert_eq!(invalid[0].path, "schema.md");
-        let templates =
-            test_templates("```starlark\nfrontmatter(fields={\"required\": field({}, required=True)}, allow_extra=True)\n```\n").unwrap();
-        let pages = HashMap::from([
-            ("one.md".into(), "---\nvalue: one\n---\n".into()),
-            ("two.md".into(), "---\nvalue: two\n---\n".into()),
-        ]);
-        let findings = validate_corpus(&pages, &templates).unwrap_err();
-        assert_eq!(findings.len(), 2);
-        assert!(findings.iter().any(|finding| finding.path == "one.md"));
-        assert!(findings.iter().any(|finding| finding.path == "two.md"));
-    }
-    #[test]
-    fn recording_example_schema_accepts_guidance_and_transcripts() {
-        let templates = test_templates(include_str!("../examples/meetings/schema.md")).unwrap();
-        let pages = HashMap::from([
-            ("recording.md".into(), include_str!("../examples/meetings/example/recording.md").into()),
-            ("transcript.md".into(), "---\nspeech2md_version: fixture\nattendees: []\n---\n# Transcript\n".into()),
-        ]);
-        validate_corpus(&pages, &templates).unwrap();
-        let mut invalid = pages;
-        invalid.insert("recording.md".into(), "---\nmdstore: recording\naudio: audio.m4a\nattendees: [{handle: Alice, identity: '', ranges: [{start: 4, end: 2}]}]\n---\n# Recording\n".into());
-        assert!(validate_corpus(&invalid, &templates).is_err());
-    }
-
-    #[test]
-    fn target_schema_can_waive_backlinks_and_policy_changes_recheck_incoming_edges() {
-        let root = "```starlark\nrelation('mentions', selector={'kind': 'markdown_links'}, reciprocal='mentions')\n```\n";
-        let exempt = "```starlark\nbacklinks(required=False)\n```\n";
-        let templates = Templates::compile(&HashMap::from([("schema.md".into(), root.into()), ("meetings/schema.md".into(), exempt.into())])).unwrap();
-        let pages = HashMap::from([("note.md".into(), "[Transcript](meetings/transcript.md)\n".into()), ("meetings/transcript.md".into(), "# Transcript\n".into())]);
-        let (parsed, edges) = validate_corpus(&pages, &templates).unwrap();
-        assert_eq!(edges.len(), 1);
-        let required = Templates::compile(&HashMap::from([("schema.md".into(), root.into()), ("meetings/schema.md".into(), "```starlark\nbacklinks(required=True)\n```\n".into())])).unwrap();
-        let findings = validate_incremental(&pages, &required, ValidationBaseline { pages: &pages, parsed: &parsed, edges: &edges, templates: &templates }).unwrap_err();
-        assert!(findings.iter().any(|f| f.path == "note.md" && f.message.contains("missing reciprocal")));
-        let mut broken = pages; broken.insert("note.md".into(), "[Missing](meetings/missing.md)\n".into());
-        assert!(validate_corpus(&broken, &templates).is_err());
-    }
-
-    #[test]
-    fn incremental_validation_matches_full_validation() {
-        let rules = "```starlark\nrelation('mentions', selector={'kind': 'markdown_links'}, reciprocal='mentions')\n```\n";
-        let templates = test_templates(rules).unwrap();
-        let before = HashMap::from([
-            ("a.md".into(), "[B](b.md)\n".into()),
-            ("b.md".into(), "[A](a.md)\n".into()),
-            ("notes/unique.md".into(), "# Unique\n".into()),
-            ("unrelated.md".into(), "# Unrelated\n".into()),
-        ]);
-        let (parsed, edges) = validate_corpus(&before, &templates).unwrap();
-        let compare = |after: &HashMap<String, String>, next_templates: &Templates| {
-            let incremental = validate_incremental(
-                after,
-                next_templates,
-                ValidationBaseline {
-                    pages: &before,
-                    parsed: &parsed,
-                    edges: &edges,
-                    templates: &templates,
-                },
-            );
-            let full = validate_corpus(after, next_templates);
-            match (incremental, full) {
-                (Ok((left, mut left_edges)), Ok((right, mut right_edges))) => {
-                    assert_eq!(
-                        serde_json::to_value(left).unwrap(),
-                        serde_json::to_value(right).unwrap()
-                    );
-                    left_edges.sort_by_key(|edge| {
-                        (
-                            edge.source.clone(),
-                            edge.relation.clone(),
-                            edge.target.clone(),
-                        )
-                    });
-                    right_edges.sort_by_key(|edge| {
-                        (
-                            edge.source.clone(),
-                            edge.relation.clone(),
-                            edge.target.clone(),
-                        )
-                    });
-                    assert_eq!(left_edges, right_edges);
-                }
-                (Err(left), Err(right)) => {
-                    let normalize = |findings: Vec<Finding>| {
-                        let mut result: Vec<_> = findings
-                            .into_iter()
-                            .map(|finding| (finding.path, finding.line, finding.message))
-                            .collect();
-                        result.sort();
-                        result
-                    };
-                    assert_eq!(normalize(left), normalize(right));
-                }
-                _ => panic!("incremental and full validation disagree"),
-            }
-        };
-        compare(&before, &templates);
-        for replacement in [
-            "# No backlink\n",
-            "[Missing](missing.md)\n",
-            "[B](b.md)\nMore prose.\n",
-        ] {
-            let mut after = before.clone();
-            after.insert("a.md".into(), replacement.into());
-            compare(&after, &templates);
-        }
-        let mut after = before.clone();
-        after.remove("b.md");
-        compare(&after, &templates);
-        after.remove("a.md");
-        compare(&after, &templates);
-        let tighter = test_templates(&format!(
-            "{rules}\n```starlark\nfrontmatter(name=string(required=True))\n```\n"
-        ))
-        .unwrap();
-        compare(&before, &tighter);
-        let nested = Templates::compile(&HashMap::from([
-            ("schema.md".into(), rules.into()),
-            (
-                "notes/schema.md".into(),
-                "```starlark\nfrontmatter(name=string(required=True))\n```\n".into(),
-            ),
-        ]))
-        .unwrap();
-        compare(&before, &nested);
-        let relaxed = Templates::compile(&HashMap::new()).unwrap();
-        compare(&before, &relaxed);
-    }
-
-    #[test]
-    fn incremental_inventory_changes_recheck_short_name_ambiguity() {
-        let templates = Templates::compile(&HashMap::new()).unwrap();
-        let before = HashMap::from([
-            ("a.md".into(), "[Unique](unique)\n".into()),
-            ("notes/unique.md".into(), "# Unique\n".into()),
-        ]);
-        let (parsed, edges) = validate_corpus(&before, &templates).unwrap();
-        let mut after = before.clone();
-        after.insert("other/unique.md".into(), "# Another\n".into());
-        let errors = validate_incremental(
-            &after,
-            &templates,
-            ValidationBaseline {
-                pages: &before,
-                parsed: &parsed,
-                edges: &edges,
-                templates: &templates,
-            },
-        )
-        .unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.path == "a.md" && error.message.contains("ambiguous"))
-        );
-    }
-    #[test]
-    fn incremental_validation_executes_only_changed_document_policies() {
-        let templates = Templates::compile(&HashMap::new()).unwrap();
-        let before: HashMap<String, String> = (0..128)
-            .map(|index| (format!("notes/{index}.md"), "# A note\n".into()))
-            .collect();
-        let (parsed, edges) = validate_corpus(&before, &templates).unwrap();
-        let mut after = before.clone();
-        after.insert("notes/7.md".into(), "# Updated note\n".into());
-        VALIDATED_PAGES.with_borrow_mut(Vec::clear);
-        validate_incremental(
-            &after,
-            &templates,
-            ValidationBaseline {
-                pages: &before,
-                parsed: &parsed,
-                edges: &edges,
-                templates: &templates,
-            },
-        )
-        .unwrap();
-        VALIDATED_PAGES.with_borrow(|paths| assert_eq!(paths, &["notes/7.md"]));
-        let nested = Templates::compile(&HashMap::from([
-            (
-                "notes/schema.md".into(),
-                "```starlark\nmarkdown('rumdl.toml')\n```\n".into(),
-            ),
-            (
-                "notes/rumdl.toml".into(),
-                "[global]\nenable = [\"MD047\"]\n".into(),
-            ),
-            ("unused/schema.md".into(), "# Unrelated policy\n".into()),
-        ]))
-        .unwrap();
-        VALIDATED_PAGES.with_borrow_mut(Vec::clear);
-        validate_incremental(
-            &before,
-            &nested,
-            ValidationBaseline {
-                pages: &before,
-                parsed: &parsed,
-                edges: &edges,
-                templates: &templates,
-            },
-        )
-        .unwrap();
-        VALIDATED_PAGES.with_borrow(|paths| assert_eq!(paths.len(), 128));
-        let unused = Templates::compile(&HashMap::from([(
-            "unused/schema.md".into(),
-            "# Unrelated policy\n".into(),
-        )]))
-        .unwrap();
-        VALIDATED_PAGES.with_borrow_mut(Vec::clear);
-        validate_incremental(
-            &before,
-            &unused,
-            ValidationBaseline {
-                pages: &before,
-                parsed: &parsed,
-                edges: &edges,
-                templates: &templates,
-            },
-        )
-        .unwrap();
-        VALIDATED_PAGES.with_borrow(|paths| assert!(paths.is_empty()));
-    }
-}
-
 /// A resolved schema-defined reference with an editable source location.
 #[derive(Debug, Serialize)]
 pub struct DocumentReference {
@@ -1327,11 +993,14 @@ pub fn document_references(
         let policy = templates.policy(path);
         let page = parse_page(text, &policy.links)?;
         let mut found = Vec::new();
-        let mut add = |raw: &str, range, pointer| -> Result<()> {
-            if let Some(target) = resolver
-                .resolve(path, raw, LinkSyntax::Wiki)
-                .map_err(anyhow::Error::msg)
-                .with_context(|| format!("{path}: cannot resolve reference"))?
+        let mut add = |raw: &str, range, pointer: Option<String>| -> Result<()> {
+            if let Some(target) = (if pointer.is_some() {
+                resolver.resolve_reference(raw)
+            } else {
+                resolver.resolve(path, raw, LinkSyntax::Wiki)
+            })
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("{path}: cannot resolve reference"))?
             {
                 found.push(DocumentReference {
                     target,
@@ -1342,7 +1011,11 @@ pub fn document_references(
             }
             Ok(())
         };
-        for link in &page.links {
+        for link in page
+            .links
+            .iter()
+            .filter(|link| matches!(link.syntax, LinkSyntax::Wiki))
+        {
             if let Some(range) = &link.target_range {
                 add(&link.target, Some(range.clone()), None)?;
             }
@@ -1380,4 +1053,71 @@ pub fn document_references(
         references.insert(path.clone(), found);
     }
     Ok(references)
+}
+
+fn find_span(body: &str, range: Range<usize>, marker: &str, target: &str) -> Result<Range<usize>> {
+    let candidates: Vec<_> = body[range.clone()]
+        .match_indices(marker)
+        .filter_map(|(index, _)| {
+            let start = range.start + index + marker.len();
+            destination_span(body, start, range.end).and_then(|span| {
+                let raw = &body[span.clone()];
+                let probe = format!("[](<{raw}>)");
+                let parsed = Parser::new(&probe).find_map(|event| match event {
+                    Event::Start(Tag::Link { dest_url, .. }) => Some(dest_url.into_string()),
+                    _ => None,
+                });
+                (parsed.as_deref() == Some(target)).then_some(span)
+            })
+        })
+        .collect();
+    let [span] = candidates.as_slice() else {
+        bail!(
+            "ambiguous or unsupported Markdown destination: {}",
+            &body[range]
+        );
+    };
+    Ok(span.clone())
+}
+
+// The Markdown parser identifies the link/definition; this scanner only locates
+// its destination bytes, including escaped and balanced parentheses.
+fn destination_span(text: &str, mut start: usize, end: usize) -> Option<Range<usize>> {
+    let bytes = text.as_bytes();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let angle = start < end && bytes[start] == b'<';
+    if angle {
+        start += 1;
+    }
+    let mut cursor = start;
+    let mut depth = 0;
+    while cursor < end {
+        let byte = bytes[cursor];
+        if byte == b'\\' && cursor + 1 < end {
+            cursor += 2;
+            continue;
+        }
+        if angle {
+            if byte == b'>' {
+                return Some(start..cursor);
+            }
+        } else {
+            if byte == b'(' {
+                depth += 1;
+            }
+            if byte == b')' {
+                if depth == 0 {
+                    return Some(start..cursor);
+                }
+                depth -= 1;
+            }
+            if byte.is_ascii_whitespace() {
+                return Some(start..cursor);
+            }
+        }
+        cursor += 1;
+    }
+    (!angle && depth == 0).then_some(start..cursor)
 }

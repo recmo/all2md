@@ -14,6 +14,8 @@ mod mcp;
 #[cfg(feature = "server")]
 mod media;
 #[cfg(feature = "server")]
+mod moves;
+#[cfg(feature = "server")]
 mod provider;
 #[cfg(feature = "server")]
 mod search;
@@ -26,9 +28,9 @@ mod template;
 mod template_script;
 
 pub use config::{
-    ChunkConfig, Config, DateOrder, DerivationConfig, DocumentConfig, GitConfig, LinkConfig, ProviderConfig,
-    RelationLinkSyntax, RelationRule, RelationSelector, SearchConfig, SectionListRule,
-    ServerConfig,
+    ChunkConfig, Config, DateOrder, DerivationConfig, DocumentConfig, GitConfig, LinkConfig,
+    ProviderConfig, RelationLinkSyntax, RelationRule, RelationSelector, SearchConfig,
+    SectionListRule, ServerConfig,
 };
 #[cfg(feature = "server")]
 pub use git::PushState;
@@ -36,17 +38,16 @@ pub use git::PushState;
 pub use hashline::{EditOperation, short_hash};
 pub use markdown::{Edge, Finding};
 #[cfg(feature = "server")]
-pub use mcp::{
-    LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, serve, serve_listener, tool_names,
-};
+pub use mcp::{MCP_PROTOCOL_VERSION, serve, serve_listener, tool_names};
+#[cfg(feature = "server")]
+pub use moves::Move;
 #[cfg(feature = "server")]
 pub use provider::{InputType, RerankResult, RetrievalProvider, ZeroEntropyProvider};
 #[cfg(feature = "server")]
-pub use search::{SearchResponse, SearchResult, VectorCoverage};
+pub use search::{SearchResponse, SearchResult};
 #[cfg(feature = "server")]
 pub use store::{
-    ApplyEditsRequest, ApplyEditsResponse, ApplyStatus, PageResponse, ReplicationStatus,
-    StatusResponse, Store, ValidationError,
+    ApplyEditsRequest, PageResponse, ReplicationStatus, StatusResponse, Store, ValidationError,
 };
 
 /// Reusable document parsing and schema validation.

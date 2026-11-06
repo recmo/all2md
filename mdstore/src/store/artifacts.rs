@@ -481,12 +481,14 @@ impl Store {
             },
         );
         self.apply_edits(&ApplyEditsRequest {
-            edit_summary: "Configure derivation".into(),
-            edits: vec![crate::EditOperation::ReplacePage {
-                path: "config.yaml".into(),
-                base,
-                content: serde_yaml::to_string(&config)?,
-            }],
+            summary: "Configure derivation".into(),
+            expected_commit: None,
+            moves: vec![],
+            edits: vec![EditOperation::replace_file(
+                "config.yaml".into(),
+                Some(&base),
+                serde_yaml::to_string(&config)?,
+            )],
         })?;
         Ok(id)
     }
@@ -1045,12 +1047,14 @@ pub(crate) mod tests {
         config.derivations.clear();
         store
             .apply_edits(&ApplyEditsRequest {
-                edit_summary: "Stop processing".into(),
-                edits: vec![EditOperation::ReplacePage {
-                    path: "config.yaml".into(),
-                    base,
-                    content: serde_yaml::to_string(&config).unwrap(),
-                }],
+                summary: "Stop processing".into(),
+                expected_commit: None,
+                moves: vec![],
+                edits: vec![EditOperation::replace_file(
+                    "config.yaml".into(),
+                    Some(&base),
+                    serde_yaml::to_string(&config).unwrap(),
+                )],
             })
             .unwrap();
         // Previous versions called the provenance map 'derivations'.
@@ -1112,12 +1116,14 @@ pub(crate) mod tests {
         assert!(
             store
                 .apply_edits(&ApplyEditsRequest {
-                    edit_summary: "overwrite".into(),
-                    edits: vec![EditOperation::ReplacePage {
-                        path: "transcript.md".into(),
-                        base: "# Transcript\nHello\n".into(),
-                        content: "# Tampered\n".into()
-                    }]
+                    summary: "overwrite".into(),
+                    expected_commit: None,
+                    moves: vec![],
+                    edits: vec![EditOperation::replace_file(
+                        "transcript.md".into(),
+                        Some("# Transcript\nHello\n"),
+                        "# Tampered\n".into()
+                    )]
                 })
                 .is_err()
         );
@@ -1147,23 +1153,27 @@ pub(crate) mod tests {
         let notes = format!("{before}\nHuman notes.\n");
         store
             .apply_edits(&ApplyEditsRequest {
-                edit_summary: "notes".into(),
-                edits: vec![EditOperation::ReplacePage {
-                    path: "recording.md".into(),
-                    base: before,
-                    content: notes.clone(),
-                }],
+                summary: "notes".into(),
+                expected_commit: None,
+                moves: vec![],
+                edits: vec![EditOperation::replace_file(
+                    "recording.md".into(),
+                    Some(&before),
+                    notes.clone(),
+                )],
             })
             .unwrap();
         assert_eq!(store.jobs().unwrap()[0].fingerprint, job.fingerprint);
         store
             .apply_edits(&ApplyEditsRequest {
-                edit_summary: "guidance".into(),
-                edits: vec![EditOperation::ReplacePage {
-                    path: "recording.md".into(),
-                    base: notes.clone(),
-                    content: notes.replace("hello", "changed"),
-                }],
+                summary: "guidance".into(),
+                expected_commit: None,
+                moves: vec![],
+                edits: vec![EditOperation::replace_file(
+                    "recording.md".into(),
+                    Some(&notes.clone()),
+                    notes.replace("hello", "changed"),
+                )],
             })
             .unwrap();
         assert!(

@@ -19,8 +19,8 @@ test('recording review stages guidance and derived transcripts remain read-only'
       params: {
         name: 'edit',
         arguments: {
-          edit_summary: 'Add recording',
-          edits: [{ op: 'create_page', path: 'recording.md', content: text }]
+          summary: 'Add recording',
+          edits: { '/recording.md': [{ op: 'replace', content: text }] }
         }
       }
     }

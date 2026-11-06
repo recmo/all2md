@@ -7,8 +7,8 @@ Local-first tools that turn source material into auditable Markdown.
 - [`pages2md`](pages2md/README.md) uses OCR to convert PDFs, DjVu files, scans,
   and image archives into portable Markdown.
 - [`Meeting Capture`](meeting-capture/README.md) records local microphone
-  and meeting-participant audio into canonical, independently selectable
-  meeting tracks.
+  and every process producing audio into separate, independently selectable
+  tracks in a canonical meeting archive.
 - [`speech2md`](speech2md/README.md) uses MOSS locally to transcribe and
   diarize recordings, with ReDimNet2 voice embeddings for stable speaker
   labels across processing windows.
@@ -18,7 +18,7 @@ Local-first tools that turn source material into auditable Markdown.
   durable Markdown with source metadata, assets, and synchronization safety.
 - [`mdstore`](mdstore/README.md) serves a Git-tracked Markdown corpus through
   schema-valid hashline edits and hybrid exact/vector/graph search.
-- [`webui`](webui/README.md) provides the offline-capable SvelteKit
+- [`webui`](webui/README.md) provides the SvelteKit
   workspace, editing, validation, and schema-driven app views for mdstore.
 
 Each project owns its runtime and dependencies. The repository shares only

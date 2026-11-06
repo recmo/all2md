@@ -50,6 +50,11 @@ stdenvNoCC.mkDerivation {
     codesign \
       --force \
       --sign - \
+      --identifier ventures.wicked.MeetingCapture.worker \
+      "$out/Applications/MeetingCapture.app/Contents/Helpers/MeetingCaptureWorker"
+    codesign \
+      --force \
+      --sign - \
       --entitlements MeetingCapture.entitlements \
       "$out/Applications/MeetingCapture.app"
 

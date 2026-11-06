@@ -41,7 +41,7 @@ test('a committed submission with a lost response is retried without duplicating
   });
   await page.locator('#submit').click();
   await expect(page.locator('.submit-notice')).toContainText(
-    'already submitted'
+    'Changes committed successfully.'
   );
   expect(bodies).toHaveLength(2);
   expect(bodies[0]).toBe(bodies[1]);

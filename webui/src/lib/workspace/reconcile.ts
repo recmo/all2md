@@ -1,6 +1,6 @@
 import { diff3Merge } from 'node-diff3';
 import type { Page } from './api';
-import type { Cache } from './cache';
+import type { Workspace } from './state';
 
 export type Conflict = {
   choices?: Record<number, string>;
@@ -27,22 +27,32 @@ export function mergeParts(
   );
 }
 export function localVersion(
-  cache: Cache,
+  workspace: Workspace,
   path: string
 ): string | null | undefined {
-  return path in (cache.deletions || {}) ? null : cache.drafts[path]?.text;
+  return path in (workspace.deletions || {})
+    ? null
+    : workspace.drafts[path]?.text;
 }
-// Pure, atomic cache transformation. Never overwrite unresolved local text.
-export function reconcilePage(cache: Cache, page: Page): Cache {
+// Pure, atomic workspace transformation. Never overwrite unresolved local text.
+export function reconcilePage(workspace: Workspace, page: Page): Workspace {
   const path = page.path;
-  const local = localVersion(cache, path);
-  const conflicts = { ...cache.conflicts };
+  const local = localVersion(workspace, path);
+  const conflicts = { ...workspace.conflicts };
   delete conflicts[path];
-  const next = { ...cache, pages: { ...cache.pages, [path]: page }, conflicts };
+  const next = {
+    ...workspace,
+    pages: { ...workspace.pages, [path]: page },
+    conflicts
+  };
   if (local === undefined) return next;
-  const draft = cache.drafts[path];
+  const draft = workspace.drafts[path];
   const base =
-    local === null ? cache.deletions![path] : draft.exists ? draft.base : null;
+    local === null
+      ? workspace.deletions![path]
+      : draft.exists
+        ? draft.base
+        : null;
   const remote = page.exists ? page.text : null;
   if (base === remote) return next;
   if (local === remote) return resolvePage(next, page, remote);
@@ -55,7 +65,7 @@ export function reconcilePage(cache: Cache, page: Page): Cache {
         parts.map((part) => ('text' in part ? part.text : '')).join('')
       );
   }
-  const previous = cache.conflicts?.[path];
+  const previous = workspace.conflicts?.[path];
   conflicts[path] = {
     base,
     local,
@@ -72,13 +82,13 @@ export function reconcilePage(cache: Cache, page: Page): Cache {
 }
 // A deliberate resolution rebases the edit onto the exact fetched server text.
 export function resolvePage(
-  cache: Cache,
+  workspace: Workspace,
   page: Page,
   text: string | null
-): Cache {
-  const drafts = { ...cache.drafts };
-  const deletions = { ...cache.deletions };
-  const conflicts = { ...cache.conflicts };
+): Workspace {
+  const drafts = { ...workspace.drafts };
+  const deletions = { ...workspace.deletions };
+  const conflicts = { ...workspace.conflicts };
   delete drafts[page.path];
   delete deletions[page.path];
   delete conflicts[page.path];
@@ -88,10 +98,10 @@ export function resolvePage(
     drafts[page.path] = { ...page, text, base: page.text };
   }
   return {
-    ...cache,
+    ...workspace,
     drafts,
     deletions,
     conflicts,
-    pages: { ...cache.pages, [page.path]: page }
+    pages: { ...workspace.pages, [page.path]: page }
   };
 }

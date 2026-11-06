@@ -1,6 +1,6 @@
 import MarkdownIt from 'markdown-it';
 import { parseDocument, Document } from 'yaml';
-import type { Cache } from '../workspace/cache';
+import type { Workspace } from '../workspace/state';
 import wasmUrl from '../wasm/validator_bg.wasm?url';
 const markdown = new MarkdownIt();
 export type AppDocument = {
@@ -47,12 +47,15 @@ export function isApp(text: string): boolean {
     return false;
   }
 }
-export function appSources(cache: Cache) {
+export function appSources(workspace: Workspace) {
   const sources: Record<string, string> = {};
   const missing: string[] = [];
-  for (const path of new Set([...cache.paths, ...Object.keys(cache.drafts)])) {
-    if (path in (cache.deletions || {})) continue;
-    const page = cache.drafts[path] || cache.pages[path];
+  for (const path of new Set([
+    ...workspace.paths,
+    ...Object.keys(workspace.drafts)
+  ])) {
+    if (path in (workspace.deletions || {})) continue;
+    const page = workspace.drafts[path] || workspace.pages[path];
     if (page) sources[path] = page.text;
     else missing.push(path);
   }

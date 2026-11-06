@@ -85,6 +85,7 @@ final class AccessibilityProbe {
         write([
             "type": "probeStarted",
             "schemaVersion": 1,
+            "windowTitle": focusedWindowTitle().map { $0 as Any } ?? NSNull(),
             "process": [
                 "pid": Int(client.processID),
                 "bundleID": client.bundleID.map { $0 as Any } ?? NSNull(),
@@ -241,6 +242,17 @@ final class AccessibilityProbe {
             result[name] = describe(copiedValue)
         }
         return result
+    }
+
+    private func focusedWindowTitle() -> String? {
+        var windowValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(applicationElement, kAXFocusedWindowAttribute as CFString, &windowValue) == .success,
+              let windowValue,
+              CFGetTypeID(windowValue) == AXUIElementGetTypeID() else { return nil }
+        let window = unsafeDowncast(windowValue, to: AXUIElement.self)
+        var titleValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success else { return nil }
+        return titleValue as? String
     }
 
     private func children(of element: AXUIElement) -> [AXUIElement] {

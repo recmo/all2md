@@ -1,40 +1,51 @@
 # mdstore web workspace
 
 SvelteKit SPA with a static adapter, Pierre CodeView, markdown-it, and DOMPurify.
-This package owns the frontend, offline-validation orchestration, and Starlark app
+This package owns the frontend, local validation orchestration, and Starlark app
 runtime. Its `wasm/` crate links mdstore's generic validation library. The document
 server has no dependency on this package and does not host the UI.
 
 Frontend modules are grouped by feature; see [the source layout](src/lib/README.md).
 
+From the repository root, run `nix develop .#webui`, then `cd webui`.
+The shell provides the Rust, Node, WASM linker and CLI tools used below.
+Nix selects the wasm-bindgen CLI version from `wasm/Cargo.lock`.
+
 ```sh
-# Requires Rust with the wasm32-unknown-unknown target and wasm-bindgen-cli 0.2.121.
+# Outside Nix, install Rust with the wasm32-unknown-unknown target and a
+# wasm-bindgen-cli version matching wasm-bindgen in wasm/Cargo.lock.
 pnpm install --frozen-lockfile
 pnpm build
 pnpm check
-pnpm test
-cargo test --manifest-path wasm/Cargo.toml --lib
 cargo build --manifest-path ../mdstore/Cargo.toml
 # In separate terminals, run mdstore serve and:
 MDSTORE_URL=http://127.0.0.1:3131 pnpm preview
 ```
 
 For development, run a daemon and `MDSTORE_URL=http://127.0.0.1:3131 pnpm dev`.
-Open `/webui/`. The Vite development proxy forwards paths outside `/webui/` to that daemon. `MDSTORE_URL` is a
+The Vite development proxy forwards API calls to that daemon. `MDSTORE_URL` is a
 server-side development setting, not a browser-selectable destination.
 
 `pnpm test:browser` starts a fresh disposable Git repository and compiled debug
 daemon for each test on port 43133, with a separate UI proxy on port 43132. Install Playwright Chromium or set `CHROME_EXECUTABLE` to an
 installed Chromium/Chrome binary. Build the frontend and Rust binary first.
 
+The only committed tests are three broad browser end-to-end workflows. Run these
+and the frontend checks before merging. Test individual changes locally with
+temporary checks or reproduction scripts; do not commit those tests, or remove
+them before merging.
+
 ## Data flow
 
-- Search and atomic submissions call `/mcp` (`search`, `edit`). Reads use
-  repository URLs: directory JSON at `/<folder>/`, page metadata at `/<path>`
-  with `Accept: application/vnd.mdstore.page+json`.
-- `get` reads directories as well as files. Webui traverses `/`, reuses
-  cached sources with matching hashes, and retries if revisions change during
-  traversal. It builds its validation baseline locally in a WASM worker.
+- Search and submissions call `/mcp` (`search`, `edit`).
+- Raw document reads use `GET /path/document.md`; `GET /path/directory/` lists
+  child paths. Webui traverses the tree and builds its validation baseline
+  locally in a WASM worker. Schema paths arrive in the HTTP `Link` header.
+  GET `X-Mdstore-Commit` values identify the published commit: cached files are
+  reused only at that commit, and traversal retries if revisions differ. HTTP caching
+  revalidates reads using `ETag` and permits 304 responses without downloading
+  the body. The commit header is independent of compression or proxy changes to
+  the HTTP cache validator.
 - Shared Rust validation runs incrementally in WASM while editing. The server
   independently validates every submission through `edit`.
 - Documents have Rendered and Code views. Pierre CodeView edits the complete source;
@@ -43,24 +54,32 @@ installed Chromium/Chrome binary. Build the frontend and Rust binary first.
   indented code with Shiki highlighting (including Rust, LaTeX, Typst, and Lean 4).
   Starlark uses Python coloring; Markdown frontmatter uses YAML coloring.
   Configuration and template editing follow the daemon permission settings.
-  The service worker caches bundled language assets for offline rendering.
-- Draft bases, edits, conflicts, and summaries use a synchronous localStorage
-  journal, scoped by origin and repository. Published documents and validation
-  snapshots use a separate IndexedDB cache with per-document writes. Connecting
-  caches the published corpus; cache failures do not block saved drafts from
-  being submitted. The service worker caches only the app shell.
-- Offline search is explicitly labelled cached-text search. Reconnecting refreshes
-  the listing; it never auto-submits and requires fresh validation. Exact original
-  source is retained for concurrency checks, including across browser reloads.
-- Connection credentials live on the Settings page; the API key is exchanged for an HttpOnly session cookie and then discarded. Cache quota and concurrent-tab conflicts are surfaced;
-  export drafts before closing a tab whose changes could not be saved. Local
-  cached documents remain readable after logout, until the cache is cleared.
+- Draft bases, edits, conflicts, and summaries use a synchronous sessionStorage
+  journal, scoped to the tab and daemon origin. Published documents and validation
+  snapshots stay in memory. Connecting loads the published corpus and reconciles
+  drafts against current server sources; nothing is submitted automatically.
+- Search always uses the daemon. Browsing, source loading, validation and submission
+  require a connection. Local drafts survive refresh and temporary disconnections
+  within the tab; closing the tab discards them.
+- Settings provides connection retry and discarding unsubmitted changes. Storage
+  quota failures are surfaced so unsaved work can be copied before closing the tab.
 
-Service workers require localhost or HTTPS. An insecure non-local HTTP deployment
-can keep drafts in localStorage but cannot reload the application shell offline.
+The WebUI uses the browser's HTTP cache for static assets. It does not register a
+service worker, persist published documents, or provide an offline application shell.
 
-The document library uses @pierre/trees through its vanilla API, hosted by a Svelte component. It provides virtualized rows, compact folder chains, keyboard navigation, and offline status badges: cached, not cached, downloading, local draft awaiting submission, or local-save failure. Folder badges aggregate offline availability. Cached does not imply up to date with the server. Folder/file context menus support creation, renaming, moving, and staged deletion.
-Renames and moves update local Markdown links. MCP search retains ranked results.
+If Connect reports a missing repository revision (`X-Mdstore-Commit`), check that
+the reverse proxy forwards `/path` and `/path/*` to mdstore instead of the static
+app shell, and deploy matching daemon and WebUI versions.
+
+The document library uses @pierre/trees through its vanilla API, hosted by a Svelte
+component. Folder/file context menus support creation, renaming, moving, and staged
+deletion. Badges show drafts, staged deletions, validation findings, save failures,
+and merge conflicts; folder badges aggregate staged changes.
+Markdown and wiki links use source-relative paths; a leading `/` selects the
+repository root. There is no global name search or implicit root fallback.
+Missing targets are marked as broken, including against local drafts and staged
+deletions. Renames and moves preserve relative/rooted link styles and rebase
+outgoing links when their source document moves. MCP search retains ranked results.
 
 
 Flagged app documents (`mdstore: app` in frontmatter) evaluate bounded Starlark
@@ -71,21 +90,14 @@ remain visible together on mobile. See the app API below.
 
 Submit shows diffs, validation, and reconciliation against server changes. A
 three-way merge automatically reconciles non-overlapping edits and presents
-conflicts for explicit resolution. Nothing is submitted automatically. An uncertain submission response is retried once
-with the identical request, using the server's durable batch receipt.
+conflicts for explicit resolution. Nothing is submitted automatically.
 
-One shared SSE connection at `/mcp/events` refreshes the workspace on repository
-changes and recording review on job progress. Reconnection receives current state;
-normal GET requests fetch the data. Recording review has no polling timer.
-
-For production, mount `build/` at `/webui/` with SPA fallback and proxy all other
-paths to mdstore on the same origin. Preserve cookies, authorization, Host, and
-Origin headers. `/health`, `/mcp`, `/worker`, and `/webui` are reserved names. The frontend
-remains a separate artifact; a separate frontend process can provide this proxy.
-Vite dev/preview provides it locally via `MDSTORE_URL`.
+For production, host `build/` with a static web server and reverse-proxy `/mcp`, `/path` and
+`/health` to mdstore on the same origin. Restrict access at the reverse proxy. Vite dev/preview provides that
+proxy locally via `MDSTORE_URL`; preview is for local inspection.
 `nix build .#webui` produces static assets, independently of `.#mdstore`.
 
-## Offline validation
+## Local validation
 
 The browser executes the same Rust validation library in a Web Worker,
 including the Starlark interpreter, schema checks, Markdown rules, link resolution,
@@ -94,19 +106,18 @@ before bundling the SPA; Nix builds it as a separate dependency. Generated binar
 and bindings are not committed. Run `pnpm build:wasm` before
 standalone frontend type checks in a fresh checkout.
 
-Webui builds its own versioned baseline from ordinary `get` reads: source
+Webui builds its own versioned baseline from raw HTTP reads: source
 hashes, parsed document facts, relation edges, and configuration/template sources.
 The first connection downloads the published document inventory; subsequent
-refreshes reuse unchanged sources unless schema/configuration changes require
-refreshing template projections. Validation uses that cached baseline offline.
+refreshes reuse files at the same commit and fetch fresh sources when the commit
+changes, including updated template projections. Validation uses this in-memory baseline while connected.
 When document-selection globs change, the current client marks local validation
 incomplete and permits submission for authoritative checks; it never labels
 those edits valid based on an incomplete inventory.
 
-The app caches the baseline, worker and WASM binary for offline use. Local results
-are advisory against the cached revision; submission always runs authoritative
+Local results are advisory against the loaded revision; submission always runs authoritative
 server validation, permissions and optimistic concurrency checks again. Revalidate
-refreshes the baseline when online. The worker preserves Starlark's execution
+refreshes the baseline from the daemon. The worker preserves Starlark's execution
 limits and is terminated if a request exceeds 15 seconds.
 
 
@@ -130,8 +141,7 @@ fallback), `template` (root-relative path with leading slash), `frontmatter`, an
 `text` (nullable for metadata-only records). Template and app definition files are
 not collection records. Queries can use comprehensions, sorting and dictionaries;
 there is no query DSL, database or index. Local drafts replace baseline records;
-staged deletions disappear. Missing metadata and offline freshness are displayed
-explicitly. Evaluation runs in a bounded WASM worker without filesystem, network,
+staged deletions disappear. Missing metadata and connection status are displayed explicitly. Evaluation runs in a bounded WASM worker without filesystem, network,
 loaders or implicit clock access.
 
 Views bind roles to frontmatter JSON pointers, or `title`/`path`:
@@ -172,7 +182,7 @@ action execution does not bypass template validation or commit automatically.
 Client-side app definition validation executes collection queries against the proposed document
 inventory and checks view/action references. Action callbacks execute only when
 invoked with a real event; their proposed edits go through ordinary validation.
-Offline validation of an edited app requires the collection source documents.
+Local validation of an edited app requires the collection source documents.
 
 ### Reconciling browser drafts
 
@@ -181,7 +191,7 @@ changes fetches current source and performs a client-side three-way merge agains
 the draft's original base. Disjoint edits merge automatically. Conflicts preserve
 both versions and the original base in local storage; the tree marks them and
 Submit offers passage-by-passage Yours, Server, and manual resolutions using
-Pierre diffs. Manual resolutions are saved locally and can be completed offline.
+Pierre diffs. Manual resolutions are saved locally.
 Resolving updates the exact base and triggers validation again.
 
 Delete/modify, remote deletion, and colliding new files require explicit choices.
@@ -200,23 +210,10 @@ the portable Rust resolver, preserves wiki labels/fragments and YAML comments,
 and stages all affected documents together. A move is rejected if its new names
 cannot preserve references under the governing schema.
 
-## Recording review
+## Recording review and imports
 
-Documents marked `mdstore: recording` open the integrated recording review view.
-See [recording review](SPEECH_REVIEW.md) for setup, storage, worker operation,
-voiceprint references, and current limitations.
-
-## Importing files and folders
-
-Drop Markdown or media files, or whole folders, onto the workspace. Dropping on
-a tree folder selects it as the destination; dropping on a file selects its
-parent. The import dialog preserves the selected folder hierarchy and lets you
-change the destination before starting. The **Import** tree item also offers file and
-folder pickers.
-
-Markdown becomes local drafts using the normal validation and submission flow;
-media and capture JSON files upload immediately through the asset API. Existing
-paths are never overwritten. Failed transfers show per-file errors and can be
-retried without repeating successful imports. Markdown can be staged offline;
-asset uploads require a connection. Unsupported files are listed as skipped, Git
-metadata is excluded, and empty directories are not imported.
+The application lives at `/webui/`, alongside the daemon API at the origin root.
+Import stages Markdown as drafts and uploads media using conditional file writes.
+Recording documents open the [recording review](SPEECH_REVIEW.md) view, with playback,
+transcription status, and human speaker corrections. Generated transcripts remain
+read-only. Repository and job changes arrive through `/mcp/events`.

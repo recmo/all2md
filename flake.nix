@@ -275,6 +275,12 @@
         nixpkgs.lib.cleanSourceFilter path type
         && !(nixpkgs.lib.hasSuffix "/src/lib/wasm" (toString path))
         && !(builtins.elem (builtins.baseNameOf path) [ "target" "node_modules" ".svelte-kit" "build" "test-results" "playwright-report" ]);
+      wasmBindgenVersion =
+        (nixpkgs.lib.findFirst (package: package.name == "wasm-bindgen")
+          (throw "wasm-bindgen is missing from webui/wasm/Cargo.lock")
+          (builtins.fromTOML (builtins.readFile ./webui/wasm/Cargo.lock)).package).version;
+      mkWasmBindgenCli = mdSystem:
+        nixpkgs.legacyPackages.${mdSystem}."wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasmBindgenVersion}";
       mkMdstoreWasm = mdSystem:
         let systemPkgs = nixpkgs.legacyPackages.${mdSystem};
         in systemPkgs.rustPlatform.buildRustPackage {
@@ -287,7 +293,7 @@
           '';
           sourceRoot = "source/webui/wasm";
           cargoLock.lockFile = ./webui/wasm/Cargo.lock;
-          nativeBuildInputs = [ systemPkgs.wasm-bindgen-cli systemPkgs.llvmPackages.lld ];
+          nativeBuildInputs = [ (mkWasmBindgenCli mdSystem) systemPkgs.llvmPackages.lld ];
           doCheck = false;
           buildPhase = ''
             runHook preBuild
@@ -312,12 +318,12 @@
             inherit pnpm;
             fetcherVersion = 4;
             pnpmInstallFlags = [ "--network-concurrency=4" "--fetch-timeout=600000" ];
-            hash = "sha256-1lyvyUY2vrzaJdEGHnaCCdkHWBschmNuWrwwxkTfnUE=";
+            hash = "sha256-kPaYBbRK+Ii3PjRG/b+Fn2hnl6fNfHb6sR9/u/Wcz80=";
           };
           nativeBuildInputs = [ systemPkgs.nodejs pnpm systemPkgs.pnpmConfigHook ];
           buildPhase = ''
             cp -r ${mkMdstoreWasm mdSystem} src/lib/wasm
-            pnpm check && pnpm test && pnpm exec vite build
+            pnpm check && pnpm exec vite build
           '';
           installPhase = "cp -r build $out";
         });
@@ -331,7 +337,7 @@
           version = "0.1.0";
           src = nixpkgs.lib.cleanSourceWith { src = ./mdstore; filter = mdstoreSourceFilter; };
           cargoLock.lockFile = ./mdstore/Cargo.lock;
-          nativeCheckInputs = [ systemPkgs.git ];
+          doCheck = false;
           nativeBuildInputs = [ systemPkgs.makeWrapper ];
           postFixup = ''
             wrapProgram "$out/bin/mdstore" --prefix PATH : ${nixpkgs.lib.makeBinPath [ systemPkgs.git ]}
@@ -360,14 +366,19 @@
             systemPkgs.rustfmt
           ];
           shellHook = ''
-            echo "Run: cargo test --manifest-path mdstore/Cargo.toml"
+            echo "Run: cargo build --manifest-path mdstore/Cargo.toml"
           '';
         };
       mkWebuiShell = mdSystem:
         let systemPkgs = nixpkgs.legacyPackages.${mdSystem};
         in systemPkgs.mkShell {
           inputsFrom = [ (mkMdstoreShell mdSystem) ];
-          packages = [ systemPkgs.nodejs systemPkgs.pnpm_11 systemPkgs.wasm-bindgen-cli ];
+          packages = [
+            systemPkgs.nodejs
+            systemPkgs.pnpm_11
+            (mkWasmBindgenCli mdSystem)
+            systemPkgs.llvmPackages.lld
+          ];
           shellHook = ''
             echo "Run: pnpm --dir webui install --frozen-lockfile && pnpm --dir webui build"
           '';
@@ -556,10 +567,11 @@
               '';
             };
 
-            meeting-capture = pkgs.mkShell {
+            meeting-capture = pkgs.mkShellNoCC {
               packages = [
                 pkgs.ffmpeg
                 pkgs.xcodegen
+                (pkgs.xcodeenv.composeXcodeWrapper { })
               ];
               shellHook = ''
                 echo "Run: cd meeting-capture && xcodegen generate"

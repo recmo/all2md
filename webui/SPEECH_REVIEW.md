@@ -97,7 +97,7 @@ current. Adding a meeting does not retranscribe the archive.
 - Rejected candidates are retained for diagnosis. Retrying currently reruns the
   pipeline with its compatible inference cache; there is no candidate-only
   revalidation endpoint.
-- Audio is streamed on demand and is not included in automatic offline caching.
+- Audio is streamed on demand.
 - Binary objects need a separate backup or external LFS hosting; mdstore does not
   expose Git LFS transfer endpoints or configure a client Git remote.
 

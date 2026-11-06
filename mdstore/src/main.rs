@@ -33,14 +33,7 @@ async fn main() -> Result<()> {
         .listen
         .parse()
         .context("parse server.listen")?;
-    let token = config
-        .server
-        .bearer_token_env
-        .as_deref()
-        .map(std::env::var)
-        .transpose()
-        .context("read configured bearer token environment variable")?;
-    serve(store, listen, token).await?;
+    serve(store, listen).await?;
     Ok(())
 }
 

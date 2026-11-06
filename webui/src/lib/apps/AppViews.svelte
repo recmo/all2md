@@ -2,7 +2,7 @@
   import AppTable from './AppTable.svelte';
   import AppKanban from './AppKanban.svelte';
   import AppGantt from './AppGantt.svelte';
-  import type { Cache } from '../workspace/cache';
+  import type { Workspace } from '../workspace/state';
   import {
     appSources,
     evaluateApp,
@@ -14,14 +14,14 @@
   } from './apps';
   let {
     path,
-    cache,
+    workspace,
     online,
     busy,
     onopen,
     onstage
   }: {
     path: string;
-    cache: Cache;
+    workspace: Workspace;
     online: boolean;
     busy: boolean;
     onopen: (path: string) => void;
@@ -34,9 +34,9 @@
     acting = $state(false),
     notice = $state('');
   let documents = $state<AppDocument[]>([]);
-  const inventory = $derived(appSources(cache));
+  const inventory = $derived(appSources(workspace));
   const source = $derived(
-    path ? (cache.drafts[path] || cache.pages[path])?.text : undefined
+    path ? (workspace.drafts[path] || workspace.pages[path])?.text : undefined
   );
   $effect(() => {
     const sources = inventory.sources,
@@ -56,7 +56,7 @@
       try {
         if (missing.length)
           throw Error(
-            'Cache all collection documents before evaluating this app.'
+            'Load all collection documents before evaluating this app.'
           );
         const value = await evaluateApp(
           filename,
@@ -175,7 +175,7 @@
   <p class="muted">
     {documents.length} documents · {online
       ? 'Includes local drafts'
-      : 'Offline · cached inventory; server changes may be missing'}
+      : 'Disconnected; reconnect to load server changes'}
   </p>
   {#if inventory.missing.length}<p role="alert">
       Incomplete collection: metadata unavailable for {inventory.missing.join(
@@ -183,7 +183,7 @@
       )}.
     </p>{/if}
   {#if source === undefined}<p role="alert">
-      App definition is not cached. Reconnect to load it.
+      App definition is unavailable. Reconnect to load it.
     </p>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if notice}<p role="status">{notice}</p>{/if}

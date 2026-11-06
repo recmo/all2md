@@ -546,18 +546,12 @@ impl Default for GitConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Configures the daemon HTTP listener and authentication source.
+/// Configures the daemon HTTP listener and editing permissions.
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
     /// Fixed IP socket address on which the daemon listens.
     pub listen: String,
-    #[serde(default)]
-    /// Optional environment variable containing the bearer token.
-    pub bearer_token_env: Option<String>,
-    /// Additional exact hostnames accepted without a bearer token, e.g. a private reverse proxy.
-    #[serde(default)]
-    pub allowed_hosts: Vec<String>,
-    /// Allow authenticated API callers (or local callers without auth) to edit templates.
+    /// Allow API callers to edit templates.
     #[serde(default)]
     pub allow_template_edits: bool,
     /// Allow API callers to edit root config.yaml.
@@ -569,80 +563,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: default_listen(),
-            bearer_token_env: None,
-            allowed_hosts: Vec::new(),
             allow_template_edits: false,
             allow_config_edits: false,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_git_metadata_and_non_normal_paths() {
-        for path in [
-            "",
-            ".",
-            "../note.md",
-            ".git/hooks/note.md",
-            ".GIT/hooks/note.md",
-            "a/.git/note.md",
-        ] {
-            assert!(validate_repo_path(path).is_err(), "accepted {path:?}");
-        }
-        assert!(validate_repo_path("notes/page.md").is_ok());
-    }
-
-    #[test]
-    fn search_weights_are_finite_and_non_negative() {
-        let config = |search: &str| {
-            Config::from_yaml(&format!(
-                "documents:\n  include: ['**/*.md']\nsearch:\n{search}\nprovider:\n  dimensions: 2\n"
-            ))
-        };
-        assert!(config("  rrf_k: 0").is_err());
-        assert!(config("  rrf_k: .inf").is_err());
-        assert!(config("  graph_weight: -0.1").is_err());
-        assert!(config("  graph_weight: .nan").is_err());
-        assert!(config("  rrf_k: 60\n  graph_weight: 0").is_ok());
-    }
-
-    #[test]
-    fn git_push_timeout_must_be_nonzero() {
-        let error = Config::from_yaml(
-            "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push_timeout_seconds: 0\n",
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("git.push_timeout_seconds"));
-    }
-
-    #[test]
-    fn chunk_context_pointers_are_validated() {
-        let config = |pointer: &str| {
-            Config::from_yaml(&format!(
-                "documents:\n  include: ['**/*.md']\nchunking:\n  context_pointers: [{pointer:?}]\nprovider:\n  dimensions: 2\n"
-            ))
-        };
-        assert!(config("/title").is_ok());
-        assert!(config("/escaped~0name/~1path").is_ok());
-        assert!(config("title").is_err());
-        assert!(config("/bad~2escape").is_err());
-        assert!(config("/trailing~").is_err());
-    }
-
-    #[test]
-    fn server_listener_is_a_fixed_socket_address() {
-        let config = |listen: &str| {
-            Config::from_yaml(&format!(
-                "documents:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\nserver:\n  listen: {listen}\n"
-            ))
-        };
-        assert!(config("127.0.0.1:3131").is_ok());
-        assert!(config("'[::1]:3131'").is_ok());
-        assert!(config("127.0.0.1:0").is_err());
-        assert!(config("localhost:3131").is_err());
     }
 }

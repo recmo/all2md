@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct MeetingStore: Sendable {
     let root: URL
@@ -6,6 +7,18 @@ struct MeetingStore: Sendable {
     init(root: URL? = nil) {
         self.root = root ?? FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "Documents/Meetings", directoryHint: .isDirectory)
+    }
+
+    func validateAccess() throws {
+        let probe = root.appending(path: ".access-check-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: probe) }
+        let expected = Data("Meeting Capture storage check".utf8)
+        try expected.write(to: probe, options: .atomic)
+        guard try Data(contentsOf: probe) == expected else {
+            throw CaptureError.writerFailure("Meeting folder readback failed")
+        }
+        try FileManager.default.removeItem(at: probe)
     }
 
     func paths(startedAt: Date, title: String?) throws -> RecordingPaths {
@@ -32,18 +45,29 @@ struct MeetingStore: Sendable {
         try encoder.encode(manifest).write(to: url, options: .atomic)
     }
 
-    func interruptedRecordings() -> [URL] {
+    func interruptedRecordings(excluding claimed: Set<URL> = []) -> [URL] {
         guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
-        return enumerator.compactMap { $0 as? URL }.filter { $0.lastPathComponent.hasSuffix(".part.caf") }
+        let identities = Set(claimed.map { $0.deletingLastPathComponent().resolvingSymlinksInPath().appending(path: $0.lastPathComponent) })
+        var recordings: [URL: URL] = [:]
+        for file in enumerator.compactMap({ $0 as? URL }) {
+            guard file.lastPathComponent.hasSuffix(".part.caf") || file.lastPathComponent.hasSuffix(".session.json") else { continue }
+            let paths = paths(forInterruptedFile: file)
+            let identity = paths.directory.resolvingSymlinksInPath().appending(path: paths.manifest.lastPathComponent)
+            guard !identities.contains(identity), RecordingClaim.isAvailable(paths) else { continue }
+            if recordings[identity] == nil || file.path.hasSuffix(".session.json") { recordings[identity] = file }
+        }
+        return recordings.values.sorted { $0.path < $1.path }
     }
 
     func paths(forInterruptedFile file: URL) -> RecordingPaths {
         var name = file.lastPathComponent
         if name.hasPrefix(".") { name.removeFirst() }
-        let markers = ["-microphone-", "-microphone.part.caf", "-participants.part.caf"]
-        let baseName = markers.compactMap { marker in
-            name.range(of: marker, options: .backwards).map { String(name[..<$0.lowerBound]) }
-        }.first ?? file.deletingPathExtension().lastPathComponent
+        if name.hasSuffix(".session.json") {
+            return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: String(name.dropLast(".session.json".count)))
+        }
+        let suffix = #"-(?:microphone-[0-9]+|process-[0-9a-fA-F-]{36}|microphone|participants)\.part\.caf$"#
+        let baseName = name.range(of: suffix, options: .regularExpression)
+            .map { String(name[..<$0.lowerBound]) } ?? file.deletingPathExtension().lastPathComponent
         return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: baseName)
     }
 
@@ -63,5 +87,29 @@ struct MeetingStore: Sendable {
         }
         guard let contents = try? manager.contentsOfDirectory(atPath: directory.path) else { return false }
         return contents.contains { $0.hasPrefix(".\(baseName)-") || $0 == ".\(baseName).part.mka" }
+    }
+}
+
+// Keep the lock file in place: unlinking it would let another process lock a
+// different inode for the same recording. The OS releases flock on process exit.
+final class RecordingClaim {
+    private let descriptor: Int32
+
+    init(_ paths: RecordingPaths) throws {
+        let url = paths.directory.appending(path: ".\(paths.baseName).lock")
+        let opened = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
+        guard opened >= 0 else { throw CaptureError.writerFailure("Cannot claim recording") }
+        guard flock(opened, LOCK_EX | LOCK_NB) == 0 else {
+            close(opened)
+            throw CaptureError.writerFailure("Recording is already being captured or processed")
+        }
+        descriptor = opened
+    }
+
+    deinit { close(descriptor) }
+
+    static func isAvailable(_ paths: RecordingPaths) -> Bool {
+        guard let claim = try? RecordingClaim(paths) else { return false }
+        return withExtendedLifetime(claim) { true }
     }
 }

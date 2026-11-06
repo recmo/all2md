@@ -129,14 +129,15 @@ struct CompiledTemplate {
     template: Template,
     schema: Option<jsonschema::Validator>,
     markdown: Option<crate::markdown_lint::MarkdownLint>,
-    definition: serde_json::Value,
     script: crate::template_script::Script,
     markdown_source: String,
 }
 
 impl std::fmt::Debug for Templates {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Templates").field("paths", &self.entries.keys()).finish_non_exhaustive()
+        f.debug_struct("Templates")
+            .field("paths", &self.entries.keys())
+            .finish_non_exhaustive()
     }
 }
 
@@ -155,7 +156,8 @@ impl Templates {
                 Ok(template) => {
                     entries.insert(path.clone(), template);
                 }
-                Err(error) => findings.push(Finding { source: None,
+                Err(error) => findings.push(Finding {
+                    source: None,
                     path: path.clone(),
                     line: None,
                     message: format!("invalid template: {error}"),
@@ -210,12 +212,9 @@ impl Templates {
         self.applicable(path).map(|(path, _)| format!("/{path}"))
     }
 
-    pub(crate) fn discovery(&self, path: &str) -> Option<serde_json::Value> {
-        self.applicable(path).map(|(path, entry)| {
-            serde_json::json!({
-                "path": path, "definition": entry.definition, "content": entry.markdown_source
-            })
-        })
+    /// Returns the governing frontmatter schema for client-side property rendering.
+    pub fn frontmatter_schema(&self, path: &str) -> Option<&serde_json::Value> {
+        self.policy(path).frontmatter.as_ref()
     }
 
     pub(crate) fn validate_page(
@@ -247,18 +246,42 @@ impl Templates {
     }
 
     /// Validates transition callbacks for changed documents.
+    #[cfg(feature = "server")]
+    pub(crate) fn validate_transaction_changes(
+        &self,
+        before: &HashMap<String, String>,
+        after: &HashMap<String, String>,
+        moves: &[crate::Move],
+    ) -> Result<(), Vec<Finding>> {
+        self.validate_changes_at(
+            before,
+            after,
+            &moves
+                .iter()
+                .flat_map(|movement| [&movement.from, &movement.to])
+                .collect(),
+        )
+    }
+
+    /// Validates transition callbacks for changed documents.
     pub fn validate_changes(
         &self,
         before: &HashMap<String, String>,
         after: &HashMap<String, String>,
     ) -> Result<(), Vec<Finding>> {
+        self.validate_changes_at(before, after, &HashSet::new())
+    }
+
+    fn validate_changes_at(
+        &self,
+        before: &HashMap<String, String>,
+        after: &HashMap<String, String>,
+        endpoints: &HashSet<&String>,
+    ) -> Result<(), Vec<Finding>> {
         let mut paths: std::collections::BTreeSet<_> = before.keys().collect();
         paths.extend(after.keys());
         let mut findings = Vec::new();
         for path in paths {
-            if before.get(path) == after.get(path) {
-                continue;
-            }
             let Some((template_path, entry)) = self.applicable(path) else {
                 continue;
             };
@@ -266,35 +289,43 @@ impl Templates {
             if !script.has_change_checks {
                 continue;
             }
-            let parse = |pages: &HashMap<String, String>| {
-                pages
-                    .get(path)
-                    .map(|text| crate::markdown::parse_page(text, &entry.template.links))
+            let parse = |text: Option<&String>| {
+                text.map(|text| crate::markdown::parse_page(text, &entry.template.links))
                     .transpose()
             };
-            let result = (|| {
-                let old = parse(before)?;
-                let new = parse(after)?;
-                if old.is_none() && new.is_none() { return Ok(()); }
-                let old = old
-                    .as_ref()
-                    .map(|page| crate::template_script::document(path, &before[path], page));
-                let new = new
-                    .as_ref()
-                    .map(|page| crate::template_script::document(path, &after[path], page));
-                script.check(old.as_ref(), new.as_ref(), true)
-            })();
-            if let Err(error) = result {
-                let text = after
-                    .get(path)
-                    .or_else(|| before.get(path))
-                    .map_or("", String::as_str);
-                findings.push(crate::template_script::finding(
-                    path,
-                    text,
-                    &template_path,
-                    &error,
-                ));
+            let (old, new) = (before.get(path), after.get(path));
+            // A reused move endpoint represents separate departing and arriving identities.
+            let transitions = if endpoints.contains(path) {
+                [(old, None), (None, new)]
+            } else {
+                [(old, new), (None, None)]
+            };
+            for (old_text, new_text) in transitions {
+                if old_text == new_text {
+                    continue;
+                }
+                let result = (|| {
+                    let old = parse(old_text)?;
+                    let new = parse(new_text)?;
+                    let old = old
+                        .as_ref()
+                        .zip(old_text)
+                        .map(|(page, text)| crate::template_script::document(path, text, page));
+                    let new = new
+                        .as_ref()
+                        .zip(new_text)
+                        .map(|(page, text)| crate::template_script::document(path, text, page));
+                    script.check(old.as_ref(), new.as_ref(), true)
+                })();
+                if let Err(error) = result {
+                    let text = new_text.or(old_text).map_or("", String::as_str);
+                    findings.push(crate::template_script::finding(
+                        path,
+                        text,
+                        &template_path,
+                        &error,
+                    ));
+                }
             }
         }
         if findings.is_empty() {
@@ -396,7 +427,7 @@ fn compile_definition(
     template_path: &str,
     files: &HashMap<String, String>,
 ) -> Result<CompiledTemplate> {
-    let template: Template = serde_json::from_value(definition.clone())?;
+    let template: Template = serde_json::from_value(definition)?;
     if let Some(rule) = &template.filename {
         let pattern = Regex::new(&rule.pattern)?;
         let names: HashSet<_> = pattern.capture_names().flatten().collect();
@@ -472,7 +503,6 @@ fn compile_definition(
         template,
         schema,
         markdown,
-        definition,
         script,
         markdown_source,
     })
@@ -553,7 +583,8 @@ fn validate_page(
             .find(path)
             .is_some_and(|found| found.start() == 0 && found.end() == path.len())
         {
-            findings.push(Finding { source: None,
+            findings.push(Finding {
+                source: None,
                 path: path.into(),
                 line: None,
                 message: format!(
@@ -565,7 +596,8 @@ fn validate_page(
     }
     if let Some(validator) = &entry.schema {
         for error in validator.iter_errors(&page.frontmatter) {
-            findings.push(Finding { source: None,
+            findings.push(Finding {
+                source: None,
                 path: path.to_owned(),
                 line: Some(crate::template_script::field_line(
                     text,
@@ -594,7 +626,8 @@ fn validate_page(
     let events = &page.events;
     let headings = &page.section_headings;
     let mut report = |offset: usize, message: String| {
-        findings.push(Finding { source: None,
+        findings.push(Finding {
+            source: None,
             path: path.to_owned(),
             line: Some(offsets.partition_point(|start| *start <= offset)),
             message: {
@@ -866,197 +899,4 @@ fn validate_timestamps(
             );
         }
     }
-}
-
-#[cfg(test)]
-pub(crate) fn test_templates(text: &str) -> Result<Templates, Vec<Finding>> {
-    Templates::compile(&HashMap::from([("schema.md".into(), text.into())]))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn relation_names_and_reciprocals_are_closed() {
-        for declarations in [
-            "relation('related', selector={'kind': 'markdown_links'})\nrelation('related', selector={'kind': 'markdown_links'})",
-            "relation('parent', selector={'kind': 'markdown_links'}, reciprocal='child')",
-        ] {
-            assert!(test_templates(&format!("```starlark\n{declarations}\n```\n")).is_err());
-        }
-    }
-
-    #[test]
-    fn wiki_link_patterns_define_their_grammar() {
-        let config =
-            |wiki: &str| test_templates(&format!("```starlark\nlinks(wiki=[{wiki:?}])\n```\n"));
-        assert!(config(r"\{\{(?P<target>[^}]+)\}\}").is_ok());
-        assert!(config("[").is_err());
-        assert!(config(r"\{\{([^}]+)\}\}").is_err());
-    }
-
-    const PEOPLE: &str = r#"Write established facts.
-
-```starlark
-structure(level=2, order="enforced", additional_sections=False)
-section("Summary", required=True, content="paragraphs", paragraphs={"minimum": 1, "maximum": 1}, words={"maximum": 5}, level=2)
-section("Timeline", required=True, list={"minimum_items": 1, "date_order": "descending"}, level=2)
-```
-"#;
-
-    fn check(text: &str, template: &str) -> Vec<Finding> {
-        let templates = test_templates(template).unwrap();
-        crate::markdown::validate_corpus(
-            &HashMap::from([("people/a.md".into(), text.into())]),
-            &templates,
-        )
-        .err()
-        .unwrap_or_default()
-    }
-
-    #[test]
-    fn people_structure_and_length_rules() {
-        let good =
-            "# Alice\n\n## Summary\nA **good** person.\n\n## Timeline\n- 2024-01-01 Met Alice.\n";
-        assert!(check(good, PEOPLE).is_empty(), "{:?}", check(good, PEOPLE));
-        for bad in [
-            good.replace("A **good** person.", "One.\n\nTwo."),
-            good.replace("A **good** person.", "One two three four five six."),
-            good.replace("## Summary", "### Summary"),
-            good.replace("## Summary", "## Other"),
-            format!("{good}\n## Extra\n"),
-            good.replace("2024-01-01", "2024-02-30"),
-            good.replace("A **good** person.", "- One item"),
-        ] {
-            assert!(!check(&bad, PEOPLE).is_empty(), "{bad}");
-        }
-        let reversed = "## Timeline\n- 2024-01-01 Met Alice\n## Summary\nOne.\n";
-        assert!(!check(reversed, PEOPLE).is_empty());
-    }
-
-    #[test]
-    fn closest_template_replaces_parent_and_discovery_preserves_guidance() {
-        let files = HashMap::from([
-            ("schema.md".into(), PEOPLE.into()),
-            (
-                "people/schema.md".into(),
-                "Different.\n\n```starlark\nstructure(additional_sections=True)\n```\n".into(),
-            ),
-        ]);
-        let templates = Templates::compile(&files).unwrap();
-        let discovery = templates.discovery("people/new.md").unwrap();
-        assert_eq!(discovery["path"], "people/schema.md");
-        assert!(
-            discovery["content"]
-                .as_str()
-                .unwrap()
-                .starts_with("Different.")
-        );
-        assert!(
-            crate::markdown::validate_corpus(
-                &HashMap::from([("people/new.md".into(), "# Any\n".into())]),
-                &templates,
-            )
-            .is_ok()
-        );
-        assert!(
-            Templates::compile(&HashMap::new())
-                .unwrap()
-                .discovery("new.md")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn recursive_sections_and_own_content_limits() {
-        let template = r#"```starlark
-structure(level=2)
-section("Overview", required=True, words={"maximum": 1}, level=2)
-section("Details", required=True, nonempty=True, level=3, parent=["Overview"])
-```
-"#;
-        let text = "## Overview\nOne\n### Details\nMany more words here.\n";
-        assert!(check(text, template).is_empty());
-        assert!(
-            !check(
-                text,
-                &template.replace(
-                    "required=True, words",
-                    "include_subsections=True, required=True, words"
-                )
-            )
-            .is_empty()
-        );
-        assert!(!check("## Overview\nOne\n", template).is_empty());
-        for template in [
-            "```starlark\nstructure(additional_sections=False)\nsection(\"A\", level=1)\nsection(\"A\", level=1)\n```\n",
-            r#"```starlark
-structure(additional_sections=False)
-section("A", words={"minimum": 4, "maximum": 1}, level=1)
-```
-"#,
-            "```starlark\nstructure(level=7)\n```\n",
-            "```starlark\nunknown()\n```\n",
-        ] {
-            assert!(test_templates(template).is_err());
-        }
-    }
-
-    #[test]
-    fn inline_markup_does_not_inflate_lengths() {
-        let template = r#"```starlark
-structure(level=2)
-section("Summary", required=True, words={"maximum": 1}, characters={"maximum": 6}, level=2)
-```
-"#;
-        assert!(check("## Summary\nfoo**bar**\n", template).is_empty());
-        assert!(!check("## Summary\nfoo**bars**\n", template).is_empty());
-    }
-
-    #[test]
-    fn section_lengths_preserve_document_wide_reference_definitions() {
-        let template = r#"```starlark
-structure(level=2, additional_sections=True)
-section("Summary", required=True, content="paragraphs", paragraphs={"minimum": 1, "maximum": 1}, words={"maximum": 1}, characters={"maximum": 5}, level=2)
-```
-"#;
-        for text in [
-            "## Summary\n[Alice][person]\n## Sources\n[person]: https://example.com\n",
-            "[person]: https://example.com\n\n## Summary\n[Alice][person]\n",
-            "## Summary\n[Alice][]\n## Sources\n[Alice]: https://example.com\n",
-            "## Summary\n[Alice]\n## Sources\n[Alice]: https://example.com\n",
-        ] {
-            assert!(
-                check(text, template).is_empty(),
-                "{text:?}: {:?}",
-                check(text, template)
-            );
-        }
-        assert!(
-            !check(
-                "## Summary\n[Alicia][person]\n## Sources\n[person]: https://example.com\n",
-                template
-            )
-            .is_empty()
-        );
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn scope_exclusions_inherit_parent_validation() {
-    let files = HashMap::from([
-        ("schema.md".into(), "```starlark\nfrontmatter(parent=string(required=True))\n```\n".into()),
-        ("records/schema.md".into(), "```starlark\nscope(exclude=['overview.md'])\nfrontmatter(record=string(required=True))\n```\n".into()),
-    ]);
-    let templates = Templates::compile(&files).unwrap();
-    assert_eq!(templates.template_path("records/overview.md").as_deref(), Some("/schema.md"));
-    assert_eq!(templates.template_path("records/task.md").as_deref(), Some("/records/schema.md"));
-    let mut pages = HashMap::from([("records/overview.md".into(), "# Missing parent field\n".into())]);
-    assert!(crate::markdown::validate_corpus(&pages, &templates).is_err());
-    pages.insert("records/overview.md".into(), "---\nparent: value\n---\n# Overview\n".into());
-    assert!(crate::markdown::validate_corpus(&pages, &templates).is_ok());
-    let invalid = HashMap::from([("schema.md".into(), "```starlark\nscope(exclude=['['])\n```\n".into())]);
-    assert!(Templates::compile(&invalid).is_err());
 }

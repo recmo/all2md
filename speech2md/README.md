@@ -214,3 +214,8 @@ Published speaker vectors use JSON with a versioned embedding-space identity,
 normalized vectors, and confirmed person associations. Only confirmed references
 are used for cross-meeting suggestions; suggestions do not become confirmed
 identities automatically. GPU inference is unchanged and is not run by tests.
+
+Meeting Capture v3 process streams use `process-<track UUID>` as their source
+identity. Each process is transcribed independently; its stream index selects the
+correct audio from the shared Matroska archive. These identities also distinguish
+speaker hints, cached transcription, and review edits across processes.

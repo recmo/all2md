@@ -40,6 +40,12 @@ test('folder import preserves hierarchy, stages Markdown, and uploads assets', a
     ).toBe(404);
     await dialog.getByRole('button', { name: 'Close' }).click();
     await page
+      .getByRole('treeitem', { name: 'incoming / bundle', exact: true })
+      .press('ArrowRight');
+    await page
+      .getByRole('treeitem', { name: 'notes', exact: true })
+      .press('ArrowRight');
+    await page
       .getByRole('treeitem', { name: 'readme.md', exact: true })
       .click();
     await page.reload();

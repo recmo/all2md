@@ -267,7 +267,7 @@
     if (config.errors.length) throw config.errors[0];
     change(config);
     await api.apply({
-      edit_summary: 'Configure recording processing',
+      summary: 'Configure recording processing',
       edits: [
         {
           op: 'replace_page',

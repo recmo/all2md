@@ -1,5 +1,5 @@
 import { parseDocument } from 'yaml';
-import type { Cache } from '../workspace/cache';
+import type { Workspace } from '../workspace/state';
 import { readonly } from '../workspace/api';
 
 export type SchemaReference = {
@@ -13,22 +13,43 @@ export type SchemaReferences = Record<string, SchemaReference[]>;
 // Locations and targets come from the same Rust schema resolver used to validate
 // documents. Preserve YAML comments and wiki delimiters, labels, and fragments.
 export function rewriteSchemaReferences(
-  cache: Cache,
+  workspace: Workspace,
   references: SchemaReferences,
   moves: Map<string, string>,
   allowTemplates: boolean,
   allowConfig: boolean
-): Cache {
-  const drafts = { ...cache.drafts };
+): Workspace {
+  const drafts = { ...workspace.drafts };
   for (const [path, refs] of Object.entries(references)) {
-    const changes = refs.filter((ref) => moves.has(ref.target));
+    const destination = moves.get(path) || path;
+    const changes = refs.filter(
+      (ref) =>
+        moves.has(ref.target) ||
+        (ref.range && destination !== path && !ref.raw.startsWith('/'))
+    );
     if (!changes.length) continue;
     if (readonly(path, allowTemplates, allowConfig))
       throw Error(`Updating references in ${path} requires edit permission.`);
-    const page = drafts[path] || cache.pages[path];
-    if (!page) throw Error(`Cache ${path} before updating its references.`);
-    const replacement = (ref: SchemaReference) =>
-      moves.get(ref.target)! + (/[#?].*$/.exec(ref.raw)?.[0] || '');
+    const page = drafts[path] || workspace.pages[path];
+    if (!page) throw Error(`Load ${path} before updating its references.`);
+    const replacement = (ref: SchemaReference) => {
+      const target = moves.get(ref.target) || ref.target;
+      const suffix = /[#?].*$/.exec(ref.raw)?.[0] || '';
+      // Frontmatter relation fields keep their repository-path contract.
+      if (ref.pointer !== null)
+        return (ref.raw.startsWith('/') ? '/' : '') + target + suffix;
+      if (ref.raw.startsWith('/')) return '/' + target + suffix;
+      const parent = destination.split('/').slice(0, -1);
+      const parts = target.split('/');
+      while (parent.length && parts.length && parent[0] === parts[0]) {
+        parent.shift();
+        parts.shift();
+      }
+      const relative = '../'.repeat(parent.length) + parts.join('/');
+      return (
+        (/^[a-z][a-z\d+.-]*:/i.test(relative) ? './' : '') + relative + suffix
+      );
+    };
     let text = page.text;
     const ranges = new Map(
       changes
@@ -67,13 +88,14 @@ export function rewriteSchemaReferences(
         newline +
         text.slice(match[0].length);
     }
+    if (text === page.text) continue;
     drafts[path] = {
       ...page,
       text,
-      base: cache.drafts[path]?.base ?? page.text
+      base: workspace.drafts[path]?.base ?? page.text
     };
   }
-  return { ...cache, drafts };
+  return { ...workspace, drafts };
 }
 
 // A filename may contain characters the configured wiki grammar cannot express.
