@@ -386,6 +386,11 @@ uses ordinary file URLs and cookies, without playback tickets. API clients can
 continue using bearer authentication. Reverse proxies must preserve Host and
 Origin consistently; serve the frontend and API on the same origin.
 
+The [MacBook ML worker](../ml-worker/README.md) also accepts audio enhancement,
+text embedding, and reranking recipes through the same generic job protocol.
+Assignments include `parameters`, a frozen mapping of the selected source
+frontmatter `fields`; the new recipes consume `ml` from this projection.
+
 Execution and vector search require `MDSTORE_WORKER_TOKEN` and do not access MCP. All worker
 operations use `POST /worker`: `claim` takes `recipes`; `heartbeat` takes `id`,
 `attempt`, optional `progress` and `failure`; `complete` takes `id`, `attempt`,

@@ -53,7 +53,7 @@ uses the locally installed Xcode and installs `MeetingCapture.app` under its
 and diarization plus pinned ReDimNet2 speaker reconciliation, with raw model
 output retained beside the rendered Markdown.
 
-## Planned ML worker
+## ML worker
 
-The [MacBook ML worker plan](ml-worker/README.md) extends the leased
-transcription worker to pick up local embeddings, OCR, and transcription jobs.
+The [MacBook ML worker](ml-worker/README.md) runs leased transcription, denoising,
+level adjustment, text embedding, and reranking jobs. OCR integration is planned.

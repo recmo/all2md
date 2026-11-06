@@ -43,6 +43,7 @@
       pagesProject = ./pages2md;
       speechProject = ./speech2md;
       docProject = ./doc2md;
+      mlProject = ./ml-worker;
       pagesVersion =
         if self ? rev then
           self.rev
@@ -99,6 +100,61 @@
         name = "speech2md";
         project = speechProject;
       };
+      mlEnvironment = mkPythonEnvironment {
+        name = "ml-worker";
+        project = mlProject;
+      };
+      # nixpkgs packages only the LADSPA plugin. Build the upstream Rust CLI
+      # from that same fixed source/cargo closure, with DFN3 weights embedded.
+      mkDeepFilter = mlSystem:
+        let
+          deepfilternet = nixpkgs.legacyPackages.${mlSystem}.deepfilternet;
+        in
+        assert deepfilternet.version == "0.5.6";
+        deepfilternet.overrideAttrs {
+          pname = "deep-filter";
+          buildAndTestSubdir = "libDF";
+          cargoBuildFlags = [
+            "--bin" "deep-filter"
+            "--features" "bin,tract,wav-utils,transforms,default-model"
+          ];
+          # Upstream lib tests import the optional training/dataset module.
+          # The worker check below exercises the installed CLI and actual model.
+          doCheck = false;
+          postInstall = "";
+        };
+      ml-worker = pkgs.writeShellApplication {
+        name = "ml-worker";
+        runtimeInputs = [ pkgs.ffmpeg (mkDeepFilter system) speech2md ];
+        text = ''
+          export SPEECH2MD_VERSION=${pagesVersion}
+          exec ${mlEnvironment}/bin/ml-worker "$@"
+        '';
+      };
+      mkMlWorkerCheck = mlSystem:
+        let systemPkgs = nixpkgs.legacyPackages.${mlSystem};
+        in systemPkgs.runCommand "ml-worker-tests" {
+          nativeBuildInputs = [
+            (systemPkgs.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.pytest ]))
+            systemPkgs.ffmpeg
+            (mkDeepFilter mlSystem)
+          ];
+        } ''
+          export PYTHONPATH=${mlProject}/src
+          export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+          pytest -q -p no:cacheprovider ${mlProject}/tests
+          touch "$out"
+        '';
+      mkMlWorkerShell = mlSystem:
+        let systemPkgs = nixpkgs.legacyPackages.${mlSystem};
+        in systemPkgs.mkShell {
+          packages = [
+            (systemPkgs.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.pytest ]))
+            systemPkgs.uv
+            systemPkgs.ffmpeg
+            (mkDeepFilter mlSystem)
+          ];
+        };
       pagesTestEnvironment = mkPythonEnvironment {
         name = "pages2md";
         project = pagesProject;
@@ -324,14 +380,17 @@
           doc2md = mkDoc2md docSystem;
           mdstore = mkMdstore docSystem;
           webui = mkMdstoreWeb docSystem;
+          deep-filter = mkDeepFilter docSystem;
         })
         // {
           ${system} = {
             default = pages2md;
+            deep-filter = mkDeepFilter system;
             inherit
               meeting-capture
               pages2md
               speech2md-worker
+              ml-worker
               speech2md
               ;
             doc2md = mkDoc2md system;
@@ -355,6 +414,10 @@
               type = "app";
               program = "${speech2md}/bin/speech2md";
             };
+            ml-worker = {
+              type = "app";
+              program = "${ml-worker}/bin/ml-worker";
+            };
             speech2md-worker = {
               type = "app";
               program = "${speech2md-worker}/bin/speech2md-worker";
@@ -369,9 +432,11 @@
           doc2md = mkDoc2md docSystem;
           doc2md-independence = mkDocIndependenceCheck docSystem;
           mdstore = mkMdstore docSystem;
+          ml-worker = mkMlWorkerCheck docSystem;
         })
         // {
           ${system} = {
+            ml-worker = mkMlWorkerCheck system;
             pages2md-source =
               pkgs.runCommand "pages2md-source-check"
                 {
@@ -437,6 +502,7 @@
                     pkgs.darwin.cctools
                     speech2md
                     speech2md-worker
+                    ml-worker
                   ];
                 }
                 ''
@@ -449,6 +515,8 @@
                   speech2md --help > /dev/null
                   speech2md --version | grep -Eq '^speech2md [0-9a-f]{40,64}$'
                   speech2md-worker --help > /dev/null
+                  ml-worker --help > /dev/null
+                  ml-worker --list-recipes | grep -q text-embeddings-e5-small-v1
                   for extension in \
                     ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
                     ${speechEnvironment}/lib/python*/site-packages/mlx/core*.so; do
@@ -470,6 +538,7 @@
           doc2md = mkDocShell docSystem;
           mdstore = mkMdstoreShell docSystem;
           webui = mkWebuiShell docSystem;
+          ml-worker = mkMlWorkerShell docSystem;
         })
         // {
           ${system} = rec {
@@ -513,6 +582,7 @@
             doc2md = mkDocShell system;
             mdstore = mkMdstoreShell system;
             webui = mkWebuiShell system;
+            ml-worker = mkMlWorkerShell system;
             default = pages2md;
           };
         };

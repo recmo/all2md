@@ -104,8 +104,8 @@ current. Adding a meeting does not retranscribe the archive.
 ## Planned enhanced audio playback
 
 The [ML worker plan](../ml-worker/README.md#audio-enhancement-for-playback-and-model-input)
-adds per-track level adjustment and optional denoising. This is planned work;
-the current player does not yet offer enhanced audio selection.
+implements per-track level adjustment and optional denoising. The enhanced files
+can be opened with the file player; integrated selection is still planned.
 
 Workers will publish time-aligned, browser-playable derived audio, including
 separate role files for shared multi-track containers. The player will offer

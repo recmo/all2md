@@ -1,146 +1,236 @@
 # MacBook ML worker
 
-Development plan for a worker that runs on an Apple Silicon MacBook and picks
-up embeddings, OCR, and transcription jobs from mdstore.
+`ml-worker` pulls jobs from mdstore and runs one recipe at a time on an Apple
+Silicon MacBook. It extends the transcription work in
+[PR #36](https://github.com/recmo/all2md/pull/36) with audio enhancement, text
+embeddings, and reranking. It does not run generative LLM jobs.
 
-This work continues [PR #36](https://github.com/recmo/all2md/pull/36). The existing
-[speech2md worker](../speech2md/src/speech2md/worker.py) is the starting point;
-the shared runner and the OCR and text embedding recipes are planned work.
-
-## Existing foundation
-
-- mdstore owns durable jobs, expiring leases, frozen inputs/references, and
-  validated atomic publication. Processing declarations live in `config.yaml`.
-- Workers claim supported recipes through `POST /worker`, send heartbeats,
-  download assigned inputs, and upload declared outputs using leased file URLs.
-- `speech2md-worker` runs transcription in a subprocess, verifies input hashes,
-  retains local caches, reports progress, and stops inference after lease loss.
-- The worker uses a separate credential and never writes the server repository
-  directly. The server remains responsible for validation, commits, and indexing.
-
-See [the worker instructions](../speech2md/README.md#mdstore-worker) and
-[the server documentation](../mdstore/README.md) for the current implementation.
-
-## Intended behavior
-
-One runner advertises only recipes available on this MacBook, claims one job at
-a time, and dispatches to a local recipe implementation. Start with serial
-execution to keep model memory use bounded. Each recipe owns its model loading,
-input interpretation, checkpoints, and output generation; shared code handles
-transport, leases, transfers, progress, cancellation, and publication.
-
-| Job | Local processing | Result |
+| Recipe | Processing | Outputs |
 | --- | --- | --- |
-| Transcription | Existing speech2md pipeline, with optional enhanced input | Transcript Markdown and voiceprints |
-| Audio enhancement | Level adjustment and optional denoising per track | Playable enhanced audio and processing provenance |
-| OCR | Existing pages2md pipeline | Markdown and declared supporting assets |
-| Embeddings | Explicitly selected local model | Vectors with model/version, dimensions, and source identity |
+| `speech2md-v1` | Existing MOSS transcription/diarization and ReDimNet2 speaker reconciliation | Transcript Markdown and voiceprints |
+| `audio-enhancement-dfn3-v1` | DeepFilterNet3 denoising and optional level adjustment | Enhanced audio per role and a capture manifest with provenance |
+| `audio-levels-v1` | Level adjustment without denoising | Adjusted audio per role and a capture manifest with provenance |
+| `text-embeddings-e5-small-v1` | Multilingual E5-small | Normalized 384-dimensional vectors |
+| `text-rerank-minilm-v1` | Multilingual MiniLMv2 cross-encoder | Ranked candidate IDs, input indices, and relevance scores |
 
-Recipe IDs must describe reproducible processing, including model and relevant
-configuration. The runner must reject unknown recipes before starting inference.
-Embedding collections must keep incompatible spaces separate. Text embeddings
-need an explicit ingestion contract; existing voiceprint search alone does not
-provide text embedding jobs or update the document search index.
+The runner advertises locally installed capabilities and claims only matching
+recipes. Inference runs in a child process; lease loss or interruption kills its
+process group, including audio tools. Inputs are verified by SHA-256, outputs
+must match the assignment, and mdstore fences stale attempts and validates atomic
+publication. Worker credentials are removed from the inference subprocess.
+Caches are isolated by server, job, and fingerprint; a file lock prevents two
+attempts from concurrently using a job's workspace, including a child whose parent
+crashed. Disposable enhancement waveforms are cleaned up after completion or
+cancellation, and stale scratch is removed before retrying. Failed attempts cannot
+publish old outputs left in the cache.
 
-MacBook sleep, shutdown, and network loss are normal interruptions. A lost lease
-must prevent publication, stop local inference, and allow a fresh attempt to
-resume compatible checkpoints. Input or recipe changes must invalidate stale
-results. Run in the foreground first, then add a launchd service with restart
-behavior and explicit paths for credentials, logs, and caches.
+## Run
 
-## Audio enhancement for playback and model input
+On Apple Silicon, with Nix and the same separate worker credential configured on
+mdstore and in `MDSTORE_WORKER_TOKEN`:
 
-Add level adjustment and optional denoising as a reusable worker stage with two
-consumers: WebUI playback and speech2md model input. Transcription, diarization,
-and speaker embeddings already exist. LLM-based summaries, captions, and
-extraction remain with external providers.
+```sh
+nix run .#ml-worker -- --list-recipes
+nix run .#ml-worker -- --server https://your-mdstore-host
+# Claim at most one matching job, then exit:
+nix run .#ml-worker -- --server https://your-mdstore-host --once \
+  --recipes audio-enhancement-dfn3-v1 text-embeddings-e5-small-v1 text-rerank-minilm-v1
+```
 
-The current pipeline selects each declared audio stream and converts model inputs
-to 16 kHz mono. It detects silence and falls back to low-energy boundaries when
-splitting long recordings. Learned VAD, level adjustment, and denoising are new
-work. MOSS and ReDimNet2 do not prescribe external enhancement in their documented
-inference paths; model-input enhancement is an explicit recipe choice that needs
-comparison against the original input, rather than a model requirement.
+`--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
+when available, otherwise CPU; `--device cpu` forces CPU for text models.
+DeepFilterNet uses its native Rust/CPU runtime. Nix packages the dependencies and
+embeds the DeepFilterNet3 model. The two text models download pinned weights into
+the Hugging Face cache on first use; loading disables remote Python code and
+requires safetensors. No packages or toolchains are installed at runtime.
 
-The enhancement stage should:
+The original `speech2md-worker` remains available for transcription-only setups.
+Use `ml-worker` for the additional recipes; its transcription recipe invokes the
+existing speech2md CLI and retains leased speaker-reference matching.
 
-- Inspect duration, channel layout, sample rate, clipping, and levels per track.
-- Apply bounded level adjustment with peak protection; detect silent input so
-  normalization does not amplify it into noise. Record the actual applied gain.
-- Support optional denoising with a pinned model/checkpoint and recorded settings.
-- Preserve microphone and participant roles and process streams separately.
-- Retain the original time axis and duration, including inter-track offsets.
-  Compensate model delay and test alignment. Do not remove silence, concatenate
-  speech, or use VAD to gate the initial enhancement implementation.
-- Keep canonical recordings immutable and publish enhanced playback files only
-  as declared derived outputs through the existing lease/publication lifecycle.
+## Declare jobs
 
-### WebUI playback
+As with [transcription](../mdstore/README.md#assets-and-derived-documents),
+add declarations under `derivations` in `config.yaml`. Recipe parameters live in
+the authored source document's `ml` frontmatter mapping. Select `fields: [ml]` so
+mdstore fingerprints those parameters and sends them in the assignment's frozen
+`parameters` projection. All paths below are repository-relative, except files
+inside the generated capture manifest, which are relative to that manifest.
 
-Publish browser-playable enhanced audio for each declared role, with explicit
-links to its source and processing version. For shared multi-track containers,
-produce separate playable track files so the browser selects the correct stream.
-Playback derivatives should retain suitable listening fidelity; the models' mono
-16 kHz conversion is a separate consumer-specific step.
+### Audio enhancement for playback and model input
 
-Offer an Original/Enhanced selection when a current enhanced artifact exists.
-Label the selected version and preserve playhead position, seeking, playback
-speed, and transcript highlighting when switching. Changes to playback selection
-must not trigger transcription. Keep original playback available; if enhancement
-is missing, stale, or failed, show its status and use playable original audio
-where available. Never substitute a different role when a source stream cannot
-be played by the browser.
+An example source document, `jobs/audio.md`:
 
-### Model input
+```yaml
+---
+ml:
+  denoise: true
+  levels: true
+  attenuation_db: 18
+  tracks:
+    - input: meetings/capture.mka
+      stream_index: 0
+      role: microphone
+      output: meetings/microphone.enhanced.m4a
+    - input: meetings/capture.mka
+      stream_index: 1
+      role: participants
+      output: meetings/participants.enhanced.m4a
+---
+# Enhance a Meeting Capture recording
+```
 
-Choose enhancement for transcription and speaker embeddings independently in the
-recipe. Reuse the same enhancement implementation and compatible cached audio
-used to generate playback assets. Convert to each model's required format after
-enhancement. Enhanced playback must work independently of model-input enhancement;
-neither setting implicitly enables the other.
+Its job declaration:
 
-Key caches and publication provenance by source hashes, track/stream identity,
-preprocessing version, model/checkpoint identity, and parameters. A recipe or
-input change must invalidate affected enhancement and inference checkpoints and
-fence stale publication. Changing a playback preference does not change these
-keys. Share lease renewal, cancellation, transfer verification, and atomic output
-publication with the worker lifecycle.
+```yaml
+derivations:
+  enhance-meeting:
+    source: jobs/audio.md
+    recipe: audio-enhancement-dfn3-v1
+    fields: [ml]
+    inputs: [meetings/capture.mka]
+    outputs:
+      - meetings/microphone.enhanced.m4a
+      - meetings/participants.enhanced.m4a
+      - meetings/enhanced-capture.json
+```
 
-### Validation
+Upload the input through mdstore's normal file API before configuring the job.
+Stream indices refer to audio streams in the file; Meeting Capture v2 manifests
+identify the microphone and participant streams. Each role must be unique.
+The output set must contain exactly the per-track files and one JSON manifest.
+For level adjustment alone, select `audio-levels-v1` and omit `denoise` or set it
+to `false`. For denoising alone, use `audio-enhancement-dfn3-v1` with `levels: false`.
+At least one stage must be enabled. `attenuation_db` limits suppression to 0–36 dB.
 
-Compare original and processed audio on clean, noisy, quiet, overlapping, clipped,
-and silent fixtures, including separate-role captures. Check output levels, peak
-protection, duration, offsets, and browser playback/seeking. Review listening
-quality separately from transcript word errors, diarization errors, and
-speaker-match accuracy before selecting model-input defaults. Measure runtime
-and memory on the MacBook. Quality decisions require representative recordings
-and reviewed reference transcripts/identities; fixture tests cover alignment,
-cache invalidation, cancellation, publication, and no-speech handling.
+The worker decodes each stream to 48 kHz PCM, denoises before level adjustment,
+and compensates DeepFilterNet's processing delay. Padding protects the final
+speech; it is trimmed after inference to retain the original sample count.
+Microphone and participant roles remain separate, without silence removal,
+VAD gating, source separation, or time compression.
 
-Leave learned VAD, source separation, and dereverberation for later evidence of
-need. VAD is not a prerequisite for level adjustment or denoising.
+Level adjustment measures track RMS and sample peaks, targets -23 dBFS RMS,
+caps amplification at 12 dB, and leaves 1 dB of sample-peak headroom. Silent or
+near-silent tracks below -60 dBFS RMS are not amplified. This is bounded constant
+gain, not dynamic compression or a guarantee of perceived loudness. The manifest
+records measured levels, applied gain, source hashes, parameters, and model version.
 
-## Development sequence
+`.wav` and `.flac` outputs are lossless. `.m4a` uses AAC at 128 kb/s for convenient
+browser playback and smaller transfers; it adds an encoding generation. Keep
+originals unchanged. mdstore currently limits each worker output to 64 MiB;
+choose an appropriate duration/format or split long recordings into jobs.
 
-- [ ] Extract the existing worker lifecycle into an independent runner while
-  preserving the transcription behavior and CLI until callers are updated.
-- [ ] Dispatch by recipe, advertise installed capabilities, and reject jobs the
-  machine cannot execute. Keep model dependencies with their owning projects.
-- [ ] Add per-track level adjustment and optional denoising, publish enhanced
-  playback artifacts, and add independent model-input recipe settings.
-- [ ] Add Original/Enhanced playback selection to WebUI with aligned seeking,
-  original fallback, and enhancement status; verify both playback and model quality.
-- [ ] Add an OCR adapter that downloads the assigned source, invokes pages2md,
-  and publishes only the declared Markdown and supporting assets.
-- [ ] Define embedding input/output schemas, versioned model identity, and the
-  server ingestion path; add a local embedding adapter against that contract.
-- [ ] Package the runner for `aarch64-darwin` in Nix and document foreground and
-  launchd operation, cache retention, and model downloads.
-- [ ] Verify idle polling, successful execution/publication, stale input fencing,
-  lease expiry, interrupted transfers, sleep/restart recovery, and replay after
-  a lost completion response using fixture recipes without downloading models.
-- [ ] Run actual transcription, OCR, and embedding smoke jobs on an Apple
-  Silicon MacBook and record model versions and resource use before deployment.
+The generated manifest follows the existing Meeting Capture v1 per-file track
+contract. A separate recording document can reference it with
+`manifest: enhanced-capture.json`; assign the manifest and **all its audio files**
+as inputs to its `speech2md-v1` job. This makes enhancement available as model
+preprocessing without changing the original recording. Choose original or enhanced
+inputs explicitly and compare transcript and speaker-match quality. MOSS and
+ReDimNet2 do not require external denoising in their documented inference paths.
 
-The current PR has no live MacBook inference or deployment validation. New
-adapters and service setup must be verified as they are implemented.
+Enhanced files can be opened with the existing WebUI file player. The integrated
+Original/Enhanced switch described in [the WebUI plan](../webui/SPEECH_REVIEW.md#planned-enhanced-audio-playback)
+is still planned; playback preference must remain independent of model input.
+The enhancement stage does not recover Zoom/Meet's original encoded packets or
+apply decoder-side codec restoration to those packets.
+
+### Text embeddings
+
+Source document, `jobs/embed.md`:
+
+```yaml
+---
+ml:
+  namespace: documents
+  input_type: document
+  texts:
+    - id: notes/meeting.md#decision
+      text: We agreed to ship the release on Friday.
+    - id: notes/design.md#storage
+      text: The repository stores immutable, content-addressed assets.
+---
+# Embed selected passages
+```
+
+```yaml
+derivations:
+  embed-passages:
+    source: jobs/embed.md
+    recipe: text-embeddings-e5-small-v1
+    fields: [ml]
+    inputs: []
+    outputs: [vectors/passages.json]
+```
+
+The model is
+[`intfloat/multilingual-e5-small`](https://huggingface.co/intfloat/multilingual-e5-small),
+pinned to `614241f622f53c4eeff9890bdc4f31cfecc418b3`. The worker adds `passage: `
+for documents or `query: ` for queries, performs attention-masked mean pooling,
+and L2-normalizes the 384-dimensional results. Embedding-space identity includes
+the recipe and namespace; text vectors cannot use the `speakers` namespace.
+
+Outputs use mdstore's existing `space`/`records` vector artifact format, with
+record IDs, original text, input mode, model revision, and source provenance.
+They can participate in frozen references through `reference_namespace` and
+leased vector search. They do **not** automatically replace mdstore's configured
+interactive search provider or its document-chunk sidecars. Author the intended
+passages in `ml.texts`; arbitrary source-body edits are not embedding inputs.
+
+### Reranking
+
+Source document, `jobs/rank.md`:
+
+```yaml
+---
+ml:
+  query: When is the release?
+  top_n: 1
+  texts:
+    - id: decision
+      text: We agreed to ship the release on Friday.
+    - id: storage
+      text: Assets are content-addressed.
+---
+# Rank search candidates
+```
+
+```yaml
+derivations:
+  rank-passages:
+    source: jobs/rank.md
+    recipe: text-rerank-minilm-v1
+    fields: [ml]
+    inputs: []
+    outputs: [results/ranked.json]
+```
+
+The model is
+[`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1),
+pinned to `1427fd652930e4ba29e8149678df786c240d8825`. Each query/passage pair
+is scored jointly. Results preserve original indices and IDs, sort by descending
+model logit, and break ties by original order. Scores are not probabilities.
+This is a queued batch job, not a synchronous search-time service.
+
+Both text recipes accept 1–256 records with unique nonempty string IDs and
+nonempty text of at most 32,768 characters. Inputs truncate at 512 model tokens;
+provide passages of suitable length. Reranking truncates each query/passage pair
+at that limit. Unknown parameters and non-finite model outputs fail the job.
+
+## Development and remaining work
+
+```sh
+nix develop .#ml-worker
+PYTHONPATH=ml-worker/src python -m pytest ml-worker/tests
+uv sync --project ml-worker --extra dev
+PYTHONPATH=ml-worker/src uv run --project ml-worker pytest ml-worker/tests
+nix build .#checks.x86_64-linux.ml-worker
+```
+
+Fixture checks exercise real HTTP transfers, subprocess execution, checksum
+failure, lease loss, publication, gain control, and DeepFilterNet audio alignment.
+Tensor tests verify pooling, prefixes, and ranking without downloading weights
+when PyTorch is installed. Actual quality needs representative Zoom/Meet audio,
+reviewed transcripts and speaker identities, and relevance judgments for text.
+MacBook MPS performance and real-recording quality are not established by these
+checks. OCR integration, codec restoration, launchd deployment, automatic corpus
+embedding jobs, and the WebUI enhancement selector remain separate work.

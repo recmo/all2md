@@ -84,6 +84,7 @@ pub(crate) struct Job {
 pub(crate) struct Assignment {
     pub job: Job,
     pub recording: String,
+    pub parameters: BTreeMap<String, Value>,
     pub inputs: BTreeMap<String, Asset>,
     pub outputs: Vec<String>,
     pub references: BTreeMap<String, Asset>,
@@ -725,6 +726,20 @@ impl Store {
             Some(Assignment {
                 job: job.clone(),
                 recording: self.state.read().pages[&job.source].clone(),
+                parameters: definition
+                    .fields
+                    .iter()
+                    .map(|key| {
+                        (
+                            key.clone(),
+                            self.state.read().parsed[&job.source]
+                                .frontmatter
+                                .get(key)
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                        )
+                    })
+                    .collect(),
                 inputs: definition
                     .inputs
                     .iter()
@@ -1070,6 +1085,11 @@ pub(crate) mod tests {
         let (dir, store) = fixture();
         let id = setup(&store);
         let assignment = store.claim_job(&["fixture-v1".into()]).unwrap().unwrap();
+        assert_eq!(assignment.parameters.len(), 1);
+        assert_eq!(
+            assignment.parameters["hotwords"],
+            serde_json::json!(["hello"])
+        );
         let attempt = assignment.job.attempt.unwrap();
         assert!(
             store
