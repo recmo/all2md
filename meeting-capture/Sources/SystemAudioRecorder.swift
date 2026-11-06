@@ -2,6 +2,7 @@
 import CoreAudio
 import CoreMedia
 import Foundation
+import Synchronization
 
 // Private, unmuted taps capture process output without requiring a window.
 final class SystemAudioRecorder: @unchecked Sendable {
@@ -98,8 +99,12 @@ final class SystemAudioRecorder: @unchecked Sendable {
             }, "Create tap audio callback")
             try check(AudioDeviceStart(deviceID, ioProcID), "Start audio process tap")
         } catch {
-            try? stopCapture()
-            throw error
+            let startupError = error
+            do { try stopCapture() }
+            catch {
+                if !CaptureError.isProcessTapFailure(error) { throw error }
+            }
+            throw startupError
         }
     }
 
@@ -176,11 +181,16 @@ final class SystemAudioRecorder: @unchecked Sendable {
 // only this separate queue may allocate PCMFile buffers or touch the filesystem.
 final class TapPCMWriter: @unchecked Sendable {
     private let file: PCMFile
-    private let buffers: [AVAudioPCMBuffer]
-    private var timestamps: [UInt64]
-    private var readIndex = 0
-    private var writeIndex = 0
-    private let lock = NSLock()
+    private final class Slot {
+        let buffer: AVAudioPCMBuffer
+        var timestamp: UInt64 = 0
+        init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
+    }
+    private let slots: [Slot]
+    // One producer (the serial HAL callback queue), one consumer (writer queue).
+    // Release/acquire publishes slots and prevents reuse until writing completes.
+    private let readIndex = Atomic<Int>(0)
+    private let writeIndex = Atomic<Int>(0)
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.pcm-writer")
     private let source: DispatchSourceUserDataOr
     private let finished = DispatchSemaphore(value: 0)
@@ -191,13 +201,12 @@ final class TapPCMWriter: @unchecked Sendable {
     init(format: AVAudioFormat, url: URL, startTime: Double) throws {
         file = PCMFile(url: url, startTime: startTime)
         // Bounded storage: 32 callbacks of up to 8192 frames each.
-        buffers = try (0..<32).map { _ in
+        slots = try (0..<32).map { _ in
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192) else {
                 throw CaptureError.writerFailure("Could not allocate process audio queue")
             }
-            return buffer
+            return Slot(buffer)
         }
-        timestamps = Array(repeating: 0, count: buffers.count)
         source = DispatchSource.makeUserDataOrSource(queue: queue)
         source.setEventHandler { [weak self] in
             guard let self else { return }
@@ -218,12 +227,10 @@ final class TapPCMWriter: @unchecked Sendable {
         let incoming = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         guard incoming.contains(where: { $0.mDataByteSize > 0 }) else { return }
         guard timestamp.mFlags.contains(.hostTimeValid) else { source.or(data: 4); return }
-        // Never wait on the writer, even while it briefly advances a ring index.
-        guard lock.try() else { source.or(data: 2); return }
-        defer { lock.unlock() }
-        guard writeIndex - readIndex < buffers.count else { source.or(data: 2); return }
-        let index = writeIndex % buffers.count
-        let buffer = buffers[index]
+        let write = writeIndex.load(ordering: .relaxed)
+        guard write - readIndex.load(ordering: .acquiring) < slots.count else { source.or(data: 2); return }
+        let slot = slots[write % slots.count]
+        let buffer = slot.buffer
         let bytesPerFrame = Int(buffer.format.streamDescription.pointee.mBytesPerFrame)
         let destination = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
         let bytes = Int(incoming[0].mDataByteSize)
@@ -239,24 +246,24 @@ final class TapPCMWriter: @unchecked Sendable {
             to.copyMemory(from: from, byteCount: bytes)
         }
         buffer.frameLength = AVAudioFrameCount(bytes / bytesPerFrame)
-        timestamps[index] = timestamp.mHostTime
-        writeIndex += 1
+        slot.timestamp = timestamp.mHostTime
+        writeIndex.store(write + 1, ordering: .releasing)
         source.or(data: 1)
     }
 
     private func drain() {
-        while let pending = lock.withLock({
-            readIndex < writeIndex ? (readIndex % buffers.count, timestamps[readIndex % buffers.count]) : nil
-        }) {
-            let (index, timestamp) = pending
+        while true {
+            let read = readIndex.load(ordering: .relaxed)
+            guard read < writeIndex.load(ordering: .acquiring) else { return }
+            let slot = slots[read % slots.count]
             if !failed {
                 do {
-                    try file.write(buffers[index], at: AVAudioTime.seconds(forHostTime: timestamp))
+                    try file.write(slot.buffer, at: AVAudioTime.seconds(forHostTime: slot.timestamp))
                     onSample?()
                 } catch { fail("Process tap PCM write: \(CaptureError.details(error))") }
             }
             // This slot stays owned by the writer until disk I/O completes.
-            lock.withLock { readIndex += 1 }
+            readIndex.store(read + 1, ordering: .releasing)
         }
     }
 
