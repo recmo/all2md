@@ -19,9 +19,10 @@ ml-worker --server http://mdstore:3131 --recipes text-embeddings-zembed-1-v1 tex
 Retrieval jobs and results live under Git's private `mdstore/retrieval` directory.
 They survive daemon restarts without adding generated documents or Git commits.
 Validated document vectors enter the live search index as individual chunks finish.
-Complete pages are saved as ignored `.mdstore` sidecars. Changed/deleted chunk
-inputs and expired worker attempts reject completion. Query/ranking requests take priority, followed by explicitly declared
-jobs and then background document indexing. Interactive requests expire
+Complete pages are saved as ignored `.mdstore` sidecars. Forced rebuilds discard
+old sidecars before queuing fresh work. Changed/deleted chunk inputs and expired
+worker attempts reject completion. Query/ranking requests take priority, followed
+by explicitly declared jobs and then background document indexing. Interactive requests expire
 after `provider.request_timeout_seconds` (default 300). If workers are unavailable,
 search reports degraded retrieval and retains exact search. Pending/failed jobs
 appear in `/health`; failed retrieval jobs support the existing retry operation.

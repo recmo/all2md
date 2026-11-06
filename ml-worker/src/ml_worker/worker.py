@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from urllib.parse import quote, urlencode
 
@@ -38,24 +39,27 @@ def capabilities():
 def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORKER_TOKEN", heartbeat_seconds=30):
     job = assignment["job"]
     scope = hashlib.sha256(client.server.encode()).hexdigest()
+    cache_root = cache.expanduser().resolve() / scope
+    cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if assignment.get("retrieval", False):
+        with tempfile.TemporaryDirectory(prefix="retrieval-", dir=cache_root) as directory:
+            root = Path(directory) / "work"
+            root.mkdir(mode=0o700)
+            return _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, None)
     identity = hashlib.sha256(job["id"].encode()).hexdigest()
-    job_root = cache.expanduser().resolve() / scope / identity
-    job_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    job_root = cache_root / identity
+    job_root.mkdir(exist_ok=True, mode=0o700)
     with (job_root / ".worker.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            fingerprint = job["fingerprint"]
-            # Hash the label rather than trusting a server string as a cache path.
-            root = job_root / hashlib.sha256(fingerprint.encode()).hexdigest()
-            # Retain this workspace for retries and the shared MOSS cache at job_root.
-            for previous in job_root.iterdir():
-                if previous.is_dir() and previous != root:
-                    shutil.rmtree(previous)
-            root.mkdir(exist_ok=True, mode=0o700)
-            _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock.fileno())
-        finally:
-            if assignment.get("retrieval", False):
-                shutil.rmtree(job_root)
+        fingerprint = job["fingerprint"]
+        # Hash the label rather than trusting a server string as a cache path.
+        root = job_root / hashlib.sha256(fingerprint.encode()).hexdigest()
+        # Retain this workspace for retries and the shared MOSS cache at job_root.
+        for previous in job_root.iterdir():
+            if previous.is_dir() and previous != root:
+                shutil.rmtree(previous)
+        root.mkdir(exist_ok=True, mode=0o700)
+        _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock.fileno())
 
 
 def _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock_fd):
@@ -98,7 +102,7 @@ def _execute_locked(client, assignment, root, device, token_env, heartbeat_secon
             env={k: v for k, v in os.environ.items() if k not in {token_env, "MDSTORE_WORKER_TOKEN"}},
             stdin=subprocess.DEVNULL, start_new_session=True,
             # Preserve the cache lock if the parent crashes while inference runs.
-            pass_fds=(lock_fd,),
+            pass_fds=() if lock_fd is None else (lock_fd,),
         )
         try:
             while process.poll() is None:

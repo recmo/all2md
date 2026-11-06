@@ -279,6 +279,34 @@ mod tests {
             store.status().unwrap().vectors_total
         );
         assert!(dir.path().join("recording.mdstore").exists());
+        // A forced rebuild must remain pending until fresh results replace the old sidecar.
+        assert!(store.reindex().await.is_err());
+        assert!(store.reindex_missing().await.is_err());
+        for _ in 0..store.status().unwrap().vectors_total {
+            let (_, assignment) = request(&app, claim.clone()).await;
+            let mut completion = result(&assignment);
+            let mut body: Value = serde_json::from_str(
+                completion["outputs"][crate::retrieval_jobs::OUTPUT]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            for record in body["records"].as_array_mut().unwrap() {
+                record["vector"][0] = json!(0.0);
+                record["vector"][1] = json!(1.0);
+            }
+            completion["outputs"][crate::retrieval_jobs::OUTPUT] = json!(body.to_string());
+            assert_eq!(request(&app, completion).await.0, StatusCode::OK);
+        }
+        store.reindex_missing().await.unwrap();
+        let rebuilt = crate::sidecar::read(&dir.path().join("recording.mdstore")).unwrap();
+        assert!(
+            rebuilt
+                .chunks
+                .iter()
+                .all(|chunk| chunk.vector_le_f32[..4] == 0.0_f32.to_le_bytes()
+                    && chunk.vector_le_f32[4..8] == 1.0_f32.to_le_bytes())
+        );
         // Both query embeddings and reranking are claimed from the same worker endpoint.
         let searching = store.clone();
         let search = tokio::spawn(async move { searching.search("Recording", &[]).await.unwrap() });

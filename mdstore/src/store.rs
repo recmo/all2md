@@ -1419,6 +1419,10 @@ fn prepare_reindex(root: &Path, snapshot: Arc<StoreState>, force: bool) -> Resul
             .into_iter()
             .map(|(chunk, _)| chunk)
             .collect();
+        if force {
+            // Later asynchronous passes must not reload the vectors being replaced.
+            actions.push(ReindexAction::Remove(sidecar_path.clone()));
+        }
         actions.push(ReindexAction::Embed {
             path,
             text: text.clone(),
