@@ -10,8 +10,8 @@ embeddings, and reranking. It does not run generative LLM jobs.
 | `speech2md-v1` | Existing MOSS transcription/diarization and ReDimNet2 speaker reconciliation | Transcript Markdown and voiceprints |
 | `audio-enhancement-dfn3-v1` | DeepFilterNet3 denoising and optional level adjustment | Enhanced audio per role and a capture manifest with provenance |
 | `audio-levels-v1` | Level adjustment without denoising | Adjusted audio per role and a capture manifest with provenance |
-| `text-embeddings-e5-small-v1` | Multilingual E5-small | Normalized 384-dimensional vectors |
-| `text-rerank-minilm-v1` | Multilingual MiniLMv2 cross-encoder | Ranked candidate IDs, input indices, and relevance scores |
+| `text-embeddings-zembed-1-v1` | ZeroEntropy zembed-1 (4B) | Normalized 2,560-dimensional vectors |
+| `text-rerank-zerank-2-v1` | ZeroEntropy zerank-2 (4B) | Ranked candidate IDs, input indices, and relevance scores |
 
 The runner advertises locally installed capabilities and claims only matching
 recipes. Inference runs in a child process; lease loss or interruption kills its
@@ -34,7 +34,7 @@ nix run .#ml-worker -- --list-recipes
 nix run .#ml-worker -- --server https://your-mdstore-host
 # Claim at most one matching job, then exit:
 nix run .#ml-worker -- --server https://your-mdstore-host --once \
-  --recipes audio-enhancement-dfn3-v1 text-embeddings-e5-small-v1 text-rerank-minilm-v1
+  --recipes audio-enhancement-dfn3-v1 text-embeddings-zembed-1-v1 text-rerank-zerank-2-v1
 ```
 
 `--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
@@ -156,18 +156,22 @@ ml:
 derivations:
   embed-passages:
     source: jobs/embed.md
-    recipe: text-embeddings-e5-small-v1
+    recipe: text-embeddings-zembed-1-v1
     fields: [ml]
     inputs: []
     outputs: [vectors/passages.json]
 ```
 
 The model is
-[`intfloat/multilingual-e5-small`](https://huggingface.co/intfloat/multilingual-e5-small),
-pinned to `614241f622f53c4eeff9890bdc4f31cfecc418b3`. The worker adds `passage: `
-for documents or `query: ` for queries, performs attention-masked mean pooling,
-and L2-normalizes the 384-dimensional results. Embedding-space identity includes
-the recipe and namespace; text vectors cannot use the `speakers` namespace.
+[`zeroentropy/zembed-1-embedding`](https://huggingface.co/zeroentropy/zembed-1-embedding),
+pinned to `cf13c81f3274394053d166740294f7eea4586f7a`. The worker uses the
+model's query/document ChatML prefixes and closing suffix, pools the last token,
+and L2-normalizes the 2,560-dimensional results. These conventions match the
+pinned Sentence Transformers configuration without executing its custom Python.
+Embedding-space identity includes the recipe and namespace; text vectors cannot
+use the `speakers` namespace. The new recipe cannot mix with old E5 artifacts.
+Local vectors are not assumed interchangeable with hosted provider vectors;
+queries and documents must use the same recipe and revision.
 
 Outputs use mdstore's existing `space`/`records` vector artifact format, with
 record IDs, original text, input mode, model revision, and source provenance.
@@ -198,23 +202,30 @@ ml:
 derivations:
   rank-passages:
     source: jobs/rank.md
-    recipe: text-rerank-minilm-v1
+    recipe: text-rerank-zerank-2-v1
     fields: [ml]
     inputs: []
     outputs: [results/ranked.json]
 ```
 
 The model is
-[`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1),
-pinned to `1427fd652930e4ba29e8149678df786c240d8825`. Each query/passage pair
-is scored jointly. Results preserve original indices and IDs, sort by descending
-model logit, and break ties by original order. Scores are not probabilities.
-This is a queued batch job, not a synchronous search-time service.
+[`zeroentropy/zerank-2-reranker`](https://huggingface.co/zeroentropy/zerank-2-reranker),
+pinned to `5eae30d5ee3c6b2df2ef6d723bde45172d761c4c`. Each query/passage pair
+uses its pinned chat template and the raw next-token `Yes` logit, matching the
+model's current LogitScore configuration. Results preserve original indices and
+IDs, sort by descending score, and break ties by original order. Scores are not
+probabilities. This is a queued batch job, not a synchronous search-time service.
+
+Both models have 4B parameters and Apache-2.0 weights. They download on first use
+(roughly 8 GB per model) and run one at a time in the job subprocess, using BF16
+on CPU or MPS. MPS requires a Mac/PyTorch combination with BF16 support (macOS 14+).
+Allow memory beyond the weights for inference; long passages use more memory.
 
 Both text recipes accept 1–256 records with unique nonempty string IDs and
-nonempty text of at most 32,768 characters. Inputs truncate at 512 model tokens;
-provide passages of suitable length. Reranking truncates each query/passage pair
-at that limit. Unknown parameters and non-finite model outputs fail the job.
+nonempty text of at most 32,768 characters. The formatted input must fit within
+32,768 model tokens (query and passage combined for reranking). Oversize inputs
+fail rather than silently truncating; split long documents into passages.
+Unknown parameters and non-finite model outputs fail the job.
 
 ## Development and remaining work
 

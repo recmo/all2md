@@ -110,8 +110,8 @@ assert 'MDSTORE_WORKER_TOKEN' not in os.environ
 
 def embed(p, **kwargs):
     text.records(p['texts'])
-    return {'space': {'namespace': p.get('namespace', 'documents'), 'recipe': text.EMBED_RECIPE, 'dimensions': 384},
-            'records': [{'id': x['id'], 'vector': [1.0]+[0.0]*383, 'metadata': {'text': x['text']}} for x in p['texts']]}
+    return {'space': {'namespace': p.get('namespace', 'documents'), 'recipe': text.EMBED_RECIPE, 'dimensions': text.DIMENSIONS},
+            'records': [{'id': x['id'], 'vector': [1.0]+[0.0]*(text.DIMENSIONS-1), 'metadata': {'text': x['text']}} for x in p['texts']]}
 def rerank(p, **kwargs):
     text.records(p['texts'])
     return {'results': [{'index': i, 'id': p['texts'][i]['id'], 'relevance_score': float(i)} for i in reversed(range(len(p['texts'])))]}
@@ -184,7 +184,7 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
         assert result['results'][0]['id'] == 'b'
     else:
         assert result['space']['namespace'] == 'documents'
-        assert len(result['records'][0]['vector']) == 384
+        assert len(result['records'][0]['vector']) == text.DIMENSIONS
 
 
 def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeypatch):

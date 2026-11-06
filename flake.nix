@@ -516,7 +516,7 @@
                   speech2md --version | grep -Eq '^speech2md [0-9a-f]{40,64}$'
                   speech2md-worker --help > /dev/null
                   ml-worker --help > /dev/null
-                  ml-worker --list-recipes | grep -q text-embeddings-e5-small-v1
+                  ml-worker --list-recipes | grep -q text-embeddings-zembed-1-v1
                   for extension in \
                     ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
                     ${speechEnvironment}/lib/python*/site-packages/mlx/core*.so; do
