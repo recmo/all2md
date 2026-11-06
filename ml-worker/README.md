@@ -182,10 +182,17 @@ queries and documents must use the same recipe and revision.
 
 Outputs use mdstore's existing `space`/`records` vector artifact format, with
 record IDs, original text, input mode, model revision, and source provenance.
-They can participate in frozen references through `reference_namespace` and
-leased vector search. They do **not** automatically replace mdstore's configured
-interactive search provider or its document-chunk sidecars. Author the intended
-passages in `ml.texts`; arbitrary source-body edits are not embedding inputs.
+Explicit derivations can participate in frozen references through
+`reference_namespace` and leased vector search. Author their passages in `ml.texts`;
+arbitrary source-body edits are not inputs to an explicit derivation.
+
+Mdstore also queues its own search chunks automatically and sends query embeddings
+and reranking through these same recipes. Workers claim these retrieval assignments
+through `/worker` and return their JSON inline in completion. Mdstore validates the
+pinned model, revision, input IDs, dimensions, normalization, and lease before
+installing document vectors into its sidecars and live search index. Retrieval
+assignments do not publish repository artifacts or create Git commits. See
+[mdstore](../mdstore/README.md) for configuration and migration.
 
 ### Reranking
 

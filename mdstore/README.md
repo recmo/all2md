@@ -6,7 +6,31 @@ MCP exposes `read`, `search`, and `edit`. Reads return a snapshot commit and num
 
 ## ML workers and file resources
 
-Declare derived outputs in root `config.yaml` under `derivations`; see the
+All search inference runs through `ml-worker`: document chunks are queued automatically
+at startup and after edits; query embeddings and reranking use the same pinned
+local recipes. No hosted API key or model endpoint is used. Set the same
+`MDSTORE_WORKER_TOKEN` on the daemon and worker, then run:
+
+```sh
+ml-worker --server http://mdstore:3131 --recipes text-embeddings-zembed-1-v1 text-rerank-zerank-2-v1
+```
+
+Retrieval jobs and results live under Git's private `mdstore/retrieval` directory.
+They survive daemon restarts without adding generated documents or Git commits.
+Validated document vectors become ignored `.mdstore` sidecars and enter the live
+search index. Changed/deleted chunk inputs and expired worker attempts reject
+completion. Query/ranking requests take priority over document batches and expire
+after `provider.request_timeout_seconds` (default 300). If workers are unavailable,
+search reports degraded retrieval and retains exact search. Pending/failed jobs
+appear in `/health`; failed retrieval jobs support the existing retry operation.
+`provider.batch_size` controls document batches (default 1, maximum 256)
+so interactive work can run between document chunks.
+Models, revisions, and 2,560-dimensional vectors are fixed by the worker recipes.
+Remove old `provider.base_url`, `api_key_env`, `embedding_model`, `rerank_model`,
+and `dimensions` settings from existing configurations; old hosted sidecars
+are rebuilt automatically with the local embedding-space identity.
+
+Declare other derived outputs in root `config.yaml` under `derivations`; see the
 [ML worker](../ml-worker/README.md) for recipes, model versions, and configuration.
 Set `MDSTORE_WORKER_TOKEN` on the daemon and worker to a separate worker credential.
 Workers claim leased jobs through `/worker`, fetch only assigned inputs, and submit

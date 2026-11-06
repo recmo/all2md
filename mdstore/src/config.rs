@@ -20,28 +20,8 @@ fn default_max_chars() -> usize {
     2_000
 }
 
-fn default_dimensions() -> usize {
-    1_280
-}
-
-fn default_embed_model() -> String {
-    "zembed-1".into()
-}
-
-fn default_rerank_model() -> String {
-    "zerank-2".into()
-}
-
-fn default_base_url() -> String {
-    "https://api.zeroentropy.dev/v1".into()
-}
-
-fn default_api_key_env() -> String {
-    "ZEROENTROPY_API_KEY".into()
-}
-
 fn default_request_timeout_seconds() -> u64 {
-    30
+    300
 }
 
 fn default_push_timeout_seconds() -> u64 {
@@ -124,12 +104,15 @@ impl Config {
         }
         let _ = self.document_globs()?;
         for (id, definition) in &self.derivations {
-            if id.is_empty()
+            if id.starts_with("retrieval-")
+                || id.is_empty()
                 || definition.recipe.is_empty()
                 || definition.fields.is_empty()
                 || definition.outputs.is_empty()
             {
-                bail!("derivation name, recipe, fields and outputs must be nonempty");
+                bail!(
+                    "derivations require nonempty name, recipe, fields and outputs; names beginning retrieval- are reserved"
+                );
             }
             validate_repo_path(&definition.source)?;
             let mut outputs = std::collections::BTreeSet::new();
@@ -167,8 +150,15 @@ impl Config {
         if !self.search.graph_weight.is_finite() || self.search.graph_weight < 0.0 {
             bail!("search.graph_weight must be finite and non-negative");
         }
-        if self.provider.dimensions == 0 {
-            bail!("provider.dimensions must be non-zero");
+        if self
+            .provider
+            .batch_size
+            .is_some_and(|size| size == 0 || size > 256)
+        {
+            bail!("provider.batch_size must be between 1 and 256");
+        }
+        if self.search.candidates > 256 {
+            bail!("search.candidates must be at most 256 for the local reranking recipe");
         }
         if self.provider.request_timeout_seconds == 0 {
             bail!("provider.request_timeout_seconds must be non-zero");
@@ -480,40 +470,20 @@ impl Default for SearchConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Configures the external embedding and reranking provider.
+/// Configures retrieval jobs executed by ml-worker.
 pub struct ProviderConfig {
-    #[serde(default = "default_base_url")]
-    /// Provider API base URL.
-    pub base_url: String,
-    #[serde(default = "default_api_key_env")]
-    /// Environment variable containing the API key.
-    pub api_key_env: String,
-    #[serde(default = "default_embed_model")]
-    /// Embedding model identifier.
-    pub embedding_model: String,
-    #[serde(default = "default_rerank_model")]
-    /// Reranking model identifier.
-    pub rerank_model: String,
-    #[serde(default = "default_dimensions")]
-    /// Requested embedding dimensions.
-    pub dimensions: usize,
     #[serde(default)]
     /// Optional document embedding batch size.
     pub batch_size: Option<usize>,
     #[serde(default = "default_request_timeout_seconds")]
-    /// Per-request network timeout in seconds.
+    /// Maximum wait for interactive worker results, in seconds.
     pub request_timeout_seconds: u64,
 }
 
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            base_url: default_base_url(),
-            api_key_env: default_api_key_env(),
-            embedding_model: default_embed_model(),
-            rerank_model: default_rerank_model(),
-            dimensions: default_dimensions(),
-            batch_size: Some(64),
+            batch_size: Some(1),
             request_timeout_seconds: default_request_timeout_seconds(),
         }
     }

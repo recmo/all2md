@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::config::ProviderConfig;
 
@@ -79,15 +78,6 @@ pub(crate) fn validate_rerank_results(
     Ok(())
 }
 
-impl InputType {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Query => "query",
-            Self::Document => "document",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 /// One provider reranking result.
 pub struct RerankResult {
@@ -97,141 +87,180 @@ pub struct RerankResult {
     pub relevance_score: f64,
 }
 
-#[derive(Clone)]
-/// HTTP client for the ZeroEntropy embedding and reranking APIs.
-pub struct ZeroEntropyProvider {
-    client: reqwest::Client,
+#[derive(Debug, thiserror::Error)]
+#[error("document embeddings queued or unavailable")]
+pub(crate) struct PendingEmbeddings;
+
+pub(crate) const EMBED_RECIPE: &str = "text-embeddings-zembed-1-v1";
+pub(crate) const RERANK_RECIPE: &str = "text-rerank-zerank-2-v1";
+const EMBED_MODEL: &str = "zeroentropy/zembed-1-embedding";
+const EMBED_REVISION: &str = "cf13c81f3274394053d166740294f7eea4586f7a";
+const RERANK_MODEL: &str = "zeroentropy/zerank-2-reranker";
+const RERANK_REVISION: &str = "5eae30d5ee3c6b2df2ef6d723bde45172d761c4c";
+
+#[derive(Debug, Clone)]
+/// Posts all retrieval inference to mdstore's durable ML worker queue.
+pub struct WorkerProvider {
+    queue: crate::retrieval_jobs::Queue,
     config: ProviderConfig,
-    api_key: Option<String>,
 }
 
-impl std::fmt::Debug for ZeroEntropyProvider {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ZeroEntropyProvider")
-            .field("config", &self.config)
-            .field("api_key_configured", &self.api_key.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
-impl ZeroEntropyProvider {
+impl WorkerProvider {
     #[must_use]
-    /// Creates a bounded HTTP client and snapshots the configured API key.
-    pub fn new(config: ProviderConfig) -> Self {
-        let api_key = std::env::var(&config.api_key_env)
-            .ok()
-            .filter(|value| !value.is_empty());
+    /// Creates a retrieval provider using the repository's private job directory.
+    pub fn new(config: ProviderConfig, git_dir: &std::path::Path) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(
-                    config.request_timeout_seconds,
-                ))
-                .build()
-                .expect("build ZeroEntropy HTTP client"),
+            queue: crate::retrieval_jobs::Queue::new(git_dir),
             config,
-            api_key,
         }
     }
 
-    fn endpoint(&self, path: &str) -> String {
-        format!("{}/{path}", self.config.base_url.trim_end_matches('/'))
-    }
-
-    fn key(&self) -> Result<&str> {
-        self.api_key
-            .as_deref()
-            .context(format!("{} is not set", self.config.api_key_env))
-    }
-
-    async fn post(&self, endpoint: &str, body: &impl Serialize) -> Result<reqwest::Response> {
-        let mut attempt = 0;
+    async fn request(
+        &self,
+        recipe: &'static str,
+        parameters: serde_json::Value,
+        document: bool,
+    ) -> Result<String> {
+        let items = parameters["texts"].as_array().context("missing texts")?;
+        anyhow::ensure!(
+            !items.is_empty() && items.len() <= 256,
+            "worker requests require 1..256 texts"
+        );
+        for item in items {
+            let text = item["text"].as_str().context("missing text")?;
+            anyhow::ensure!(
+                !text.trim().is_empty() && text.chars().count() <= 32768,
+                "worker texts require 1..32768 characters"
+            );
+        }
+        let queue = self.queue.clone();
+        let timeout = self.config.request_timeout_seconds;
+        let id = tokio::task::spawn_blocking(move || {
+            queue.submit(recipe, parameters, document, timeout)
+        });
+        let id = id.await??;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
         loop {
-            let response = self
-                .client
-                .post(self.endpoint(endpoint))
-                .bearer_auth(self.key()?)
-                .json(body)
-                .send()
-                .await
-                .with_context(|| format!("call ZeroEntropy {endpoint}"))?;
-            let status = response.status();
-            if attempt < 2 && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
+            let queue = self.queue.clone();
+            let identity = id.clone();
+            if let Some(result) =
+                tokio::task::spawn_blocking(move || queue.result(&identity)).await??
             {
-                tokio::time::sleep(std::time::Duration::from_millis(100 * (1_u64 << attempt)))
-                    .await;
-                attempt += 1;
-                continue;
+                return Ok(result);
             }
-            if status != StatusCode::OK {
-                bail!(
-                    "ZeroEntropy {endpoint} returned {status}: {}",
-                    response.text().await.unwrap_or_default()
-                );
+            if document {
+                return Err(PendingEmbeddings.into());
             }
-            return Ok(response);
+            if tokio::time::Instant::now() >= deadline {
+                bail!("ML worker timed out: {id}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 }
 
-#[derive(Serialize)]
-struct EmbedRequest<'a> {
-    model: &'a str,
-    input_type: &'a str,
-    input: &'a [String],
-    dimensions: usize,
-    encoding_format: &'static str,
+fn texts(input: &[String]) -> serde_json::Value {
+    serde_json::Value::Array(
+        input
+            .iter()
+            .enumerate()
+            .map(|(index, text)| serde_json::json!({"id": index.to_string(), "text": text}))
+            .collect(),
+    )
 }
 
 #[derive(Deserialize)]
-struct EmbedResponse {
-    results: Vec<EmbedResult>,
+struct Embeddings {
+    records: Vec<Embedding>,
 }
-
 #[derive(Deserialize)]
-struct EmbedResult {
-    embedding: Vec<f32>,
+struct Embedding {
+    vector: Vec<f32>,
 }
-
-#[derive(Serialize)]
-struct RerankRequest<'a> {
-    model: &'a str,
-    query: &'a str,
-    documents: &'a [String],
-    top_n: usize,
-}
-
 #[derive(Deserialize)]
-struct RerankResponse {
+struct Ranking {
     results: Vec<RerankResult>,
 }
 
+pub(crate) fn validate_result(
+    recipe: &str,
+    parameters: &serde_json::Value,
+    output: &str,
+) -> Result<()> {
+    let body: serde_json::Value = serde_json::from_str(output).context("decode worker result")?;
+    let items = parameters["texts"]
+        .as_array()
+        .context("missing input texts")?;
+    if recipe == EMBED_RECIPE {
+        anyhow::ensure!(
+            body["model"] == EMBED_MODEL
+                && body["revision"] == EMBED_REVISION
+                && body["space"]["recipe"] == EMBED_RECIPE
+                && body["space"]["namespace"] == "search"
+                && body["space"]["dimensions"] == 2560,
+            "wrong embedding model or space"
+        );
+        let embeddings: Embeddings = serde_json::from_value(body.clone())?;
+        let vectors: Vec<_> = embeddings.records.into_iter().map(|r| r.vector).collect();
+        validate_vectors(&vectors, items.len(), 2560)?;
+        for (index, vector) in vectors.iter().enumerate() {
+            anyhow::ensure!(
+                body["records"][index]["id"] == items[index]["id"],
+                "embedding IDs out of order"
+            );
+            anyhow::ensure!(
+                body["records"][index]["metadata"]["text"] == items[index]["text"]
+                    && body["records"][index]["metadata"]["input_type"] == parameters["input_type"],
+                "wrong embedding input"
+            );
+            let norm: f64 = vector.iter().map(|v| f64::from(*v).powi(2)).sum();
+            anyhow::ensure!(
+                (0.99..=1.01).contains(&norm),
+                "embedding must be normalized"
+            );
+        }
+    } else {
+        anyhow::ensure!(
+            recipe == RERANK_RECIPE
+                && body["model"] == RERANK_MODEL
+                && body["revision"] == RERANK_REVISION
+                && body["query"] == parameters["query"],
+            "wrong reranking model or query"
+        );
+        let ranking: Ranking = serde_json::from_value(body.clone())?;
+        let top_n = parameters["top_n"].as_u64().context("missing top_n")? as usize;
+        validate_rerank_results(&ranking.results, items.len(), top_n)?;
+        for (index, result) in ranking.results.iter().enumerate() {
+            anyhow::ensure!(
+                body["results"][index]["id"] == items[result.index]["id"],
+                "wrong reranking ID"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
-impl RetrievalProvider for ZeroEntropyProvider {
+impl RetrievalProvider for WorkerProvider {
     async fn embed(&self, input_type: InputType, input: &[String]) -> Result<Vec<Vec<f32>>> {
         if input.is_empty() {
             return Ok(Vec::new());
         }
-        let response = self
-            .post(
-                "models/embed",
-                &EmbedRequest {
-                    model: &self.config.embedding_model,
-                    input_type: input_type.as_str(),
-                    input,
-                    dimensions: self.config.dimensions,
-                    encoding_format: "float",
-                },
+        let document = matches!(input_type, InputType::Document);
+        let result = self
+            .request(
+                EMBED_RECIPE,
+                serde_json::json!({"texts": texts(input),
+            "input_type": if document { "document" } else { "query" }, "namespace": "search"}),
+                document,
             )
             .await?;
-        let body: EmbedResponse = response.json().await.context("decode embedding response")?;
-        let vectors: Vec<Vec<f32>> = body
-            .results
+        let result: Embeddings = serde_json::from_str(&result)?;
+        Ok(result
+            .records
             .into_iter()
-            .map(|result| result.embedding)
-            .collect();
-        validate_vectors(&vectors, input.len(), self.config.dimensions)?;
-        Ok(vectors)
+            .map(|record| record.vector)
+            .collect())
     }
 
     async fn rerank(
@@ -240,46 +269,30 @@ impl RetrievalProvider for ZeroEntropyProvider {
         documents: &[String],
         top_n: usize,
     ) -> Result<Vec<RerankResult>> {
-        if documents.is_empty() {
+        if documents.is_empty() || top_n == 0 {
             return Ok(Vec::new());
         }
-        let response = self
-            .post(
-                "models/rerank",
-                &RerankRequest {
-                    model: &self.config.rerank_model,
-                    query,
-                    documents,
-                    top_n,
-                },
+        anyhow::ensure!(
+            !query.trim().is_empty() && query.chars().count() <= 32768,
+            "worker queries require 1..32768 characters"
+        );
+        let result = self
+            .request(
+                RERANK_RECIPE,
+                serde_json::json!({"texts": texts(documents),
+            "query": query, "top_n": top_n.min(documents.len())}),
+                false,
             )
             .await?;
-        Ok(response
-            .json::<RerankResponse>()
-            .await
-            .context("decode rerank response")?
-            .results)
+        Ok(serde_json::from_str::<Ranking>(&result)?.results)
     }
-
     fn model(&self) -> &str {
-        &self.config.embedding_model
+        EMBED_MODEL
     }
-
     fn dimensions(&self) -> usize {
-        self.config.dimensions
+        2560
     }
-
     fn embedding_provider_identity(&self) -> String {
-        let endpoint = reqwest::Url::parse(&self.config.base_url).map_or_else(
-            |_| self.config.base_url.trim_end_matches('/').to_owned(),
-            |mut endpoint| {
-                let _ = endpoint.set_username("");
-                let _ = endpoint.set_password(None);
-                endpoint.set_query(None);
-                endpoint.set_fragment(None);
-                endpoint.to_string().trim_end_matches('/').to_owned()
-            },
-        );
-        format!("zeroentropy:{endpoint}")
+        format!("ml-worker:{EMBED_RECIPE}:{EMBED_REVISION}")
     }
 }

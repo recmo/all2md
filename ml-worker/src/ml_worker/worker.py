@@ -129,7 +129,7 @@ def _execute_locked(client, assignment, root, device, token_env, heartbeat_secon
             target = local_path(root, path)
             if target.stat().st_size > MAX_OUTPUT:
                 raise ValueError("output exceeds mdstore's 64 MiB limit")
-            if path.endswith(".md"):
+            if path.endswith(".md") or assignment.get("retrieval", False):
                 texts[path] = target.read_text(encoding="utf-8")
             else:
                 assets[path] = client.request("/" + quote(path, safe="/") + "?" + urlencode({

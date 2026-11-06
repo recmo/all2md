@@ -638,7 +638,7 @@ impl Store {
         self.refresh_external_commit()?;
         let (manifest, jobs) = self.reconcile_jobs()?;
         self.save_jobs(&jobs)?;
-        Ok(jobs
+        let mut jobs: Vec<_> = jobs
             .into_values()
             .map(|mut j| {
                 j.attempt = None;
@@ -647,7 +647,21 @@ impl Store {
                 let published = manifest.publications.contains_key(&j.id);
                 Job::new(j, definition, published)
             })
-            .collect())
+            .collect();
+        let snapshot = self.state.read();
+        let texts = snapshot
+            .index
+            .chunks
+            .iter()
+            .map(|c| c.chunk.embedding_text.as_str())
+            .collect();
+        let (retrieval, changed) = self.retrieval_queue().summaries(&texts)?;
+        jobs.extend(retrieval);
+        if changed {
+            self.changes
+                .send_modify(|change| change.jobs = change.jobs.wrapping_add(1));
+        }
+        Ok(jobs)
     }
 
     pub(crate) fn retry_job(&self, id: &str) -> Result<()> {
@@ -937,7 +951,7 @@ pub(crate) mod tests {
         );
         fs::write(
             dir.path().join("config.yaml"),
-            "server:\n  allow_config_edits: true\ndocuments:\n  include: ['**/*.md']\nprovider:\n  dimensions: 2\ngit:\n  push: false\n",
+            "server:\n  allow_config_edits: true\ndocuments:\n  include: ['**/*.md']\ngit:\n  push: false\n",
         )
         .unwrap();
         fs::write(dir.path().join(".gitignore"), "*.mdstore\n").unwrap();

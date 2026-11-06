@@ -64,13 +64,14 @@ and a semantic smoke check, not a retrieval-quality evaluation.
 
 Query embedding is plausible for local retrieval with a resident model, but this
 reranker implementation is too slow for interactive search. Even 10 short
-passages exceed mdstore's default 30-second provider timeout. Its default is
+passages exceed the former hosted provider's 30-second timeout. Its default is
 30 candidates and approximately 400-token chunks, so the 128-token benchmark
 is an optimistic workload. Two resident FP32 model processes would require
 roughly 30 GiB based on the individual measurements; co-residency was not tested.
-An optimized, quality-checked inference backend is needed before putting ZE
-reranking in the synchronous CPU retrieval path. The worker runs queued jobs;
-mdstore's interactive retrieval continues to use its configured provider.
+These measurements motivate an optimized, quality-checked inference backend.
+Mdstore now queues all search inference to the local worker, with a configurable
+300-second default interactive timeout. That integration does not improve these
+model latencies; long jobs can still time out and leave search degraded.
 
 The Nix-packaged Python 3.13 runtime was also checked with a real query through
 the production CPU loader: 0.609 s warm median (0.596, 0.612, 0.609 s), with

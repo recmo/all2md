@@ -18,6 +18,8 @@ mod moves;
 #[cfg(feature = "server")]
 mod provider;
 #[cfg(feature = "server")]
+mod retrieval_jobs;
+#[cfg(feature = "server")]
 mod search;
 #[cfg(feature = "server")]
 mod sidecar;
@@ -42,7 +44,7 @@ pub use mcp::{MCP_PROTOCOL_VERSION, serve, serve_listener, tool_names};
 #[cfg(feature = "server")]
 pub use moves::Move;
 #[cfg(feature = "server")]
-pub use provider::{InputType, RerankResult, RetrievalProvider, ZeroEntropyProvider};
+pub use provider::{InputType, RerankResult, RetrievalProvider, WorkerProvider};
 #[cfg(feature = "server")]
 pub use search::{SearchResponse, SearchResult};
 #[cfg(feature = "server")]
