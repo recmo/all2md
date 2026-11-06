@@ -99,15 +99,25 @@ of a single-passage time. RSS is the process high-water mark, including loading.
 Other services remain running and CPU affinity is unrestricted, so short runs
 vary. This does not measure concurrent requests or both models resident together.
 
-## Rejected INT8 experiment
+## INT8 experiment
 
 PyTorch dynamic INT8 linear layers reduced the short-query median to 0.198 s
 and the 128-token embedding median to 2.71 s at four threads. However, the
 resulting embeddings had cosine agreement of only **0.803** (query) and **0.844**
 (passage) with the BF16 baseline. The reranker's relevant-passage score changed
-from 12.4375 to 0.0634. These differences fail a numerical agreement smoke check;
-no retrieval-quality evaluation was performed. These timings are not an approved
-production optimization.
+from 12.4375 to 0.0634. Changed raw scores alone do not establish ranking-quality
+loss, and the embedding agreement failure does not establish reranker quality.
+A follow-up three-query smoke check still put the relevant document first in all
+three cases for both FP32 and INT8. No retrieval-quality evaluation was performed;
+quantization is not enabled in production.
+
+The original INT8 reranker median was **3.14 s per 128-token passage** at four
+threads (2.877, 3.136, 3.548 s), versus FP32's 3.72 s: a 1.19× speedup. A separate
+follow-up run measured 2.18 s INT8 versus 3.33 s FP32, both at four threads, but
+with only one warm sample each. This illustrates shared-host variability. Full
+10- and 30-candidate INT8 requests have not been measured. The follow-up INT8
+process used 7.25 GiB RSS after inference, versus FP32's 15.38 GiB; converting
+weights at startup peaked at 15.44 GiB.
 
 The experiment loaded the pinned BF16 weights, replaced each `torch.nn.Linear`
 with `torch.ao.nn.quantized.dynamic.Linear.from_float(layer.float())` using
@@ -115,3 +125,23 @@ with `torch.ao.nn.quantized.dynamic.Linear.from_float(layer.float())` using
 nonquantized parameters to FP32. Initialization took 27.5 s for zembed and
 33.6 s for zerank, with 14.4 and 13.6 GiB peak RSS respectively. This experimental
 quantization is not part of the worker.
+
+## CPU kernel profile
+
+The installed PyTorch build includes MKL 2024.2, oneDNN 3.10.2, OpenMP and
+FBGEMM. Its ATen CPU capability is AVX2; the quantization engine is `x86`.
+`MKL_VERBOSE=1` confirms AVX2 dispatch and `SGEMM` calls with four threads.
+Profiling one 128-token passage at four threads shows:
+
+| Precision | Dominant operator | Share of self CPU operator time | CPU flash attention |
+| --- | --- | ---: | ---: |
+| FP32 | `aten::mm` | 95.04% | 1.79% |
+| Dynamic INT8 | `quantized::linear_dynamic` | 92.49% | 3.30% |
+
+These profiles use optimized native matrix kernels, with the model in eager
+mode. Candidates are processed sequentially. No `torch.compile`, calibrated
+quantization or alternative inference engine was tested. Removing Python
+overhead alone cannot address a matrix-dominated workload. The dynamic INT8
+operator also quantizes activations and returns FP32 between linear layers;
+see the [PyTorch 2.11 implementation](https://github.com/pytorch/pytorch/blob/v2.11.0/aten/src/ATen/native/quantized/cpu/qlinear_dynamic.cpp).
+This is not a fully integer transformer graph.
