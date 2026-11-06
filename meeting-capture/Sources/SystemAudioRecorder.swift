@@ -183,6 +183,7 @@ final class TapPCMWriter: @unchecked Sendable {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.pcm-writer")
     private let source: DispatchSourceUserDataOr
+    private let finished = DispatchSemaphore(value: 0)
     private var failed = false // Writer queue only.
     var onSample: (@Sendable () -> Void)?
     var onError: (@Sendable (Error) -> Void)?
@@ -204,6 +205,11 @@ final class TapPCMWriter: @unchecked Sendable {
             if events & 2 != 0 { self.fail("Process audio queue overflow; audio could not be saved fast enough") }
             if events & 4 != 0 { self.fail("Invalid process audio buffer or timestamp") }
             self.drain()
+            if events & 8 != 0 {
+                self.file.close()
+                self.source.cancel()
+                self.finished.signal()
+            }
         }
         source.resume()
     }
@@ -239,10 +245,13 @@ final class TapPCMWriter: @unchecked Sendable {
     }
 
     private func drain() {
-        while let index = lock.withLock({ readIndex < writeIndex ? readIndex % buffers.count : nil }) {
+        while let pending = lock.withLock({
+            readIndex < writeIndex ? (readIndex % buffers.count, timestamps[readIndex % buffers.count]) : nil
+        }) {
+            let (index, timestamp) = pending
             if !failed {
                 do {
-                    try file.write(buffers[index], at: AVAudioTime.seconds(forHostTime: timestamps[index]))
+                    try file.write(buffers[index], at: AVAudioTime.seconds(forHostTime: timestamp))
                     onSample?()
                 } catch { fail("Process tap PCM write: \(CaptureError.details(error))") }
             }
@@ -258,15 +267,10 @@ final class TapPCMWriter: @unchecked Sendable {
     }
 
     func finish() {
-        queue.sync {
-            // Read pending flags too: a final overflow may precede stop().
-            let events = source.data
-            if events & 2 != 0 { fail("Process audio queue overflow; audio could not be saved fast enough") }
-            if events & 4 != 0 { fail("Invalid process audio buffer or timestamp") }
-            drain()
-            file.close()
-            source.cancel()
-        }
+        // Called only after HAL stops. A final event drains both pending audio
+        // and failure flags before acknowledging close to the stopping thread.
+        source.or(data: 8)
+        finished.wait()
     }
 }
 
