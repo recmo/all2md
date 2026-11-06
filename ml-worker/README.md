@@ -1,8 +1,9 @@
-# MacBook ML worker
+# ML worker
 
-`ml-worker` pulls jobs from mdstore and runs one recipe at a time on an Apple
-Silicon MacBook: transcription, audio enhancement, text embeddings, and reranking.
-It does not run generative LLM jobs.
+`ml-worker` pulls jobs from mdstore and runs one recipe at a time. Apple Silicon
+supports transcription, audio enhancement, text embeddings, and reranking. Linux
+CPU supports audio enhancement and text models; transcription requires MLX and
+is not included in the Linux package. It does not run generative LLM jobs.
 
 | Recipe | Processing | Outputs |
 | --- | --- | --- |
@@ -28,8 +29,8 @@ publish old outputs left in the cache.
 
 ## Run
 
-On Apple Silicon, with Nix and the same separate worker credential configured on
-mdstore and in `MDSTORE_WORKER_TOKEN`:
+On Apple Silicon or Linux, with Nix and the same separate worker credential
+configured on mdstore and in `MDSTORE_WORKER_TOKEN`:
 
 ```sh
 nix run .#ml-worker -- --list-recipes
@@ -41,10 +42,15 @@ nix run .#ml-worker -- --server https://your-mdstore-host --once \
 
 `--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
 when available, otherwise CPU; `--device cpu` forces CPU for text models.
+Text models use FP32 on CPU and BF16 on MPS. Allow roughly 16 GiB for one CPU
+text-model process; `OMP_NUM_THREADS=4` can limit its CPU parallelism.
 DeepFilterNet uses its native Rust/CPU runtime. Nix packages the dependencies and
 embeds the DeepFilterNet3 model. The two text models download pinned weights into
 the Hugging Face cache on first use; loading disables remote Python code and
 requires safetensors. No packages or toolchains are installed at runtime.
+
+See [Zawrat CPU measurements](benchmarks.md) before scheduling the 4B text models
+on a CPU. These queued recipes do not provide synchronous mdstore retrieval.
 
 Use `--recipes speech2md-v1` for a transcription-only worker.
 Use `ml-worker` for the additional recipes; its transcription recipe invokes the
@@ -171,15 +177,24 @@ and L2-normalizes the 2,560-dimensional results. These conventions match the
 pinned Sentence Transformers configuration without executing its custom Python.
 Embedding-space identity includes the recipe and namespace; text vectors cannot
 use the `speakers` namespace. The new recipe cannot mix with old E5 artifacts.
-Local vectors are not assumed interchangeable with hosted provider vectors;
-queries and documents must use the same recipe and revision.
+Queries and documents must use the same local recipe and revision. Mdstore has
+no hosted ZeroEntropy API integration or fallback.
 
 Outputs use mdstore's existing `space`/`records` vector artifact format, with
 record IDs, original text, input mode, model revision, and source provenance.
-They can participate in frozen references through `reference_namespace` and
-leased vector search. They do **not** automatically replace mdstore's configured
-interactive search provider or its document-chunk sidecars. Author the intended
-passages in `ml.texts`; arbitrary source-body edits are not embedding inputs.
+Explicit derivations can participate in frozen references through
+`reference_namespace` and leased vector search. Author their passages in `ml.texts`;
+arbitrary source-body edits are not inputs to an explicit derivation.
+
+Mdstore also queues its own search chunks automatically and sends query embeddings
+and reranking through these same recipes. Workers claim these retrieval assignments
+through `/worker` and return their JSON inline in completion. Mdstore validates the
+pinned model, revision, input IDs, dimensions, normalization, and lease before
+installing document vectors into its sidecars and live search index. Retrieval
+assignments do not publish repository artifacts or create Git commits. Each attempt
+uses an isolated temporary workspace that is removed when the attempt ends. Workers
+claim the next job immediately after processing one and wait only when idle or after an error. See
+[mdstore](../mdstore/README.md) for configuration and migration.
 
 ### Reranking
 

@@ -46,13 +46,40 @@ pub(super) async fn handle(
     if !is_worker && !matches!(request, WorkerRequest::Retry { .. }) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match run_blocking(move || match request {
-        WorkerRequest::Retry { id } => { state.store.retry_job(&id)?; Ok(Value::Null) },
+    let result = run_blocking(move || match request {
+        WorkerRequest::Retry { id } => {
+            if id.starts_with("retrieval-") {
+                state.store.with_retrieval(|queue, _| queue.retry(&id))?;
+                state.store.notify_reindex();
+            } else {
+                state.store.retry_job(&id)?;
+            }
+            Ok(Value::Null)
+        }
         WorkerRequest::Search { id, attempt, query } => {
-            Ok(json!({"results": state.store.search_reference_vectors(query.space, query.vector, query.limit, query.filter, (id, attempt))?}))
+            let results = state.store.search_reference_vectors(
+                query.space,
+                query.vector,
+                query.limit,
+                query.filter,
+                (id, attempt),
+            )?;
+            Ok(json!({"results": results}))
         }
         WorkerRequest::Claim { recipes } => {
-            Ok(serde_json::to_value(state.store.claim_job(&recipes)?)?)
+            if let Some(assignment) = state
+                .store
+                .with_retrieval(|queue, texts| queue.claim(&recipes, texts, false))?
+            {
+                Ok(assignment)
+            } else if let Some(assignment) = state.store.claim_job(&recipes)? {
+                Ok(serde_json::to_value(assignment)?)
+            } else {
+                Ok(state
+                    .store
+                    .with_retrieval(|queue, texts| queue.claim(&recipes, texts, true))?
+                    .unwrap_or(Value::Null))
+            }
         }
         WorkerRequest::Heartbeat {
             id,
@@ -60,7 +87,13 @@ pub(super) async fn handle(
             progress,
             failure,
         } => {
-            state.store.heartbeat(&id, &attempt, progress, failure)?;
+            if id.starts_with("retrieval-") {
+                state.store.with_retrieval(|queue, texts| {
+                    queue.heartbeat(&id, &attempt, failure, texts)
+                })?;
+            } else {
+                state.store.heartbeat(&id, &attempt, progress, failure)?;
+            }
             Ok(Value::Null)
         }
         WorkerRequest::Complete {
@@ -69,19 +102,27 @@ pub(super) async fn handle(
             outputs,
             assets,
         } => {
-            state.store.complete_job(
-                &id,
-                Completion {
-                    attempt,
-                    outputs,
-                    assets,
-                },
-            )?;
+            if id.starts_with("retrieval-") {
+                anyhow::ensure!(assets.is_empty(), "retrieval results must be inline JSON");
+                state.store.with_retrieval(|queue, texts| {
+                    queue.complete(&id, &attempt, &outputs, texts)
+                })?;
+                state.store.notify_reindex();
+            } else {
+                state.store.complete_job(
+                    &id,
+                    Completion {
+                        attempt,
+                        outputs,
+                        assets,
+                    },
+                )?;
+            }
             Ok(Value::Null)
         }
     })
-    .await
-    {
+    .await;
+    match result {
         Ok(value) => Json(value).into_response(),
         Err(error) => problem::Problem::from_error(&error).into_response(),
     }
@@ -95,4 +136,242 @@ pub(super) struct VectorQuery {
     limit: usize,
     #[serde(default)]
     filter: std::collections::BTreeMap<String, Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{EMBED_RECIPE, RERANK_RECIPE};
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn request(app: &Router, value: Value) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/worker")
+                    .header("authorization", "Bearer worker")
+                    .header("content-type", "application/json")
+                    .body(Body::from(value.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn result(assignment: &Value) -> Value {
+        let parameters = &assignment["parameters"]["ml"];
+        let texts = parameters["texts"].as_array().unwrap();
+        let mut body = if assignment["job"]["recipe"] == EMBED_RECIPE {
+            let mut vector = vec![0.0; 2560];
+            vector[0] = 1.0;
+            json!({"model":"zeroentropy/zembed-1-embedding", "revision":"cf13c81f3274394053d166740294f7eea4586f7a",
+                "space":{"recipe": EMBED_RECIPE, "namespace":"search", "dimensions":2560},
+                "records": texts.iter().map(|text| json!({"id":text["id"], "vector":vector,
+                    "metadata":{"text":text["text"], "input_type":parameters["input_type"]}})).collect::<Vec<_>>()})
+        } else {
+            json!({"model":"zeroentropy/zerank-2-reranker", "revision":"5eae30d5ee3c6b2df2ef6d723bde45172d761c4c",
+                "query":parameters["query"], "results": texts.iter().enumerate().take(parameters["top_n"].as_u64().unwrap() as usize)
+                    .map(|(index,text)| json!({"index":index,"id":text["id"],"relevance_score":1.0})).collect::<Vec<_>>()})
+        };
+        body["provenance"] = json!({"recipe":assignment["job"]["recipe"], "fingerprint":assignment["job"]["fingerprint"]});
+        json!({"op":"complete", "id":assignment["job"]["id"], "attempt":assignment["job"]["attempt"],
+            "outputs": {crate::retrieval_jobs::OUTPUT:body.to_string()}})
+    }
+
+    #[tokio::test]
+    async fn retrieval_workers_index_search_restart_and_fence_changed_chunks() {
+        let (dir, fixture) = crate::store::artifacts::tests::fixture();
+        fixture
+            .apply_edits(&ApplyEditsRequest {
+                summary: "Add searchable body".into(),
+                edits: vec![crate::EditOperation::Append {
+                    path: "recording.md".into(),
+                    anchor: None,
+                    content: "Recording content to search.\n\n## Details\n\nAdditional recording details.\n".into(),
+                }],
+                expected_commit: None,
+                moves: vec![],
+            })
+            .unwrap();
+        fixture
+            .create_derivation(crate::DerivationConfig {
+                source: "recording.md".into(),
+                recipe: "fixture-v1".into(),
+                fields: vec!["hotwords".into()],
+                inputs: vec![],
+                outputs: vec!["transcript.md".into()],
+                reference_namespace: None,
+            })
+            .unwrap();
+        drop(fixture);
+        let store = Store::open(dir.path()).unwrap();
+        let app = application(AppState {
+            store: store.clone(),
+            worker_token: Some("worker".into()),
+        });
+        let claim = json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]});
+        assert!(store.reindex_missing().await.is_err());
+        assert!(store.status().unwrap().vectors_total > 0);
+        assert_eq!(store.status().unwrap().vectors_ready, 0);
+        assert!(
+            store
+                .jobs()
+                .unwrap()
+                .iter()
+                .all(|job| job.state.status == "queued")
+        );
+        // Interactive queries precede declared jobs, which precede background indexing.
+        let interactive = store.retrieval_queue().submit(EMBED_RECIPE,
+            json!({"texts":[{"id":"0","text":"Which recording?"}],"input_type":"query","namespace":"search"}), false, 30).unwrap();
+        let all_recipes = json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE,"fixture-v1"]});
+        let (_, query) = request(&app, all_recipes.clone()).await;
+        assert_eq!(query["job"]["id"], interactive);
+        assert_eq!(request(&app, result(&query)).await.0, StatusCode::OK);
+        let (_, declared) = request(&app, all_recipes.clone()).await;
+        assert_eq!(declared["job"]["recipe"], "fixture-v1");
+        let (_, assignment) = request(&app, claim.clone()).await;
+        assert_eq!(assignment["parameters"]["ml"]["input_type"], "document");
+        let completion = result(&assignment);
+        // A restarted daemon still accepts a valid outstanding lease.
+        drop(app);
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        let app = application(AppState {
+            store: store.clone(),
+            worker_token: Some("worker".into()),
+        });
+        let mut wrong = completion.clone();
+        wrong["attempt"] = json!("superseded");
+        assert_eq!(
+            request(&app, wrong).await.0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let mut wrong = completion.clone();
+        let mut body: Value = serde_json::from_str(
+            wrong["outputs"][crate::retrieval_jobs::OUTPUT]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        body["revision"] = json!("wrong-model-revision");
+        wrong["outputs"][crate::retrieval_jobs::OUTPUT] = json!(body.to_string());
+        assert_eq!(
+            request(&app, wrong).await.0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(request(&app, completion.clone()).await.0, StatusCode::OK);
+        assert_eq!(request(&app, completion).await.0, StatusCode::OK);
+        assert!(store.reindex_missing().await.is_err());
+        let partial = store.status().unwrap();
+        assert!(partial.vectors_ready > 0 && partial.vectors_ready < partial.vectors_total);
+        let (_, second_chunk) = request(&app, claim.clone()).await;
+        assert_eq!(request(&app, result(&second_chunk)).await.0, StatusCode::OK);
+        store.reindex_missing().await.unwrap();
+        assert_eq!(
+            store.status().unwrap().vectors_ready,
+            store.status().unwrap().vectors_total
+        );
+        assert!(dir.path().join("recording.mdstore").exists());
+        // A forced rebuild must remain pending until fresh results replace the old sidecar.
+        assert!(store.reindex().await.is_err());
+        assert!(store.reindex_missing().await.is_err());
+        for _ in 0..store.status().unwrap().vectors_total {
+            let (_, assignment) = request(&app, claim.clone()).await;
+            let mut completion = result(&assignment);
+            let mut body: Value = serde_json::from_str(
+                completion["outputs"][crate::retrieval_jobs::OUTPUT]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            for record in body["records"].as_array_mut().unwrap() {
+                record["vector"][0] = json!(0.0);
+                record["vector"][1] = json!(1.0);
+            }
+            completion["outputs"][crate::retrieval_jobs::OUTPUT] = json!(body.to_string());
+            assert_eq!(request(&app, completion).await.0, StatusCode::OK);
+        }
+        store.reindex_missing().await.unwrap();
+        let rebuilt = crate::sidecar::read(&dir.path().join("recording.mdstore")).unwrap();
+        assert!(
+            rebuilt
+                .chunks
+                .iter()
+                .all(|chunk| chunk.vector_le_f32[..4] == 0.0_f32.to_le_bytes()
+                    && chunk.vector_le_f32[4..8] == 1.0_f32.to_le_bytes())
+        );
+        // Both query embeddings and reranking are claimed from the same worker endpoint.
+        let searching = store.clone();
+        let search = tokio::spawn(async move { searching.search("Recording", &[]).await.unwrap() });
+        let mut modes = Vec::new();
+        for _ in 0..200 {
+            let (_, assignment) = request(&app, claim.clone()).await;
+            if !assignment.is_null() {
+                modes.push((
+                    assignment["job"]["recipe"].clone(),
+                    assignment["parameters"]["ml"]["input_type"].clone(),
+                ));
+                assert_eq!(request(&app, result(&assignment)).await.0, StatusCode::OK);
+            }
+            if search.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(search.is_finished());
+        let response = search.await.unwrap();
+        assert!(response.degraded.is_empty(), "{:?}", response.degraded);
+        assert!(!response.results.is_empty());
+        assert_eq!(
+            modes,
+            vec![
+                (json!(EMBED_RECIPE), json!("query")),
+                (json!(RERANK_RECIPE), Value::Null)
+            ]
+        );
+        // A changed chunk cannot accept a previously claimed result.
+        assert!(store.reindex().await.is_err());
+        let (_, stale) = request(&app, claim.clone()).await;
+        let page = store.file_page("recording.md").unwrap();
+        let changed = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("PUT")
+                    .uri("/recording.md")
+                    .header("if-match", format!("\"{}\"", page.hash.unwrap()))
+                    .body(Body::from("# Changed document\n\nFresh searchable text.\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(changed.status().is_success(), "{}", changed.status());
+        assert_eq!(
+            request(&app, result(&stale)).await.0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert!(store.reindex_missing().await.is_err());
+        let (_, fresh) = request(&app, claim).await;
+        assert_ne!(fresh["job"]["id"], stale["job"]["id"]);
+        assert_eq!(request(&app, result(&fresh)).await.0, StatusCode::OK);
+        store.reindex_missing().await.unwrap();
+        assert_eq!(
+            store.status().unwrap().vectors_ready,
+            store.status().unwrap().vectors_total
+        );
+        drop(app);
+        drop(store);
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.status().unwrap().vectors_ready,
+            reopened.status().unwrap().vectors_total
+        );
+    }
 }

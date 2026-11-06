@@ -135,11 +135,12 @@ text.embeddings, text.rerank = embed, rerank
     return processes
 
 
-@pytest.mark.parametrize(('recipe', 'capture_version'), [
-    (text.EMBED_RECIPE, None), (text.RERANK_RECIPE, None), (recipes.LEVELS_RECIPE, None),
-    *((recipes.SPEECH_RECIPE, version) for version in (None, 1, 2, 3)),
+@pytest.mark.parametrize(('recipe', 'capture_version', 'retrieval'), [
+    (text.EMBED_RECIPE, None, False), (text.RERANK_RECIPE, None, False), (recipes.LEVELS_RECIPE, None, False),
+    (text.EMBED_RECIPE, None, True), (text.RERANK_RECIPE, None, True),
+    *((recipes.SPEECH_RECIPE, version, False) for version in (None, 1, 2, 3)),
 ])
-def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, capture_version):
+def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, capture_version, retrieval):
     client, state = server
     fixture_models(monkeypatch)
     monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
@@ -191,16 +192,20 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
             state['inputs']['jobs/capture.json'] = json.dumps(capture).encode()
             state['assignment'] = assignment(recipe, params, state['inputs'], outputs)
             state['assignment']['recording'] = '---\nmanifest: capture.json\n---\n# Recording\n'
+    state['assignment']['retrieval'] = retrieval
     assert worker.main(['--server', client.server, '--once', '--recipes', recipe,
                         '--cache', str(tmp_path/'cache')]) == 0
     assert len(state['completed']) == 1 and not state['failed']
     assert state['completion_requests'] == 2
+    if retrieval:
+        assert not list((tmp_path/'cache').rglob('.assignment.json'))
+        assert not list((tmp_path/'cache').rglob('.worker.lock'))
     complete = state['completed'][0]
-    assert set(complete['assets']) == {p for p in outputs if not p.endswith('.md')}
-    assert set(complete['outputs']) == {p for p in outputs if p.endswith('.md')}
+    assert set(complete['assets']) == {p for p in outputs if not p.endswith('.md') and not retrieval}
+    assert set(complete['outputs']) == {p for p in outputs if p.endswith('.md') or retrieval}
     for path, asset in complete['assets'].items():
         assert asset['oid'] == hashlib.sha256(state['outputs'][path]).hexdigest()
-    result = json.loads(state['outputs'][outputs[-1]])
+    result = json.loads(complete['outputs'][outputs[-1]] if retrieval else state['outputs'][outputs[-1]])
     if recipe == recipes.SPEECH_RECIPE:
         assert result['records'][0]['metadata']['suggestions'][0]['metadata']['identity'] == 'people/alice.md'
         previous = next((tmp_path/'cache').rglob('.assignment.json')).parent
@@ -230,11 +235,13 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
         assert len(result['records'][0]['vector']) == text.DIMENSIONS
 
 
-def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeypatch):
+@pytest.mark.parametrize('retrieval', [False, True])
+def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeypatch, retrieval):
     client, state = server
     marker = tmp_path/'started'
     processes = fixture_models(monkeypatch, started=marker)
     state['assignment'] = assignment(text.EMBED_RECIPE, {'texts': [{'id':'x','text':'hello'}]}, {}, ['jobs/result.json'])
+    state['assignment']['retrieval'] = retrieval
     state['lose_lease'] = marker.exists
     started = time.monotonic()
     with pytest.raises(RuntimeError, match='lease lost'):
@@ -242,6 +249,9 @@ def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeyp
     assert time.monotonic()-started < 5
     assert processes and all(p.poll() is not None for p in processes)
     assert not state['outputs'] and not state['completed']
+    if retrieval:
+        assert not list((tmp_path/'cache').rglob('.assignment.json'))
+        assert not list((tmp_path/'cache').rglob('.worker.lock'))
 
 
 def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):

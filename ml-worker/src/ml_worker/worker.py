@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from urllib.parse import quote, urlencode
 
@@ -38,9 +39,16 @@ def capabilities():
 def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORKER_TOKEN", heartbeat_seconds=30):
     job = assignment["job"]
     scope = hashlib.sha256(client.server.encode()).hexdigest()
+    cache_root = cache.expanduser().resolve() / scope
+    cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if assignment.get("retrieval", False):
+        with tempfile.TemporaryDirectory(prefix="retrieval-", dir=cache_root) as directory:
+            root = Path(directory) / "work"
+            root.mkdir(mode=0o700)
+            return _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, None)
     identity = hashlib.sha256(job["id"].encode()).hexdigest()
-    job_root = cache.expanduser().resolve() / scope / identity
-    job_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    job_root = cache_root / identity
+    job_root.mkdir(exist_ok=True, mode=0o700)
     with (job_root / ".worker.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fingerprint = job["fingerprint"]
@@ -94,7 +102,7 @@ def _execute_locked(client, assignment, root, device, token_env, heartbeat_secon
             env={k: v for k, v in os.environ.items() if k not in {token_env, "MDSTORE_WORKER_TOKEN"}},
             stdin=subprocess.DEVNULL, start_new_session=True,
             # Preserve the cache lock if the parent crashes while inference runs.
-            pass_fds=(lock_fd,),
+            pass_fds=() if lock_fd is None else (lock_fd,),
         )
         try:
             while process.poll() is None:
@@ -129,7 +137,7 @@ def _execute_locked(client, assignment, root, device, token_env, heartbeat_secon
             target = local_path(root, path)
             if target.stat().st_size > MAX_OUTPUT:
                 raise ValueError("output exceeds mdstore's 64 MiB limit")
-            if path.endswith(".md"):
+            if path.endswith(".md") or assignment.get("retrieval", False):
                 texts[path] = target.read_text(encoding="utf-8")
             else:
                 assets[path] = client.request("/" + quote(path, safe="/") + "?" + urlencode({
@@ -181,6 +189,8 @@ def main(argv=None):
                     execute(client, assignment, args.cache, device=args.device, token_env=args.token_env)
                 if args.once:
                     return 0
+                if assignment:
+                    continue
             except Exception as error:
                 print(f"worker: {error}", file=sys.stderr)
                 if args.once:

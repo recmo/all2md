@@ -53,7 +53,10 @@ fn application(state: AppState) -> Router {
         .route("/path/", get(raw_root))
         .route("/path/{*path}", get(raw_path))
         .route("/mcp/events", get(events::subscribe))
-        .route("/worker", post(worker::handle))
+        .route(
+            "/worker",
+            post(worker::handle).layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .merge(files::routes())
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .layer(middleware::from_fn(problem::normalize))
@@ -179,7 +182,7 @@ fn raw_document(store: &Store, path: &str, headers: &HeaderMap) -> Response {
         HeaderValue::from_str(&revision).expect("Git object ID"),
     );
     if let Some(template) = template {
-        let mut url = reqwest::Url::parse("http://mdstore.invalid/path").expect("static URL");
+        let mut url = url::Url::parse("http://mdstore.invalid/path").expect("static URL");
         url.path_segments_mut()
             .expect("hierarchical URL")
             .extend(template.trim_start_matches('/').split('/'));

@@ -23,7 +23,7 @@ use crate::{
     git::{self, PushState},
     hashline::{EditOperation, apply_operations, render},
     markdown::{Edge, Finding, ParsedPage, validate_corpus},
-    provider::{InputType, RetrievalProvider, ZeroEntropyProvider},
+    provider::{InputType, RetrievalProvider, WorkerProvider, validate_vectors},
     search::{PageChunks, SearchIndex, SearchResponse, SearchResult},
     sidecar::{self, Sidecar},
 };
@@ -37,7 +37,7 @@ pub struct Store {
     root: PathBuf,
     changes: tokio::sync::watch::Sender<changes::Change>,
     state: RwLock<Arc<StoreState>>,
-    provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
+    provider_factory: Option<fn(ProviderConfig, &Path) -> Arc<dyn RetrievalProvider>>,
     reindex_lock: tokio::sync::Mutex<()>,
     git_dir: PathBuf,
     reindex_notify: tokio::sync::Notify,
@@ -222,7 +222,34 @@ pub struct ReplicationStatus {
 }
 
 impl Store {
-    /// Opens a repository with its configured ZeroEntropy provider.
+    pub(crate) fn retrieval_queue(&self) -> crate::retrieval_jobs::Queue {
+        crate::retrieval_jobs::Queue::new(&self.git_dir)
+    }
+
+    pub(crate) fn with_retrieval<T>(
+        &self,
+        action: impl FnOnce(
+            &crate::retrieval_jobs::Queue,
+            &std::collections::HashSet<&str>,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let _guard = self.lock_repository()?;
+        self.refresh_external_commit()?;
+        let snapshot = self.state.read();
+        let texts = snapshot
+            .index
+            .chunks
+            .iter()
+            .map(|c| c.chunk.embedding_text.as_str())
+            .collect();
+        action(&self.retrieval_queue(), &texts)
+    }
+
+    pub(crate) fn notify_reindex(&self) {
+        self.reindex_notify.notify_one();
+    }
+
+    /// Opens a repository with its configured ML worker provider.
     pub fn open(root: impl AsRef<Path>) -> Result<Arc<Self>> {
         let (root, git_dir) = Self::prepare_repository(root)?;
         Self::open_stable(&root, &git_dir, None)
@@ -278,9 +305,12 @@ impl Store {
                 let (provider, provider_factory) = if let Some(provider) = injected_provider {
                     (Arc::clone(provider), None)
                 } else {
-                    let factory: fn(ProviderConfig) -> Arc<dyn RetrievalProvider> =
-                        zeroentropy_provider;
-                    (zeroentropy_provider(config.provider.clone()), Some(factory))
+                    let factory: fn(ProviderConfig, &Path) -> Arc<dyn RetrievalProvider> =
+                        worker_provider;
+                    (
+                        worker_provider(config.provider.clone(), git_dir),
+                        Some(factory),
+                    )
                 };
                 let store = Self::open_inner(
                     root.to_path_buf(),
@@ -312,7 +342,7 @@ impl Store {
         config: Config,
         provider: Arc<dyn RetrievalProvider>,
         git_dir: PathBuf,
-        provider_factory: Option<fn(ProviderConfig) -> Arc<dyn RetrievalProvider>>,
+        provider_factory: Option<fn(ProviderConfig, &Path) -> Arc<dyn RetrievalProvider>>,
     ) -> Result<Arc<Self>> {
         let snapshot = load_snapshot(&root, head, config, provider, 0)?;
         let blocked = read_blocked(&git_dir)?;
@@ -637,7 +667,7 @@ impl Store {
             let factory = self
                 .provider_factory
                 .context("provider changes require a daemon with a configurable provider")?;
-            factory(config.provider.clone())
+            factory(config.provider.clone(), &self.git_dir)
         } else {
             current.provider.clone()
         };
@@ -769,7 +799,11 @@ impl Store {
         tokio::spawn(async move {
             let result = store.reindex_all(force).await;
             if let Err(error) = &result {
-                tracing::error!(%error, "reindex failed");
+                if error.is::<crate::provider::PendingEmbeddings>() {
+                    tracing::debug!("document embeddings pending");
+                } else {
+                    tracing::error!(%error, "reindex failed");
+                }
             }
             result
         })
@@ -779,6 +813,10 @@ impl Store {
 
     async fn reindex_all(&self, force: bool) -> Result<()> {
         let _guard = self.reindex_lock.lock().await;
+        if force && self.provider_factory.is_some() {
+            let queue = self.retrieval_queue();
+            blocking(move || queue.clear_documents()).await?;
+        }
         let snapshot = self.state.read().clone();
         let generation = snapshot.generation;
         let root = self.root.clone();
@@ -786,6 +824,8 @@ impl Store {
         if self.state.read().generation != generation {
             return Ok(());
         }
+        let mut incomplete = false;
+        let mut failure = None;
         for action in context.actions {
             match action {
                 ReindexAction::Remove(path) => {
@@ -812,20 +852,34 @@ impl Store {
                         .config
                         .provider
                         .batch_size
-                        .unwrap_or(64)
+                        .unwrap_or(1)
                         .max(1);
+                    let mut pending = false;
                     for batch in chunks.chunks(batch_size) {
                         let input: Vec<String> = batch
                             .iter()
                             .map(|chunk| chunk.embedding_text.clone())
                             .collect();
-                        vectors.extend(
-                            context
-                                .snapshot
-                                .provider
-                                .embed(InputType::Document, &input)
-                                .await?,
-                        );
+                        match context
+                            .snapshot
+                            .provider
+                            .embed(InputType::Document, &input)
+                            .await
+                            .and_then(|vectors| {
+                                validate_vectors(&vectors, batch.len(), context.dimensions)?;
+                                Ok(vectors)
+                            }) {
+                            Ok(batch) => vectors.extend(batch.into_iter().map(Some)),
+                            Err(error) => {
+                                if !error.is::<crate::provider::PendingEmbeddings>()
+                                    && failure.is_none()
+                                {
+                                    failure = Some(error.context(format!("embed document {path}")));
+                                }
+                                vectors.extend(std::iter::repeat_n(None, batch.len()));
+                                pending = true;
+                            }
+                        }
                         if self.state.read().generation != generation {
                             return Ok(());
                         }
@@ -833,6 +887,14 @@ impl Store {
                     if self.state.read().generation != generation {
                         return Ok(());
                     }
+                    if pending {
+                        incomplete = true;
+                        context
+                            .ready
+                            .insert(path, chunks.into_iter().zip(vectors).collect());
+                        continue;
+                    }
+                    let vectors: Vec<_> = vectors.into_iter().flatten().collect();
                     let provider_identity = context.provider_identity.clone();
                     let model = context.model.clone();
                     let dimensions = context.dimensions;
@@ -871,6 +933,12 @@ impl Store {
         let mut current = self.state.write();
         if current.generation == generation {
             Arc::make_mut(&mut current).index = Arc::new(index);
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if incomplete {
+            return Err(crate::provider::PendingEmbeddings.into());
         }
         Ok(())
     }
@@ -1033,7 +1101,7 @@ impl Store {
                 let reason = "external commit changes provider configuration; restart required";
                 bail!(reason);
             };
-            factory(config.provider.clone())
+            factory(config.provider.clone(), &self.git_dir)
         } else {
             current_state.provider.clone()
         };
@@ -1351,6 +1419,10 @@ fn prepare_reindex(root: &Path, snapshot: Arc<StoreState>, force: bool) -> Resul
             .into_iter()
             .map(|(chunk, _)| chunk)
             .collect();
+        if force {
+            // Later asynchronous passes must not reload the vectors being replaced.
+            actions.push(ReindexAction::Remove(sidecar_path.clone()));
+        }
         actions.push(ReindexAction::Embed {
             path,
             text: text.clone(),
@@ -1464,8 +1536,8 @@ fn embedding_context(config: &Config, page: &ParsedPage) -> Vec<String> {
         .collect()
 }
 
-fn zeroentropy_provider(config: ProviderConfig) -> Arc<dyn RetrievalProvider> {
-    Arc::new(ZeroEntropyProvider::new(config))
+fn worker_provider(config: ProviderConfig, git_dir: &Path) -> Arc<dyn RetrievalProvider> {
+    Arc::new(WorkerProvider::new(config, git_dir))
 }
 
 fn read_blocked(git_dir: &Path) -> Result<Option<WriteBlock>> {
@@ -1477,7 +1549,7 @@ fn read_blocked(git_dir: &Path) -> Result<Option<WriteBlock>> {
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("state file has no parent")?;
     fs::create_dir_all(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;

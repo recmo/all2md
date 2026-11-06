@@ -186,11 +186,7 @@ impl SearchIndex {
         let mut degraded = Vec::new();
         let query_vectors = match provider.embed(InputType::Query, &formulations).await {
             Ok(query_vectors) => {
-                match validate_vectors(
-                    &query_vectors,
-                    formulations.len(),
-                    config.provider.dimensions,
-                ) {
+                match validate_vectors(&query_vectors, formulations.len(), provider.dimensions()) {
                     Ok(()) => Some(query_vectors),
                     Err(error) => {
                         degraded.push(format!("embedding: {error}"));

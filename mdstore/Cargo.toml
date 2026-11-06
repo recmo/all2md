@@ -14,7 +14,7 @@ server = [
     "dep:fs2",
     "dep:fastrand",
     "dep:parking_lot",
-    "dep:reqwest",
+    "dep:url",
     "dep:serde_cbor",
     "dep:tempfile",
     "dep:thiserror",
@@ -45,7 +45,7 @@ jsonschema = { version = "0.33", default-features = false }
 parking_lot = { version = "0.12", optional = true }
 pulldown-cmark = "0.13"
 regex = "1.11"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+url = { version = "2", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_cbor = { version = "0.11", optional = true }
 serde_json = "1.0"
