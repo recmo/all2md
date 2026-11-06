@@ -527,7 +527,7 @@
               '';
             };
 
-            meeting-capture = pkgs.mkShell {
+            meeting-capture = pkgs.mkShellNoCC {
               packages = [
                 pkgs.ffmpeg
                 pkgs.xcodegen
