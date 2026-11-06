@@ -26,7 +26,6 @@
   } = $props();
   type Job = {
     id: string;
-    source: string;
     status: string;
     published: boolean;
     error?: string;
@@ -34,6 +33,7 @@
   };
   type Definition = {
     source: string;
+    recipe: string;
     outputs: string[];
     inputs: string[];
   };
@@ -59,7 +59,7 @@
     track = $state('mixed');
   const guidance = $derived(properties(page.text));
   const segments = $derived(turns(transcript));
-  const job = $derived(jobs.find((job) => job.source === page.path));
+  const job = $derived(jobs.find((job) => job.id === definitionId));
   const attendees = $derived(guidance.attendees || []);
   let suggestions = $state<
     {
@@ -94,9 +94,11 @@
     >;
     definitionId =
       Object.keys(definitions).find(
-        (id) => definitions[id].source === page.path
+        (id) =>
+          definitions[id].source === page.path &&
+          definitions[id].recipe === 'speech2md-v1'
       ) || '';
-    definition = Object.values(definitions).find((d) => d.source === page.path);
+    definition = definitions[definitionId];
     jobs = (await api.request<{ jobs: Job[] }>('/health')).jobs;
     if (definition && job?.published) {
       const path = definition.outputs.find((path) => path.endsWith('.md'));

@@ -46,6 +46,10 @@ def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORK
         fingerprint = job["fingerprint"]
         # Hash the label rather than trusting a server string as a cache path.
         root = job_root / hashlib.sha256(fingerprint.encode()).hexdigest()
+        # Retain this workspace for retries and the shared MOSS cache at job_root.
+        for previous in job_root.iterdir():
+            if previous.is_dir() and previous != root:
+                shutil.rmtree(previous)
         root.mkdir(exist_ok=True, mode=0o700)
         _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock.fileno())
 

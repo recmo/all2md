@@ -1,9 +1,8 @@
 # MacBook ML worker
 
 `ml-worker` pulls jobs from mdstore and runs one recipe at a time on an Apple
-Silicon MacBook. It extends the transcription work in
-[PR #36](https://github.com/recmo/all2md/pull/36) with audio enhancement, text
-embeddings, and reranking. It does not run generative LLM jobs.
+Silicon MacBook: transcription, audio enhancement, text embeddings, and reranking.
+It does not run generative LLM jobs.
 
 | Recipe | Processing | Outputs |
 | --- | --- | --- |
@@ -18,7 +17,8 @@ recipes. Inference runs in a child process; lease loss or interruption kills its
 process group, including audio tools. Inputs are verified by SHA-256, outputs
 must match the assignment, and mdstore fences stale attempts and validates atomic
 publication. Worker credentials are removed from the inference subprocess.
-Workspaces are isolated by server, job, and fingerprint. The MOSS cache is shared
+Workspaces are isolated by server, job, and fingerprint. Starting a new fingerprint
+removes that job's obsolete workspaces under its lock. The MOSS cache is shared
 across a job’s fingerprints and validated by speech2md before reuse, so speaker
 corrections can replay compatible generations. A file lock prevents two
 attempts from concurrently using a job's workspace, including a child whose parent
@@ -130,9 +130,8 @@ preprocessing without changing the original recording. Choose original or enhanc
 inputs explicitly and compare transcript and speaker-match quality. MOSS and
 ReDimNet2 do not require external denoising in their documented inference paths.
 
-Enhanced files can be opened with the existing WebUI file player. The integrated
-Original/Enhanced switch described in [the WebUI plan](../webui/SPEECH_REVIEW.md#planned-enhanced-audio-playback)
-is still planned; playback preference must remain independent of model input.
+Enhanced files can be opened with the existing WebUI file player; an integrated
+Original/Enhanced selector is not implemented.
 The enhancement stage does not recover Zoom/Meet's original encoded packets or
 apply decoder-side codec restoration to those packets.
 

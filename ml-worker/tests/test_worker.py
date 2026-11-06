@@ -203,6 +203,7 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
     result = json.loads(state['outputs'][outputs[-1]])
     if recipe == recipes.SPEECH_RECIPE:
         assert result['records'][0]['metadata']['suggestions'][0]['metadata']['identity'] == 'people/alice.md'
+        previous = next((tmp_path/'cache').rglob('.assignment.json')).parent
         # A speaker correction changes the job fingerprint, but not its raw inference cache.
         state['assignment']['job']['fingerprint'] = 'speaker-correction'
         state['assignment']['recording'] = state['assignment']['recording'].replace('\n---\n', '\nattendees: [{handle: Alice, identity: ""}]\n---\n')
@@ -212,6 +213,8 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
                             '--cache', str(tmp_path/'cache')]) == 0
         assert len(state['completed']) == 1 and not state['failed']
         assert state['completion_requests'] == 2
+        assert not previous.exists()
+        assert len(list((tmp_path/'cache').rglob('input.wav'))) == 1
         return
     assert result['provenance']['fingerprint'] == 'fingerprint'
     if recipe == recipes.LEVELS_RECIPE:
