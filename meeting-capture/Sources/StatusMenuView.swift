@@ -25,14 +25,8 @@ struct StatusMenuView: View {
                 }
                 Button("Check recording access again") { model.checkPermissions() }
                 Button("Start recording manually") { model.manualStart() }
-                if !model.activeOutputClients.isEmpty {
-                    Text("Active audio applications").font(.caption).foregroundStyle(.secondary)
-                    ForEach(model.activeOutputClients) { client in
-                        Button("Record \(client.applicationName)") {
-                            model.manualStart(client: client)
-                        }
-                    }
-                }
+                Text("Records the microphone and every app producing audio as separate tracks.")
+                    .font(.caption).foregroundStyle(.secondary)
             case let .detecting(client, _):
                 Label("Checking \(client.applicationName)…", systemImage: "waveform")
                 Text(client.inputDeviceSummary).font(.caption).foregroundStyle(.secondary)
@@ -41,6 +35,7 @@ struct StatusMenuView: View {
                     .font(.headline)
                 Text(client.inputDeviceSummary).font(.caption).foregroundStyle(.secondary)
                 Text("Recording in \(remaining) seconds")
+                Text("All application audio will be recorded to separate tracks.").font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("Start now") { model.startNow() }.keyboardShortcut(.defaultAction)
                     Button("Skip") { model.skip() }.keyboardShortcut(.cancelAction)
@@ -51,7 +46,8 @@ struct StatusMenuView: View {
                 Label("Recording \(client.applicationName)", systemImage: "record.circle.fill").foregroundStyle(.red)
                 if let startedAt = capture.startedAt { TimelineView(.periodic(from: .now, by: 1)) { _ in Text(startedAt, style: .timer).monospacedDigit() } }
                 LevelRow(name: capture.activeMicrophoneName ?? client.inputDeviceSummary, level: capture.microphoneLevel)
-                LevelRow(name: "Participants", level: capture.participantsLevel)
+                LevelRow(name: "Application audio", level: capture.processAudioLevel)
+                Text("\(capture.processTrackCount) process track(s)").font(.caption).foregroundStyle(.secondary)
                 Button("Stop") { model.stopRecording() }.keyboardShortcut(.defaultAction)
             case .finalizing:
                 ProgressView("Preparing recording…")
@@ -115,10 +111,10 @@ struct StatusMenuView: View {
             Divider()
             Text("Permissions").font(.caption).foregroundStyle(.secondary)
             permissionRow("Microphone", granted: model.microphoneAccess, pane: "Privacy_Microphone")
-            permissionRow("Screen & System Audio Recording", granted: model.screenRecordingAccess, pane: "Privacy_ScreenCapture")
+            permissionRow("System Audio Recording", granted: model.systemAudioAccess, pane: "Privacy_ScreenCapture")
             permissionRow("Documents / Files & Folders", granted: model.documentsAccess, pane: "Privacy_FilesAndFolders")
             permissionRow("Accessibility (optional)", granted: model.accessibilityAccess, pane: "Privacy_Accessibility")
-            Text("✓ Available   ○ Unavailable   — Unknown\nClick a permission to open System Settings.")
+            Text("✓ Available   ○ Unavailable   — Unknown\nAudio access reflects the last recording check.\nClick a permission to open System Settings.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }

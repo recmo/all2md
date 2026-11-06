@@ -6,7 +6,6 @@ import Foundation
 @MainActor
 final class AudioActivityMonitor {
     var onClientsChanged: (([AudioClient]) -> Void)?
-    var onOutputClientsChanged: (([AudioClient]) -> Void)?
     private var timer: Timer?
     private var deviceListeners: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
     private let ownPID = ProcessInfo.processInfo.processIdentifier
@@ -27,11 +26,9 @@ final class AudioActivityMonitor {
     }
 
     private func poll() {
-        let objectIDs = processObjectIDs()
+        guard let objectIDs = try? processObjectIDs() else { return }
         synchronizeDeviceListeners(for: objectIDs)
         let clients = runningClients(from: objectIDs, selector: kAudioProcessPropertyIsRunningInput)
-        let outputClients = runningClients(from: objectIDs, selector: kAudioProcessPropertyIsRunningOutput)
-        onOutputClientsChanged?(outputClients)
         onClientsChanged?(clients)
     }
 
@@ -44,6 +41,20 @@ final class AudioActivityMonitor {
             .compactMap { audioClient(for: $0, runningSelector: selector) }
             .filter { $0.processID != ownPID && seen.insert($0.processID).inserted }
             .sorted { $0.applicationName.localizedStandardCompare($1.applicationName) == .orderedAscending }
+    }
+
+    func outputProcesses() throws -> (all: Set<UInt32>, active: [AudioProcess]) {
+        let objects = try processObjectIDs()
+        let active = objects.compactMap { objectID -> AudioProcess? in
+            guard uint32Property(kAudioProcessPropertyIsRunningOutput, objectID: objectID) == 1,
+                  let pid = pidProperty(objectID: objectID), pid != ownPID else { return nil }
+            let bundleID = bundleIDProperty(objectID: objectID)
+            let owner = ProcessApplicationResolver.resolve(processID: pid, bundleID: bundleID)
+            let name = stringProperty(kAudioObjectPropertyName, objectID: objectID)
+                ?? owner?.applicationName ?? "Process \(pid)"
+            return AudioProcess(objectID: objectID, processID: pid, bundleID: bundleID, name: name)
+        }.sorted { $0.processID < $1.processID }
+        return (Set(objects), active)
     }
 
     private func synchronizeDeviceListeners(for objectIDs: [AudioObjectID]) {
@@ -77,12 +88,19 @@ final class AudioActivityMonitor {
         )
     }
 
-    private func processObjectIDs() -> [AudioObjectID] {
+    func processObjectIDs() throws -> [AudioObjectID] {
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else { return [] }
+        let sizeStatus = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size)
+        guard sizeStatus == noErr else {
+            throw CaptureError.writerFailure("Cannot enumerate audio processes (OSStatus \(sizeStatus))")
+        }
         var values = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &values) == noErr else { return [] }
+        let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &values)
+        guard status == noErr else {
+            throw CaptureError.writerFailure("Cannot read audio processes (OSStatus \(status))")
+        }
+        values = Array(values.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
         return values
     }
 

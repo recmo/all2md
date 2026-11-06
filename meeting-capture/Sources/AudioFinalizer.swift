@@ -26,27 +26,26 @@ enum AudioFinalizer {
 
     static func createArchive(
         microphoneSegments: [CapturedAudioSegment],
-        participants: URL?,
-        participantsStartedAt: Date?,
+        processTracks: [CapturedProcessTrack],
         captureStartedAt: Date,
         captureEndedAt: Date,
         temporaryDestination: URL,
         finalDestination: URL
     ) throws -> ArchiveResult {
         let microphoneSegments = try microphoneSegments.filter { try containsAudio($0.url) }
-        let participants = try participants.flatMap { try containsAudio($0) ? $0 : nil }
-        guard !microphoneSegments.isEmpty || participants != nil else {
+        let processTracks = try processTracks.filter { try containsAudio($0.url) }
+        guard !microphoneSegments.isEmpty || !processTracks.isEmpty else {
             throw CaptureError.writerFailure("no captured audio is available for finalization")
         }
 
         try? FileManager.default.removeItem(at: temporaryDestination)
         var arguments = ["-nostdin", "-v", "error", "-xerror", "-y"]
         for segment in microphoneSegments { arguments += ["-i", segment.url.path] }
-        if let participants { arguments += ["-i", participants.path] }
+        for track in processTracks { arguments += ["-i", track.url.path] }
 
         let duration = max(0, captureEndedAt.timeIntervalSince(captureStartedAt))
         var filters: [String] = []
-        var maps: [(label: String, role: AudioTrack.Role, bitrate: Int, channels: Int)] = []
+        var maps: [(label: String, role: AudioTrack.Role, bitrate: Int, channels: Int, title: String, track: CapturedProcessTrack?)] = []
         if !microphoneSegments.isEmpty {
             var labels: [String] = []
             for (index, segment) in microphoneSegments.enumerated() {
@@ -55,14 +54,15 @@ enum AudioFinalizer {
                 filters.append("[\(index):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono,adelay=\(delay):all=1[\(label)]")
                 labels.append("[\(label)]")
             }
-            filters.append("\(labels.joined())amix=inputs=\(labels.count):duration=longest:normalize=0,atrim=duration=\(duration),asetpts=PTS-STARTPTS[microphone]")
-            maps.append(("microphone", .microphone, 96_000, 1))
+            filters.append("\(labels.joined())amix=inputs=\(labels.count):duration=longest:normalize=0,apad=whole_dur=\(duration),atrim=duration=\(duration),asetpts=PTS-STARTPTS[microphone]")
+            maps.append(("microphone", .microphone, 96_000, 1, "Microphone", nil))
         }
-        if participants != nil {
-            let inputIndex = microphoneSegments.count
-            let delay = max(0, Int((participantsStartedAt ?? captureStartedAt).timeIntervalSince(captureStartedAt) * 1_000))
-            filters.append("[\(inputIndex):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=\(delay):all=1,atrim=duration=\(duration),asetpts=PTS-STARTPTS[participants]")
-            maps.append(("participants", .participants, 128_000, 2))
+        for (index, track) in processTracks.enumerated() {
+            let inputIndex = microphoneSegments.count + index
+            let label = "process\(index)"
+            let delay = max(0, Int(track.startedAt.timeIntervalSince(captureStartedAt) * 1_000))
+            filters.append("[\(inputIndex):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=\(delay):all=1,apad=whole_dur=\(duration),atrim=duration=\(duration),asetpts=PTS-STARTPTS[\(label)]")
+            maps.append((label, .process, 128_000, 2, track.process.title, track))
         }
 
         arguments += ["-filter_complex", filters.joined(separator: ";")]
@@ -75,7 +75,7 @@ enum AudioFinalizer {
                 "-application:a:\(index)", "audio",
                 "-frame_duration:a:\(index)", "20",
                 "-compression_level:a:\(index)", "10",
-                "-metadata:s:a:\(index)", "title=\(map.role == .microphone ? "Microphone" : "Participants")",
+                "-metadata:s:a:\(index)", "title=\(map.title)",
                 "-disposition:a:\(index)", "0",
             ]
         }
@@ -94,7 +94,7 @@ enum AudioFinalizer {
                   stream.channels == expected.channels else {
                 throw CaptureError.writerFailure("archive track \(index) does not match the \(expected.role.rawValue) contract")
             }
-            let expectedTitle = expected.role == .microphone ? "Microphone" : "Participants"
+            let expectedTitle = expected.title
             guard stream.tags?["title"] == expectedTitle else {
                 throw CaptureError.writerFailure("archive track \(index) is missing its \(expectedTitle) identity")
             }
@@ -119,7 +119,9 @@ enum AudioFinalizer {
                 sampleRate: Double(stream.sample_rate) ?? 48_000,
                 channels: stream.channels,
                 durationSeconds: Double(stream.duration ?? "") ?? archiveDuration,
-                bitrate: map.bitrate
+                bitrate: map.bitrate,
+                id: map.track?.id,
+                process: map.track?.process
             )
         }
         return ArchiveResult(

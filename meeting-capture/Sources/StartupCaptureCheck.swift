@@ -1,5 +1,4 @@
 @preconcurrency import AVFoundation
-import CoreGraphics
 import CoreMedia
 import Foundation
 
@@ -18,9 +17,6 @@ enum StartupCaptureCheck {
                 throw CaptureError.microphonePermissionRequired
             }
         default: throw CaptureError.microphonePermissionRequired
-        }
-        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
-            throw CaptureError.screenRecordingPermissionRequired
         }
         try validateStorage(MeetingStore().root)
         let worker = try BackgroundWorkerClient()

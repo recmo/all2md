@@ -29,7 +29,7 @@ enum WorkerOperations {
         let end = start.addingTimeInterval(Double(input.length) / input.processingFormat.sampleRate)
         let archive = try AudioFinalizer.createArchive(
             microphoneSegments: [CapturedAudioSegment(url: request.microphone, startedAt: start, endedAt: end)],
-            participants: nil, participantsStartedAt: nil,
+            processTracks: [],
             captureStartedAt: start, captureEndedAt: end,
             temporaryDestination: directory.appending(path: "test.part.mka"),
             finalDestination: directory.appending(path: "test.mka")
@@ -82,17 +82,16 @@ enum WorkerOperations {
         }
         let archive = try AudioFinalizer.createArchive(
             microphoneSegments: request.microphoneSegments,
-            participants: request.participants,
-            participantsStartedAt: request.participantsStartedAt,
+            processTracks: request.processTracks,
             captureStartedAt: request.captureStartedAt,
             captureEndedAt: request.captureEndedAt,
             temporaryDestination: request.paths.archiveTemporary,
             finalDestination: request.paths.archiveFinal
         )
         let status: CaptureManifest.Status = !request.captureFailed && archive.tracks.contains(where: { $0.role == .microphone })
-            && archive.tracks.contains(where: { $0.role == .participants }) ? .complete : .incomplete
+            ? .complete : .incomplete
         let manifest = CaptureManifest(
-            schemaVersion: 2,
+            schemaVersion: 3,
             meetingID: UUID(),
             slug: String(request.paths.baseName.dropFirst(min(11, request.paths.baseName.count))),
             title: metadata.first(where: { $0.kind == .windowTitle })?.value,
@@ -112,7 +111,7 @@ enum WorkerOperations {
         )
         try MeetingStore().write(manifest, to: request.paths.manifest)
         for segment in request.microphoneSegments { try? FileManager.default.removeItem(at: segment.url) }
-        if let participants = request.participants { try? FileManager.default.removeItem(at: participants) }
+        for track in request.processTracks { try? FileManager.default.removeItem(at: track.url) }
         try? FileManager.default.removeItem(at: request.paths.session)
         return request.paths.manifest
     }
@@ -133,7 +132,10 @@ enum WorkerOperations {
                   $0.url.deletingLastPathComponent().resolvingSymlinksInPath() == paths.directory.resolvingSymlinksInPath()
                       && $0.url.lastPathComponent.hasPrefix(".\(paths.baseName)-microphone-")
                       && $0.url.lastPathComponent.hasSuffix(".part.caf")
-              }), session.participants == nil || session.participants == paths.participantsTemporary else {
+              }), session.processTracks.allSatisfy({
+                  $0.url.resolvingSymlinksInPath() == paths.processTemporary($0.id).resolvingSymlinksInPath()
+              }),
+              Set(session.processTracks.map(\.id)).count == session.processTracks.count else {
             throw CaptureError.writerFailure("Invalid recording session paths; original files were kept")
         }
         var segments: [CapturedAudioSegment] = []
@@ -148,17 +150,23 @@ enum WorkerOperations {
             session.captureEndedAt = max(session.captureEndedAt, end)
         }
         session.microphoneSegments = segments
-        var hasParticipantAudio = false
-        if let url = session.participants, FileManager.default.fileExists(atPath: url.path) {
-            let input = try AVAudioFile(forReading: url)
+        var tracks: [CapturedProcessTrack] = []
+        var hasProcessAudio = false
+        for track in session.processTracks {
+            guard FileManager.default.fileExists(atPath: track.url.path) else {
+                session.warnings.append("Missing process track: \(track.url.lastPathComponent)")
+                continue
+            }
+            let input = try AVAudioFile(forReading: track.url)
             if input.length > 0 {
-                hasParticipantAudio = true
-                let end = (session.participantsStartedAt ?? session.captureStartedAt)
-                    .addingTimeInterval(Double(input.length) / input.processingFormat.sampleRate)
+                hasProcessAudio = true
+                let end = track.startedAt.addingTimeInterval(Double(input.length) / input.processingFormat.sampleRate)
                 session.captureEndedAt = max(session.captureEndedAt, end)
             }
-        } else { session.participants = nil }
-        guard segments.contains(where: { $0.endedAt > $0.startedAt }) || hasParticipantAudio else {
+            tracks.append(track)
+        }
+        session.processTracks = tracks
+        guard segments.contains(where: { $0.endedAt > $0.startedAt }) || hasProcessAudio else {
             let files = try FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)
                 .filter { store.paths(forInterruptedFile: $0).baseName == paths.baseName && $0.path.hasSuffix(".part.caf") }
             quarantineEmptyRecoveryFiles(files, archiveTemporary: paths.archiveTemporary)

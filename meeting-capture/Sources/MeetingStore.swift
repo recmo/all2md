@@ -65,10 +65,9 @@ struct MeetingStore: Sendable {
         if name.hasSuffix(".session.json") {
             return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: String(name.dropLast(".session.json".count)))
         }
-        let markers = ["-microphone-", "-microphone.part.caf", "-participants.part.caf"]
-        let baseName = markers.compactMap { marker in
-            name.range(of: marker, options: .backwards).map { String(name[..<$0.lowerBound]) }
-        }.first ?? file.deletingPathExtension().lastPathComponent
+        let suffix = #"-(?:microphone-[0-9]+|process-[0-9a-fA-F-]{36}|microphone|participants)\.part\.caf$"#
+        let baseName = name.range(of: suffix, options: .regularExpression)
+            .map { String(name[..<$0.lowerBound]) } ?? file.deletingPathExtension().lastPathComponent
         return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: baseName)
     }
 
