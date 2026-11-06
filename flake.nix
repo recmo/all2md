@@ -531,6 +531,7 @@
               packages = [
                 pkgs.ffmpeg
                 pkgs.xcodegen
+                (pkgs.xcodeenv.composeXcodeWrapper { })
               ];
               shellHook = ''
                 echo "Run: cd meeting-capture && xcodegen generate"
