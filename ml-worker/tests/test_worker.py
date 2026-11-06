@@ -128,8 +128,11 @@ text.embeddings, text.rerank = embed, rerank
     return processes
 
 
-@pytest.mark.parametrize('recipe', [text.EMBED_RECIPE, text.RERANK_RECIPE, recipes.LEVELS_RECIPE, recipes.SPEECH_RECIPE])
-def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe):
+@pytest.mark.parametrize(('recipe', 'capture_version'), [
+    (text.EMBED_RECIPE, None), (text.RERANK_RECIPE, None), (recipes.LEVELS_RECIPE, None),
+    *((recipes.SPEECH_RECIPE, version) for version in (None, 1, 2, 3)),
+])
+def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, capture_version):
     client, state = server
     fixture_models(monkeypatch)
     monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
@@ -160,7 +163,21 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
         outputs = ['jobs/result.json']
     state['assignment'] = assignment(recipe, params, state['inputs'], outputs)
     if recipe == recipes.SPEECH_RECIPE:
-        state['assignment']['recording'] = '---\naudio: input.wav\n---\n# Recording\n'
+        if capture_version is None:
+            state['assignment']['recording'] = '---\naudio: input.wav\n---\n# Recording\n'
+        else:
+            capture = {'schemaVersion': capture_version, 'meetingID': 'fixture', 'status': 'complete',
+                       'startedAt': None, 'endedAt': None}
+            checksum = hashlib.sha256(state['inputs']['jobs/input.wav']).hexdigest()
+            if capture_version == 1:
+                capture['audio'] = [{'file': 'input.wav', 'role': 'mixed', 'sha256': checksum}]
+            else:
+                capture['container'] = {'file': 'input.wav', 'sha256': checksum}
+                capture['audio'] = [{'role': 'process' if capture_version == 3 else 'participants',
+                                     'id': 'zoom', 'process': {'name': 'Zoom'}, 'streamIndex': 0}]
+            state['inputs']['jobs/capture.json'] = json.dumps(capture).encode()
+            state['assignment'] = assignment(recipe, params, state['inputs'], outputs)
+            state['assignment']['recording'] = '---\nmanifest: capture.json\n---\n# Recording\n'
     assert worker.main(['--server', client.server, '--once', '--recipes', recipe,
                         '--cache', str(tmp_path/'cache')]) == 0
     assert len(state['completed']) == 1 and not state['failed']

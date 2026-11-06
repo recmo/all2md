@@ -117,13 +117,21 @@
     else if (guidance.manifest) {
       const manifestPath = sibling(page.path, guidance.manifest);
       const capture = await api.request<{
-        audio: { file?: string; role: string }[];
+        schemaVersion: number;
+        audio: { file?: string; role: string; id?: string }[];
         container?: { file: string };
       }>(fileUrl(manifestPath));
-      tracks = capture.audio.map((a) => ({
-        path: sibling(manifestPath, a.file || capture.container!.file),
-        role: a.role
-      }));
+      tracks = capture.audio.map((a) => {
+        if (capture.schemaVersion === 3 && a.role === 'process' && !a.id)
+          throw Error('Capture process track is missing its identity');
+        return {
+          path: sibling(manifestPath, a.file || capture.container!.file),
+          role:
+            capture.schemaVersion === 3 && a.role === 'process'
+              ? `process-${a.id}`
+              : a.role
+        };
+      });
     }
     if (tracks.length) {
       track = tracks[0].role;

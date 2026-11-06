@@ -55,11 +55,13 @@ def _speech(assignment, root, source, inputs, outputs):
     reference = assigned(source.parent, refs[0])
     if "manifest" in metadata:
         manifest = json.loads(reference.read_text())
-        if manifest.get("schemaVersion") == 2:
+        if manifest.get("schemaVersion") in {2, 3}:
             assigned(reference.parent, manifest["container"]["file"])
-        else:
+        elif manifest.get("schemaVersion") == 1:
             for track in manifest["audio"]:
                 assigned(reference.parent, track["file"])
+        else:
+            raise ValueError("unsupported meeting capture schema version")
     transcript = source.with_name("transcript.md") if source.name == "recording.md" else source.with_suffix(".transcript.md")
     if set(outputs) != {transcript, transcript.with_suffix(".voiceprints.json")}:
         raise ValueError("speech output paths do not match the recording")

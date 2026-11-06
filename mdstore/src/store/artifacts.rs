@@ -638,6 +638,8 @@ impl Store {
                 references: BTreeMap::new(),
                 rerun: false,
             });
+            job.source.clone_from(&definition.source);
+            job.recipe.clone_from(&definition.recipe);
             job.published = definition.publication.is_some();
             if job.fingerprint != fingerprint {
                 job.fingerprint = fingerprint;
@@ -1142,7 +1144,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn changes_fence_old_workers_but_notes_do_not_recompute() {
-        let (_dir, store) = fixture();
+        let (dir, store) = fixture();
         let id = setup(&store);
         let job = store
             .claim_job(&["fixture-v1".into()])
@@ -1186,6 +1188,57 @@ pub(crate) mod tests {
         );
         let fresh = store.claim_job(&["fixture-v1".into()]).unwrap().unwrap();
         assert_ne!(fresh.job.fingerprint, job.fingerprint);
+        let base = store.get_page("config.yaml", None).unwrap().text.unwrap();
+        let mut config = Config::from_yaml(&base).unwrap();
+        let definition = config.derivations.get_mut(&id).unwrap();
+        definition.source = "other.md".into();
+        definition.recipe = "fixture-v2".into();
+        let other = "---\nhotwords: [other]\n---\n# Other recording\n";
+        store
+            .apply_edits(&ApplyEditsRequest {
+                summary: "Change derivation source and recipe".into(),
+                expected_commit: None,
+                moves: vec![],
+                edits: vec![
+                    EditOperation::replace_file("other.md".into(), None, other.into()),
+                    EditOperation::replace_file(
+                        "config.yaml".into(),
+                        Some(&base),
+                        serde_yaml::to_string(&config).unwrap(),
+                    ),
+                ],
+            })
+            .unwrap();
+        let queued = &store.jobs().unwrap()[0];
+        assert_eq!(queued.source, "other.md");
+        assert_eq!(queued.recipe, "fixture-v2");
+        assert_eq!(queued.status, "queued");
+        assert!(
+            store
+                .complete_job(
+                    &id,
+                    completion(fresh.job.attempt.as_deref().unwrap(), "# Stale\n")
+                )
+                .is_err()
+        );
+        assert!(store.claim_job(&["fixture-v1".into()]).unwrap().is_none());
+        drop(store);
+        let store = Store::open_with_provider(dir.path(), Arc::new(Provider)).unwrap();
+        let updated = store.claim_job(&["fixture-v2".into()]).unwrap().unwrap();
+        assert_eq!(updated.job.source, "other.md");
+        assert_eq!(updated.job.recipe, "fixture-v2");
+        assert_eq!(updated.recording, other);
+        assert_eq!(updated.parameters["hotwords"], serde_json::json!(["other"]));
+        store
+            .complete_job(
+                &id,
+                completion(
+                    updated.job.attempt.as_deref().unwrap(),
+                    "# Updated transcript\n",
+                ),
+            )
+            .unwrap();
+        assert_eq!(store.jobs().unwrap()[0].status, "current");
     }
     #[test]
     fn reference_vectors_are_frozen_filtered_and_fenced() {
