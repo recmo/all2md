@@ -474,6 +474,7 @@
               pkgs.runCommand "speech2md-tests"
                 {
                   nativeBuildInputs = [
+                    pkgs.ffmpeg
                     (pkgs.python3.withPackages (ps: [
                       ps.numpy
                       ps.pytest

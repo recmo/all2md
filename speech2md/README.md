@@ -24,8 +24,9 @@ uv run --project speech2md speech2md recording.md
 
 The input is an authored Markdown recording document. Its frontmatter references
 an audio/video file with `audio`, or a Meeting Capture manifest with `manifest`.
-Both legacy v1 per-file tracks and v2 Matroska containers are accepted. For v2,
-each role is read from its declared audio stream in the shared container.
+Meeting Capture v1 per-file tracks and v2/v3 Matroska containers are accepted.
+Container tracks are read from their declared streams; v3 process IDs distinguish
+application tracks.
 Manifest checksums are verified before inference. Canonical audio is never
 changed.
 
@@ -55,7 +56,8 @@ attendees:
 Human notes go here.
 ```
 
-Both fields are optional, as are `ranges` on each attendee. Unknown fields, invalid tracks,
+Both fields are optional, as are `ranges` on each attendee. Unrelated recording
+metadata is ignored. Unknown fields within guidance entries, invalid tracks,
 out-of-bounds ranges, and identities that cannot be separated at a MOSS turn
 boundary stop processing. A track may be omitted for single-track media and is
 required for multi-track captures. Hotwords are trimmed, deduplicated

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 import hashlib
 import json
 import math
@@ -40,14 +41,12 @@ def load_hints(path: Path) -> SpeechHints:
 
 
 def parse_hints(value: dict) -> SpeechHints:
-    mapping = dict(value)
-    for key in ("audio", "manifest", "mdstore"):
-        mapping.pop(key, None)
-    _only(
-        mapping,
-        {"attendees", "calendar_event", "edits", "ended_at", "hotwords", "started_at", "title"},
-        "recording frontmatter",
-    )
+    mapping = {key: value[key] for key in (
+        "attendees", "calendar_event", "edits", "ended_at", "hotwords", "started_at", "title"
+    ) if key in value}
+    for key in ("started_at", "ended_at"):
+        if isinstance(mapping.get(key), date):
+            mapping[key] = mapping[key].isoformat()
     title = _optional_single_line(mapping.get("title"), "hint title")
     started_at = _optional_single_line(mapping.get("started_at"), "hint started_at")
     ended_at = _optional_single_line(mapping.get("ended_at"), "hint ended_at")

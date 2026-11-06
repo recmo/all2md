@@ -66,7 +66,7 @@ export function importPath(folder: string, path: string): string {
 }
 export function importKind(path: string): 'markdown' | 'asset' | null {
   if (path.endsWith('.md')) return 'markdown';
-  return /\.(m4a|mp3|wav|flac|ogg|aac|opus|mp4|mov|mkv|webm|jpg|jpeg|png|gif|webp|avif|svg|pdf|json)$/i.test(
+  return /\.(m4a|mka|mp3|wav|flac|ogg|aac|opus|mp4|mov|mkv|webm|jpg|jpeg|png|gif|webp|avif|svg|pdf|json)$/i.test(
     path
   )
     ? 'asset'

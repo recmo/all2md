@@ -82,6 +82,10 @@ def test_combined_hints_are_strictly_parsed_and_hotwords_normalized(tmp_path: Pa
         TranscriptEdit(12.5, 18.0, "F two Z", "F2Z", "participants"),
     )
     assert hints.sha256 == guidance_hash(raw)
+    path.write_text("---\n" + raw + "tags: [work]\nml: {levels: true}\n---\n# Recording\n")
+    assert load_hints(path) == hints
+    path.write_text(path.read_text().replace("'2026-08-04T09:00:00+02:00'", "2026-08-04T09:00:00+02:00"))
+    assert load_hints(path) == hints
 
 
 def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch):
@@ -109,11 +113,9 @@ def test_hint_hash_and_parsing_use_one_byte_snapshot(tmp_path: Path, monkeypatch
 @pytest.mark.parametrize(
     "raw, message",
     [
-        ("unknown: true\n", "unknown field"),
         ("hotwords: F2Z\n", "must be a list"),
         ("hotwords: [F2Z, 3]\n", "only strings"),
         ("hotwords: ['']\n", "must not be empty"),
-        ("speakers: {}\n", "unknown field"),
         ("attendees: [{identity: Alice}]\n", "must contain handle and identity"),
         ("attendees: [{handle: Alice}]\n", "must contain handle and identity"),
         ("attendees: [Alice]\n", "must be a mapping"),

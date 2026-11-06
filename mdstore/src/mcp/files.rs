@@ -846,6 +846,7 @@ mod tests {
         for path in [
             "health/file.md",
             "mcp/file.md",
+            "path/file.md",
             "webui/file.md",
             "worker/file.md",
         ] {

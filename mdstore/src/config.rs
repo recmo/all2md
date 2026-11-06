@@ -227,7 +227,7 @@ pub fn validate_repo_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
     if matches!(
         path.split('/').next(),
-        Some("mcp" | "health" | "webui" | "worker")
+        Some("mcp" | "health" | "path" | "webui" | "worker")
     ) {
         bail!("reserved HTTP namespace: {path}");
     }

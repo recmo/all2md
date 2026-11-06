@@ -14,7 +14,7 @@ test('folder import preserves hierarchy, stages Markdown, and uploads assets', a
     join(folder, 'notes', 'readme.md'),
     '# Imported\n\nA new note.\n'
   );
-  writeFileSync(join(folder, 'audio.wav'), 'audio fixture');
+  writeFileSync(join(folder, 'audio.mka'), 'audio fixture');
   writeFileSync(join(folder, 'ignored.exe'), 'unsupported');
   try {
     await page.goto('/webui/');
@@ -30,7 +30,7 @@ test('folder import preserves hierarchy, stages Markdown, and uploads assets', a
     await expect(dialog.getByText('Uploaded', { exact: true })).toBeVisible();
     await expect(dialog.getByText('Skipped: unsupported file')).toBeVisible();
     const asset = await (
-      await request.get('/incoming/bundle/audio.wav', {
+      await request.get('/incoming/bundle/audio.mka', {
         headers: { Accept: 'application/vnd.mdstore.page+json' }
       })
     ).json();
