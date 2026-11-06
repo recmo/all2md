@@ -546,7 +546,7 @@ final class MeetingStoreTests: XCTestCase {
             metadata: [], warnings: [], interruptions: []
         )
         try session.save()
-        XCTAssertEqual(store.interruptedRecordings(), [paths.session])
+        XCTAssertEqual(store.interruptedRecordings().map { $0.resolvingSymlinksInPath() }, [paths.session.resolvingSymlinksInPath()])
         let loaded = try FinalizeCaptureRequest.load(from: paths.session)
         XCTAssertEqual(loaded.microphoneSegments.map(\.startedAt), session.microphoneSegments.map(\.startedAt))
         let worker = try workerClient()

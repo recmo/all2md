@@ -9,7 +9,7 @@ derived="$(mktemp -d)"
 trap 'rm -rf "$derived"' EXIT
 xcodebuild -project meeting-capture/MeetingCapture.xcodeproj \
     -scheme MeetingCapture -configuration Debug -derivedDataPath "$derived" \
-    CODE_SIGNING_ALLOWED=NO ENABLE_DEBUG_DYLIB=YES \
+    CODE_SIGNING_ALLOWED=NO \
     'LD_RUNPATH_SEARCH_PATHS=$(inherited) @loader_path/../../../../MacOS' \
     build-for-testing
 app="$derived/Build/Products/Debug/MeetingCapture.app"

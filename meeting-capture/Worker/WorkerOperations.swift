@@ -132,7 +132,9 @@ enum WorkerOperations {
                   $0.url.deletingLastPathComponent().resolvingSymlinksInPath() == paths.directory.resolvingSymlinksInPath()
                       && $0.url.lastPathComponent.hasPrefix(".\(paths.baseName)-microphone-")
                       && $0.url.lastPathComponent.hasSuffix(".part.caf")
-              }), session.processTracks.allSatisfy({ $0.url == paths.processTemporary($0.id) }),
+              }), session.processTracks.allSatisfy({
+                  $0.url.resolvingSymlinksInPath() == paths.processTemporary($0.id).resolvingSymlinksInPath()
+              }),
               Set(session.processTracks.map(\.id)).count == session.processTracks.count else {
             throw CaptureError.writerFailure("Invalid recording session paths; original files were kept")
         }
