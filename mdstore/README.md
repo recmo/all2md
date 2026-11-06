@@ -8,7 +8,8 @@ MCP exposes `read`, `search`, and `edit`. Reads return a snapshot commit and num
 
 All search inference runs through `ml-worker`: document chunks are queued automatically
 at startup and after edits; query embeddings and reranking use the same pinned
-local recipes. No hosted API key or model endpoint is used. Set the same
+local recipes. The ZeroEntropy hosted API integration has been removed. Its API-key
+and endpoint settings are unsupported and rejected by configuration validation. Set the same
 `MDSTORE_WORKER_TOKEN` on the daemon and worker, then run:
 
 ```sh

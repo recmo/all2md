@@ -63,8 +63,7 @@ between its two warm runs; its first inference took 11.65 s. This is a latency b
 and a semantic smoke check, not a retrieval-quality evaluation.
 
 Query embedding is plausible for local retrieval with a resident model, but this
-reranker implementation is too slow for interactive search. Even 10 short
-passages exceed the former hosted provider's 30-second timeout. Its default is
+reranker implementation is too slow for interactive search. Mdstore defaults to
 30 candidates and approximately 400-token chunks, so the 128-token benchmark
 is an optimistic workload. Two resident FP32 model processes would require
 roughly 30 GiB based on the individual measurements; co-residency was not tested.

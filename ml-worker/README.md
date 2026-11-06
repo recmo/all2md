@@ -177,8 +177,8 @@ and L2-normalizes the 2,560-dimensional results. These conventions match the
 pinned Sentence Transformers configuration without executing its custom Python.
 Embedding-space identity includes the recipe and namespace; text vectors cannot
 use the `speakers` namespace. The new recipe cannot mix with old E5 artifacts.
-Local vectors are not assumed interchangeable with hosted provider vectors;
-queries and documents must use the same recipe and revision.
+Queries and documents must use the same local recipe and revision. Mdstore has
+no hosted ZeroEntropy API integration or fallback.
 
 Outputs use mdstore's existing `space`/`records` vector artifact format, with
 record IDs, original text, input mode, model revision, and source provenance.
