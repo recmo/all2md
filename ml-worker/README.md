@@ -14,18 +14,25 @@ is not included in the Linux package. It does not run generative LLM jobs.
 | `text-rerank-zerank-2-v1` | ZeroEntropy zerank-2 (4B) | Ranked candidate IDs, input indices, and relevance scores |
 
 The runner advertises locally installed capabilities and claims only matching
-recipes. Inference runs in a child process; lease loss or interruption kills its
-process group, including audio tools. Inputs are verified by SHA-256, outputs
-must match the assignment, and mdstore fences stale attempts and validates atomic
-publication. Worker credentials are removed from the inference subprocess.
+recipes. One long-running Python worker owns the models and runs jobs sequentially.
+Selected text models load before the first claim and stay loaded, including while
+idle. Transcription loads MOSS and ReDimNet2 on demand; audio enhancement uses a
+resident Rust DeepFilterNet helper. Both groups are evicted **five minutes after
+their last job finishes**. A maintenance thread clears idle caches even while
+another recipe is running, and never evicts a group in use. Level-only jobs do
+not extend model lifetimes. DeepFilterNet resets stream state between tracks.
+
+On lease loss, an active model call finishes and its result is discarded before
+publication. Inputs are verified by SHA-256, outputs must match the assignment,
+and mdstore fences stale attempts and validates atomic publication. The worker
+removes its credential from the environment after creating the HTTP client.
 Workspaces are isolated by server, job, and fingerprint. Starting a new fingerprint
 removes that job's obsolete workspaces under its lock. The MOSS cache is shared
 across a job’s fingerprints and validated by speech2md before reuse, so speaker
 corrections can replay compatible generations. A file lock prevents two
-attempts from concurrently using a job's workspace, including a child whose parent
-crashed. Disposable enhancement waveforms are cleaned up after completion or
-cancellation, and stale scratch is removed before retrying. Failed attempts cannot
-publish old outputs left in the cache.
+attempts from concurrently using a job's workspace. Disposable enhancement
+waveforms are cleaned up after completion or failure, and stale scratch is removed
+before retrying. Failed attempts cannot publish old outputs left in the cache.
 
 ## Run
 
@@ -40,23 +47,26 @@ nix run .#ml-worker -- --server https://your-mdstore-host --once \
   --recipes audio-enhancement-dfn3-v1 text-embeddings-zembed-1-v1 text-rerank-zerank-2-v1
 ```
 
-Idle workers poll once a second; failed requests retry after ten seconds.
+When no jobs are available, the worker polls once a second; failed requests
+retry after ten seconds.
 
 `--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
 when available, otherwise CPU; `--device cpu` forces CPU for text models.
-Text models use FP32 on CPU and BF16 on MPS. Allow roughly 16 GiB for one CPU
-text-model process; `OMP_NUM_THREADS=4` can limit its CPU parallelism.
-DeepFilterNet uses its native Rust/CPU runtime. Nix packages the dependencies and
-embeds the DeepFilterNet3 model. The two text models download pinned weights into
-the Hugging Face cache on first use; loading disables remote Python code and
+Text models use FP32 on CPU and BF16 on MPS. Allow roughly 32 GiB for both CPU
+text models together, plus inference memory; `OMP_NUM_THREADS=4` can limit CPU
+parallelism.
+DeepFilterNet uses a resident native Rust/CPU runtime. Nix packages the
+dependencies and embeds the DeepFilterNet3 model. The two text models download pinned weights into
+the Hugging Face cache on first startup; loading disables remote Python code and
 requires safetensors. No packages or toolchains are installed at runtime.
 
 See [Zawrat CPU measurements](benchmarks.md) before scheduling the 4B text models
 on a CPU. These queued recipes do not provide synchronous mdstore retrieval.
 
 Use `--recipes speech2md-v1` for a transcription-only worker.
-Use `ml-worker` for the additional recipes; its transcription recipe invokes the
-existing speech2md CLI and retains leased speaker-reference matching.
+Use `ml-worker` for the additional recipes; its transcription recipe uses the
+existing speech2md pipeline in the worker’s locked Python environment and retains
+leased speaker-reference matching.
 
 ## Declare jobs
 
@@ -235,8 +245,9 @@ IDs, sort by descending score, and break ties by original order. Scores are not
 probabilities. This is a queued batch job, not a synchronous search-time service.
 
 Both models have 4B parameters and Apache-2.0 weights. They download on first use
-(roughly 8 GB per model) and run one at a time in the job subprocess, using BF16
-on CPU or MPS. MPS requires a Mac/PyTorch combination with BF16 support (macOS 14+).
+(roughly 8 GB per model on disk). Both stay loaded while jobs run one at a time,
+using FP32 on CPU and BF16 on MPS. MPS requires a Mac/PyTorch combination with
+BF16 support (macOS 14+).
 Allow memory beyond the weights for inference; long passages use more memory.
 
 Both text recipes accept 1–256 records with unique nonempty string IDs and
@@ -255,7 +266,7 @@ PYTHONPATH=ml-worker/src uv run --project ml-worker pytest ml-worker/tests
 nix build .#checks.x86_64-linux.ml-worker
 ```
 
-Fixture checks exercise real HTTP transfers, subprocess execution, checksum
+Fixture checks exercise real HTTP transfers, recipe execution, checksum
 failure, lease loss, publication, gain control, and DeepFilterNet audio alignment.
 Tensor tests verify pooling, prefixes, and ranking without downloading weights
 when PyTorch is installed. Actual quality needs representative Zoom/Meet audio,

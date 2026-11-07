@@ -1,11 +1,9 @@
-"""Exercise real transport, recipe subprocesses, and cancellation without model downloads."""
+"""Exercise transport, recipe execution, and lease fencing without model downloads."""
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import os
-from pathlib import Path
-import subprocess
 import sys
+import types
 import threading
 import time
 from urllib.parse import unquote, urlsplit
@@ -106,33 +104,39 @@ def assignment(recipe, parameters, inputs, outputs):
 
 def fixture_models(monkeypatch, *, started=None):
     monkeypatch.setattr(worker, "capabilities", lambda: list(recipes.RECIPES))
-    original = subprocess.Popen
-    processes = []
-    def popen(command, **kwargs):
-        if command[1:3] == ['-m', 'ml_worker.worker']:
-            code = '''
-import os, sys, runpy
-from ml_worker import text
-assert 'MDSTORE_WORKER_TOKEN' not in os.environ
+    monkeypatch.setattr(text, "preload", lambda *args, **kwargs: None)
+    def embed(p, **kwargs):
+        text.records(p['texts'])
+        if started is not None:
+            started.set()
+            # Wait until the HTTP heartbeat has rejected our lease.
+            assert rejected.wait(5)
+            time.sleep(0.1)  # Keep inference running while the response reaches the worker.
+        return {'space': {'namespace': p.get('namespace', 'documents'), 'recipe': text.EMBED_RECIPE, 'dimensions': text.DIMENSIONS},
+                'records': [{'id': x['id'], 'vector': [1.0]+[0.0]*(text.DIMENSIONS-1), 'metadata': {'text': x['text']}} for x in p['texts']]}
+    def rerank(p, **kwargs):
+        text.records(p['texts'])
+        return {'results': [{'index': i, 'id': p['texts'][i]['id'], 'relevance_score': float(i)} for i in reversed(range(len(p['texts'])))]}
+    rejected = threading.Event()
+    monkeypatch.setattr(text, 'embeddings', embed)
+    monkeypatch.setattr(text, 'rerank', rerank)
+    return rejected
 
-def embed(p, **kwargs):
-    text.records(p['texts'])
-    return {'space': {'namespace': p.get('namespace', 'documents'), 'recipe': text.EMBED_RECIPE, 'dimensions': text.DIMENSIONS},
-            'records': [{'id': x['id'], 'vector': [1.0]+[0.0]*(text.DIMENSIONS-1), 'metadata': {'text': x['text']}} for x in p['texts']]}
-def rerank(p, **kwargs):
-    text.records(p['texts'])
-    return {'results': [{'index': i, 'id': p['texts'][i]['id'], 'relevance_score': float(i)} for i in reversed(range(len(p['texts'])))]}
-text.embeddings, text.rerank = embed, rerank
-'''
-            if started:
-                code += f"from pathlib import Path\nPath({str(started)!r}).touch()\nimport time\ntime.sleep(10)\n"
-            code += f"sys.argv = {['ml_worker.worker', *command[3:]]!r}\nrunpy.run_module('ml_worker.worker', run_name='__main__')\n"
-            command = [sys.executable, '-c', code]
-        process = original(command, **kwargs)
-        processes.append(process)
-        return process
-    monkeypatch.setattr(worker.subprocess, 'Popen', popen)
-    return processes
+
+def fixture_speech(monkeypatch):
+    def transcribe(source, *, force):
+        assert force
+        moss = source.with_suffix('.transcript.moss.npz')
+        if 'Alice' in source.read_text():
+            assert moss.read_bytes() == b'raw MOSS generation'
+        else:
+            assert not moss.exists()
+        moss.write_bytes(b'raw MOSS generation')
+        source.with_suffix('.transcript.md').write_text('# Transcript')
+        source.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({
+            'space': {}, 'records': [{'id': 'speaker', 'vector': [1.0], 'metadata': {}}]}))
+    monkeypatch.setitem(sys.modules, 'speech2md', types.ModuleType('speech2md'))
+    monkeypatch.setitem(sys.modules, 'speech2md.pipeline', types.SimpleNamespace(transcribe=transcribe))
 
 
 @pytest.mark.parametrize(('recipe', 'capture_version', 'retrieval'), [
@@ -145,22 +149,7 @@ def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, captur
     fixture_models(monkeypatch)
     monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
     if recipe == recipes.SPEECH_RECIPE:
-        cli = tmp_path/'speech2md'
-        cli.write_text(f'#!{sys.executable}\n' + '''from pathlib import Path
-import json, sys
-recording=Path(sys.argv[1])
-assert sys.argv[2] == '--force'
-moss = recording.with_suffix('.transcript.moss.npz')
-if 'Alice' in recording.read_text():
-    assert moss.read_bytes() == b'raw MOSS generation'
-else:
-    assert not moss.exists()
-moss.write_bytes(b'raw MOSS generation')
-recording.with_suffix('.transcript.md').write_text('# Transcript\\n')
-recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'space':{}, 'records':[{'id':'speaker','vector':[1.0], 'metadata':{}}]}))
-''')
-        cli.chmod(0o755)
-        monkeypatch.setenv('PATH', str(tmp_path)+os.pathsep+os.environ['PATH'])
+        fixture_speech(monkeypatch)
         state['inputs'] = {'jobs/input.wav': b'fixture'}
         params = {}
         outputs = ['jobs/source.transcript.md','jobs/source.transcript.voiceprints.json']
@@ -198,7 +187,7 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
     assert len(state['completed']) == 1 and not state['failed']
     assert state['completion_requests'] == 2
     if retrieval:
-        assert not list((tmp_path/'cache').rglob('.assignment.json'))
+        assert not list((tmp_path/'cache').rglob('work'))
         assert not list((tmp_path/'cache').rglob('.worker.lock'))
     complete = state['completed'][0]
     assert set(complete['assets']) == {p for p in outputs if not p.endswith('.md') and not retrieval}
@@ -208,12 +197,13 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
     result = json.loads(complete['outputs'][outputs[-1]] if retrieval else state['outputs'][outputs[-1]])
     if recipe == recipes.SPEECH_RECIPE:
         assert result['records'][0]['metadata']['suggestions'][0]['metadata']['identity'] == 'people/alice.md'
-        previous = next((tmp_path/'cache').rglob('.assignment.json')).parent
+        previous = next((tmp_path/'cache').rglob('source.transcript.md')).parent.parent
         # A speaker correction changes the job fingerprint, but not its raw inference cache.
         state['assignment']['job']['fingerprint'] = 'speaker-correction'
         state['assignment']['recording'] = state['assignment']['recording'].replace('\n---\n', '\nattendees: [{handle: Alice, identity: ""}]\n---\n')
         state['completed'].clear()
         state['completion_requests'] = 0
+        monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
         assert worker.main(['--server', client.server, '--once', '--recipes', recipe,
                             '--cache', str(tmp_path/'cache')]) == 0
         assert len(state['completed']) == 1 and not state['failed']
@@ -236,22 +226,31 @@ recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'sp
 
 
 @pytest.mark.parametrize('retrieval', [False, True])
-def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeypatch, retrieval):
+def test_failed_lease_finishes_inference_and_never_publishes(server, tmp_path, monkeypatch, retrieval):
     client, state = server
-    marker = tmp_path/'started'
-    processes = fixture_models(monkeypatch, started=marker)
+    started = threading.Event()
+    rejected = fixture_models(monkeypatch, started=started)
+    def lose_lease():
+        if started.is_set():
+            rejected.set()
+            return True
+        return False
     state['assignment'] = assignment(text.EMBED_RECIPE, {'texts': [{'id':'x','text':'hello'}]}, {}, ['jobs/result.json'])
     state['assignment']['retrieval'] = retrieval
-    state['lose_lease'] = marker.exists
-    started = time.monotonic()
-    with pytest.raises(RuntimeError, match='lease lost'):
-        worker.execute(client, state['assignment'], tmp_path/'cache', heartbeat_seconds=0.05)
-    assert time.monotonic()-started < 5
-    assert processes and all(p.poll() is not None for p in processes)
-    assert not state['outputs'] and not state['completed']
-    if retrieval:
-        assert not list((tmp_path/'cache').rglob('.assignment.json'))
-        assert not list((tmp_path/'cache').rglob('.worker.lock'))
+    state['lose_lease'] = lose_lease
+    models = worker.Models()
+    try:
+        with pytest.raises(RuntimeError, match='lease lost'):
+            worker.execute(client, state['assignment'], tmp_path/'cache', heartbeat_seconds=0.05, models=models)
+        assert started.is_set() and rejected.is_set()
+        assert not state['outputs'] and not state['completed']
+        if retrieval:
+            assert not list((tmp_path/'cache').rglob('work'))
+        state['lose_lease'] = lambda: False
+        worker.execute(client, state['assignment'], tmp_path/'cache', models=models)
+        assert len(state['completed']) == 1
+    finally:
+        models.close()
 
 
 def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):
@@ -261,7 +260,7 @@ def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):
     state['assignment'] = assignment(recipes.LEVELS_RECIPE, params, state['inputs'], ['audio/output.wav','audio/capture.json'])
     state['corrupt'] = True
     with pytest.raises(ValueError, match='assigned size'):
-        worker.execute(client, state['assignment'], tmp_path/'cache')
+        worker.execute(client, state['assignment'], tmp_path/'cache', models=None)
     assert state['failed'] and not state['completed']
     state['assignment']['inputs'] = {}
     with pytest.raises(ValueError, match='not assigned'):
@@ -269,8 +268,8 @@ def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):
 
 
 def test_audio_enhancement_keeps_tail_channels_and_silence(tmp_path):
-    if not __import__('shutil').which('deep-filter'):
-        pytest.skip('requires the Nix DeepFilterNet3 CLI')
+    if not __import__('shutil').which('deep-filter-worker'):
+        pytest.skip('requires the native DeepFilterNet3 helper')
     source, output = tmp_path/'source.wav', tmp_path/'enhanced.wav'
     count = waveform(source, channels=2)
     result = audio.enhance(source, output)
@@ -278,6 +277,22 @@ def test_audio_enhancement_keeps_tail_channels_and_silence(tmp_path):
     assert audio.measure(output)['channels'] == 2
     assert result['model'] == 'DeepFilterNet3'
     assert result['gain_db'] <= 12
+    first = output.read_bytes()
+    denoiser = audio._denoiser
+    audio.enhance(source, output)
+    assert output.read_bytes() == first
+    assert audio._denoiser is denoiser and denoiser.poll() is None
     waveform(source, amplitude=0)
+    audio.enhance(source, output)
+    assert audio.measure(output)['rms_dbfs'] is None
+    models = worker.Models(idle_seconds=0)
+    try:
+        with models.use(audio.RECIPE):
+            models.evict()  # An active model must survive maintenance.
+            assert audio._denoiser is denoiser
+        models.evict()
+        assert audio._denoiser is None and denoiser.poll() is not None
+    finally:
+        models.close()
     audio.enhance(source, output, denoise=False)
     assert audio.measure(output)['rms_dbfs'] is None

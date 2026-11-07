@@ -105,25 +105,37 @@
         name = "speech2md";
         project = speechProject;
       };
-      # nixpkgs packages only the LADSPA plugin. Build the upstream Rust CLI
-      # from that same fixed source/cargo closure, with DFN3 weights embedded.
-      mkDeepFilter = mlSystem:
+      # Build a resident Rust backend from the pinned DeepFilterNet source/cargo
+      # closure, with DFN3 weights embedded.
+      mkDeepFilterWorker = mlSystem:
         let
           deepfilternet = nixpkgs.legacyPackages.${mlSystem}.deepfilternet;
         in
         assert deepfilternet.version == "0.5.6";
-        deepfilternet.overrideAttrs {
-          pname = "deep-filter";
+        deepfilternet.overrideAttrs (old: {
+          pname = "deep-filter-worker";
+          meta = (old.meta or { }) // { mainProgram = "deep-filter-worker"; };
           buildAndTestSubdir = "libDF";
+          postPatch = (old.postPatch or "") + ''
+            sed -i '/^\[features\]/a worker-json = ["dep:serde_json"]' libDF/Cargo.toml
+            cp ${./ml-worker/native/deep-filter-worker.rs} libDF/src/bin/deep-filter-worker.rs
+            cat >> libDF/Cargo.toml <<'EOF'
+
+            [[bin]]
+            name = "deep-filter-worker"
+            path = "src/bin/deep-filter-worker.rs"
+            required-features = ["tract", "wav-utils", "worker-json"]
+            EOF
+          '';
           cargoBuildFlags = [
-            "--bin" "deep-filter"
-            "--features" "bin,tract,wav-utils,transforms,default-model"
+            "--bin" "deep-filter-worker"
+            "--features" "tract,wav-utils,transforms,default-model,worker-json"
           ];
           # Upstream lib tests import the optional training/dataset module.
-          # The worker check below exercises the installed CLI and actual model.
+          # The worker check below exercises the resident backend and actual model.
           doCheck = false;
           postInstall = "";
-        };
+        });
       mkMlWorker =
         mlSystem:
         let
@@ -138,10 +150,13 @@
           name = "ml-worker";
           runtimeInputs = [
             systemPkgs.ffmpeg
-            (mkDeepFilter mlSystem)
-          ]
-          ++ nixpkgs.lib.optionals systemPkgs.stdenv.hostPlatform.isDarwin [ speech2md ];
-          text = ''exec ${environment}/bin/ml-worker "$@"'';
+            (mkDeepFilterWorker mlSystem)
+          ];
+          text = nixpkgs.lib.optionalString systemPkgs.stdenv.hostPlatform.isDarwin ''
+            export SPEECH2MD_VERSION=${pagesVersion}
+            export TORCH_HOME="''${XDG_CACHE_HOME:-$HOME/.cache}/speech2md/torch"
+            mkdir -p "$TORCH_HOME"
+          '' + ''exec ${environment}/bin/ml-worker "$@"'';
         };
       ml-worker = mkMlWorker system;
       mkMlWorkerCheck = mlSystem:
@@ -150,7 +165,7 @@
           nativeBuildInputs = [
             (systemPkgs.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.pytest ]))
             systemPkgs.ffmpeg
-            (mkDeepFilter mlSystem)
+            (mkDeepFilterWorker mlSystem)
           ];
         } ''
           export PYTHONPATH=${mlProject}/src
@@ -165,7 +180,7 @@
             (systemPkgs.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.pytest ]))
             systemPkgs.uv
             systemPkgs.ffmpeg
-            (mkDeepFilter mlSystem)
+            (mkDeepFilterWorker mlSystem)
           ];
           shellHook = nixpkgs.lib.optionalString systemPkgs.stdenv.hostPlatform.isLinux ''
             export LD_LIBRARY_PATH="${nixpkgs.lib.makeLibraryPath [ systemPkgs.stdenv.cc.cc.lib ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -396,13 +411,13 @@
           doc2md = mkDoc2md docSystem;
           mdstore = mkMdstore docSystem;
           webui = mkMdstoreWeb docSystem;
-          deep-filter = mkDeepFilter docSystem;
+          deep-filter-worker = mkDeepFilterWorker docSystem;
           ml-worker = mkMlWorker docSystem;
         })
         // {
           ${system} = {
             default = pages2md;
-            deep-filter = mkDeepFilter system;
+            deep-filter-worker = mkDeepFilterWorker system;
             inherit
               meeting-capture
               pages2md
@@ -532,6 +547,7 @@
                   speech2md --version | grep -Eq '^speech2md [0-9a-f]{40,64}$'
                   ml-worker --help > /dev/null
                   ml-worker --list-recipes | grep -q text-embeddings-zembed-1-v1
+                  ml-worker --list-recipes | grep -q speech2md-v1
                   for extension in \
                     ${pagesEnvironment}/lib/python*/site-packages/mlx/core*.so \
                     ${speechEnvironment}/lib/python*/site-packages/mlx/core*.so; do

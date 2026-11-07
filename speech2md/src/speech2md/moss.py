@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from difflib import SequenceMatcher
+from functools import cache
 from pathlib import Path
 import math
 import re
@@ -251,6 +252,7 @@ def parse_moss_transcript(text: str) -> list[dict[str, Any]]:
     return _parse_moss_transcript(text)[0]
 
 
+@cache
 def load_moss_engine() -> Any:
     try:
         from mlx_audio.stt import load
