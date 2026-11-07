@@ -227,6 +227,33 @@ mod tests {
                 .iter()
                 .all(|job| job.state.status == "queued")
         );
+        // With the MacBook absent, indexing stays queued and search immediately
+        // returns lexical results without creating interactive inference jobs.
+        let queued = store.jobs().unwrap().len();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.search("Recording", &[]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!response.results.is_empty());
+        assert_eq!(response.degraded.len(), 2);
+        assert_eq!(store.jobs().unwrap().len(), queued);
+        // Even an old queue entry from a long offline interval must be claimable.
+        let retrieval = dir.path().join(".git/mdstore/retrieval");
+        for entry in std::fs::read_dir(&retrieval).unwrap() {
+            let path = entry.unwrap().path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                let mut job: Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                job["deadline"] = json!(0);
+                std::fs::write(path, serde_json::to_vec(&job).unwrap()).unwrap();
+            }
+        }
         // Interactive queries precede declared jobs, which precede background indexing.
         let interactive = store.retrieval_queue().submit(EMBED_RECIPE,
             json!({"texts":[{"id":"0","text":"Which recording?"}],"input_type":"query","namespace":"search"}), false, 30).unwrap();
@@ -336,6 +363,30 @@ mod tests {
                 (json!(RERANK_RECIPE), Value::Null)
             ]
         );
+        // Recent results remain usable when the worker goes away. An uncached
+        // query falls back immediately and does not enqueue stale reranking.
+        let queued = store.jobs().unwrap().len();
+        std::fs::write(
+            retrieval.join("workers"),
+            serde_json::to_vec(&std::collections::BTreeMap::from([
+                (EMBED_RECIPE, 0_u64),
+                (RERANK_RECIPE, 0_u64),
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let cached = store.search("Recording", &[]).await.unwrap();
+        assert!(cached.degraded.is_empty(), "{:?}", cached.degraded);
+        let uncached = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.search("Recording uncached", &[]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!uncached.results.is_empty());
+        assert_eq!(uncached.degraded.len(), 2);
+        assert_eq!(store.jobs().unwrap().len(), queued);
         // A changed chunk cannot accept a previously claimed result.
         assert!(store.reindex().await.is_err());
         let (_, stale) = request(&app, claim.clone()).await;
@@ -373,5 +424,25 @@ mod tests {
             reopened.status().unwrap().vectors_ready,
             reopened.status().unwrap().vectors_total
         );
+        // A freshly seen worker may disappear during inference. Both stages
+        // must still finish comfortably before the WebUI's 15-second deadline.
+        let app = application(AppState {
+            store: reopened.clone(),
+            worker_token: Some("worker".into()),
+        });
+        request(
+            &app,
+            json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]}),
+        )
+        .await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            reopened.search("Fresh unavailable", &[]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!response.results.is_empty());
+        assert_eq!(response.degraded.len(), 2);
     }
 }

@@ -141,13 +141,27 @@ impl WorkerProvider {
                 "worker texts require 1..32768 characters"
             );
         }
+        if !document {
+            let queue = self.queue.clone();
+            let inputs = parameters.clone();
+            let (cached, available) =
+                tokio::task::spawn_blocking(move || queue.interactive_state(recipe, &inputs))
+                    .await??;
+            if let Some(result) = cached {
+                return Ok(result);
+            }
+            if !available {
+                bail!("ML worker unavailable for {recipe}");
+            }
+        }
         let queue = self.queue.clone();
         let timeout = self.config.request_timeout_seconds;
         let id = tokio::task::spawn_blocking(move || {
             queue.submit(recipe, parameters, document, timeout)
         });
         let id = id.await??;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
+        // Later completions can be reused without holding up this search.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.min(3));
         loop {
             let queue = self.queue.clone();
             let identity = id.clone();
@@ -160,7 +174,7 @@ impl WorkerProvider {
                 return Err(PendingEmbeddings.into());
             }
             if tokio::time::Instant::now() >= deadline {
-                bail!("ML worker timed out: {id}");
+                bail!("ML worker result pending: {id}");
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }

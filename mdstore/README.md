@@ -22,9 +22,15 @@ Validated document vectors enter the live search index as individual chunks fini
 Complete pages are saved as ignored `.mdstore` sidecars. Forced rebuilds discard
 old sidecars before queuing fresh work. Changed/deleted chunk inputs and expired
 worker attempts reject completion. Query/ranking requests take priority, followed
-by explicitly declared jobs and then background document indexing. Interactive requests expire
-after `provider.request_timeout_seconds` (default 300). If workers are unavailable,
-search reports degraded retrieval and retains exact search. Pending/failed jobs
+by explicitly declared jobs and then background document indexing. Interactive
+jobs and cached results expire after `provider.request_timeout_seconds` (default
+300). Search reuses completed results for identical inputs. With no worker poll
+or matching heartbeat in the last 60 seconds, it skips new interactive inference
+and returns lexical/graph results, plus vector retrieval when a recent query
+embedding is cached. Reranking is skipped unless a matching result is cached.
+If a worker disappears during a request, each inference stage waits at most
+3 seconds before returning degraded results. Document embedding jobs remain
+queued without an offline expiry and resume when workers return. Pending/failed jobs
 appear in `/health`; failed retrieval jobs support the existing retry operation.
 `provider.batch_size` controls document batches (default 1, maximum 256)
 so interactive work can run between document chunks.
