@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import math
+import atexit
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -14,6 +16,47 @@ MODEL = "DeepFilterNet3"
 # The Nix build embeds this release's model, rather than downloading mutable weights.
 MODEL_REVISION = "DeepFilterNet-v0.5.6"
 SAMPLE_RATE = 48000
+
+
+# Owned by the resident audio inference process; its process group is cancelled
+# as a unit. The controller evicts the entire backend after five idle minutes.
+_denoiser = None
+
+
+def close_denoiser():
+    global _denoiser
+    if _denoiser is not None:
+        if _denoiser.poll() is None:
+            _denoiser.kill()
+        _denoiser.wait()
+        _denoiser.stdin.close()
+        _denoiser.stdout.close()
+        _denoiser = None
+
+
+atexit.register(close_denoiser)
+
+
+def denoise_file(source, output, attenuation_db):
+    global _denoiser
+    if _denoiser is not None and _denoiser.poll() is not None:
+        close_denoiser()
+    if _denoiser is None:
+        _denoiser = subprocess.Popen(["deep-filter-worker"], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, text=True)
+    try:
+        _denoiser.stdin.write(json.dumps({"source": str(source), "output": str(output),
+                                        "attenuation_db": attenuation_db}) + "\n")
+        _denoiser.stdin.flush()
+        response = _denoiser.stdout.readline()
+        if not response:
+            raise RuntimeError("DeepFilterNet inference process exited")
+        error = json.loads(response)
+    except BaseException:
+        close_denoiser()
+        raise
+    if error is not None:
+        raise RuntimeError(error)
 
 
 def run(*args):
@@ -73,17 +116,13 @@ def enhance(source: Path, output: Path, *, stream_index=0, denoise=True, levels=
         original = measure(decoded)
         processed = decoded
         if denoise:
-            version = subprocess.check_output(["deep-filter", "--version"], text=True).strip()
-            if version != "deep_filter 0.5.6":
-                raise ValueError("this recipe requires deep-filter 0.5.6 with its embedded DFN3 model")
             padded = root / "padded.wav"
             # deep-filter trims its lookahead but does not flush the tail. Padding
             # before inference protects the final speech; trim it only afterwards.
             run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(decoded),
                 "-af", "apad=pad_dur=1", "-c:a", "pcm_s16le", str(padded))
-            run("deep-filter", "--compensate-delay", "--atten-lim-db", str(attenuation_db),
-                "--output-dir", str(root / "denoised"), str(padded))
-            processed = root / "denoised/padded.wav"
+            processed = root / "denoised.wav"
+            denoise_file(padded, processed, attenuation_db)
         stats = measure(processed, original["frames"])
         gain = level_gain(stats) if levels else 0.0
         codec = {".wav": ["-c:a", "pcm_s16le"], ".flac": ["-c:a", "flac"],

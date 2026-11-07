@@ -14,7 +14,7 @@ import wave
 import numpy as np
 import pytest
 
-from ml_worker import audio, recipes, text, worker
+from ml_worker import audio, inference as inference_module, recipes, text, worker
 from ml_worker.client import Client
 
 
@@ -109,10 +109,10 @@ def fixture_models(monkeypatch, *, started=None, loads=None):
     original = subprocess.Popen
     processes = []
     def popen(command, **kwargs):
-        if command[1:3] == ['-m', 'ml_worker.worker']:
+        if '--inference-fd' in command:
             code = '''
 import os, sys, runpy
-from ml_worker import text
+from ml_worker import text, recipes
 assert 'MDSTORE_WORKER_TOKEN' not in os.environ
 assert 'CUSTOM_TOKEN' not in os.environ
 from types import SimpleNamespace
@@ -146,15 +146,17 @@ def rerank(p, **kwargs):
     text._load(text.RERANK_MODEL, text.RERANK_REVISION, classifier=True, device=kwargs['device'])
     return {'results': [{'index': i, 'id': p['texts'][i]['id'], 'relevance_score': float(i)} for i in reversed(range(len(p['texts'])))]}
 text.embeddings, text.rerank = embed, rerank
+import subprocess
+recipes._transcribe = lambda source: subprocess.run(['speech2md', str(source), '--force'], check=True)
 '''
             code = f'loads = {str(loads)!r}\n' + code if loads is not None else 'loads = None\n' + code
             code = f'started = {str(started)!r}\n' + code if started is not None else 'started = None\n' + code
-            code += f"sys.argv = {['ml_worker.worker', *command[3:]]!r}\nrunpy.run_module('ml_worker.worker', run_name='__main__')\n"
+            code += f"sys.argv = {['ml_worker.worker', *command[command.index('--inference-fd'):]]!r}\nrunpy.run_module('ml_worker.worker', run_name='__main__')\n"
             command = [sys.executable, '-c', code]
         process = original(command, **kwargs)
         processes.append(process)
         return process
-    monkeypatch.setattr(worker.subprocess, 'Popen', popen)
+    monkeypatch.setattr(inference_module.subprocess, 'Popen', popen)
     return processes
 
 
@@ -300,7 +302,7 @@ def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):
 
 
 def test_audio_enhancement_keeps_tail_channels_and_silence(tmp_path):
-    if not __import__('shutil').which('deep-filter'):
+    if not __import__('shutil').which('deep-filter-worker'):
         pytest.skip('requires the Nix DeepFilterNet3 CLI')
     source, output = tmp_path/'source.wav', tmp_path/'enhanced.wav'
     count = waveform(source, channels=2)
@@ -309,7 +311,15 @@ def test_audio_enhancement_keeps_tail_channels_and_silence(tmp_path):
     assert audio.measure(output)['channels'] == 2
     assert result['model'] == 'DeepFilterNet3'
     assert result['gain_db'] <= 12
+    first = output.read_bytes()
+    denoiser = audio._denoiser
+    audio.enhance(source, output)
+    assert output.read_bytes() == first
+    assert audio._denoiser is denoiser and denoiser.poll() is None
     waveform(source, amplitude=0)
+    audio.enhance(source, output)
+    assert audio.measure(output)['rms_dbfs'] is None
+    audio.close_denoiser()
     audio.enhance(source, output, denoise=False)
     assert audio.measure(output)['rms_dbfs'] is None
 
@@ -345,3 +355,75 @@ def test_text_models_stay_hot_across_jobs_and_recipe_errors(server, tmp_path, mo
     finally:
         inference.close()
     assert process.poll() is not None
+
+
+@pytest.mark.parametrize('recipe', [audio.RECIPE, recipes.SPEECH_RECIPE])
+def test_audio_and_speech_backends_reuse_evict_and_reload(server, tmp_path, monkeypatch, recipe):
+    client, state = server
+    monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
+    source = tmp_path/'source.wav'
+    waveform(source)
+    state['inputs'] = {'jobs/input.wav': source.read_bytes()}
+    if recipe == recipes.SPEECH_RECIPE:
+        # Use production model-cache functions, with a tiny fake MLX loader and
+        # pipeline so the lifecycle check runs on Linux without model weights.
+        modules = tmp_path/'modules'
+        speech = modules/'speech2md'
+        speech.mkdir(parents=True)
+        production = Path(os.environ.get('SPEECH2MD_SOURCE',
+            str(Path(__file__).resolve().parents[2]/'speech2md/src/speech2md')))
+        for name in ('__init__.py', 'moss.py', 'model.py', 'redimnet2.py'):
+            (speech/name).symlink_to(production/name)
+        (speech/'pipeline.py').write_text('''from .moss import load_moss_engine
+from .redimnet2 import get_redimnet2_embedder
+import json, os
+
+def transcribe(source, *, force):
+    assert force
+    assert 'MDSTORE_WORKER_TOKEN' not in os.environ
+    load_moss_engine()
+    assert get_redimnet2_embedder() is get_redimnet2_embedder()
+    source.with_suffix('.transcript.md').write_text('# Transcript')
+    source.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'space': {}, 'records': []}))
+''')
+        mlx = modules/'mlx_audio'
+        mlx.mkdir()
+        (mlx/'__init__.py').write_text('')
+        (mlx/'stt.py').write_text(f'''def load(*args, **kwargs):
+    with open({str(tmp_path/'loads')!r}, 'a') as stream:
+        stream.write('loaded\\n')
+    return object()
+''')
+        monkeypatch.setenv('PYTHONPATH', str(modules)+os.pathsep+os.environ.get('PYTHONPATH', ''))
+        outputs = ['jobs/source.transcript.md', 'jobs/source.transcript.voiceprints.json']
+        params = {}
+    else:
+        outputs = ['jobs/enhanced.wav', 'jobs/capture.json']
+        params = {'tracks': [{'input': 'jobs/input.wav', 'output': outputs[0],
+                              'stream_index': 0, 'role': 'microphone'}]}
+    state['assignment'] = assignment(recipe, params, state['inputs'], outputs)
+    if recipe == recipes.SPEECH_RECIPE:
+        state['assignment']['recording'] = '---\naudio: input.wav\n---\n# Recording\n'
+    backend = worker.Inference([recipe], 'cpu', 'MDSTORE_WORKER_TOKEN', idle_seconds=1.0)
+    try:
+        assert backend.process is None  # Lazy until the first job.
+        worker.execute(client, state['assignment'], tmp_path/'cache', inference=backend)
+        process = backend.process
+        worker.execute(client, state['assignment'], tmp_path/'cache', inference=backend)
+        assert backend.process is process and process.poll() is None
+        if recipe == recipes.SPEECH_RECIPE:
+            assert (tmp_path/'loads').read_text().splitlines() == ['loaded']
+        timer = backend._timer
+        deadline = time.monotonic() + 5
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert process.poll() is not None
+        # Joining the timer also ensures descriptor cleanup has completed.
+        timer.join(timeout=2)
+        assert backend.process is None and backend.connection is None
+        worker.execute(client, state['assignment'], tmp_path/'cache', inference=backend)
+        assert backend.process is not process and backend.process.poll() is None
+        if recipe == recipes.SPEECH_RECIPE:
+            assert (tmp_path/'loads').read_text().splitlines() == ['loaded', 'loaded']
+    finally:
+        backend.close()

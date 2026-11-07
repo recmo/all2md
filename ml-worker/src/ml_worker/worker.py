@@ -9,8 +9,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
-import subprocess
 import sys
 import threading
 import tempfile
@@ -22,15 +20,16 @@ from . import audio, recipes, text
 from .inference import Inference, serve
 
 MAX_OUTPUT = 64 * 1024 * 1024
+MODEL_IDLE_SECONDS = 5 * 60
 
 
 def capabilities():
     result = []
-    if shutil.which("speech2md"):
+    if os.environ.get("ML_WORKER_SPEECH_PYTHON") or importlib.util.find_spec("speech2md"):
         result.append(recipes.SPEECH_RECIPE)
     if shutil.which("ffmpeg"):
         result.append(recipes.LEVELS_RECIPE)
-        if shutil.which("deep-filter"):
+        if shutil.which("deep-filter-worker"):
             result.append(audio.RECIPE)
     if importlib.util.find_spec("torch") and importlib.util.find_spec("transformers"):
         result.extend((text.EMBED_RECIPE, text.RERANK_RECIPE))
@@ -98,34 +97,14 @@ def _execute_locked(client, assignment, root, device, token_env, heartbeat_secon
         recipes.json_output(request, assignment)
         progress["stage"] = "processing"
         check_lease()
-        if job["recipe"] in {text.EMBED_RECIPE, text.RERANK_RECIPE}:
-            if inference is None:
-                temporary = Inference([job["recipe"]], device, token_env)
-                try:
-                    temporary.execute(request, lock_fd, lost)
-                finally:
-                    temporary.close()
-            else:
-                inference.execute(request, lock_fd, lost)
-        else:
-            process = subprocess.Popen(
-                [sys.executable, "-m", "ml_worker.worker", "--assignment", str(request), "--device", device],
-                env={k: v for k, v in os.environ.items() if k not in {token_env, "MDSTORE_WORKER_TOKEN"}},
-                stdin=subprocess.DEVNULL, start_new_session=True,
-                # Preserve the cache lock if the parent crashes while inference runs.
-                pass_fds=() if lock_fd is None else (lock_fd,),
-            )
+        if inference is None:
+            temporary = Inference([job["recipe"]], device, token_env)
             try:
-                while process.poll() is None:
-                    if lost.wait(0.2):
-                        raise RuntimeError("worker lease lost")
-                if process.returncode:
-                    raise RuntimeError(f"{job['recipe']} exited with status {process.returncode}")
+                temporary.execute(request, lock_fd, lost)
             finally:
-                # Stop the entire owned process group, including ffmpeg/deep-filter.
-                if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
+                temporary.close()
+        else:
+            inference.execute(request, lock_fd, lost)
         check_lease()
         progress["stage"] = "publishing"
         for output in outputs:
@@ -177,16 +156,10 @@ def main(argv=None):
     parser.add_argument("--recipes", nargs="+", choices=recipes.RECIPES)
     parser.add_argument("--list-recipes", action="store_true")
     parser.add_argument("--once", action="store_true", help="claim at most one job and exit")
-    parser.add_argument("--assignment", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--inference-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.inference_fd is not None:
         serve(args.inference_fd, args.recipes or [], args.device)
-        return 0
-    if args.assignment:
-        assignment = json.loads(args.assignment.read_text())
-        recipes.execute(assignment, args.assignment.parent, device=args.device,
-                        scratch=args.assignment.parent.parent / ".scratch")
         return 0
     available = capabilities()
     if args.list_recipes:
@@ -196,15 +169,23 @@ def main(argv=None):
     if not args.server or not selected or set(selected)-set(available):
         parser.error("--server and locally available recipes are required; use --list-recipes")
     client = Client(args.server, os.environ.get(args.token_env, ""))
-    inference = Inference([recipe for recipe in selected
-                           if recipe in {text.EMBED_RECIPE, text.RERANK_RECIPE}], args.device, args.token_env)
+    text_recipes = [recipe for recipe in selected if recipe in {text.EMBED_RECIPE, text.RERANK_RECIPE}]
+    text_inference = Inference(text_recipes, args.device, args.token_env)
+    speech_inference = Inference([recipes.SPEECH_RECIPE], args.device, args.token_env,
+                                 idle_seconds=MODEL_IDLE_SECONDS)
+    audio_inference = Inference([audio.RECIPE], args.device, args.token_env,
+                                idle_seconds=MODEL_IDLE_SECONDS)
     try:
-        if inference.selected:
-            inference.start(threading.Event())
+        if text_recipes:
+            text_inference.start(threading.Event())
         while True:
             try:
                 assignment = client.request("/worker", {"op": "claim", "recipes": selected})
                 if assignment:
+                    recipe = assignment["job"]["recipe"]
+                    inference = (text_inference if recipe in text_recipes else
+                                 speech_inference if recipe == recipes.SPEECH_RECIPE else
+                                 audio_inference if recipe == audio.RECIPE else None)
                     execute(client, assignment, args.cache, device=args.device, token_env=args.token_env, inference=inference)
                 if args.once:
                     return 0
@@ -220,7 +201,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         return 130
     finally:
-        inference.close()
+        for inference in (text_inference, speech_inference, audio_inference):
+            inference.close()
 
 
 if __name__ == "__main__":

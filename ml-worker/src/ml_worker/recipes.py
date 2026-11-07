@@ -6,7 +6,6 @@ import os
 import re
 import shutil
 from pathlib import Path
-import subprocess
 
 from . import audio, text
 from .client import digest, local_path
@@ -33,6 +32,11 @@ def validate_assignment(assignment, root):
     if not outputs or len(set(outputs)) != len(outputs) or source in outputs or source in inputs or set(outputs) & inputs:
         raise ValueError("output paths must be unique and independent of inputs/source")
     return source, inputs, outputs
+
+
+def _transcribe(source):
+    from speech2md.pipeline import transcribe
+    transcribe(source, force=True)
 
 
 def _speech(assignment, root, source, inputs, outputs):
@@ -73,7 +77,7 @@ def _speech(assignment, root, source, inputs, outputs):
     if not moss.exists() and cached.is_file():
         shutil.copyfile(cached, moss)
     try:
-        subprocess.run(["speech2md", str(source), "--force"], check=True, stdin=subprocess.DEVNULL)
+        _transcribe(source)
     finally:
         if moss.is_file():
             temporary = cached.with_suffix(".part")

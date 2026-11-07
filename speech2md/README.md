@@ -201,3 +201,8 @@ to replace.
 Use the [ML worker](../ml-worker/README.md) to run leased `speech2md-v1` jobs.
 `speech2md` remains the standalone transcription CLI; the ML worker owns transport,
 leases, cancellation, and publication.
+
+When called by `ml-worker`, the transcription pipeline retains MOSS and ReDimNet2
+across jobs in a dedicated process. The worker evicts that process after five
+minutes without a transcription job. Standalone CLI invocations still exit after
+one recording.

@@ -105,25 +105,36 @@
         name = "speech2md";
         project = speechProject;
       };
-      # nixpkgs packages only the LADSPA plugin. Build the upstream Rust CLI
-      # from that same fixed source/cargo closure, with DFN3 weights embedded.
+      # Build a resident Rust backend from the pinned DeepFilterNet source/cargo
+      # closure, with DFN3 weights embedded.
       mkDeepFilter = mlSystem:
         let
           deepfilternet = nixpkgs.legacyPackages.${mlSystem}.deepfilternet;
         in
         assert deepfilternet.version == "0.5.6";
-        deepfilternet.overrideAttrs {
+        deepfilternet.overrideAttrs (old: {
           pname = "deep-filter";
           buildAndTestSubdir = "libDF";
+          postPatch = (old.postPatch or "") + ''
+            sed -i '/^\[features\]/a worker-json = ["dep:serde_json"]' libDF/Cargo.toml
+            cp ${./ml-worker/native/deep-filter-worker.rs} libDF/src/bin/deep-filter-worker.rs
+            cat >> libDF/Cargo.toml <<'EOF'
+
+            [[bin]]
+            name = "deep-filter-worker"
+            path = "src/bin/deep-filter-worker.rs"
+            required-features = ["tract", "wav-utils", "worker-json"]
+            EOF
+          '';
           cargoBuildFlags = [
-            "--bin" "deep-filter"
-            "--features" "bin,tract,wav-utils,transforms,default-model"
+            "--bin" "deep-filter-worker"
+            "--features" "tract,wav-utils,transforms,default-model,worker-json"
           ];
           # Upstream lib tests import the optional training/dataset module.
-          # The worker check below exercises the installed CLI and actual model.
+          # The worker check below exercises the resident backend and actual model.
           doCheck = false;
           postInstall = "";
-        };
+        });
       mkMlWorker =
         mlSystem:
         let
@@ -139,9 +150,13 @@
           runtimeInputs = [
             systemPkgs.ffmpeg
             (mkDeepFilter mlSystem)
-          ]
-          ++ nixpkgs.lib.optionals systemPkgs.stdenv.hostPlatform.isDarwin [ speech2md ];
-          text = ''exec ${environment}/bin/ml-worker "$@"'';
+          ];
+          text = nixpkgs.lib.optionalString systemPkgs.stdenv.hostPlatform.isDarwin ''
+            export ML_WORKER_SPEECH_PYTHON=${speechEnvironment}/bin/python
+            export SPEECH2MD_VERSION=${pagesVersion}
+            export TORCH_HOME="''${XDG_CACHE_HOME:-$HOME/.cache}/speech2md/torch"
+            mkdir -p "$TORCH_HOME"
+          '' + ''exec ${environment}/bin/ml-worker "$@"'';
         };
       ml-worker = mkMlWorker system;
       mkMlWorkerCheck = mlSystem:
@@ -154,6 +169,7 @@
           ];
         } ''
           export PYTHONPATH=${mlProject}/src
+          export SPEECH2MD_SOURCE=${speechProject}/src/speech2md
           export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
           pytest -q -p no:cacheprovider ${mlProject}/tests
           touch "$out"
