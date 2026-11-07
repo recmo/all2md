@@ -2,7 +2,7 @@
 
 `ml-worker` pulls jobs from mdstore and runs one recipe at a time. Apple Silicon
 supports transcription, audio enhancement, text embeddings, and reranking. Linux
-CPU supports audio enhancement and text models; transcription requires MLX and
+CPU supports audio enhancement; text models and transcription require MLX and
 is not included in the Linux package. It does not run generative LLM jobs.
 
 | Recipe | Processing | Outputs |
@@ -42,17 +42,17 @@ nix run .#ml-worker -- --server https://your-mdstore-host --once \
 
 Idle workers poll once a second; failed requests retry after ten seconds.
 
-`--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
-when available, otherwise CPU; `--device cpu` forces CPU for text models.
-Text models use FP32 on CPU and BF16 on MPS. Allow roughly 16 GiB for one CPU
-text-model process; `OMP_NUM_THREADS=4` can limit its CPU parallelism.
+`--cache` defaults to `~/.cache/ml-worker`. Text inference uses native MLX
+with BF16 original weights on Apple Silicon (macOS 14+). CPU text inference,
+PyTorch MPS, and the `--device` option have been removed. Linux workers only
+advertise their locally available audio recipes.
 DeepFilterNet uses its native Rust/CPU runtime. Nix packages the dependencies and
 embeds the DeepFilterNet3 model. The two text models download pinned weights into
 the Hugging Face cache on first use; loading disables remote Python code and
 requires safetensors. No packages or toolchains are installed at runtime.
 
-See [Zawrat CPU measurements](benchmarks.md) before scheduling the 4B text models
-on a CPU. These queued recipes do not provide synchronous mdstore retrieval.
+See [runtime measurements](benchmarks.md) for the CPU removal decision and
+MacBook batch-size selection. Mdstore queues retrieval through these recipes.
 
 Use `--recipes speech2md-v1` for a transcription-only worker.
 Use `ml-worker` for the additional recipes; its transcription recipe invokes the
@@ -235,12 +235,13 @@ IDs, sort by descending score, and break ties by original order. Scores are not
 probabilities. This is a queued batch job, not a synchronous search-time service.
 
 Both models have 4B parameters and Apache-2.0 weights. They download on first use
-(roughly 8 GB per model) and run one at a time in the job subprocess, using BF16
-on MPS and FP32 on CPU. MPS requires a Mac/PyTorch combination with BF16 support (macOS 14+).
+(roughly 8 GB per model) and run one at a time in the job subprocess using native
+MLX BF16. MLX requires Apple Silicon and macOS 14+.
 Allow memory beyond the weights for inference; long passages use more memory.
-Both recipes use left-padded batches of up to 8 inputs and 2,048 padded tokens.
-Longer inputs run alone. These are conservative starting limits, not measured
-optimal settings; see [benchmarking](benchmarks.md) for batch-size tuning.
+Both recipes use batches of up to 4 inputs and 2,048 padded tokens, with
+causal right padding and pooling at the last real token. Longer inputs run alone. Batch size 4 was selected from the MacBook
+measurements in [benchmarking](benchmarks.md). The pinned original weights and
+artifact formats are preserved; no quantization is applied.
 
 Both text recipes accept 1–256 records with unique nonempty string IDs and
 nonempty text of at most 32,768 characters. The formatted input must fit within
@@ -261,8 +262,8 @@ nix build .#checks.x86_64-linux.ml-worker
 Fixture checks exercise real HTTP transfers, subprocess execution, checksum
 failure, lease loss, publication, gain control, and DeepFilterNet audio alignment.
 Tensor tests verify pooling, prefixes, and ranking without downloading weights
-when PyTorch is installed. Actual quality needs representative Zoom/Meet audio,
+when MLX is installed. Actual quality needs representative Zoom/Meet audio,
 reviewed transcripts and speaker identities, and relevance judgments for text.
-MacBook MPS performance and real-recording quality are not established by these
-checks. OCR integration, codec restoration, launchd deployment, automatic corpus
+MacBook throughput measurements are recorded in [benchmarks.md](benchmarks.md);
+real-recording quality is not established by these checks. OCR integration, codec restoration, launchd deployment, automatic corpus
 embedding jobs, and the WebUI enhancement selector remain separate work.

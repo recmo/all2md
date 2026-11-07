@@ -1,78 +1,86 @@
-"""Verify model-specific formatting, last-token pooling, and causal scoring."""
-from types import SimpleNamespace
+"""Exercise native MLX loading, batching, and the published retrieval artifacts."""
+import json
+import math
+
 import pytest
 from ml_worker import text
 
 
-def test_embeddings_and_reranking_use_pinned_model_conventions(monkeypatch):
-    torch = pytest.importorskip('torch')
-    calls = []
-    batches = []
-    class Batch(dict):
-        def to(self, device): return self
-    class Tokenizer:
-        pad_token_id = 0
-        def __call__(self, inputs, **kwargs):
-            calls.extend(inputs)
-            return {'input_ids': [[1] * (2 + int('beta' in value)) +
-                                  [int('beta' in value) + 3] for value in inputs]}
-        def pad(self, encoded, *, padding, return_tensors):
-            assert self.padding_side == 'left' and padding and return_tensors == 'pt'
-            rows = encoded['input_ids']
-            length = max(map(len, rows))
-            ids = torch.tensor([[0] * (length - len(row)) + row for row in rows])
-            batches.append(ids.shape)
-            return Batch(input_ids=ids, attention_mask=(ids != 0).long())
-        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
-            assert not tokenize and add_generation_prompt
-            assert [m['role'] for m in messages] == ['query', 'document']
-            return f"<|im_start|>system\n{messages[0]['content']}<|im_end|>\n<|im_start|>user\n{messages[1]['content']}<|im_end|>\n<|im_start|>assistant\n"
-    class Model:
-        def __init__(self, classifier): self.classifier = classifier
-        def __call__(self, input_ids, *, use_cache, **kwargs):
-            assert not use_cache
-            if self.classifier:
-                assert kwargs['logits_to_keep'] == 1
-                logits = torch.zeros((len(input_ids), 1, text.YES_TOKEN + 1))
-                logits[:, -1, text.YES_TOKEN] = input_ids[:, -1]
-                return SimpleNamespace(logits=logits)
-            hidden = torch.full((*input_ids.shape, text.DIMENSIONS), float('nan'))
-            hidden[:, -1, :] = 1
-            return SimpleNamespace(last_hidden_state=hidden)
-    def load(model_id, revision, *, classifier, device):
-        assert (model_id, revision) == ((text.RERANK_MODEL, text.RERANK_REVISION) if classifier
-                                       else (text.EMBED_MODEL, text.EMBED_REVISION))
-        return Tokenizer(), Model(classifier), 'cpu'
-    monkeypatch.setattr(text, '_load', load)
-    items = [{'id':'a', 'text':'alpha'}, {'id':'b', 'text':'beta'}]
-    result = text.embeddings({'texts':items})
-    embedded = result
-    assert calls[0] == '<|im_start|>system\ndocument<|im_end|>\n<|im_start|>user\nalpha<|im_end|>\n'
-    assert result['space']['dimensions'] == text.DIMENSIONS
-    assert result['space']['recipe'] == text.EMBED_RECIPE
-    assert abs(sum(x*x for x in result['records'][0]['vector'])-1) < 1e-5
-    text.embeddings({'texts':items, 'input_type':'query'})
-    assert calls[-2] == '<|im_start|>system\nquery<|im_end|>\n<|im_start|>user\nalpha<|im_end|>\n'
-    result = text.rerank({'texts':items, 'query':'release', 'top_n':1})
-    assert calls[-1] == '<|im_start|>system\nrelease<|im_end|>\n<|im_start|>user\nbeta<|im_end|>\n<|im_start|>assistant\n'
-    assert result['results'] == [{'index':1, 'id':'b', 'relevance_score':4.0}]
-    assert batches == [(2, 4)] * 3
-    # The same request through single-item calls preserves vectors and ranking.
+def test_native_mlx_loading_and_retrieval_artifacts(tmp_path, monkeypatch):
+    mx = pytest.importorskip('mlx.core')
+    pytest.importorskip('mlx_lm')
+    from mlx_lm.models.qwen3 import Model, ModelArgs
+    from mlx.utils import tree_flatten
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+    import huggingface_hub
+
+    mx.random.seed(7)
+    config = dict(model_type='qwen3', vocab_size=text.YES_TOKEN + 1, hidden_size=32,
+                  intermediate_size=64, num_hidden_layers=2, num_attention_heads=4,
+                  num_key_value_heads=2, head_dim=8, tie_word_embeddings=True,
+                  rms_norm_eps=1e-6, max_position_embeddings=32768, rope_theta=10000)
+    model = Model(ModelArgs.from_dict(config))
+    mx.save_safetensors(str(tmp_path / 'model.safetensors'), dict(tree_flatten(model.parameters())))
+    (tmp_path / 'config.json').write_text(json.dumps(config))
+    backend = Tokenizer(models.WordLevel(
+        {'[UNK]': 0, '[PAD]': 1, '[EOS]': 2, 'alpha': 3, 'beta': 4}, unk_token='[UNK]'))
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token='[UNK]',
+                                       pad_token='[PAD]', eos_token='[EOS]')
+    tokenizer.chat_template = "{% for message in messages %}{{message['content']}} {% endfor %}alpha"
+    tokenizer.save_pretrained(tmp_path)
+    monkeypatch.setattr(text, 'DIMENSIONS', 32)
+    # The test uses MLX's CPU implementation; production requires Metal.
+    monkeypatch.setattr(mx.metal, 'is_available', lambda: True)
+    monkeypatch.setattr(AutoTokenizer, 'from_pretrained', lambda *args, **kwargs: tokenizer)
+    downloads = []
+    def snapshot(model_id, *, revision, allow_patterns):
+        downloads.append((model_id, revision))
+        assert '*.safetensors' in allow_patterns
+        return str(tmp_path)
+    monkeypatch.setattr(huggingface_hub, 'snapshot_download', snapshot)
+    original_load = text._load
+    loaded = {identity: original_load(identity, revision, precision='fp32') for identity, revision in
+              [(text.EMBED_MODEL, text.EMBED_REVISION), (text.RERANK_MODEL, text.RERANK_REVISION)]}
+    assert downloads == [(text.EMBED_MODEL, text.EMBED_REVISION),
+                         (text.RERANK_MODEL, text.RERANK_REVISION)]
+    # Check the production BF16 default separately from FP32 batch comparisons.
+    _, bf16 = original_load(text.EMBED_MODEL, text.EMBED_REVISION)
+    assert all(value.dtype == mx.bfloat16 for _, value in tree_flatten(bf16.parameters()))
+    monkeypatch.setattr(text, '_load', lambda identity, revision: loaded[identity])
+    items = [{'id': str(i), 'text': 'alpha ' * (i + 1) + 'beta'} for i in range(30)]
+    parameters = {'texts': items, 'input_type': 'document', 'namespace': 'search',
+                  'query': 'alpha beta', 'top_n': 10}
+    vectors = text.embeddings(parameters)
+    scores = text.rerank(parameters)
+    assert vectors['space'] == {'namespace': 'search', 'recipe': text.EMBED_RECIPE, 'dimensions': 32}
+    assert vectors['revision'] == text.EMBED_REVISION
+    assert scores['revision'] == text.RERANK_REVISION
+    assert [r['id'] for r in vectors['records']] == [r['id'] for r in items]
+    for item, record in zip(items, vectors['records'], strict=True):
+        assert record['metadata'] == {'text': item['text'], 'input_type': 'document'}
+        assert abs(sum(x*x for x in record['vector']) - 1) < 1e-5
+    assert len(scores['results']) == 10
+    assert len({r['index'] for r in scores['results']}) == 10
+    for result in scores['results']:
+        assert result['id'] == items[result['index']]['id']
+        assert math.isfinite(result['relevance_score'])
+    assert scores['results'] == sorted(scores['results'], key=lambda r: (-r['relevance_score'], r['index']))
     monkeypatch.setattr(text, 'INFERENCE_BATCH_SIZE', 1)
-    assert text.rerank({'texts':items, 'query':'release', 'top_n':1}) == result
-    assert text.embeddings({'texts':items}) == embedded
-    monkeypatch.setattr(text, 'INFERENCE_BATCH_SIZE', 8)
-    monkeypatch.setattr(text, 'INFERENCE_BATCH_TOKENS', 6)
-    assert text.rerank({'texts':items, 'query':'release', 'top_n':1}) == result
-    assert batches[-2:] == [(1, 3), (1, 4)]
-    monkeypatch.setattr(text, 'INFERENCE_BATCH_TOKENS', 2048)
-    many = [{'id':str(i), 'text':'beta' if i == 29 else 'alpha'} for i in range(30)]
-    ranked = text.rerank({'texts':many, 'query':'release'})
-    assert [r['index'] for r in ranked['results']] == [29, *range(29)]
-    assert batches[-4:] == [(8, 3), (8, 3), (8, 3), (6, 4)]
-    with pytest.raises(ValueError): text.embeddings({'texts':items, 'namespace':'speakers'})
-    with pytest.raises(ValueError): text.rerank({'texts':items, 'query':'release', 'top_n':True})
-    with pytest.raises(ValueError): text.records([items[0],items[0]])
+    single_vectors = text.embeddings(parameters)
+    single_scores = text.rerank(parameters)
+    for a, b in zip(vectors['records'], single_vectors['records'], strict=True):
+        assert sum(x*y for x, y in zip(a['vector'], b['vector'], strict=True)) > .99999
+    assert [r['index'] for r in scores['results']] == [r['index'] for r in single_scores['results']]
+    for a, b in zip(scores['results'], single_scores['results'], strict=True):
+        assert abs(a['relevance_score'] - b['relevance_score']) < 1e-5
+    monkeypatch.setattr(text, 'INFERENCE_BATCH_SIZE', 4)
+    monkeypatch.setattr(text, 'INFERENCE_BATCH_TOKENS', 1)
+    assert text.rerank(parameters) == single_scores
+    with pytest.raises(ValueError): text.embeddings({**parameters, 'namespace': 'speakers'})
+    with pytest.raises(ValueError): text.rerank({**parameters, 'top_n': True})
+    with pytest.raises(ValueError): text.records([items[0], items[0]])
     monkeypatch.setattr(text, 'MAX_TOKENS', 2)
     with pytest.raises(ValueError, match='split into smaller passages'):
-        text.embeddings({'texts':items})
+        text.rerank(parameters)

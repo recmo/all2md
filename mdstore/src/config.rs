@@ -486,7 +486,7 @@ pub struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            batch_size: Some(8),
+            batch_size: Some(4),
             request_timeout_seconds: default_request_timeout_seconds(),
         }
     }

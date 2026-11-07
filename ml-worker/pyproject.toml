@@ -12,8 +12,8 @@ license = "MIT"
 dependencies = [
   "numpy>=2,<3",
   "pyyaml>=6,<7",
-  "torch==2.11.0",
-  "transformers==5.12.1",
+  "mlx-lm==0.32.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "transformers==5.12.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.optional-dependencies]
@@ -28,11 +28,3 @@ packages = ["src/ml_worker"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-
-[tool.uv.sources]
-torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import platform
 import subprocess
 import sys
 import threading
@@ -31,12 +32,13 @@ def capabilities():
         result.append(recipes.LEVELS_RECIPE)
         if shutil.which("deep-filter"):
             result.append(audio.RECIPE)
-    if importlib.util.find_spec("torch") and importlib.util.find_spec("transformers"):
+    supported = sys.platform == "darwin" and platform.machine() == "arm64"
+    if supported and importlib.util.find_spec("mlx_lm") and importlib.util.find_spec("transformers"):
         result.extend((text.EMBED_RECIPE, text.RERANK_RECIPE))
     return result
 
 
-def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORKER_TOKEN", heartbeat_seconds=30):
+def execute(client, assignment, cache, *, token_env="MDSTORE_WORKER_TOKEN", heartbeat_seconds=30):
     job = assignment["job"]
     scope = hashlib.sha256(client.server.encode()).hexdigest()
     cache_root = cache.expanduser().resolve() / scope
@@ -45,7 +47,7 @@ def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORK
         with tempfile.TemporaryDirectory(prefix="retrieval-", dir=cache_root) as directory:
             root = Path(directory) / "work"
             root.mkdir(mode=0o700)
-            return _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, None)
+            return _execute_locked(client, assignment, root, token_env, heartbeat_seconds, None)
     identity = hashlib.sha256(job["id"].encode()).hexdigest()
     job_root = cache_root / identity
     job_root.mkdir(exist_ok=True, mode=0o700)
@@ -59,10 +61,10 @@ def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORK
             if previous.is_dir() and previous != root:
                 shutil.rmtree(previous)
         root.mkdir(exist_ok=True, mode=0o700)
-        _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock.fileno())
+        _execute_locked(client, assignment, root, token_env, heartbeat_seconds, lock.fileno())
 
 
-def _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock_fd):
+def _execute_locked(client, assignment, root, token_env, heartbeat_seconds, lock_fd):
     job = assignment["job"]
     lease = {"id": job["id"], "attempt": job["attempt"]}
     scratch = root.parent / ".scratch"
@@ -98,7 +100,7 @@ def _execute_locked(client, assignment, root, device, token_env, heartbeat_secon
         progress["stage"] = "processing"
         check_lease()
         process = subprocess.Popen(
-            [sys.executable, "-m", "ml_worker.worker", "--assignment", str(request), "--device", device],
+            [sys.executable, "-m", "ml_worker.worker", "--assignment", str(request)],
             env={k: v for k, v in os.environ.items() if k not in {token_env, "MDSTORE_WORKER_TOKEN"}},
             stdin=subprocess.DEVNULL, start_new_session=True,
             # Preserve the cache lock if the parent crashes while inference runs.
@@ -162,7 +164,6 @@ def main(argv=None):
     parser.add_argument("--server")
     parser.add_argument("--token-env", default="MDSTORE_WORKER_TOKEN")
     parser.add_argument("--cache", type=Path, default=Path.home() / ".cache/ml-worker")
-    parser.add_argument("--device", choices=("auto", "cpu", "mps"), default="auto")
     parser.add_argument("--recipes", nargs="+", choices=recipes.RECIPES)
     parser.add_argument("--list-recipes", action="store_true")
     parser.add_argument("--once", action="store_true", help="claim at most one job and exit")
@@ -170,7 +171,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.assignment:
         assignment = json.loads(args.assignment.read_text())
-        recipes.execute(assignment, args.assignment.parent, device=args.device,
+        recipes.execute(assignment, args.assignment.parent,
                         scratch=args.assignment.parent.parent / ".scratch")
         return 0
     available = capabilities()
@@ -186,7 +187,7 @@ def main(argv=None):
             try:
                 assignment = client.request("/worker", {"op": "claim", "recipes": selected})
                 if assignment:
-                    execute(client, assignment, args.cache, device=args.device, token_env=args.token_env)
+                    execute(client, assignment, args.cache, token_env=args.token_env)
                 if args.once:
                     return 0
                 if assignment:

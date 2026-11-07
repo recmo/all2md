@@ -81,7 +81,7 @@ def _speech(assignment, root, source, inputs, outputs):
             temporary.replace(cached)
 
 
-def execute(assignment, root, *, device="auto", scratch=None):
+def execute(assignment, root, *, scratch=None):
     source, inputs, outputs = validate_assignment(assignment, root)
     job = assignment["job"]
     recipe = job["recipe"]
@@ -104,7 +104,7 @@ def execute(assignment, root, *, device="auto", scratch=None):
     if recipe in {text.EMBED_RECIPE, text.RERANK_RECIPE}:
         if len(outputs) != 1 or outputs[0].suffix != ".json":
             raise ValueError("text recipes require exactly one JSON output")
-        result = (text.embeddings if recipe == text.EMBED_RECIPE else text.rerank)(parameters, device=device)
+        result = (text.embeddings if recipe == text.EMBED_RECIPE else text.rerank)(parameters)
         result["provenance"] = provenance
         json_output(outputs[0], result)
         return

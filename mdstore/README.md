@@ -8,7 +8,8 @@ MCP exposes `read`, `search`, and `edit`. Reads return a snapshot commit and num
 
 All search inference runs through `ml-worker`: document chunks are queued automatically
 at startup and after edits; query embeddings and reranking use the same pinned
-local recipes. The ZeroEntropy hosted API integration has been removed. Its API-key
+local recipes on an Apple Silicon Mac using native MLX. Linux workers provide
+audio recipes only. The ZeroEntropy hosted API integration has been removed. Its API-key
 and endpoint settings are unsupported and rejected by configuration validation. Set the same
 `MDSTORE_WORKER_TOKEN` on the daemon and worker, then run:
 
@@ -35,9 +36,9 @@ the search deadline; other MCP clients must allow enough time for both embedding
 and reranking. Document embedding jobs remain
 queued without an offline expiry and resume when workers return. Pending/failed jobs
 appear in `/health`; failed retrieval jobs support the existing retry operation.
-`provider.batch_size` controls document jobs (default 8, maximum 256)
+`provider.batch_size` controls document jobs (default 4, maximum 256)
 so interactive work can run between jobs. Within each job the worker batches
-both embeddings and reranking, with at most 8 items and 2,048 padded tokens per
+both embeddings and reranking, with at most 4 items and 2,048 padded tokens per
 model call. Longer individual inputs run alone.
 Completed JSON results are stored separately from queue metadata; cache keys include
 the pinned model revision. Models and 2,560-dimensional vectors are fixed by the

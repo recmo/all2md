@@ -1,4 +1,10 @@
-# ZE on Zawrat CPU
+# Retrieval runtime measurements
+
+CPU inference has been removed. The CPU results and commands below describe the
+historical harness at commit `8b3a406`; the current worker and benchmark use
+MLX only on Apple Silicon. MacBook measurements appear after the CPU history.
+
+## Historical ZE on Zawrat CPU
 
 Measured on 2026-11-06 in Zawrat's Codex container, on its actual Intel
 Core i5-14500 (6 performance cores, 8 efficiency cores, 20 hardware threads).
@@ -30,8 +36,8 @@ The original BF16 implementation, limited to four threads:
 
 Switching the same reranker weights to FP32 at **four threads** took 3.72 s
 (3.833, 3.602 s), with 15.44 GiB peak RSS. Its relevant-passage score was
-12.4059 versus BF16's 12.4375. The worker therefore uses FP32 on CPU; MPS keeps
-BF16. This is a precision change, without changing weights or introducing a
+12.4059 versus BF16's 12.4375. The former CPU backend therefore used FP32. Apple Silicon uses native MLX
+BF16 (see the MacBook measurements below). This is a precision change, without changing weights or introducing a
 quantized recipe. BF16/FP32 embedding cosine agreement was 0.999921 for the
 query and 0.999939 for the 128-token passage.
 
@@ -146,54 +152,78 @@ operator also quantizes activations and returns FP32 between linear layers;
 see the [PyTorch 2.11 implementation](https://github.com/pytorch/pytorch/blob/v2.11.0/aten/src/ATen/native/quantized/cpu/qlinear_dynamic.cpp).
 This is not a fully integer transformer graph.
 
-## MacBook batch-size tuning
+## MacBook MLX versus MPS
 
-The historical CPU measurements above used single-item calls. The worker now
-uses up to 8 inputs and 2,048 padded tokens per call; longer inputs run alone.
-These are provisional limits, not an established optimum for the MacBook.
+Measured on the user's Apple Silicon MacBook with macOS 27.2, PyTorch 2.11.0,
+MLX 0.32.4, and MLX-LM 0.32.2. The chip and RAM size were not supplied. Both
+runtimes used the pinned original BF16 weights, 16 passages of 400 tokens
+(411 formatted for embedding, 419 for reranking), a 32,768-token batch budget,
+one initial inference and two warm repetitions. Loading and the initial
+inference are excluded from the medians. These synthetic inputs contain one
+relevant passage and repeated distractors; they are not a quality evaluation.
 
-`benchmark.py --device mlx` loads the original pinned BF16 safetensors using
-MLX-LM's Qwen3 implementation. It does not quantize or substitute a community
-checkpoint. This benchmark path uses native MLX arrays, causal right padding,
-last-real-token pooling, and the tied readout's Yes logit. The production worker
-still uses PyTorch; choosing its runtime requires the target-machine results.
-`--device mps` runs the production PyTorch path on the Mac GPU. Both paths
-materialize their results before stopping the timer.
+| Batch | zembed MLX passages/s | zembed MPS passages/s | zerank MLX passages/s | zerank MPS passages/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 3.33 | 2.54 | 3.24 | 2.62 |
+| 2 | 3.85 | 2.76 | 3.54 | 2.62 |
+| 4 | 3.99 | 2.65 | 3.82 | 2.65 |
+| 8 | 4.00 | 2.64 | 3.66 | 2.69 |
+| 16 | 4.07 | 2.48 | 3.54 | 2.52 |
 
-From the updated repository checkout on the MacBook:
+Batch 32 was limited to 16 supplied passages and does not test a larger batch.
+MLX batch 4 processed the complete embedding request in 4.006 s and reranking
+in 4.188 s. Compared with each model's best measured MPS setting, throughput
+improved by 45% and 42% respectively. MLX embedding gains above batch 4 were
+small; larger reranking batches were slower. Two warm samples do not establish
+a precise optimum. The worker requires MLX on Apple Silicon and fixes the
+inference batch limit at 4, retaining the 2,048-token memory guard.
+
+At MLX batch 4, peak MLX allocator memory was 7.91 GiB for embedding and
+7.92 GiB for reranking. MPS process RSS omits GPU allocations and cannot be
+compared directly with this allocator measurement. Warm query embedding was
+about 59 ms with MLX versus 65 ms with MPS. The two models were measured in
+separate processes; co-residency was not measured.
+
+Relative to each runtime's own single-item inference, MLX embedding minimum
+cosine agreement was 0.999901 (MPS: 0.999887). Reranking order was identical on
+these inputs, with maximum raw-score drift 0.0625 for MLX and 0.125 for MPS.
+These checks do not establish cross-runtime agreement or retrieval quality.
+
+The benchmark now uses the production loader and inference code. It loads
+original pinned safetensors, disables remote Python code, and does not quantize
+or substitute a community checkpoint. Text inference depends on MLX-LM; PyTorch and CPU text support were removed. To check the selected settings from the MacBook repository:
 
 ```sh
 nix develop .#ml-worker --command bash
 uv sync --project ml-worker --extra dev
-mkdir -p /tmp/all2md-batch
-for device in mlx mps; do
-  for model in embed rerank; do
-    for size in 1 2 4 8 16 32; do
-      PYTHONPATH=ml-worker/src uv run --project ml-worker --with mlx-lm \
-        python ml-worker/benchmark.py "$model" --device "$device" \
-        --precision bf16 --tokens 400 --candidates 64 \
-        --batch-size "$size" --batch-tokens 32768 --repeats 5 --compare-single \
-        | tee "/tmp/all2md-batch/$device-$model-$size.jsonl"
-    done
-  done
+for model in embed rerank; do
+  PYTHONPATH=ml-worker/src uv run --project ml-worker \
+    python ml-worker/benchmark.py "$model" \
+    --tokens 400 --candidates 30 --repeats 5 --compare-single
 done
 ```
 
-This measures throughput over 64 passages, independently of the 30-candidate
-interactive search default. Each run starts a fresh process, loads one model,
-and excludes loading and the first inference from warm timing. Compare results
-for embeddings and reranking separately; the best batch size may differ.
-Repeat the winning configurations with 128- and 1,024-token passages and with
-30 reranking candidates to check the actual search latency. Keep the Mac plugged
-in and avoid running other GPU jobs during the comparison. Compare warm
-`passages_per_second`, `median_seconds`, `max_warm_seconds`, `peak_rss_gib`, and
-MLX's additional `mlx_peak_allocated_gib`; MLX allocator memory and RSS are
-different measures. `--compare-single` checks each batch against that runtime's
-single-item inference, not cross-runtime quality agreement.
+Each run loads one model and excludes loading and the first inference from warm
+timing. The benchmark retains batch controls for experiments, but the worker
+uses a fixed maximum of four. Test mixed passage lengths and full queued
+searches before assuming the synthetic warm timings represent production
+latency: model loading, queueing, and long document jobs still affect search.
 
-Choose the smallest batch near the throughput plateau that leaves memory
-headroom. Investigate score/order changes against representative relevance
-judgments. A synthetic relevant-first assertion alone does not establish quality.
-After choosing the runtime and batch limits, measure full queued searches and
-indexing together: loading, queueing, and long document jobs still affect search
-latency. Batching alone does not guarantee the response deadline will be met.
+
+## CPU support decision
+
+The earlier i5-14500 measurements show a 16 GiB process footprint for FP32,
+11.35 s to embed one 512-token passage, and 104.12 s to rerank 30 shorter
+128-token passages sequentially. These costs are unsuitable for this deployment
+relative to the MacBook's roughly four passages per second at 400 tokens.
+
+A fresh eight-thread FP32, batch-4 run was attempted on the same i5-14500 after
+the MacBook sweep. The final attempt reached 346/398 loading operations after
+7 minutes 45 seconds, then the session restarted. It produced no warm inference
+samples. This is an incomplete benchmark, not a new throughput measurement;
+the restart's cause was not established. The earlier measured throughput and
+memory cost are sufficient to reject this backend for this deployment.
+
+The worker no longer installs PyTorch, offers CPU text inference, or advertises
+text recipes on Linux. Linux audio recipes remain available. This decision does
+not claim that all CPUs or alternative inference engines have the same limits.

@@ -1,4 +1,4 @@
-"""Measure the pinned ZE models on CPU, PyTorch MPS, or native MLX."""
+"""Measure the pinned ZE models on the production native MLX backend."""
 import argparse
 import importlib.metadata
 import json
@@ -9,8 +9,7 @@ import sys
 import time
 from unittest.mock import patch
 
-import torch
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+import numpy as np
 
 from ml_worker import text
 
@@ -18,9 +17,7 @@ from ml_worker import text
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", choices=["embed", "rerank"])
-    parser.add_argument("--device", choices=["cpu", "mps", "mlx"], default="cpu")
     parser.add_argument("--precision", choices=["bf16", "fp32"], default="bf16")
-    parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--tokens", type=int, nargs="+", default=[128])
     parser.add_argument("--candidates", type=int, nargs="+", default=[1])
     parser.add_argument("--batch-size", type=int, default=text.INFERENCE_BATCH_SIZE)
@@ -28,36 +25,23 @@ def main():
     parser.add_argument("--compare-single", action="store_true")
     parser.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args()
-    if (args.threads < 1 or args.repeats < 1 or min(args.tokens) < 1
+    if (args.repeats < 1 or min(args.tokens) < 1
             or args.batch_size < 1 or args.batch_tokens < 1
             or not all(1 <= n <= text.MAX_ITEMS for n in args.candidates)):
-        parser.error("threads, repeats and tokens must be positive; candidates must be 1..256")
-    torch.set_num_threads(args.threads)
-    torch.set_num_interop_threads(1)
+        parser.error("repeats, batch limits and tokens must be positive; candidates must be 1..256")
     text.INFERENCE_BATCH_SIZE = args.batch_size
     text.INFERENCE_BATCH_TOKENS = args.batch_tokens
     embedding = args.model == "embed"
     model_id, revision = ((text.EMBED_MODEL, text.EMBED_REVISION) if embedding
                           else (text.RERANK_MODEL, text.RERANK_REVISION))
     start = time.perf_counter()
-    tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision, trust_remote_code=False)
-    if args.device == "mlx":
-        import benchmark_mlx
-        model = benchmark_mlx.load(model_id, revision, args.precision)
-    else:
-        if args.device == "mps" and not torch.backends.mps.is_available():
-            parser.error("PyTorch MPS is unavailable")
-        factory = AutoModel if embedding else AutoModelForCausalLM
-        model = factory.from_pretrained(
-            model_id, revision=revision, trust_remote_code=False, use_safetensors=True,
-            dtype=torch.bfloat16 if args.precision == "bf16" else torch.float32,
-        ).to(args.device).eval()
+    tokenizer, model = text._load(model_id, revision, precision=args.precision)
     load_seconds = time.perf_counter() - start
     print(json.dumps({"model": model_id, "revision": revision, "precision": args.precision,
-                      "device": args.device, "threads": args.threads, "batch_size": args.batch_size,
-                      "batch_tokens": args.batch_tokens, "torch": torch.__version__,
-                      **({"mlx": importlib.metadata.version("mlx"),
-                          "mlx_lm": importlib.metadata.version("mlx-lm")} if args.device == "mlx" else {}),
+                      "device": "mlx", "batch_size": args.batch_size,
+                      "batch_tokens": args.batch_tokens,
+                      "mlx": importlib.metadata.version("mlx"),
+                      "mlx_lm": importlib.metadata.version("mlx-lm"),
                       "platform": platform.platform(), "load_seconds": load_seconds}), flush=True)
     query = "When is the release shipping?"
     passages = [
@@ -78,7 +62,7 @@ def main():
 
     # Exercise the production formatting, pooling and scoring, while keeping each
     # model resident. The queued worker currently reloads it for every job.
-    with patch.object(text, "_load", return_value=(tokenizer, model, args.device)):
+    with patch.object(text, "_load", return_value=(tokenizer, model)):
         for tokens in ([0] + args.tokens if embedding else args.tokens):
             for count in ([1] if tokens == 0 else args.candidates):
                 items = [{"id": str(i), "text": query if tokens == 0 else passage(i, tokens)}
@@ -86,16 +70,10 @@ def main():
                 input_type = "query" if tokens == 0 else "document"
                 parameters = {"texts": items, "input_type": input_type, "query": query}
                 inference = text.embeddings if embedding else text.rerank
-                if args.device == "mlx":
-                    def inference(parameters, **kwargs):
-                        return benchmark_mlx.inference(parameters, model=model,
-                                                       tokenizer=tokenizer, embedding=embedding)
                 times = []
                 for _ in range(args.repeats + 1):
                     start = time.perf_counter()
-                    result = inference(parameters, device=args.device)
-                    if args.device == "mps":
-                        torch.mps.synchronize()
+                    result = inference(parameters)
                     times.append(time.perf_counter() - start)
                 if embedding:
                     formatted = (f"<|im_start|>system\n{input_type}<|im_end|>\n"
@@ -108,17 +86,18 @@ def main():
                     assert result["results"][0]["id"] == "0", "relevant passage lost first place"
                 peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 memory = {}
-                if args.device == "mlx":
-                    memory["mlx_peak_allocated_gib"] = benchmark_mlx.mx.get_peak_memory() / 1024**3
+                import mlx.core as mx
+                memory["mlx_peak_allocated_gib"] = mx.get_peak_memory() / 1024**3
                 comparison = {}
                 if args.compare_single:
                     with patch.object(text, "INFERENCE_BATCH_SIZE", 1):
-                        baseline = inference(parameters, device=args.device)
+                        baseline = inference(parameters)
                     if embedding:
-                        vectors = torch.tensor([r["vector"] for r in result["records"]])
-                        reference = torch.tensor([r["vector"] for r in baseline["records"]])
+                        vectors = np.array([r["vector"] for r in result["records"]])
+                        reference = np.array([r["vector"] for r in baseline["records"]])
                         comparison["min_cosine_to_single"] = float(
-                            torch.nn.functional.cosine_similarity(vectors, reference).min())
+                            (np.sum(vectors * reference, axis=1) /
+                             (np.linalg.norm(vectors, axis=1) * np.linalg.norm(reference, axis=1))).min())
                     else:
                         reference = {r["id"]: r["relevance_score"] for r in baseline["results"]}
                         comparison["max_score_delta_to_single"] = max(
