@@ -60,7 +60,7 @@ def main():
                                                  add_special_tokens=False)[:tokens])
 
     # Exercise the production formatting, pooling and scoring, while keeping each
-    # model resident. The queued worker currently reloads it for every job.
+    # model resident, as the persistent worker does across jobs.
     with patch.object(text, "_load", return_value=(tokenizer, model, "cpu")):
         for tokens in ([0] + args.tokens if embedding else args.tokens):
             for count in ([1] if embedding else args.candidates):

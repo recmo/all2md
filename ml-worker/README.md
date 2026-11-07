@@ -14,8 +14,12 @@ is not included in the Linux package. It does not run generative LLM jobs.
 | `text-rerank-zerank-2-v1` | ZeroEntropy zerank-2 (4B) | Ranked candidate IDs, input indices, and relevance scores |
 
 The runner advertises locally installed capabilities and claims only matching
-recipes. Inference runs in a child process; lease loss or interruption kills its
-process group, including audio tools. Inputs are verified by SHA-256, outputs
+recipes. Selected text models load before the first claim and stay resident together
+in a credential-free inference process across jobs, including while idle. Lease
+loss or interruption kills the inference process; the next text job reloads the
+selected models. Ordinary recipe errors retain the loaded models. Audio and
+transcription recipes use separate child processes; cancellation kills their
+process groups, including audio tools. Inputs are verified by SHA-256, outputs
 must match the assignment, and mdstore fences stale attempts and validates atomic
 publication. Worker credentials are removed from the inference subprocess.
 Workspaces are isolated by server, job, and fingerprint. Starting a new fingerprint
@@ -44,11 +48,12 @@ Idle workers poll once a second; failed requests retry after ten seconds.
 
 `--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
 when available, otherwise CPU; `--device cpu` forces CPU for text models.
-Text models use FP32 on CPU and BF16 on MPS. Allow roughly 16 GiB for one CPU
-text-model process; `OMP_NUM_THREADS=4` can limit its CPU parallelism.
+Text models use FP32 on CPU and BF16 on MPS. Allow roughly 32 GiB for both CPU
+text models together, plus inference memory; `OMP_NUM_THREADS=4` can limit CPU
+parallelism.
 DeepFilterNet uses its native Rust/CPU runtime. Nix packages the dependencies and
 embeds the DeepFilterNet3 model. The two text models download pinned weights into
-the Hugging Face cache on first use; loading disables remote Python code and
+the Hugging Face cache on first startup; loading disables remote Python code and
 requires safetensors. No packages or toolchains are installed at runtime.
 
 See [Zawrat CPU measurements](benchmarks.md) before scheduling the 4B text models
@@ -235,8 +240,9 @@ IDs, sort by descending score, and break ties by original order. Scores are not
 probabilities. This is a queued batch job, not a synchronous search-time service.
 
 Both models have 4B parameters and Apache-2.0 weights. They download on first use
-(roughly 8 GB per model) and run one at a time in the job subprocess, using BF16
-on CPU or MPS. MPS requires a Mac/PyTorch combination with BF16 support (macOS 14+).
+(roughly 8 GB per model on disk). Both stay loaded while jobs run one at a time,
+using FP32 on CPU and BF16 on MPS. MPS requires a Mac/PyTorch combination with
+BF16 support (macOS 14+).
 Allow memory beyond the weights for inference; long passages use more memory.
 
 Both text recipes accept 1–256 records with unique nonempty string IDs and

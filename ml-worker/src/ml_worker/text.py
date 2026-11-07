@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from functools import cache
 
 EMBED_MODEL = "zeroentropy/zembed-1-embedding"
 EMBED_REVISION = "cf13c81f3274394053d166740294f7eea4586f7a"
@@ -33,6 +34,7 @@ def records(value):
     return value
 
 
+@cache
 def _load(model_id, revision, *, classifier, device):
     import torch
     from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
@@ -44,6 +46,15 @@ def _load(model_id, revision, *, classifier, device):
                                    use_safetensors=True,
                                    dtype=torch.float32 if device == "cpu" else torch.bfloat16).to(device).eval()
     return tokenizer, model, device
+
+
+def preload(selected, *, device="auto"):
+    for recipe, model, revision, classifier in (
+        (EMBED_RECIPE, EMBED_MODEL, EMBED_REVISION, False),
+        (RERANK_RECIPE, RERANK_MODEL, RERANK_REVISION, True),
+    ):
+        if recipe in selected:
+            _load(model, revision, classifier=classifier, device=device)
 
 
 def _batch(tokenizer, formatted, device):

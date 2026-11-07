@@ -19,6 +19,7 @@ from urllib.parse import quote, urlencode
 
 from .client import Client, local_path
 from . import audio, recipes, text
+from .inference import Inference, serve
 
 MAX_OUTPUT = 64 * 1024 * 1024
 
@@ -36,7 +37,7 @@ def capabilities():
     return result
 
 
-def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORKER_TOKEN", heartbeat_seconds=30):
+def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORKER_TOKEN", heartbeat_seconds=30, inference=None):
     job = assignment["job"]
     scope = hashlib.sha256(client.server.encode()).hexdigest()
     cache_root = cache.expanduser().resolve() / scope
@@ -45,7 +46,7 @@ def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORK
         with tempfile.TemporaryDirectory(prefix="retrieval-", dir=cache_root) as directory:
             root = Path(directory) / "work"
             root.mkdir(mode=0o700)
-            return _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, None)
+            return _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, None, inference)
     identity = hashlib.sha256(job["id"].encode()).hexdigest()
     job_root = cache_root / identity
     job_root.mkdir(exist_ok=True, mode=0o700)
@@ -59,10 +60,10 @@ def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORK
             if previous.is_dir() and previous != root:
                 shutil.rmtree(previous)
         root.mkdir(exist_ok=True, mode=0o700)
-        _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock.fileno())
+        _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock.fileno(), inference)
 
 
-def _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock_fd):
+def _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock_fd, inference):
     job = assignment["job"]
     lease = {"id": job["id"], "attempt": job["attempt"]}
     scratch = root.parent / ".scratch"
@@ -97,24 +98,34 @@ def _execute_locked(client, assignment, root, device, token_env, heartbeat_secon
         recipes.json_output(request, assignment)
         progress["stage"] = "processing"
         check_lease()
-        process = subprocess.Popen(
-            [sys.executable, "-m", "ml_worker.worker", "--assignment", str(request), "--device", device],
-            env={k: v for k, v in os.environ.items() if k not in {token_env, "MDSTORE_WORKER_TOKEN"}},
-            stdin=subprocess.DEVNULL, start_new_session=True,
-            # Preserve the cache lock if the parent crashes while inference runs.
-            pass_fds=() if lock_fd is None else (lock_fd,),
-        )
-        try:
-            while process.poll() is None:
-                if lost.wait(0.2):
-                    raise RuntimeError("worker lease lost")
-            if process.returncode:
-                raise RuntimeError(f"{job['recipe']} exited with status {process.returncode}")
-        finally:
-            # Stop the entire owned process group, including ffmpeg/deep-filter.
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
+        if job["recipe"] in {text.EMBED_RECIPE, text.RERANK_RECIPE}:
+            if inference is None:
+                temporary = Inference([job["recipe"]], device, token_env)
+                try:
+                    temporary.execute(request, lock_fd, lost)
+                finally:
+                    temporary.close()
+            else:
+                inference.execute(request, lock_fd, lost)
+        else:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "ml_worker.worker", "--assignment", str(request), "--device", device],
+                env={k: v for k, v in os.environ.items() if k not in {token_env, "MDSTORE_WORKER_TOKEN"}},
+                stdin=subprocess.DEVNULL, start_new_session=True,
+                # Preserve the cache lock if the parent crashes while inference runs.
+                pass_fds=() if lock_fd is None else (lock_fd,),
+            )
+            try:
+                while process.poll() is None:
+                    if lost.wait(0.2):
+                        raise RuntimeError("worker lease lost")
+                if process.returncode:
+                    raise RuntimeError(f"{job['recipe']} exited with status {process.returncode}")
+            finally:
+                # Stop the entire owned process group, including ffmpeg/deep-filter.
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
         check_lease()
         progress["stage"] = "publishing"
         for output in outputs:
@@ -167,7 +178,11 @@ def main(argv=None):
     parser.add_argument("--list-recipes", action="store_true")
     parser.add_argument("--once", action="store_true", help="claim at most one job and exit")
     parser.add_argument("--assignment", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--inference-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.inference_fd is not None:
+        serve(args.inference_fd, args.recipes or [], args.device)
+        return 0
     if args.assignment:
         assignment = json.loads(args.assignment.read_text())
         recipes.execute(assignment, args.assignment.parent, device=args.device,
@@ -181,12 +196,16 @@ def main(argv=None):
     if not args.server or not selected or set(selected)-set(available):
         parser.error("--server and locally available recipes are required; use --list-recipes")
     client = Client(args.server, os.environ.get(args.token_env, ""))
+    inference = Inference([recipe for recipe in selected
+                           if recipe in {text.EMBED_RECIPE, text.RERANK_RECIPE}], args.device, args.token_env)
     try:
+        if inference.selected:
+            inference.start(threading.Event())
         while True:
             try:
                 assignment = client.request("/worker", {"op": "claim", "recipes": selected})
                 if assignment:
-                    execute(client, assignment, args.cache, device=args.device, token_env=args.token_env)
+                    execute(client, assignment, args.cache, device=args.device, token_env=args.token_env, inference=inference)
                 if args.once:
                     return 0
                 if assignment:
@@ -200,6 +219,8 @@ def main(argv=None):
             time.sleep(1)
     except KeyboardInterrupt:
         return 130
+    finally:
+        inference.close()
 
 
 if __name__ == "__main__":

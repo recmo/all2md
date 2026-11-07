@@ -104,7 +104,7 @@ def assignment(recipe, parameters, inputs, outputs):
                        for path, value in inputs.items()}, 'outputs': outputs}
 
 
-def fixture_models(monkeypatch, *, started=None):
+def fixture_models(monkeypatch, *, started=None, loads=None):
     monkeypatch.setattr(worker, "capabilities", lambda: list(recipes.RECIPES))
     original = subprocess.Popen
     processes = []
@@ -114,18 +114,41 @@ def fixture_models(monkeypatch, *, started=None):
 import os, sys, runpy
 from ml_worker import text
 assert 'MDSTORE_WORKER_TOKEN' not in os.environ
+assert 'CUSTOM_TOKEN' not in os.environ
+from types import SimpleNamespace
+class Factory:
+    @classmethod
+    def from_pretrained(cls, model, **kwargs):
+        assert kwargs['trust_remote_code'] is False
+        if loads is not None and 'dtype' in kwargs:
+            with open(loads, 'a') as stream:
+                stream.write(model + '\\n')
+        return cls()
+    def to(self, device): return self
+    def eval(self): return self
+sys.modules['torch'] = SimpleNamespace(float32='fp32', bfloat16='bf16',
+    backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)))
+sys.modules['transformers'] = SimpleNamespace(AutoModel=Factory, AutoModelForCausalLM=Factory, AutoTokenizer=Factory)
 
 def embed(p, **kwargs):
     text.records(p['texts'])
+    if started:
+        from pathlib import Path
+        import time
+        if not Path(started).exists():
+            Path(started).touch()
+            time.sleep(10)
+    text._load(text.EMBED_MODEL, text.EMBED_REVISION, classifier=False, device=kwargs['device'])
     return {'space': {'namespace': p.get('namespace', 'documents'), 'recipe': text.EMBED_RECIPE, 'dimensions': text.DIMENSIONS},
             'records': [{'id': x['id'], 'vector': [1.0]+[0.0]*(text.DIMENSIONS-1), 'metadata': {'text': x['text']}} for x in p['texts']]}
 def rerank(p, **kwargs):
     text.records(p['texts'])
+    text._load(text.RERANK_MODEL, text.RERANK_REVISION, classifier=True, device=kwargs['device'])
     return {'results': [{'index': i, 'id': p['texts'][i]['id'], 'relevance_score': float(i)} for i in reversed(range(len(p['texts'])))]}
 text.embeddings, text.rerank = embed, rerank
 '''
-            if started:
-                code += f"from pathlib import Path\nPath({str(started)!r}).touch()\nimport time\ntime.sleep(10)\n"
+            code = f'loads = {str(loads)!r}\n' + code if loads is not None else 'loads = None\n' + code
+            code = f'started = {str(started)!r}\n' + code if started is not None else 'started = None\n' + code
             code += f"sys.argv = {['ml_worker.worker', *command[3:]]!r}\nrunpy.run_module('ml_worker.worker', run_name='__main__')\n"
             command = [sys.executable, '-c', code]
         process = original(command, **kwargs)
@@ -243,15 +266,23 @@ def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeyp
     state['assignment'] = assignment(text.EMBED_RECIPE, {'texts': [{'id':'x','text':'hello'}]}, {}, ['jobs/result.json'])
     state['assignment']['retrieval'] = retrieval
     state['lose_lease'] = marker.exists
-    started = time.monotonic()
-    with pytest.raises(RuntimeError, match='lease lost'):
-        worker.execute(client, state['assignment'], tmp_path/'cache', heartbeat_seconds=0.05)
-    assert time.monotonic()-started < 5
-    assert processes and all(p.poll() is not None for p in processes)
-    assert not state['outputs'] and not state['completed']
-    if retrieval:
-        assert not list((tmp_path/'cache').rglob('.assignment.json'))
-        assert not list((tmp_path/'cache').rglob('.worker.lock'))
+    inference = worker.Inference([text.EMBED_RECIPE, text.RERANK_RECIPE], 'auto', 'MDSTORE_WORKER_TOKEN')
+    try:
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match='lease lost'):
+            worker.execute(client, state['assignment'], tmp_path/'cache', heartbeat_seconds=0.05, inference=inference)
+        assert time.monotonic()-started < 5
+        assert processes and all(p.poll() is not None for p in processes)
+        assert not state['outputs'] and not state['completed']
+        if retrieval:
+            assert not list((tmp_path/'cache').rglob('.assignment.json'))
+            assert not list((tmp_path/'cache').rglob('.worker.lock'))
+        state['lose_lease'] = lambda: False
+        worker.execute(client, state['assignment'], tmp_path/'cache', inference=inference)
+        assert len(processes) == 2 and len(state['completed']) == 1
+        assert inference.process.poll() is None
+    finally:
+        inference.close()
 
 
 def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):
@@ -281,3 +312,36 @@ def test_audio_enhancement_keeps_tail_channels_and_silence(tmp_path):
     waveform(source, amplitude=0)
     audio.enhance(source, output, denoise=False)
     assert audio.measure(output)['rms_dbfs'] is None
+
+
+def test_text_models_stay_hot_across_jobs_and_recipe_errors(server, tmp_path, monkeypatch):
+    client, state = server
+    loads = tmp_path/'loads'
+    processes = fixture_models(monkeypatch, loads=loads)
+    selected = [text.EMBED_RECIPE, text.RERANK_RECIPE]
+    inference = worker.Inference(selected, 'cpu', 'CUSTOM_TOKEN')
+    monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
+    monkeypatch.setenv('CUSTOM_TOKEN', 'also-secret')
+    try:
+        inference.start(threading.Event())
+        assert loads.read_text().splitlines() == [text.EMBED_MODEL, text.RERANK_MODEL]
+        process = inference.process
+        for i, recipe in enumerate([*selected, text.EMBED_RECIPE, text.RERANK_RECIPE]):
+            params = {'texts': [{'id': 'x', 'text': 'hello'}]}
+            if recipe == text.RERANK_RECIPE:
+                params['query'] = 'hello'
+            state['assignment'] = assignment(recipe, params, {}, ['jobs/result.json'])
+            state['assignment']['retrieval'] = bool(i % 2)
+            state['assignment']['job']['fingerprint'] = str(i)
+            if i == 2:
+                params['texts'] = []
+                with pytest.raises(RuntimeError, match='texts must contain'):
+                    worker.execute(client, state['assignment'], tmp_path/'cache', device='cpu', inference=inference)
+                params['texts'] = [{'id': 'x', 'text': 'hello'}]
+            worker.execute(client, state['assignment'], tmp_path/'cache', device='cpu', inference=inference)
+            assert inference.process is process and process.poll() is None
+        assert len(processes) == 1
+        assert loads.read_text().splitlines() == [text.EMBED_MODEL, text.RERANK_MODEL]
+    finally:
+        inference.close()
+    assert process.poll() is not None
