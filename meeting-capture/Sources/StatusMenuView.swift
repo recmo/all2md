@@ -34,8 +34,10 @@ struct StatusMenuView: View {
                 LevelRow(name: "Application audio", level: capture.processAudioLevel)
                 Text("\(capture.processTrackCount) process track(s)").font(.caption).foregroundStyle(.secondary)
                 Button("Stop") { model.stopRecording() }.keyboardShortcut(.defaultAction)
-                Button("Ignore for one hour") { model.ignoreForHour() }
-                Button("Never record this application") { model.neverRecordApplication() }
+                if client.processID > 0 {
+                    Button("Ignore for one hour") { model.ignoreForHour() }
+                    Button("Never record this application") { model.neverRecordApplication() }
+                }
             case .finalizing:
                 ProgressView("Preparing recording…")
             case .checkingPermissions:

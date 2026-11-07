@@ -92,13 +92,13 @@ final class AppModel: ObservableObject {
     }
 
     func ignoreForHour() {
-        guard case let .recording(client) = state else { return }
+        guard case let .recording(client) = state, client.processID > 0 else { return }
         ignoredUntil[key(client)] = Date().addingTimeInterval(3600)
         stopRecording()
     }
 
     func neverRecordApplication() {
-        guard case let .recording(client) = state else { return }
+        guard case let .recording(client) = state, client.processID > 0 else { return }
         var values = Set(UserDefaults.standard.stringArray(forKey: "excludedBundleIDs") ?? [])
         values.insert(key(client))
         UserDefaults.standard.set(Array(values).sorted(), forKey: "excludedBundleIDs")
