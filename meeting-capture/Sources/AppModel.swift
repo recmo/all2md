@@ -6,8 +6,6 @@ import Foundation
 final class AppModel: ObservableObject {
     enum State: Equatable {
         case idle
-        case detecting(AudioClient, since: Date)
-        case countdown(AudioClient, remaining: Int)
         case recording(AudioClient)
         case finalizing
         case permissionRequired
@@ -33,7 +31,6 @@ final class AppModel: ObservableObject {
     let capture = CaptureCoordinator()
 
     private let monitor: AudioActivityMonitor?
-    private var countdownTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
     private var ignoredUntil: [String: Date] = [:]
     private var started = false
@@ -56,7 +53,6 @@ final class AppModel: ObservableObject {
     var statusIcon: String {
         switch state {
         case .recording: "record.circle.fill"
-        case .countdown, .detecting: "mic.badge.plus"
         case .permissionRequired, .error: "exclamationmark.triangle.fill"
         default: "waveform"
         }
@@ -90,33 +86,23 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func startNow() { if case let .countdown(client, _) = state { beginRecording(client) } }
-
     func manualStart() {
         let client = AudioClient(audioObjectID: 0, processID: 0, bundleID: nil, applicationName: "Manual recording", inputDevices: [])
         beginRecording(client, method: .manual)
     }
 
-    func skip() {
-        guard case let .countdown(client, _) = state else { return }
-        suppressedClients.insert(client.processID)
-        countdownTask?.cancel()
-        countdownTask = nil
-        state = .idle
-    }
-
     func ignoreForHour() {
-        guard case let .countdown(client, _) = state else { return }
+        guard case let .recording(client) = state, client.processID > 0 else { return }
         ignoredUntil[key(client)] = Date().addingTimeInterval(3600)
-        skip()
+        stopRecording()
     }
 
     func neverRecordApplication() {
-        guard case let .countdown(client, _) = state else { return }
+        guard case let .recording(client) = state, client.processID > 0 else { return }
         var values = Set(UserDefaults.standard.stringArray(forKey: "excludedBundleIDs") ?? [])
         values.insert(key(client))
         UserDefaults.standard.set(Array(values).sorted(), forKey: "excludedBundleIDs")
-        skip()
+        stopRecording()
     }
 
     func stopRecording() {
@@ -194,7 +180,7 @@ final class AppModel: ObservableObject {
     var allowsTermination: Bool {
         switch state {
         case .idle, .permissionRequired, .checkingPermissions, .error: true
-        case .detecting, .countdown, .recording, .finalizing: false
+        case .recording, .finalizing: false
         }
     }
 
@@ -238,20 +224,13 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting(related.isEmpty ? [file] : related)
     }
 
-    func handle(_ clients: [AudioClient], now: Date = Date()) {
+    func handle(_ clients: [AudioClient]) {
         activeMicrophoneClients = Set(clients.map(\.processID))
         suppressedClients.formIntersection(activeMicrophoneClients)
         switch state {
         case .idle:
             guard let candidate = clients.first(where: { !isIgnored($0) }) else { return }
-            state = .detecting(candidate, since: now)
-        case let .detecting(candidate, since):
-            guard let current = clients.first(where: { $0.processID == candidate.processID }) else { state = .idle; return }
-            if now.timeIntervalSince(since) >= 2 { beginCountdown(current) }
-            else if current != candidate { state = .detecting(current, since: since) }
-        case let .countdown(candidate, remaining):
-            guard let current = clients.first(where: { $0.processID == candidate.processID }) else { state = .idle; return }
-            if current != candidate { state = .countdown(current, remaining: remaining) }
+            beginRecording(candidate)
         case let .recording(candidate):
             if let current = clients.first(where: { $0.processID == candidate.processID }) {
                 stopTask?.cancel(); stopTask = nil
@@ -269,31 +248,9 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func beginCountdown(_ client: AudioClient) {
-        state = .countdown(client, remaining: 10)
-        countdownTask?.cancel()
-        countdownTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled, let self,
-                      case let .countdown(client, remaining) = self.state else { return }
-                if remaining <= 1 {
-                    self.beginRecording(client)
-                    return
-                }
-                self.state = .countdown(client, remaining: remaining - 1)
-            }
-        }
-    }
-
     private func beginRecording(_ client: AudioClient, method: TriggerMethod = .audioProcess) {
         guard startupReport != nil else { return }
-        switch state {
-        case .idle, .detecting, .countdown: break
-        default: return
-        }
-        countdownTask?.cancel(); countdownTask = nil
-        stopTask?.cancel(); stopTask = nil
+        guard case .idle = state else { return }
         recordingMethod = method
         state = .finalizing
         captureFailure = nil
