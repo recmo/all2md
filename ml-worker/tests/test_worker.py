@@ -1,11 +1,10 @@
-"""Exercise real transport, recipe subprocesses, and cancellation without model downloads."""
+"""Exercise transport, recipe execution, and lease fencing without model downloads."""
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
+import types
 import threading
 import time
 from urllib.parse import unquote, urlsplit
@@ -14,7 +13,7 @@ import wave
 import numpy as np
 import pytest
 
-from ml_worker import audio, inference as inference_module, recipes, text, worker
+from ml_worker import audio, recipes, text, worker
 from ml_worker.client import Client
 
 
@@ -104,95 +103,41 @@ def assignment(recipe, parameters, inputs, outputs):
                        for path, value in inputs.items()}, 'outputs': outputs}
 
 
-def fixture_models(monkeypatch, *, started=None, loads=None):
+def fixture_models(monkeypatch, *, started=None):
     monkeypatch.setattr(worker, "capabilities", lambda: list(recipes.RECIPES))
-    original = subprocess.Popen
-    processes = []
-    def popen(command, **kwargs):
-        if '--inference-fd' in command and set(command) & {text.EMBED_RECIPE, text.RERANK_RECIPE}:
-            code = '''
-import os, sys, runpy
-from ml_worker import text
-assert 'MDSTORE_WORKER_TOKEN' not in os.environ
-assert 'CUSTOM_TOKEN' not in os.environ
-from types import SimpleNamespace
-class Factory:
-    @classmethod
-    def from_pretrained(cls, model, **kwargs):
-        assert kwargs['trust_remote_code'] is False
-        if loads is not None and 'dtype' in kwargs:
-            with open(loads, 'a') as stream:
-                stream.write(model + '\\n')
-        return cls()
-    def to(self, device): return self
-    def eval(self): return self
-sys.modules['torch'] = SimpleNamespace(float32='fp32', bfloat16='bf16',
-    backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)))
-sys.modules['transformers'] = SimpleNamespace(AutoModel=Factory, AutoModelForCausalLM=Factory, AutoTokenizer=Factory)
-
-def embed(p, **kwargs):
-    text.records(p['texts'])
-    if started:
-        from pathlib import Path
-        import time
-        if not Path(started).exists():
-            Path(started).touch()
-            time.sleep(10)
-    text._load(text.EMBED_MODEL, text.EMBED_REVISION, classifier=False, device=kwargs['device'])
-    return {'space': {'namespace': p.get('namespace', 'documents'), 'recipe': text.EMBED_RECIPE, 'dimensions': text.DIMENSIONS},
-            'records': [{'id': x['id'], 'vector': [1.0]+[0.0]*(text.DIMENSIONS-1), 'metadata': {'text': x['text']}} for x in p['texts']]}
-def rerank(p, **kwargs):
-    text.records(p['texts'])
-    text._load(text.RERANK_MODEL, text.RERANK_REVISION, classifier=True, device=kwargs['device'])
-    return {'results': [{'index': i, 'id': p['texts'][i]['id'], 'relevance_score': float(i)} for i in reversed(range(len(p['texts'])))]}
-text.embeddings, text.rerank = embed, rerank
-'''
-            code = f'loads = {str(loads)!r}\n' + code if loads is not None else 'loads = None\n' + code
-            code = f'started = {str(started)!r}\n' + code if started is not None else 'started = None\n' + code
-            code += f"sys.argv = {['ml_worker.worker', *command[command.index('--inference-fd'):]]!r}\nrunpy.run_module('ml_worker.worker', run_name='__main__')\n"
-            command = [sys.executable, '-c', code]
-        process = original(command, **kwargs)
-        processes.append(process)
-        return process
-    monkeypatch.setattr(inference_module.subprocess, 'Popen', popen)
-    return processes
+    monkeypatch.setattr(text, "preload", lambda *args, **kwargs: None)
+    def embed(p, **kwargs):
+        text.records(p['texts'])
+        if started is not None:
+            started.set()
+            # Wait until the HTTP heartbeat has rejected our lease.
+            assert rejected.wait(5)
+            time.sleep(0.1)  # Keep inference running while the response reaches the worker.
+        return {'space': {'namespace': p.get('namespace', 'documents'), 'recipe': text.EMBED_RECIPE, 'dimensions': text.DIMENSIONS},
+                'records': [{'id': x['id'], 'vector': [1.0]+[0.0]*(text.DIMENSIONS-1), 'metadata': {'text': x['text']}} for x in p['texts']]}
+    def rerank(p, **kwargs):
+        text.records(p['texts'])
+        return {'results': [{'index': i, 'id': p['texts'][i]['id'], 'relevance_score': float(i)} for i in reversed(range(len(p['texts'])))]}
+    rejected = threading.Event()
+    monkeypatch.setattr(text, 'embeddings', embed)
+    monkeypatch.setattr(text, 'rerank', rerank)
+    return rejected
 
 
-def fixture_speech(tmp_path, monkeypatch):
-    # Use production model-cache functions, with a tiny fake MLX loader and
-    # pipeline so the lifecycle check runs on Linux without model weights.
-    modules = tmp_path/'modules'
-    speech = modules/'speech2md'
-    speech.mkdir(parents=True)
-    production = Path(os.environ.get('SPEECH2MD_SOURCE',
-        str(Path(__file__).resolve().parents[2]/'speech2md/src/speech2md')))
-    (speech/'__init__.py').write_text(f'__path__.append({str(production)!r})\n')
-    (speech/'pipeline.py').write_text('''from .moss import load_moss_engine
-from .redimnet2 import get_redimnet2_embedder
-import json, os
-
-def transcribe(source, *, force):
-    assert force
-    assert 'MDSTORE_WORKER_TOKEN' not in os.environ
-    moss = source.with_suffix('.transcript.moss.npz')
-    if 'Alice' in source.read_text():
-        assert moss.read_bytes() == b'raw MOSS generation'
-    else:
-        load_moss_engine()
-    moss.write_bytes(b'raw MOSS generation')
-    assert get_redimnet2_embedder() is get_redimnet2_embedder()
-    source.with_suffix('.transcript.md').write_text('# Transcript')
-    source.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'space': {}, 'records': [{'id': 'speaker', 'vector': [1.0], 'metadata': {}}]}))
-''')
-    mlx = modules/'mlx_audio'
-    mlx.mkdir()
-    (mlx/'__init__.py').write_text('')
-    (mlx/'stt.py').write_text(f'''def load(*args, **kwargs):
-    with open({str(tmp_path/'loads')!r}, 'a') as stream:
-        stream.write('loaded\\n')
-    return object()
-''')
-    monkeypatch.setenv('PYTHONPATH', str(modules)+os.pathsep+os.environ.get('PYTHONPATH', ''))
+def fixture_speech(monkeypatch):
+    def transcribe(source, *, force):
+        assert force
+        moss = source.with_suffix('.transcript.moss.npz')
+        if 'Alice' in source.read_text():
+            assert moss.read_bytes() == b'raw MOSS generation'
+        else:
+            assert not moss.exists()
+        moss.write_bytes(b'raw MOSS generation')
+        source.with_suffix('.transcript.md').write_text('# Transcript')
+        source.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({
+            'space': {}, 'records': [{'id': 'speaker', 'vector': [1.0], 'metadata': {}}]}))
+    monkeypatch.setitem(sys.modules, 'speech2md', types.ModuleType('speech2md'))
+    monkeypatch.setitem(sys.modules, 'speech2md.pipeline', types.SimpleNamespace(transcribe=transcribe))
 
 
 @pytest.mark.parametrize(('recipe', 'capture_version', 'retrieval'), [
@@ -205,7 +150,7 @@ def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, captur
     fixture_models(monkeypatch)
     monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
     if recipe == recipes.SPEECH_RECIPE:
-        fixture_speech(tmp_path, monkeypatch)
+        fixture_speech(monkeypatch)
         state['inputs'] = {'jobs/input.wav': b'fixture'}
         params = {}
         outputs = ['jobs/source.transcript.md','jobs/source.transcript.voiceprints.json']
@@ -243,7 +188,7 @@ def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, captur
     assert len(state['completed']) == 1 and not state['failed']
     assert state['completion_requests'] == 2
     if retrieval:
-        assert not list((tmp_path/'cache').rglob('.assignment.json'))
+        assert not list((tmp_path/'cache').rglob('work'))
         assert not list((tmp_path/'cache').rglob('.worker.lock'))
     complete = state['completed'][0]
     assert set(complete['assets']) == {p for p in outputs if not p.endswith('.md') and not retrieval}
@@ -253,12 +198,13 @@ def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, captur
     result = json.loads(complete['outputs'][outputs[-1]] if retrieval else state['outputs'][outputs[-1]])
     if recipe == recipes.SPEECH_RECIPE:
         assert result['records'][0]['metadata']['suggestions'][0]['metadata']['identity'] == 'people/alice.md'
-        previous = next((tmp_path/'cache').rglob('.assignment.json')).parent
+        previous = next((tmp_path/'cache').rglob('source.transcript.md')).parent.parent
         # A speaker correction changes the job fingerprint, but not its raw inference cache.
         state['assignment']['job']['fingerprint'] = 'speaker-correction'
         state['assignment']['recording'] = state['assignment']['recording'].replace('\n---\n', '\nattendees: [{handle: Alice, identity: ""}]\n---\n')
         state['completed'].clear()
         state['completion_requests'] = 0
+        monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
         assert worker.main(['--server', client.server, '--once', '--recipes', recipe,
                             '--cache', str(tmp_path/'cache')]) == 0
         assert len(state['completed']) == 1 and not state['failed']
@@ -281,30 +227,31 @@ def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, captur
 
 
 @pytest.mark.parametrize('retrieval', [False, True])
-def test_failed_lease_kills_recipe_and_never_publishes(server, tmp_path, monkeypatch, retrieval):
+def test_failed_lease_finishes_inference_and_never_publishes(server, tmp_path, monkeypatch, retrieval):
     client, state = server
-    marker = tmp_path/'started'
-    processes = fixture_models(monkeypatch, started=marker)
+    started = threading.Event()
+    rejected = fixture_models(monkeypatch, started=started)
+    def lose_lease():
+        if started.is_set():
+            rejected.set()
+            return True
+        return False
     state['assignment'] = assignment(text.EMBED_RECIPE, {'texts': [{'id':'x','text':'hello'}]}, {}, ['jobs/result.json'])
     state['assignment']['retrieval'] = retrieval
-    state['lose_lease'] = marker.exists
-    inference = worker.Inference([text.EMBED_RECIPE, text.RERANK_RECIPE], 'auto', 'MDSTORE_WORKER_TOKEN')
+    state['lose_lease'] = lose_lease
+    models = worker.Models()
     try:
-        started = time.monotonic()
         with pytest.raises(RuntimeError, match='lease lost'):
-            worker.execute(client, state['assignment'], tmp_path/'cache', heartbeat_seconds=0.05, inference=inference)
-        assert time.monotonic()-started < 5
-        assert processes and all(p.poll() is not None for p in processes)
+            worker.execute(client, state['assignment'], tmp_path/'cache', heartbeat_seconds=0.05, models=models)
+        assert started.is_set() and rejected.is_set()
         assert not state['outputs'] and not state['completed']
         if retrieval:
-            assert not list((tmp_path/'cache').rglob('.assignment.json'))
-            assert not list((tmp_path/'cache').rglob('.worker.lock'))
+            assert not list((tmp_path/'cache').rglob('work'))
         state['lose_lease'] = lambda: False
-        worker.execute(client, state['assignment'], tmp_path/'cache', inference=inference)
-        assert len(processes) == 2 and len(state['completed']) == 1
-        assert inference.process.poll() is None
+        worker.execute(client, state['assignment'], tmp_path/'cache', models=models)
+        assert len(state['completed']) == 1
     finally:
-        inference.close()
+        models.close()
 
 
 def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):
@@ -314,7 +261,7 @@ def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):
     state['assignment'] = assignment(recipes.LEVELS_RECIPE, params, state['inputs'], ['audio/output.wav','audio/capture.json'])
     state['corrupt'] = True
     with pytest.raises(ValueError, match='assigned size'):
-        worker.execute(client, state['assignment'], tmp_path/'cache')
+        worker.execute(client, state['assignment'], tmp_path/'cache', models=None)
     assert state['failed'] and not state['completed']
     state['assignment']['inputs'] = {}
     with pytest.raises(ValueError, match='not assigned'):
@@ -339,79 +286,14 @@ def test_audio_enhancement_keeps_tail_channels_and_silence(tmp_path):
     waveform(source, amplitude=0)
     audio.enhance(source, output)
     assert audio.measure(output)['rms_dbfs'] is None
-    audio.close_denoiser()
+    models = worker.Models(idle_seconds=0)
+    try:
+        with models.use(audio.RECIPE):
+            models.evict()  # An active model must survive maintenance.
+            assert audio._denoiser is denoiser
+        models.evict()
+        assert audio._denoiser is None and denoiser.poll() is not None
+    finally:
+        models.close()
     audio.enhance(source, output, denoise=False)
     assert audio.measure(output)['rms_dbfs'] is None
-
-
-def test_text_models_stay_hot_across_jobs_and_recipe_errors(server, tmp_path, monkeypatch):
-    client, state = server
-    loads = tmp_path/'loads'
-    processes = fixture_models(monkeypatch, loads=loads)
-    selected = [text.EMBED_RECIPE, text.RERANK_RECIPE]
-    inference = worker.Inference(selected, 'cpu', 'CUSTOM_TOKEN')
-    monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
-    monkeypatch.setenv('CUSTOM_TOKEN', 'also-secret')
-    try:
-        inference.start(threading.Event())
-        assert loads.read_text().splitlines() == [text.EMBED_MODEL, text.RERANK_MODEL]
-        process = inference.process
-        for i, recipe in enumerate([*selected, text.EMBED_RECIPE, text.RERANK_RECIPE]):
-            params = {'texts': [{'id': 'x', 'text': 'hello'}]}
-            if recipe == text.RERANK_RECIPE:
-                params['query'] = 'hello'
-            state['assignment'] = assignment(recipe, params, {}, ['jobs/result.json'])
-            state['assignment']['retrieval'] = bool(i % 2)
-            state['assignment']['job']['fingerprint'] = str(i)
-            if i == 2:
-                params['texts'] = []
-                with pytest.raises(RuntimeError, match='texts must contain'):
-                    worker.execute(client, state['assignment'], tmp_path/'cache', device='cpu', inference=inference)
-                params['texts'] = [{'id': 'x', 'text': 'hello'}]
-            worker.execute(client, state['assignment'], tmp_path/'cache', device='cpu', inference=inference)
-            assert inference.process is process and process.poll() is None
-        assert len(processes) == 1
-        assert loads.read_text().splitlines() == [text.EMBED_MODEL, text.RERANK_MODEL]
-    finally:
-        inference.close()
-    assert process.poll() is not None
-
-
-@pytest.mark.parametrize('recipe', [audio.RECIPE, recipes.SPEECH_RECIPE])
-def test_audio_and_speech_backends_reuse_evict_and_reload(server, tmp_path, monkeypatch, recipe):
-    client, state = server
-    monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
-    source = tmp_path/'source.wav'
-    waveform(source)
-    state['inputs'] = {'jobs/input.wav': source.read_bytes()}
-    if recipe == recipes.SPEECH_RECIPE:
-        fixture_speech(tmp_path, monkeypatch)
-        outputs = ['jobs/source.transcript.md', 'jobs/source.transcript.voiceprints.json']
-        params = {}
-    else:
-        outputs = ['jobs/enhanced.wav', 'jobs/capture.json']
-        params = {'tracks': [{'input': 'jobs/input.wav', 'output': outputs[0],
-                              'stream_index': 0, 'role': 'microphone'}]}
-    state['assignment'] = assignment(recipe, params, state['inputs'], outputs)
-    if recipe == recipes.SPEECH_RECIPE:
-        state['assignment']['recording'] = '---\naudio: input.wav\n---\n# Recording\n'
-    backend = worker.Inference([recipe], 'cpu', 'MDSTORE_WORKER_TOKEN', idle_seconds=1.0)
-    try:
-        assert backend.process is None  # Lazy until the first job.
-        worker.execute(client, state['assignment'], tmp_path/'cache', inference=backend)
-        process = backend.process
-        worker.execute(client, state['assignment'], tmp_path/'cache', inference=backend)
-        assert backend.process is process and process.poll() is None
-        if recipe == recipes.SPEECH_RECIPE:
-            assert (tmp_path/'loads').read_text().splitlines() == ['loaded']
-        deadline = time.monotonic() + 5
-        while backend.connection is not None and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert process.poll() is not None
-        assert backend.process is None and backend.connection is None
-        worker.execute(client, state['assignment'], tmp_path/'cache', inference=backend)
-        assert backend.process is not process and backend.process.poll() is None
-        if recipe == recipes.SPEECH_RECIPE:
-            assert (tmp_path/'loads').read_text().splitlines() == ['loaded', 'loaded']
-    finally:
-        backend.close()

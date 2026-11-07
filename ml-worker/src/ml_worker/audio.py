@@ -18,8 +18,7 @@ MODEL_REVISION = "DeepFilterNet-v0.5.6"
 SAMPLE_RATE = 48000
 
 
-# Owned by the resident audio inference process; its process group is cancelled
-# as a unit. The controller evicts the entire backend after five idle minutes.
+# Native DFN runtime, shared across tracks and jobs.
 _denoiser = None
 
 

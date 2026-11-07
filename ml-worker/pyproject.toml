@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "MIT"
 dependencies = [
+  "speech2md; sys_platform == 'darwin'",
   "numpy>=2,<3",
   "pyyaml>=6,<7",
   "torch==2.11.0",
@@ -30,6 +31,7 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.uv.sources]
+speech2md = { path = "../speech2md" }
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [[tool.uv.index]]

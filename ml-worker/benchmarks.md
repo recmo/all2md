@@ -76,8 +76,8 @@ The Nix-packaged Python 3.13 runtime was also checked with a real query through
 the production CPU loader: 0.609 s warm median (0.596, 0.612, 0.609 s), with
 0.999921 cosine agreement against BF16. Loading and computing the first query
 took 6.0–9.0 s in two separate processes, excluding Python/Torch import startup.
-The queued worker currently reloads the model for every job; warm latency is
-what a future persistent retrieval service could target.
+The worker now retains the text models across jobs. Warm inference timings exclude
+queueing and transport overhead.
 
 ## Reproduce
 

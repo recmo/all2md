@@ -203,6 +203,6 @@ Use the [ML worker](../ml-worker/README.md) to run leased `speech2md-v1` jobs.
 leases, cancellation, and publication.
 
 When called by `ml-worker`, the transcription pipeline retains MOSS and ReDimNet2
-across jobs in a dedicated process. The worker evicts that process after five
-minutes without a transcription job. Standalone CLI invocations still exit after
+across jobs in the worker’s Python process. The worker clears those model caches
+after five idle minutes. Standalone CLI invocations still exit after
 one recording.

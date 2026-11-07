@@ -14,27 +14,25 @@ is not included in the Linux package. It does not run generative LLM jobs.
 | `text-rerank-zerank-2-v1` | ZeroEntropy zerank-2 (4B) | Ranked candidate IDs, input indices, and relevance scores |
 
 The runner advertises locally installed capabilities and claims only matching
-recipes. Selected text models load before the first claim and stay resident together
-in a credential-free inference process across jobs, including while idle. Lease
-loss or interruption kills the active inference process; its next job reloads the
-models. Ordinary recipe errors retain the loaded models. Audio enhancement and
-transcription each have a separate resident backend, loaded on demand and evicted
-**five minutes after its last job finishes**. The timer restarts after each job,
-never interrupts active inference, and runs even while another backend is busy.
-The next job after eviction loads the models again. Transcription retains MOSS
-and ReDimNet2 together; DeepFilterNet retains its compiled models and resets all
-stream state between tracks. Level-only jobs do not keep a model backend alive.
-Cancellation kills the active process group, including audio tools. Inputs are verified by SHA-256, outputs
-must match the assignment, and mdstore fences stale attempts and validates atomic
-publication. Worker credentials are removed from the inference subprocess.
+recipes. One long-running Python worker owns the models and runs jobs sequentially.
+Selected text models load before the first claim and stay loaded, including while
+idle. Transcription loads MOSS and ReDimNet2 on demand; audio enhancement uses a
+resident Rust DeepFilterNet helper. Both groups are evicted **five minutes after
+their last job finishes**. A maintenance thread clears idle caches even while
+another recipe is running, and never evicts a group in use. Level-only jobs do
+not extend model lifetimes. DeepFilterNet resets stream state between tracks.
+
+On lease loss, an active model call finishes and its result is discarded before
+publication. Inputs are verified by SHA-256, outputs must match the assignment,
+and mdstore fences stale attempts and validates atomic publication. The worker
+removes its credential from the environment after creating the HTTP client.
 Workspaces are isolated by server, job, and fingerprint. Starting a new fingerprint
 removes that job's obsolete workspaces under its lock. The MOSS cache is shared
 across a job’s fingerprints and validated by speech2md before reuse, so speaker
 corrections can replay compatible generations. A file lock prevents two
-attempts from concurrently using a job's workspace, including a child whose parent
-crashed. Disposable enhancement waveforms are cleaned up after completion or
-cancellation, and stale scratch is removed before retrying. Failed attempts cannot
-publish old outputs left in the cache.
+attempts from concurrently using a job's workspace. Disposable enhancement
+waveforms are cleaned up after completion or failure, and stale scratch is removed
+before retrying. Failed attempts cannot publish old outputs left in the cache.
 
 ## Run
 
@@ -49,15 +47,16 @@ nix run .#ml-worker -- --server https://your-mdstore-host --once \
   --recipes audio-enhancement-dfn3-v1 text-embeddings-zembed-1-v1 text-rerank-zerank-2-v1
 ```
 
-Idle workers poll once a second; failed requests retry after ten seconds.
+When no jobs are available, the worker polls once a second; failed requests
+retry after ten seconds.
 
 `--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
 when available, otherwise CPU; `--device cpu` forces CPU for text models.
 Text models use FP32 on CPU and BF16 on MPS. Allow roughly 32 GiB for both CPU
 text models together, plus inference memory; `OMP_NUM_THREADS=4` can limit CPU
 parallelism.
-DeepFilterNet uses a resident native Rust/CPU runtime. Nix packages the dependencies and
-embeds the DeepFilterNet3 model. The two text models download pinned weights into
+DeepFilterNet uses a resident native Rust/CPU runtime. Nix packages the
+dependencies and embeds the DeepFilterNet3 model. The two text models download pinned weights into
 the Hugging Face cache on first startup; loading disables remote Python code and
 requires safetensors. No packages or toolchains are installed at runtime.
 
@@ -66,8 +65,8 @@ on a CPU. These queued recipes do not provide synchronous mdstore retrieval.
 
 Use `--recipes speech2md-v1` for a transcription-only worker.
 Use `ml-worker` for the additional recipes; its transcription recipe uses the
-existing speech2md pipeline in its locked Python environment and retains leased
-speaker-reference matching.
+existing speech2md pipeline in the worker’s locked Python environment and retains
+leased speaker-reference matching.
 
 ## Declare jobs
 
@@ -267,7 +266,7 @@ PYTHONPATH=ml-worker/src uv run --project ml-worker pytest ml-worker/tests
 nix build .#checks.x86_64-linux.ml-worker
 ```
 
-Fixture checks exercise real HTTP transfers, subprocess execution, checksum
+Fixture checks exercise real HTTP transfers, recipe execution, checksum
 failure, lease loss, publication, gain control, and DeepFilterNet audio alignment.
 Tensor tests verify pooling, prefixes, and ranking without downloading weights
 when PyTorch is installed. Actual quality needs representative Zoom/Meet audio,

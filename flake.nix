@@ -153,7 +153,6 @@
             (mkDeepFilterWorker mlSystem)
           ];
           text = nixpkgs.lib.optionalString systemPkgs.stdenv.hostPlatform.isDarwin ''
-            export ML_WORKER_SPEECH_PYTHON=${speechEnvironment}/bin/python
             export SPEECH2MD_VERSION=${pagesVersion}
             export TORCH_HOME="''${XDG_CACHE_HOME:-$HOME/.cache}/speech2md/torch"
             mkdir -p "$TORCH_HOME"
@@ -170,7 +169,6 @@
           ];
         } ''
           export PYTHONPATH=${mlProject}/src
-          export SPEECH2MD_SOURCE=${speechProject}/src/speech2md
           export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
           pytest -q -p no:cacheprovider ${mlProject}/tests
           touch "$out"

@@ -18,15 +18,14 @@ from urllib.parse import quote, urlencode
 
 from .client import Client, local_path
 from . import audio, recipes, text
-from .inference import Inference, serve
+from .models import Models
 
 MAX_OUTPUT = 64 * 1024 * 1024
-MODEL_IDLE_SECONDS = 5 * 60
 
 
 def capabilities():
     result = []
-    if os.environ.get("ML_WORKER_SPEECH_PYTHON") or importlib.util.find_spec("speech2md"):
+    if importlib.util.find_spec("speech2md"):
         result.append(recipes.SPEECH_RECIPE)
     if shutil.which("ffmpeg"):
         result.append(recipes.LEVELS_RECIPE)
@@ -37,7 +36,7 @@ def capabilities():
     return result
 
 
-def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORKER_TOKEN", heartbeat_seconds=30, inference=None):
+def execute(client, assignment, cache, *, models, device="auto", heartbeat_seconds=30):
     job = assignment["job"]
     scope = hashlib.sha256(client.server.encode()).hexdigest()
     cache_root = cache.expanduser().resolve() / scope
@@ -46,7 +45,7 @@ def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORK
         with tempfile.TemporaryDirectory(prefix="retrieval-", dir=cache_root) as directory:
             root = Path(directory) / "work"
             root.mkdir(mode=0o700)
-            return _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, None, inference)
+            return _execute_locked(client, assignment, root, heartbeat_seconds, models, device)
     identity = hashlib.sha256(job["id"].encode()).hexdigest()
     job_root = cache_root / identity
     job_root.mkdir(exist_ok=True, mode=0o700)
@@ -60,10 +59,10 @@ def execute(client, assignment, cache, *, device="auto", token_env="MDSTORE_WORK
             if previous.is_dir() and previous != root:
                 shutil.rmtree(previous)
         root.mkdir(exist_ok=True, mode=0o700)
-        _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock.fileno(), inference)
+        _execute_locked(client, assignment, root, heartbeat_seconds, models, device)
 
 
-def _execute_locked(client, assignment, root, device, token_env, heartbeat_seconds, lock_fd, inference):
+def _execute_locked(client, assignment, root, heartbeat_seconds, models, device):
     job = assignment["job"]
     lease = {"id": job["id"], "attempt": job["attempt"]}
     scratch = root.parent / ".scratch"
@@ -94,18 +93,10 @@ def _execute_locked(client, assignment, root, device, token_env, heartbeat_secon
         for output in outputs:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.unlink(missing_ok=True)
-        request = root / ".assignment.json"
-        recipes.json_output(request, assignment)
         progress["stage"] = "processing"
         check_lease()
-        if inference is None:
-            temporary = Inference([job["recipe"]], device, token_env)
-            try:
-                temporary.execute(request, lock_fd, lost)
-            finally:
-                temporary.close()
-        else:
-            inference.execute(request, lock_fd, lost)
+        with models.use(job["recipe"]):
+            recipes.execute(assignment, root, device=device, scratch=scratch)
         check_lease()
         progress["stage"] = "publishing"
         for output in outputs:
@@ -157,11 +148,7 @@ def main(argv=None):
     parser.add_argument("--recipes", nargs="+", choices=recipes.RECIPES)
     parser.add_argument("--list-recipes", action="store_true")
     parser.add_argument("--once", action="store_true", help="claim at most one job and exit")
-    parser.add_argument("--inference-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    if args.inference_fd is not None:
-        serve(args.inference_fd, args.recipes or [], args.device)
-        return 0
     available = capabilities()
     if args.list_recipes:
         print("\n".join(available))
@@ -170,27 +157,20 @@ def main(argv=None):
     if not args.server or not selected or set(selected)-set(available):
         parser.error("--server and locally available recipes are required; use --list-recipes")
     client = Client(args.server, os.environ.get(args.token_env, ""))
-    text_recipes = [recipe for recipe in selected if recipe in {text.EMBED_RECIPE, text.RERANK_RECIPE}]
-    text_inference = Inference(text_recipes, args.device, args.token_env)
-    speech_inference = Inference([recipes.SPEECH_RECIPE], args.device, args.token_env,
-                                 idle_seconds=MODEL_IDLE_SECONDS)
-    audio_inference = Inference([audio.RECIPE], args.device, args.token_env,
-                                idle_seconds=MODEL_IDLE_SECONDS)
+    # Keep the credential in Client, out of environments inherited by audio tools.
+    os.environ.pop(args.token_env, None)
+    os.environ.pop("MDSTORE_WORKER_TOKEN", None)
+    models = Models()
     def terminate(signum, _frame):
         raise SystemExit(128 + signum)
     previous_sigterm = signal.signal(signal.SIGTERM, terminate)
     try:
-        if text_recipes:
-            text_inference.start(threading.Event())
+        text.preload(selected, device=args.device)
         while True:
             try:
                 assignment = client.request("/worker", {"op": "claim", "recipes": selected})
                 if assignment:
-                    recipe = assignment["job"]["recipe"]
-                    inference = (text_inference if recipe in text_recipes else
-                                 speech_inference if recipe == recipes.SPEECH_RECIPE else
-                                 audio_inference if recipe == audio.RECIPE else None)
-                    execute(client, assignment, args.cache, device=args.device, token_env=args.token_env, inference=inference)
+                    execute(client, assignment, args.cache, models=models, device=args.device)
                 if args.once:
                     return 0
                 if assignment:
@@ -205,8 +185,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         return 130
     finally:
-        for inference in (text_inference, speech_inference, audio_inference):
-            inference.close()
+        models.close()
         signal.signal(signal.SIGTERM, previous_sigterm)
 
 
