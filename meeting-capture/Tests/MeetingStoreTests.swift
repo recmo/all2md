@@ -130,8 +130,6 @@ final class MeetingStoreTests: XCTestCase {
     func testPermissionChecksCannotInterruptCapture() {
         let client = AudioClient(audioObjectID: 0, processID: 1, bundleID: nil, applicationName: "Fixture", inputDevices: [])
         XCTAssertFalse(AppModel.allowsPermissionCheck(in: .recording(client)))
-        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .detecting(client, since: Date())))
-        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .countdown(client, remaining: 2)))
         XCTAssertFalse(AppModel.allowsPermissionCheck(in: .finalizing))
         XCTAssertTrue(AppModel.allowsPermissionCheck(in: .permissionRequired))
         XCTAssertTrue(AppModel.allowsPermissionCheck(in: .idle))
@@ -518,8 +516,6 @@ final class MeetingStoreTests: XCTestCase {
             inputDevices: []
         )
         XCTAssertTrue(AppModel.allowsMaintenance(in: .idle))
-        XCTAssertFalse(AppModel.allowsMaintenance(in: .detecting(client, since: Date())))
-        XCTAssertFalse(AppModel.allowsMaintenance(in: .countdown(client, remaining: 5)))
         XCTAssertFalse(AppModel.allowsMaintenance(in: .recording(client)))
         XCTAssertFalse(AppModel.allowsMaintenance(in: .finalizing))
     }
@@ -549,24 +545,6 @@ final class MeetingStoreTests: XCTestCase {
             parentPID: { [200: 100][$0] }
         )
         XCTAssertEqual(resolved, browser)
-    }
-
-    @MainActor
-    func testSkipSuppressesOnlyTheCurrentMicrophoneSession() async {
-        let model = AppModel(checkCapture: { StartupCaptureReport(systemAudioObserved: false) }, monitor: nil)
-        model.start()
-        for _ in 0..<100 where model.state == .checkingPermissions { await Task.yield() }
-        let client = AudioClient(audioObjectID: 1, processID: 42, bundleID: "test.meeting", applicationName: "Meeting", inputDevices: [])
-        let start = Date()
-        model.handle([client], now: start)
-        model.handle([client], now: start.addingTimeInterval(3))
-        guard case .countdown = model.state else { return XCTFail("Expected countdown") }
-        model.skip()
-        for offset in 4...20 { model.handle([client], now: start.addingTimeInterval(Double(offset))) }
-        XCTAssertEqual(model.state, .idle)
-        model.handle([], now: start.addingTimeInterval(21))
-        model.handle([client], now: start.addingTimeInterval(22))
-        guard case .detecting = model.state else { return XCTFail("A new microphone session should be eligible") }
     }
 
     func testJournalRecoveryPreservesGapsAndFailureStatus() async throws {

@@ -1,7 +1,7 @@
 # Meeting Capture
 
 Meeting Capture is a local-only macOS menu-bar recorder. It watches Core Audio
-for another process opening a microphone, offers a ten-second veto, and records
+for another process opening a microphone and immediately records
 the microphone plus every process producing audio into separate tracks. This
 includes unrelated applications playing during the recording. Core Audio process
 taps work without an application window, including a FaceTime call bubble.
@@ -51,7 +51,7 @@ Check each permission row opens its own Settings pane, toggle access, return to
 the menu, and retry the recording check. If macOS requests a restart, quit and
 reopen the app. Use **Copy error details** on failure. With audio playing, make
 an attributed manual recording and check the separate microphone and participant
-tracks. Also verify Skip/Stop suppress the current microphone session, input
+tracks. Also verify Stop suppresses the current microphone session, input
 device/format changes create a new segment, and interrupted recordings can be
 selected independently for recovery. Raw Accessibility traces remain enabled
 for future speaker attribution.
@@ -96,7 +96,7 @@ collects metadata. Folder probes delete their disposable files after each check.
 
 Failures keep recording disabled and expose Settings links and an explicit Retry
 action. macOS may require quitting and reopening the installed app after a grant.
-Permission rechecks cannot run during capture, countdown, or detection. Optional
+Permission rechecks cannot run during capture or capture startup. Optional
 Accessibility metadata does not gate recording or prompt automatically.
 A process capture failure stops recording visibly rather than silently dropping
 that process. A quiet system can produce a complete microphone-only archive.
@@ -122,8 +122,11 @@ for manual salvage rather than guessed into the new format.
   the microphone selected by the meeting application, even when it is not the
   macOS default. The active device is shown in the menu and recorded as a
   `microphoneDevice` metadata event.
-- Two seconds of sustained activity opens a ten-second, vetoable countdown.
-  Skip and Stop suppress that process until its microphone activity ends.
+- Recording starts on the first detected microphone activity, without a
+  countdown or sustained-activity delay. Detection polls every 500 ms; audio
+  before detection and capture startup cannot be recovered. Stop suppresses
+  that process until its microphone activity ends. Ignore for one hour and
+  Never record this application are available in the recording menu.
 - The microphone is captured to crash-safe PCM CAF segments in each device's
   native format. Device changes and AVAudioEngine configuration changes restart
   the microphone into a new segment; the short restart interval is recorded as an
@@ -170,7 +173,7 @@ for manual salvage rather than guessed into the new format.
   the menu while idle or after a recording check or capture error. Recovery does
   not require a working microphone or recording authorization. It remains a
   secondary maintenance status;
-  it cannot replace detection, countdown, or recording state. Header-only CAF
+  it cannot replace capture startup or recording state. Header-only CAF
   files are preserved with an `.unrecoverable.caf` suffix rather than retried
   forever.
 - Capture, finalization, and recovery claim each recording exclusively. Claimed
@@ -213,10 +216,6 @@ and two start/stop cycles:
 MEETING_CAPTURE_TEST_PROCESS_TAP=1 nix develop .#meeting-capture --command \
   bash meeting-capture/test-local.sh
 ```
-
-No countdown audio is persisted. A skipped trigger therefore leaves no audio
-on disk. A bounded in-memory pre-roll remains a candidate for the real-meeting
-validation cycle and would preserve the manifest contract.
 
 ## Milestone 1 acceptance
 
