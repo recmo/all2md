@@ -14,6 +14,8 @@ DIMENSIONS = 2560
 MAX_TOKENS = 32768
 MAX_ITEMS = 256
 MAX_TEXT = 32768
+INFERENCE_BATCH_SIZE = 4
+INFERENCE_BATCH_TOKENS = 2048
 # Pinned zerank-2 1_LogitScore/config.json selects the raw "Yes" logit.
 YES_TOKEN = 9454
 
@@ -35,93 +37,145 @@ def records(value):
 
 
 @cache
-def _load(model_id, revision, *, classifier, device):
-    import torch
-    from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
-    if device == "auto":
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
+def _load(model_id, revision):
+    import mlx.core as mx
+    from huggingface_hub import snapshot_download
+    from mlx_lm import load
+    from transformers import AutoTokenizer
+    if not mx.metal.is_available():
+        raise RuntimeError("text inference requires Apple Silicon with Metal")
     tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision, trust_remote_code=False)
-    factory = AutoModelForCausalLM if classifier else AutoModel
-    model = factory.from_pretrained(model_id, revision=revision, trust_remote_code=False,
-                                   use_safetensors=True,
-                                   dtype=torch.float32 if device == "cpu" else torch.bfloat16).to(device).eval()
-    return tokenizer, model, device
+    path = snapshot_download(model_id, revision=revision,
+                             allow_patterns=["*.json", "model*.safetensors", "*.txt", "*.jinja", "*.model"])
+    model, _ = load(path, tokenizer_config={"trust_remote_code": False})
+    if not model.args.tie_word_embeddings:
+        raise ValueError("pinned retrieval models require tied readout weights")
+    model.apply(lambda value: value.astype(mx.bfloat16))
+    model.eval()
+    mx.eval(model.parameters())
+    return tokenizer, model
 
 
-def preload(selected, *, device="auto"):
-    for recipe, model, revision, classifier in (
-        (EMBED_RECIPE, EMBED_MODEL, EMBED_REVISION, False),
-        (RERANK_RECIPE, RERANK_MODEL, RERANK_REVISION, True),
+def preload(selected):
+    for recipe, model, revision in (
+        (EMBED_RECIPE, EMBED_MODEL, EMBED_REVISION),
+        (RERANK_RECIPE, RERANK_MODEL, RERANK_REVISION),
     ):
         if recipe in selected:
-            _load(model, revision, classifier=classifier, device=device)
+            _load(model, revision)
 
 
-def _batch(tokenizer, formatted, device):
-    # Process one item at a time: these are 4B models with potentially long inputs.
-    # Reject oversize inputs rather than losing text or the closing scoring prompt.
-    batch = tokenizer([formatted], truncation=False, return_tensors="pt")
-    if batch["input_ids"].shape[1] > MAX_TOKENS:
-        raise ValueError(f"formatted input exceeds {MAX_TOKENS} tokens; split into smaller passages")
-    return batch.to(device)
+def _batches(encoded):
+    start = 0
+    while start < len(encoded):
+        end = start + 1
+        longest = len(encoded[start])
+        while end < len(encoded) and end - start < INFERENCE_BATCH_SIZE:
+            longest = max(longest, len(encoded[end]))
+            if longest * (end - start + 1) > INFERENCE_BATCH_TOKENS:
+                break
+            end += 1
+        # An input larger than the batch budget runs alone, within MAX_TOKENS.
+        yield encoded[start:end]
+        start = end
 
 
-def embeddings(parameters, *, device="auto"):
-    import torch
+def _infer(tokenizer, model, encoded, *, classifier):
+    import mlx.core as mx
+    values = []
+    for rows in _batches(encoded):
+        width = max(map(len, rows))
+        pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+        inputs = mx.array([row + [pad] * (width - len(row)) for row in rows])
+        # Causal right padding cannot affect the preceding real final token.
+        hidden = model.model(inputs)
+        last = hidden[mx.arange(len(rows)), mx.array([len(row) - 1 for row in rows])]
+        if classifier:
+            output = model.model.embed_tokens.as_linear(last)[:, YES_TOKEN].astype(mx.float32)
+        else:
+            output = last.astype(mx.float32)
+            output = output / mx.linalg.norm(output, axis=1, keepdims=True)
+        mx.eval(output)
+        values.extend(output.tolist())
+    return values
+
+
+def prepare(recipe, parameters):
     items = records(parameters.get("texts"))
-    input_type = parameters.get("input_type", "document")
-    if input_type not in {"query", "document"}:
-        raise ValueError("input_type must be query or document")
-    namespace = parameters.get("namespace", "documents")
-    if not isinstance(namespace, str) or not namespace.strip() or namespace == "speakers":
-        raise ValueError("a non-speaker text namespace is required")
-    tokenizer, model, device = _load(EMBED_MODEL, EMBED_REVISION, classifier=False, device=device)
-    vectors = []
-    for item in items:
-        # config_sentence_transformers.json + modeling_zembed.py add this prefix/suffix.
-        formatted = f"<|im_start|>system\n{input_type}<|im_end|>\n<|im_start|>user\n{item['text']}<|im_end|>\n"
-        batch = _batch(tokenizer, formatted, device)
-        with torch.inference_mode():
-            # 1_Pooling/config.json specifies last-token pooling, including the prompt.
-            hidden = model(**batch, use_cache=False).last_hidden_state[:, -1].float()
-            vectors.extend(torch.nn.functional.normalize(hidden, p=2, dim=1).cpu().tolist())
-    if len(vectors) != len(items) or any(
-        len(v) != DIMENSIONS or not all(math.isfinite(x) for x in v)
-        or not 0.99 <= sum(x*x for x in v) <= 1.01 for v in vectors
-    ):
-        raise ValueError("model returned invalid embeddings")
-    return {
-        "space": {"namespace": namespace, "recipe": EMBED_RECIPE, "dimensions": DIMENSIONS},
-        "model": EMBED_MODEL, "revision": EMBED_REVISION, "max_tokens": MAX_TOKENS,
-        "records": [{"id": item["id"], "vector": vector,
-                     "metadata": {"text": item["text"], "input_type": input_type}}
-                    for item, vector in zip(items, vectors, strict=True)],
-    }
-
-
-def rerank(parameters, *, device="auto"):
-    import torch
-    items = records(parameters.get("texts"))
-    query = parameters.get("query")
-    if not isinstance(query, str) or not query.strip() or len(query) > MAX_TEXT:
-        raise ValueError("query must be nonempty and at most 32768 characters")
-    top_n = parameters.get("top_n", len(items))
-    if type(top_n) is not int or not 1 <= top_n <= len(items):
-        raise ValueError("top_n must be between 1 and the number of texts")
-    tokenizer, model, device = _load(RERANK_MODEL, RERANK_REVISION, classifier=True, device=device)
-    scores = []
-    for item in items:
-        # Pinned chat_template.jinja: query is system, document is user; score next token.
-        formatted = tokenizer.apply_chat_template(
+    if recipe == EMBED_RECIPE:
+        input_type = parameters.get("input_type", "document")
+        if input_type not in {"query", "document"}:
+            raise ValueError("input_type must be query or document")
+        namespace = parameters.get("namespace", "documents")
+        if not isinstance(namespace, str) or not namespace.strip() or namespace == "speakers":
+            raise ValueError("a non-speaker text namespace is required")
+        # Pinned Sentence Transformers configuration adds this prefix/suffix.
+        formatted = [f"<|im_start|>system\n{input_type}<|im_end|>\n<|im_start|>user\n{item['text']}<|im_end|>\n"
+                     for item in items]
+    elif recipe == RERANK_RECIPE:
+        query = parameters.get("query")
+        if not isinstance(query, str) or not query.strip() or len(query) > MAX_TEXT:
+            raise ValueError("query must be nonempty and at most 32768 characters")
+        top_n = parameters.get("top_n", len(items))
+        if type(top_n) is not int or not 1 <= top_n <= len(items):
+            raise ValueError("top_n must be between 1 and the number of texts")
+        tokenizer, _ = _load(RERANK_MODEL, RERANK_REVISION)
+        formatted = [tokenizer.apply_chat_template(
             [{"role": "query", "content": query}, {"role": "document", "content": item["text"]}],
-            tokenize=False, add_generation_prompt=True)
-        batch = _batch(tokenizer, formatted, device)
-        with torch.inference_mode():
-            logits = model(**batch, use_cache=False, logits_to_keep=1).logits
-            scores.append(float(logits[0, -1, YES_TOKEN].float().cpu()))
-    if len(scores) != len(items) or not all(math.isfinite(x) for x in scores):
-        raise ValueError("model returned invalid reranking scores")
-    order = sorted(range(len(items)), key=lambda i: (-scores[i], i))[:top_n]
-    return {"model": RERANK_MODEL, "revision": RERANK_REVISION, "max_tokens": MAX_TOKENS,
-            "query": query, "results": [{"index": i, "id": items[i]["id"],
-                                        "relevance_score": scores[i]} for i in order]}
+            tokenize=False, add_generation_prompt=True) for item in items]
+    else:
+        raise ValueError("unknown text recipe")
+    # Token limits must fail this job before it joins a batch of independent jobs.
+    model_id, revision = ((EMBED_MODEL, EMBED_REVISION) if recipe == EMBED_RECIPE
+                          else (RERANK_MODEL, RERANK_REVISION))
+    tokenizer, _ = _load(model_id, revision)
+    encoded = tokenizer(formatted, truncation=False, padding=False)["input_ids"]
+    if max(map(len, encoded)) > MAX_TOKENS:
+        raise ValueError(f"formatted input exceeds {MAX_TOKENS} tokens; split into smaller passages")
+    return parameters, items, encoded
+
+
+def infer_batch(recipe, prepared):
+    embedding = recipe == EMBED_RECIPE
+    model_id, revision = ((EMBED_MODEL, EMBED_REVISION) if embedding
+                          else (RERANK_MODEL, RERANK_REVISION))
+    tokenizer, model = _load(model_id, revision)
+    values = _infer(tokenizer, model, [row for _, _, rows in prepared for row in rows],
+                    classifier=not embedding)
+    results = []
+    offset = 0
+    for parameters, items, _ in prepared:
+        output = values[offset:offset + len(items)]
+        offset += len(items)
+        if embedding:
+            if len(output) != len(items) or any(
+                len(v) != DIMENSIONS or not all(math.isfinite(x) for x in v)
+                or not 0.99 <= sum(x*x for x in v) <= 1.01 for v in output
+            ):
+                raise ValueError("model returned invalid embeddings")
+            result = {
+                "space": {"namespace": parameters.get("namespace", "documents"),
+                          "recipe": EMBED_RECIPE, "dimensions": DIMENSIONS},
+                "model": model_id, "revision": revision, "max_tokens": MAX_TOKENS,
+                "records": [{"id": item["id"], "vector": vector,
+                             "metadata": {"text": item["text"],
+                                          "input_type": parameters.get("input_type", "document")}}
+                            for item, vector in zip(items, output, strict=True)],
+            }
+        else:
+            if len(output) != len(items) or not all(math.isfinite(x) for x in output):
+                raise ValueError("model returned invalid reranking scores")
+            order = sorted(range(len(items)), key=lambda i: (-output[i], i))[:parameters.get("top_n", len(items))]
+            result = {"model": model_id, "revision": revision, "max_tokens": MAX_TOKENS,
+                      "query": parameters["query"], "results": [
+                          {"index": i, "id": items[i]["id"], "relevance_score": output[i]} for i in order]}
+        results.append(result)
+    return results
+
+
+def embeddings(parameters):
+    return infer_batch(EMBED_RECIPE, [prepare(EMBED_RECIPE, parameters)])[0]
+
+
+def rerank(parameters):
+    return infer_batch(RERANK_RECIPE, [prepare(RERANK_RECIPE, parameters)])[0]

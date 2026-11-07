@@ -1,9 +1,9 @@
 # ML worker
 
-`ml-worker` pulls jobs from mdstore and runs one recipe at a time. Apple Silicon
+`ml-worker` pulls jobs from mdstore and processes one recipe at a time. Apple Silicon
 supports transcription, audio enhancement, text embeddings, and reranking. Linux
-CPU supports audio enhancement and text models; transcription requires MLX and
-is not included in the Linux package. It does not run generative LLM jobs.
+supports audio enhancement; text inference and transcription require Apple Silicon
+and are not included in the Linux package. It does not run generative LLM jobs.
 
 | Recipe | Processing | Outputs |
 | --- | --- | --- |
@@ -14,7 +14,13 @@ is not included in the Linux package. It does not run generative LLM jobs.
 | `text-rerank-zerank-2-v1` | ZeroEntropy zerank-2 (4B) | Ranked candidate IDs, input indices, and relevance scores |
 
 The runner advertises locally installed capabilities and claims only matching
-recipes. One long-running Python worker owns the models and runs jobs sequentially.
+recipes. One long-running Python worker owns the models. It requests up to four
+embedding jobs per claim and batches their inputs locally. A reranking job already
+contains its candidate passages, so reranking and audio claims contain one job.
+Jobs retain independent validation, heartbeats, results, and retries.
+The `/worker` claim request maps recipe names to desired counts, for example
+`{"op":"claim","recipes":{"text-embeddings-zembed-1-v1":4,"speech2md-v1":1}}`.
+The response is an array of assignments of one recipe, or an empty array when idle.
 Selected text models load before the first claim and stay loaded, including while
 idle. Transcription loads MOSS and ReDimNet2 on demand; audio enhancement uses a
 resident Rust DeepFilterNet helper. Both groups are evicted **five minutes after
@@ -42,7 +48,7 @@ configured on mdstore and in `MDSTORE_WORKER_TOKEN`:
 ```sh
 nix run .#ml-worker -- --list-recipes
 nix run .#ml-worker -- --server https://your-mdstore-host
-# Claim at most one matching job, then exit:
+# Claim at most one batch of matching jobs, then exit:
 nix run .#ml-worker -- --server https://your-mdstore-host --once \
   --recipes audio-enhancement-dfn3-v1 text-embeddings-zembed-1-v1 text-rerank-zerank-2-v1
 ```
@@ -50,18 +56,14 @@ nix run .#ml-worker -- --server https://your-mdstore-host --once \
 When no jobs are available, the worker polls once a second; failed requests
 retry after ten seconds.
 
-`--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
-when available, otherwise CPU; `--device cpu` forces CPU for text models.
-Text models use FP32 on CPU and BF16 on MPS. Allow roughly 32 GiB for both CPU
-text models together, plus inference memory; `OMP_NUM_THREADS=4` can limit CPU
-parallelism.
+`--cache` defaults to `~/.cache/ml-worker`. Text inference uses native MLX
+BF16 on Apple Silicon (macOS 14+). Linux workers provide audio recipes only.
 DeepFilterNet uses a resident native Rust/CPU runtime. Nix packages the
-dependencies and embeds the DeepFilterNet3 model. The two text models download pinned weights into
-the Hugging Face cache on first startup; loading disables remote Python code and
-requires safetensors. No packages or toolchains are installed at runtime.
+dependencies and embeds the DeepFilterNet3 model. The text models download
+pinned weights into the Hugging Face cache on first startup; loading disables
+remote Python code and requires safetensors. No packages or toolchains are installed at runtime.
 
-See [Zawrat CPU measurements](benchmarks.md) before scheduling the 4B text models
-on a CPU. These queued recipes do not provide synchronous mdstore retrieval.
+Mdstore queues retrieval through these recipes.
 
 Use `--recipes speech2md-v1` for a transcription-only worker.
 Use `ml-worker` for the additional recipes; its transcription recipe uses the
@@ -188,9 +190,8 @@ model's query/document ChatML prefixes and closing suffix, pools the last token,
 and L2-normalizes the 2,560-dimensional results. These conventions match the
 pinned Sentence Transformers configuration without executing its custom Python.
 Embedding-space identity includes the recipe and namespace; text vectors cannot
-use the `speakers` namespace. The new recipe cannot mix with old E5 artifacts.
-Queries and documents must use the same local recipe and revision. Mdstore has
-no hosted ZeroEntropy API integration or fallback.
+use the `speakers` namespace. Queries and documents must use the same local
+recipe and revision.
 
 Outputs use mdstore's existing `space`/`records` vector artifact format, with
 record IDs, original text, input mode, model revision, and source provenance.
@@ -205,8 +206,8 @@ pinned model, revision, input IDs, dimensions, normalization, and lease before
 installing document vectors into its sidecars and live search index. Retrieval
 assignments do not publish repository artifacts or create Git commits. Each attempt
 uses an isolated temporary workspace that is removed when the attempt ends. Workers
-claim the next job immediately after processing one and wait only when idle or after an error. See
-[mdstore](../mdstore/README.md) for configuration and migration.
+claim the next batch immediately after processing one and wait only when idle or after an error. See
+[mdstore](../mdstore/README.md) for configuration.
 
 ### Reranking
 
@@ -242,13 +243,16 @@ pinned to `5eae30d5ee3c6b2df2ef6d723bde45172d761c4c`. Each query/passage pair
 uses its pinned chat template and the raw next-token `Yes` logit, matching the
 model's current LogitScore configuration. Results preserve original indices and
 IDs, sort by descending score, and break ties by original order. Scores are not
-probabilities. This is a queued batch job, not a synchronous search-time service.
+probabilities.
 
 Both models have 4B parameters and Apache-2.0 weights. They download on first use
 (roughly 8 GB per model on disk). Both stay loaded while jobs run one at a time,
-using FP32 on CPU and BF16 on MPS. MPS requires a Mac/PyTorch combination with
-BF16 support (macOS 14+).
-Allow memory beyond the weights for inference; long passages use more memory.
+using native MLX BF16 on Apple Silicon (macOS 14+).
+Allow roughly 15 GiB for both resident text models before inference buffers;
+long passages use more memory.
+Both recipes batch up to 4 inputs within a 2,048-padded-token budget. Longer
+inputs run alone. Causal right padding preserves the last real token for pooling
+and scoring. The original pinned weights are unquantized.
 
 Both text recipes accept 1–256 records with unique nonempty string IDs and
 nonempty text of at most 32,768 characters. The formatted input must fit within
@@ -269,8 +273,7 @@ nix build .#checks.x86_64-linux.ml-worker
 Fixture checks exercise real HTTP transfers, recipe execution, checksum
 failure, lease loss, publication, gain control, and DeepFilterNet audio alignment.
 Tensor tests verify pooling, prefixes, and ranking without downloading weights
-when PyTorch is installed. Actual quality needs representative Zoom/Meet audio,
+when MLX is installed. Actual quality needs representative Zoom/Meet audio,
 reviewed transcripts and speaker identities, and relevance judgments for text.
-MacBook MPS performance and real-recording quality are not established by these
-checks. OCR integration, codec restoration, launchd deployment, automatic corpus
-embedding jobs, and the WebUI enhancement selector remain separate work.
+OCR integration, codec restoration, launchd deployment, and the WebUI enhancement
+selector remain separate work.

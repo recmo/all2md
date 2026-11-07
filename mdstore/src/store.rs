@@ -847,26 +847,16 @@ impl Store {
                     sidecar_path,
                 } => {
                     let mut vectors = Vec::new();
-                    let batch_size = context
-                        .snapshot
-                        .config
-                        .provider
-                        .batch_size
-                        .unwrap_or(1)
-                        .max(1);
                     let mut pending = false;
-                    for batch in chunks.chunks(batch_size) {
-                        let input: Vec<String> = batch
-                            .iter()
-                            .map(|chunk| chunk.embedding_text.clone())
-                            .collect();
+                    for chunk in &chunks {
+                        let input = [chunk.embedding_text.clone()];
                         match context
                             .snapshot
                             .provider
                             .embed(InputType::Document, &input)
                             .await
                             .and_then(|vectors| {
-                                validate_vectors(&vectors, batch.len(), context.dimensions)?;
+                                validate_vectors(&vectors, 1, context.dimensions)?;
                                 Ok(vectors)
                             }) {
                             Ok(batch) => vectors.extend(batch.into_iter().map(Some)),
@@ -876,7 +866,7 @@ impl Store {
                                 {
                                     failure = Some(error.context(format!("embed document {path}")));
                                 }
-                                vectors.extend(std::iter::repeat_n(None, batch.len()));
+                                vectors.push(None);
                                 pending = true;
                             }
                         }

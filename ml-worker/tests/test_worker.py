@@ -29,7 +29,8 @@ def waveform(path, *, channels=1, amplitude=0.01):
 @pytest.fixture
 def server():
     state = {"inputs": {}, "outputs": {}, "completed": [], "failed": [], "assignment": None,
-             "lose_lease": lambda: False, "corrupt": False, "completion_requests": 0}
+             "lose_lease": lambda: False, "corrupt": False, "completion_requests": 0,
+             "lease_rejected": threading.Event()}
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -65,10 +66,12 @@ def server():
             if not self.authorized(): return
             value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             if value['op'] == 'claim':
-                assert state['assignment']['job']['recipe'] in value['recipes']
-                self.respond(state['assignment'])
+                assignments = state.get('assignments', [state['assignment']])
+                assert len(assignments) <= value['recipes'][assignments[0]['job']['recipe']]
+                self.respond(assignments)
                 return
-            assert value['id'] == 'fixture' and value['attempt'] == 'lease'
+            assert value['id'] in {a['job']['id'] for a in state.get('assignments', [state['assignment']])}
+            assert value['attempt'] == 'lease'
             if value['op'] == 'search':
                 self.respond({'results': [{'metadata': {'identity': 'people/alice.md'}}]})
                 return
@@ -81,7 +84,8 @@ def server():
                     self.close_connection = True
                     return
             if value.get('failure'): state['failed'].append(value['failure'])
-            if value['op'] == 'heartbeat' and state['lose_lease']():
+            if value['op'] == 'heartbeat' and (state['lose_lease']() or value['id'] == state.get('lost_id')):
+                state['lease_rejected'].set()
                 self.respond({'error': 'expired'}, 409)
             else:
                 self.respond(None)
@@ -223,6 +227,45 @@ def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, captur
     else:
         assert result['space']['namespace'] == 'documents'
         assert len(result['records'][0]['vector']) == text.DIMENSIONS
+
+
+@pytest.mark.parametrize('recipe', [text.EMBED_RECIPE, text.RERANK_RECIPE])
+def test_batch_keeps_jobs_independent(server, tmp_path, monkeypatch, recipe):
+    client, state = server
+    fixture_models(monkeypatch)
+    assignments = [assignment(recipe, {'texts': [{'id': '0', 'text': f'job {i}'}],
+                                        **({'query': f'query {i}'} if recipe == text.RERANK_RECIPE else {})},
+                              {}, ['result.json'])
+                   for i in range(4)]
+    for i, job in enumerate(assignments):
+        job['job']['id'] = str(i)
+        job['job']['fingerprint'] = str(i)
+        job['retrieval'] = True
+    assignments[1]['parameters']['ml']['unexpected'] = True
+    state['assignments'] = assignments
+    state['lost_id'] = '2'
+    calls = []
+    monkeypatch.setattr(text, 'prepare', lambda kind, parameters: parameters)
+    def infer_batch(kind, prepared):
+        calls.append((kind, prepared))
+        assert state['lease_rejected'].wait(5)
+        time.sleep(0.1)  # Let the rejected heartbeat reach the job before publication.
+        run = text.embeddings if kind == text.EMBED_RECIPE else text.rerank
+        return [run(parameters) for parameters in prepared]
+    monkeypatch.setattr(text, 'infer_batch', infer_batch)
+    models = worker.Models()
+    try:
+        with pytest.raises((ValueError, RuntimeError)):
+            worker.execute_batch(client, assignments, tmp_path / 'cache',
+                                 models=models, heartbeat_seconds=0.01)
+    finally:
+        models.close()
+    assert len(calls) == 1 and len(calls[0][1]) == 3
+    assert {job['id'] for job in state['completed']} == {'0', '3'}
+    for job in state['completed']:
+        result = json.loads(job['outputs']['result.json'])
+        assert result['provenance']['fingerprint'] == job['id']
+    assert not list((tmp_path / 'cache').rglob('work'))
 
 
 @pytest.mark.parametrize('retrieval', [False, True])

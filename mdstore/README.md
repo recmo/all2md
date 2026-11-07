@@ -8,7 +8,8 @@ MCP exposes `read`, `search`, and `edit`. Reads return a snapshot commit and num
 
 All search inference runs through `ml-worker`: document chunks are queued automatically
 at startup and after edits; query embeddings and reranking use the same pinned
-local recipes. The ZeroEntropy hosted API integration has been removed. Its API-key
+local recipes on an Apple Silicon Mac using native MLX. Linux workers provide
+audio recipes only. The ZeroEntropy hosted API integration has been removed. Its API-key
 and endpoint settings are unsupported and rejected by configuration validation. Set the same
 `MDSTORE_WORKER_TOKEN` on the daemon and worker, then run:
 
@@ -24,23 +25,37 @@ old sidecars before queuing fresh work. Changed/deleted chunk inputs and expired
 worker attempts reject completion. Query/ranking requests take priority, followed
 by explicitly declared jobs and then background document indexing. Interactive
 jobs and cached results expire after `provider.request_timeout_seconds` (default
-300). Identical requests share one pending job or completed result. Idle workers poll
+30). Identical requests share one pending job or completed result. Idle workers poll
 every second, within the foreground wait budget. With no worker poll
 or matching heartbeat in the last 60 seconds, it skips new interactive inference
 and returns lexical/graph results, plus vector retrieval when a recent query
 embedding is cached. Reranking is skipped unless a matching result is cached.
-If a worker disappears during a request, each inference stage waits at most
-3 seconds before returning degraded results. Document embedding jobs remain
+Each inference stage waits up to `provider.request_timeout_seconds` (default
+30 seconds) before returning degraded results. The WebUI lets the daemon enforce
+the search deadline; other MCP clients must allow enough time for both embedding
+and reranking. Document embedding jobs remain
 queued without an offline expiry and resume when workers return. Pending/failed jobs
 appear in `/health`; failed retrieval jobs support the existing retry operation.
-`provider.batch_size` controls document batches (default 1, maximum 256)
-so interactive work can run between document chunks.
+
+The default timeout is based on MacBook MLX batch-4 measurements: approximately
+8 seconds to rerank 30 passages of 400 tokens, plus allowances of 5 seconds for
+process startup/model loading, 15 seconds for queueing, and 2 seconds for polling
+and network overhead. These are planning allowances, not measured tail-latency
+guarantees. Embedding and reranking run sequentially, so a search can wait roughly
+60 seconds in total. Set `provider.request_timeout_seconds` higher for longer
+passages, larger candidate sets, or sustained queue contention. Large audio input
+transfers retain their independent worker transport timeout.
+
+Each document chunk is a separate embedding job. Workers request batches of jobs
+of one recipe through `/worker`, choosing how many jobs to claim per recipe.
+The MLX worker claims up to four embedding jobs; a reranking job already contains
+its candidate passages. It groups inputs into model calls of at most four items
+and 2,048 padded tokens. Longer individual inputs run
+alone. Every job keeps its own lease, result, and retry state. Interactive jobs
+have priority over declared derivations and background indexing.
 Completed JSON results are stored separately from queue metadata; cache keys include
 the pinned model revision. Models and 2,560-dimensional vectors are fixed by the
 worker recipes. `chunking.max_chars` must be at most 32,768.
-Remove old `provider.base_url`, `api_key_env`, `embedding_model`, `rerank_model`,
-and `dimensions` settings from existing configurations; old hosted sidecars
-are rebuilt automatically with the local embedding-space identity.
 
 Declare other derived outputs in root `config.yaml` under `derivations`; see the
 [ML worker](../ml-worker/README.md) for recipes, model versions, and configuration.

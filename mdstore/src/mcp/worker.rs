@@ -14,7 +14,7 @@ pub(super) enum WorkerRequest {
         query: VectorQuery,
     },
     Claim {
-        recipes: Vec<String>,
+        recipes: std::collections::BTreeMap<String, usize>,
     },
     Heartbeat {
         id: String,
@@ -67,19 +67,34 @@ pub(super) async fn handle(
             Ok(json!({"results": results}))
         }
         WorkerRequest::Claim { recipes } => {
-            if let Some(assignment) = state
+            anyhow::ensure!(
+                !recipes.is_empty()
+                    && recipes.len() <= 32
+                    && recipes.values().all(|count| (1..=256).contains(count)),
+                "claim requires recipe counts between 1 and 256"
+            );
+            let mut assignments = state
                 .store
-                .with_retrieval(|queue, texts| queue.claim(&recipes, texts, false))?
-            {
-                Ok(assignment)
-            } else if let Some(assignment) = state.store.claim_job(&recipes)? {
-                Ok(serde_json::to_value(assignment)?)
-            } else {
-                Ok(state
-                    .store
-                    .with_retrieval(|queue, texts| queue.claim(&recipes, texts, true))?
-                    .unwrap_or(Value::Null))
+                .with_retrieval(|queue, texts| queue.claim(&recipes, texts, false))?;
+            if assignments.is_empty() {
+                let names: Vec<_> = recipes.keys().cloned().collect();
+                if let Some(first) = state.store.claim_job(&names)? {
+                    let recipe = first.job.recipe.clone();
+                    assignments.push(serde_json::to_value(first)?);
+                    for _ in 1..recipes[&recipe] {
+                        let Some(next) = state.store.claim_job(std::slice::from_ref(&recipe))?
+                        else {
+                            break;
+                        };
+                        assignments.push(serde_json::to_value(next)?);
+                    }
+                } else {
+                    assignments = state
+                        .store
+                        .with_retrieval(|queue, texts| queue.claim(&recipes, texts, true))?;
+                }
             }
+            Ok(serde_json::to_value(assignments)?)
         }
         WorkerRequest::Heartbeat {
             id,
@@ -165,6 +180,16 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
+    async fn claim_one(app: &Router, recipes: &[&str]) -> Value {
+        let recipes: serde_json::Map<_, _> = recipes
+            .iter()
+            .map(|recipe| ((*recipe).to_owned(), json!(1)))
+            .collect();
+        let (status, assignments) = request(app, json!({"op":"claim", "recipes": recipes})).await;
+        assert_eq!(status, StatusCode::OK);
+        assignments[0].clone()
+    }
+
     fn result(assignment: &Value) -> Value {
         let parameters = &assignment["parameters"]["ml"];
         let texts = parameters["texts"].as_array().unwrap();
@@ -188,6 +213,8 @@ mod tests {
     #[tokio::test]
     async fn retrieval_workers_index_search_restart_and_fence_changed_chunks() {
         let (dir, fixture) = crate::store::artifacts::tests::fixture();
+        drop(fixture);
+        let fixture = Store::open(dir.path()).unwrap();
         fixture
             .apply_edits(&ApplyEditsRequest {
                 summary: "Add searchable body".into(),
@@ -216,7 +243,7 @@ mod tests {
             store: store.clone(),
             worker_token: Some("worker".into()),
         });
-        let claim = json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]});
+        let recipes = &[EMBED_RECIPE, RERANK_RECIPE];
         assert!(store.reindex_missing().await.is_err());
         assert!(store.status().unwrap().vectors_total > 0);
         assert_eq!(store.status().unwrap().vectors_ready, 0);
@@ -255,17 +282,53 @@ mod tests {
             }
         }
         // Interactive queries precede declared jobs, which precede background indexing.
-        request(&app, json!({"op":"claim","recipes":[RERANK_RECIPE]})).await;
+        claim_one(&app, &[RERANK_RECIPE]).await;
         let interactive = store.retrieval_queue().submit(RERANK_RECIPE,
             json!({"texts":[{"id":"0","text":"Recording"}],"query":"Which recording?","top_n":1}), false, 30).unwrap();
-        let all_recipes = json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE,"fixture-v1"]});
-        let (_, query) = request(&app, all_recipes.clone()).await;
-        assert_eq!(query["job"]["id"], interactive);
-        assert_eq!(request(&app, result(&query)).await.0, StatusCode::OK);
-        let (_, declared) = request(&app, all_recipes.clone()).await;
+        let all_recipes = &[EMBED_RECIPE, RERANK_RECIPE, "fixture-v1"];
+        let second = store.retrieval_queue().submit(RERANK_RECIPE,
+            json!({"texts":[{"id":"0","text":"Recording"}],"query":"Another recording?","top_n":1}), false, 30).unwrap();
+        let (status, batch) = request(
+            &app,
+            json!({"op":"claim","recipes":{
+            EMBED_RECIPE: 2, RERANK_RECIPE: 2, "fixture-v1": 2}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let batch = batch.as_array().unwrap();
+        assert_eq!(batch.len(), 2);
+        let claimed: std::collections::HashSet<_> = batch
+            .iter()
+            .map(|job| job["job"]["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(claimed, [interactive.as_str(), second.as_str()].into());
+        assert_ne!(batch[0]["job"]["attempt"], batch[1]["job"]["attempt"]);
+        for query in batch {
+            assert_eq!(query["job"]["recipe"], RERANK_RECIPE);
+            assert_eq!(request(&app, result(query)).await.0, StatusCode::OK);
+        }
+        let declared = claim_one(&app, all_recipes).await;
         assert_eq!(declared["job"]["recipe"], "fixture-v1");
-        let (_, assignment) = request(&app, claim.clone()).await;
+        let (_, document_batch) =
+            request(&app, json!({"op":"claim", "recipes":{EMBED_RECIPE: 2}})).await;
+        let document_batch = document_batch.as_array().unwrap();
+        assert_eq!(document_batch.len(), 2);
+        for job in document_batch {
+            assert_eq!(
+                job["parameters"]["ml"]["texts"].as_array().unwrap().len(),
+                1
+            );
+        }
+        let assignment = document_batch[0].clone();
+        let second_chunk = document_batch[1].clone();
         assert_eq!(assignment["parameters"]["ml"]["input_type"], "document");
+        assert_eq!(
+            assignment["parameters"]["ml"]["texts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         let completion = result(&assignment);
         // A restarted daemon still accepts a valid outstanding lease.
         drop(app);
@@ -299,7 +362,6 @@ mod tests {
         assert!(store.reindex_missing().await.is_err());
         let partial = store.status().unwrap();
         assert!(partial.vectors_ready > 0 && partial.vectors_ready < partial.vectors_total);
-        let (_, second_chunk) = request(&app, claim.clone()).await;
         assert_eq!(request(&app, result(&second_chunk)).await.0, StatusCode::OK);
         store.reindex_missing().await.unwrap();
         assert_eq!(
@@ -311,7 +373,7 @@ mod tests {
         assert!(store.reindex().await.is_err());
         assert!(store.reindex_missing().await.is_err());
         for _ in 0..store.status().unwrap().vectors_total {
-            let (_, assignment) = request(&app, claim.clone()).await;
+            let assignment = claim_one(&app, recipes).await;
             let mut completion = result(&assignment);
             let mut body: Value = serde_json::from_str(
                 completion["outputs"][crate::retrieval_jobs::OUTPUT]
@@ -342,7 +404,7 @@ mod tests {
         for _ in 0..10 {
             // Match the real worker's idle polling interval.
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let (_, assignment) = request(&app, claim.clone()).await;
+            let assignment = claim_one(&app, recipes).await;
             if !assignment.is_null() {
                 modes.push((
                     assignment["job"]["recipe"].clone(),
@@ -392,7 +454,7 @@ mod tests {
         assert_eq!(store.jobs().unwrap().len(), queued);
         // A changed chunk cannot accept a previously claimed result.
         assert!(store.reindex().await.is_err());
-        let (_, stale) = request(&app, claim.clone()).await;
+        let stale = claim_one(&app, recipes).await;
         let page = store.file_page("recording.md").unwrap();
         let changed = app
             .clone()
@@ -412,7 +474,7 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert!(store.reindex_missing().await.is_err());
-        let (_, fresh) = request(&app, claim).await;
+        let fresh = claim_one(&app, recipes).await;
         assert_ne!(fresh["job"]["id"], stale["job"]["id"]);
         assert_eq!(request(&app, result(&fresh)).await.0, StatusCode::OK);
         store.reindex_missing().await.unwrap();
@@ -427,58 +489,51 @@ mod tests {
             reopened.status().unwrap().vectors_ready,
             reopened.status().unwrap().vectors_total
         );
-        // A freshly seen worker may disappear during inference. Both stages
-        // must still finish comfortably before the WebUI's 15-second deadline.
+        // Concurrent searches share jobs and wait beyond the old three-second cap.
         let app = application(AppState {
             store: reopened.clone(),
             worker_token: Some("worker".into()),
         });
-        request(
-            &app,
-            json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]}),
-        )
-        .await;
+        claim_one(&app, recipes).await;
         let queued = reopened.jobs().unwrap().len();
-        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        let searching = reopened.clone();
+        let searches = tokio::spawn(async move {
             tokio::join!(
-                reopened.search("Fresh unavailable", &[]),
-                reopened.search("Fresh unavailable", &[])
+                searching.search("Fresh unavailable", &[]),
+                searching.search("Fresh unavailable", &[])
             )
-        })
-        .await
-        .unwrap();
-        for response in [first.unwrap(), second.unwrap()] {
-            assert!(!response.results.is_empty());
-            assert_eq!(response.degraded.len(), 2);
-        }
-        // Concurrent searches share pending work, even while the worker is gone.
-        assert_eq!(reopened.jobs().unwrap().len(), queued + 2);
-        std::fs::write(retrieval.join("workers"), b"{}").unwrap();
-        let offline = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            reopened.search("Fresh unavailable", &[]),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(offline.degraded.len(), 2);
-        assert_eq!(reopened.jobs().unwrap().len(), queued + 2);
-        // A returning worker completes the pending requests. Replacing an expired
-        // result keeps its cache key but must reject the old attempt's replay.
+        });
+        let mut completed = Vec::new();
         for _ in 0..2 {
-            let (_, assignment) = request(
-                &app,
-                json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]}),
-            )
-            .await;
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            assert!(!searches.is_finished());
+            assert_eq!(reopened.jobs().unwrap().len(), queued + 1);
+            let assignment = claim_one(&app, recipes).await;
             assert!(!assignment.is_null());
             assert_eq!(request(&app, result(&assignment)).await.0, StatusCode::OK);
+            completed.push(assignment);
+        }
+        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(2), searches)
+            .await
+            .unwrap()
+            .unwrap();
+        for response in [first.unwrap(), second.unwrap()] {
+            assert!(!response.results.is_empty());
+            assert!(response.degraded.is_empty(), "{:?}", response.degraded);
+        }
+        assert_eq!(reopened.jobs().unwrap().len(), queued);
+        std::fs::write(retrieval.join("workers"), b"{}").unwrap();
+        let cached = reopened.search("Fresh unavailable", &[]).await.unwrap();
+        assert!(cached.degraded.is_empty(), "{:?}", cached.degraded);
+        // Replacing an expired result keeps its key but rejects the old attempt.
+        for assignment in completed {
             let id = assignment["job"]["id"].as_str().unwrap();
             let path = retrieval.join(format!("{id}.json"));
             let mut job: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             job["deadline"] = json!(0);
             std::fs::write(&path, serde_json::to_vec(&job).unwrap()).unwrap();
             let recipe = assignment["job"]["recipe"].as_str().unwrap();
+            claim_one(&app, &[recipe]).await;
             let replacement = reopened
                 .retrieval_queue()
                 .submit(recipe, assignment["parameters"]["ml"].clone(), false, 300)
@@ -488,11 +543,29 @@ mod tests {
                 request(&app, result(&assignment)).await.0,
                 StatusCode::UNPROCESSABLE_ENTITY
             );
-            let (_, replacement) = request(&app, json!({"op":"claim","recipes":[recipe]})).await;
+            let replacement = claim_one(&app, &[recipe]).await;
             assert_ne!(replacement["job"]["attempt"], assignment["job"]["attempt"]);
             assert_eq!(request(&app, result(&replacement)).await.0, StatusCode::OK);
         }
-        let cached = reopened.search("Fresh unavailable", &[]).await.unwrap();
-        assert!(cached.degraded.is_empty(), "{:?}", cached.degraded);
+        // A lower configured deadline still bounds a stalled inference stage.
+        let provider = crate::provider::WorkerProvider::new(
+            crate::config::ProviderConfig {
+                request_timeout_seconds: 1,
+            },
+            &crate::git::git_dir(dir.path()).unwrap(),
+        );
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::provider::RetrievalProvider::embed(
+                &provider,
+                crate::provider::InputType::Query,
+                &["A stalled query".into()],
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().to_string().contains("result pending"));
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
     }
 }
