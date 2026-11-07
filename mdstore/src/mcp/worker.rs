@@ -241,6 +241,7 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         let app = application(AppState {
             store: store.clone(),
+            embeddings_token: None,
             worker_token: Some("worker".into()),
         });
         let recipes = &[EMBED_RECIPE, RERANK_RECIPE];
@@ -336,6 +337,7 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         let app = application(AppState {
             store: store.clone(),
+            embeddings_token: None,
             worker_token: Some("worker".into()),
         });
         let mut wrong = completion.clone();
@@ -492,6 +494,7 @@ mod tests {
         // Concurrent searches share jobs and wait beyond the old three-second cap.
         let app = application(AppState {
             store: reopened.clone(),
+            embeddings_token: None,
             worker_token: Some("worker".into()),
         });
         claim_one(&app, recipes).await;

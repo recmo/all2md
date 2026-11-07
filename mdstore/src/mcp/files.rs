@@ -288,6 +288,7 @@ mod tests {
         let (dir, store) = crate::store::artifacts::tests::fixture();
         let app = application(AppState {
             store: store.clone(),
+            embeddings_token: None,
             worker_token: Some("worker".into()),
         });
         (dir, app, store)
