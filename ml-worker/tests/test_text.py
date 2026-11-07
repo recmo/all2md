@@ -57,6 +57,25 @@ def test_native_mlx_loading_and_retrieval_artifacts(tmp_path, monkeypatch, reque
     for _, loaded_model in loaded.values():
         loaded_model.apply(lambda value: value.astype(mx.float32))
     monkeypatch.setattr(text, '_load', lambda identity, revision: loaded[identity])
+    # Independent jobs may reuse record IDs and have different prompts/namespaces.
+    for recipe in (text.EMBED_RECIPE, text.RERANK_RECIPE):
+        parameters = [{'texts': [{'id': '0', 'text': 'alpha ' * (i + 1) + 'beta'}],
+                       'query': 'beta ' * (i + 1), 'namespace': f'namespace-{i}',
+                       'input_type': 'query' if i % 2 else 'document'} for i in range(4)]
+        prepared = [text.prepare(recipe, p) for p in parameters]
+        batched = text.infer_batch(recipe, prepared)
+        assert len(batched) == 4
+        for p, result in zip(prepared, batched, strict=True):
+            single = text.infer_batch(recipe, [p])[0]
+            if recipe == text.EMBED_RECIPE:
+                assert result['space'] == single['space']
+                assert result['records'][0]['metadata'] == single['records'][0]['metadata']
+                assert sum(a*b for a, b in zip(result['records'][0]['vector'],
+                                               single['records'][0]['vector'], strict=True)) > .99999
+            else:
+                assert result['query'] == single['query']
+                assert abs(result['results'][0]['relevance_score'] -
+                           single['results'][0]['relevance_score']) < 1e-5
     items = [{'id': str(i), 'text': 'alpha ' * (i + 1) + 'beta'} for i in range(30)]
     parameters = {'texts': items, 'input_type': 'document', 'namespace': 'search',
                   'query': 'alpha beta', 'top_n': len(items)}

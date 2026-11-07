@@ -46,10 +46,13 @@ guarantees. Embedding and reranking run sequentially, so a search can wait rough
 passages, larger candidate sets, or sustained queue contention. Large audio input
 transfers retain their independent worker transport timeout.
 
-`provider.batch_size` controls document jobs (default 4, maximum 256)
-so interactive work can run between jobs. Within each job the worker batches
-both embeddings and reranking, with at most 4 items and 2,048 padded tokens per
-model call. Longer individual inputs run alone.
+Each document chunk is a separate embedding job. Workers request batches of jobs
+of one recipe through `/worker`, choosing how many jobs to claim per recipe.
+The MLX worker claims up to four embedding jobs; a reranking job already contains
+its candidate passages. It groups inputs into model calls of at most four items
+and 2,048 padded tokens. Longer individual inputs run
+alone. Every job keeps its own lease, result, and retry state. Interactive jobs
+have priority over declared derivations and background indexing.
 Completed JSON results are stored separately from queue metadata; cache keys include
 the pinned model revision. Models and 2,560-dimensional vectors are fixed by the
 worker recipes. `chunking.max_chars` must be at most 32,768.

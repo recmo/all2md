@@ -1,6 +1,6 @@
 # ML worker
 
-`ml-worker` pulls jobs from mdstore and runs one recipe at a time. Apple Silicon
+`ml-worker` pulls jobs from mdstore and processes one recipe at a time. Apple Silicon
 supports transcription, audio enhancement, text embeddings, and reranking. Linux
 supports audio enhancement; text inference and transcription require Apple Silicon
 and are not included in the Linux package. It does not run generative LLM jobs.
@@ -14,7 +14,13 @@ and are not included in the Linux package. It does not run generative LLM jobs.
 | `text-rerank-zerank-2-v1` | ZeroEntropy zerank-2 (4B) | Ranked candidate IDs, input indices, and relevance scores |
 
 The runner advertises locally installed capabilities and claims only matching
-recipes. One long-running Python worker owns the models and runs jobs sequentially.
+recipes. One long-running Python worker owns the models. It requests up to four
+embedding jobs per claim and batches their inputs locally. A reranking job already
+contains its candidate passages, so reranking and audio claims contain one job.
+Jobs retain independent validation, heartbeats, results, and retries.
+The `/worker` claim request maps recipe names to desired counts, for example
+`{"op":"claim","recipes":{"text-embeddings-zembed-1-v1":4,"speech2md-v1":1}}`.
+The response is an array of assignments of one recipe, or an empty array when idle.
 Selected text models load before the first claim and stay loaded, including while
 idle. Transcription loads MOSS and ReDimNet2 on demand; audio enhancement uses a
 resident Rust DeepFilterNet helper. Both groups are evicted **five minutes after
@@ -42,7 +48,7 @@ configured on mdstore and in `MDSTORE_WORKER_TOKEN`:
 ```sh
 nix run .#ml-worker -- --list-recipes
 nix run .#ml-worker -- --server https://your-mdstore-host
-# Claim at most one matching job, then exit:
+# Claim at most one batch of matching jobs, then exit:
 nix run .#ml-worker -- --server https://your-mdstore-host --once \
   --recipes audio-enhancement-dfn3-v1 text-embeddings-zembed-1-v1 text-rerank-zerank-2-v1
 ```
@@ -200,7 +206,7 @@ pinned model, revision, input IDs, dimensions, normalization, and lease before
 installing document vectors into its sidecars and live search index. Retrieval
 assignments do not publish repository artifacts or create Git commits. Each attempt
 uses an isolated temporary workspace that is removed when the attempt ends. Workers
-claim the next job immediately after processing one and wait only when idle or after an error. See
+claim the next batch immediately after processing one and wait only when idle or after an error. See
 [mdstore](../mdstore/README.md) for configuration.
 
 ### Reranking

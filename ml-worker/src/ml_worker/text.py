@@ -65,11 +65,7 @@ def preload(selected):
             _load(model, revision)
 
 
-def _batches(tokenizer, formatted):
-    # Reject oversize inputs rather than losing text or the closing scoring prompt.
-    encoded = tokenizer(formatted, truncation=False, padding=False)["input_ids"]
-    if max(map(len, encoded)) > MAX_TOKENS:
-        raise ValueError(f"formatted input exceeds {MAX_TOKENS} tokens; split into smaller passages")
+def _batches(encoded):
     start = 0
     while start < len(encoded):
         end = start + 1
@@ -84,10 +80,10 @@ def _batches(tokenizer, formatted):
         start = end
 
 
-def _infer(tokenizer, model, formatted, *, classifier):
+def _infer(tokenizer, model, encoded, *, classifier):
     import mlx.core as mx
     values = []
-    for rows in _batches(tokenizer, formatted):
+    for rows in _batches(encoded):
         width = max(map(len, rows))
         pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         inputs = mx.array([row + [pad] * (width - len(row)) for row in rows])
@@ -104,50 +100,82 @@ def _infer(tokenizer, model, formatted, *, classifier):
     return values
 
 
-def embeddings(parameters):
+def prepare(recipe, parameters):
     items = records(parameters.get("texts"))
-    input_type = parameters.get("input_type", "document")
-    if input_type not in {"query", "document"}:
-        raise ValueError("input_type must be query or document")
-    namespace = parameters.get("namespace", "documents")
-    if not isinstance(namespace, str) or not namespace.strip() or namespace == "speakers":
-        raise ValueError("a non-speaker text namespace is required")
-    tokenizer, model = _load(EMBED_MODEL, EMBED_REVISION)
-    # config_sentence_transformers.json + modeling_zembed.py add this prefix/suffix.
-    formatted = [f"<|im_start|>system\n{input_type}<|im_end|>\n<|im_start|>user\n{item['text']}<|im_end|>\n"
-                 for item in items]
-    vectors = _infer(tokenizer, model, formatted, classifier=False)
-    if len(vectors) != len(items) or any(
-        len(v) != DIMENSIONS or not all(math.isfinite(x) for x in v)
-        or not 0.99 <= sum(x*x for x in v) <= 1.01 for v in vectors
-    ):
-        raise ValueError("model returned invalid embeddings")
-    return {
-        "space": {"namespace": namespace, "recipe": EMBED_RECIPE, "dimensions": DIMENSIONS},
-        "model": EMBED_MODEL, "revision": EMBED_REVISION, "max_tokens": MAX_TOKENS,
-        "records": [{"id": item["id"], "vector": vector,
-                     "metadata": {"text": item["text"], "input_type": input_type}}
-                    for item, vector in zip(items, vectors, strict=True)],
-    }
+    if recipe == EMBED_RECIPE:
+        input_type = parameters.get("input_type", "document")
+        if input_type not in {"query", "document"}:
+            raise ValueError("input_type must be query or document")
+        namespace = parameters.get("namespace", "documents")
+        if not isinstance(namespace, str) or not namespace.strip() or namespace == "speakers":
+            raise ValueError("a non-speaker text namespace is required")
+        # Pinned Sentence Transformers configuration adds this prefix/suffix.
+        formatted = [f"<|im_start|>system\n{input_type}<|im_end|>\n<|im_start|>user\n{item['text']}<|im_end|>\n"
+                     for item in items]
+    elif recipe == RERANK_RECIPE:
+        query = parameters.get("query")
+        if not isinstance(query, str) or not query.strip() or len(query) > MAX_TEXT:
+            raise ValueError("query must be nonempty and at most 32768 characters")
+        top_n = parameters.get("top_n", len(items))
+        if type(top_n) is not int or not 1 <= top_n <= len(items):
+            raise ValueError("top_n must be between 1 and the number of texts")
+        tokenizer, _ = _load(RERANK_MODEL, RERANK_REVISION)
+        formatted = [tokenizer.apply_chat_template(
+            [{"role": "query", "content": query}, {"role": "document", "content": item["text"]}],
+            tokenize=False, add_generation_prompt=True) for item in items]
+    else:
+        raise ValueError("unknown text recipe")
+    # Token limits must fail this job before it joins a batch of independent jobs.
+    model_id, revision = ((EMBED_MODEL, EMBED_REVISION) if recipe == EMBED_RECIPE
+                          else (RERANK_MODEL, RERANK_REVISION))
+    tokenizer, _ = _load(model_id, revision)
+    encoded = tokenizer(formatted, truncation=False, padding=False)["input_ids"]
+    if max(map(len, encoded)) > MAX_TOKENS:
+        raise ValueError(f"formatted input exceeds {MAX_TOKENS} tokens; split into smaller passages")
+    return parameters, items, encoded
+
+
+def infer_batch(recipe, prepared):
+    embedding = recipe == EMBED_RECIPE
+    model_id, revision = ((EMBED_MODEL, EMBED_REVISION) if embedding
+                          else (RERANK_MODEL, RERANK_REVISION))
+    tokenizer, model = _load(model_id, revision)
+    values = _infer(tokenizer, model, [row for _, _, rows in prepared for row in rows],
+                    classifier=not embedding)
+    results = []
+    offset = 0
+    for parameters, items, _ in prepared:
+        output = values[offset:offset + len(items)]
+        offset += len(items)
+        if embedding:
+            if len(output) != len(items) or any(
+                len(v) != DIMENSIONS or not all(math.isfinite(x) for x in v)
+                or not 0.99 <= sum(x*x for x in v) <= 1.01 for v in output
+            ):
+                raise ValueError("model returned invalid embeddings")
+            result = {
+                "space": {"namespace": parameters.get("namespace", "documents"),
+                          "recipe": EMBED_RECIPE, "dimensions": DIMENSIONS},
+                "model": model_id, "revision": revision, "max_tokens": MAX_TOKENS,
+                "records": [{"id": item["id"], "vector": vector,
+                             "metadata": {"text": item["text"],
+                                          "input_type": parameters.get("input_type", "document")}}
+                            for item, vector in zip(items, output, strict=True)],
+            }
+        else:
+            if len(output) != len(items) or not all(math.isfinite(x) for x in output):
+                raise ValueError("model returned invalid reranking scores")
+            order = sorted(range(len(items)), key=lambda i: (-output[i], i))[:parameters.get("top_n", len(items))]
+            result = {"model": model_id, "revision": revision, "max_tokens": MAX_TOKENS,
+                      "query": parameters["query"], "results": [
+                          {"index": i, "id": items[i]["id"], "relevance_score": output[i]} for i in order]}
+        results.append(result)
+    return results
+
+
+def embeddings(parameters):
+    return infer_batch(EMBED_RECIPE, [prepare(EMBED_RECIPE, parameters)])[0]
 
 
 def rerank(parameters):
-    items = records(parameters.get("texts"))
-    query = parameters.get("query")
-    if not isinstance(query, str) or not query.strip() or len(query) > MAX_TEXT:
-        raise ValueError("query must be nonempty and at most 32768 characters")
-    top_n = parameters.get("top_n", len(items))
-    if type(top_n) is not int or not 1 <= top_n <= len(items):
-        raise ValueError("top_n must be between 1 and the number of texts")
-    tokenizer, model = _load(RERANK_MODEL, RERANK_REVISION)
-    # Pinned chat_template.jinja: query is system, document is user; score next token.
-    formatted = [tokenizer.apply_chat_template(
-        [{"role": "query", "content": query}, {"role": "document", "content": item["text"]}],
-        tokenize=False, add_generation_prompt=True) for item in items]
-    scores = _infer(tokenizer, model, formatted, classifier=True)
-    if len(scores) != len(items) or not all(math.isfinite(x) for x in scores):
-        raise ValueError("model returned invalid reranking scores")
-    order = sorted(range(len(items)), key=lambda i: (-scores[i], i))[:top_n]
-    return {"model": RERANK_MODEL, "revision": RERANK_REVISION, "max_tokens": MAX_TOKENS,
-            "query": query, "results": [{"index": i, "id": items[i]["id"],
-                                        "relevance_score": scores[i]} for i in order]}
+    return infer_batch(RERANK_RECIPE, [prepare(RERANK_RECIPE, parameters)])[0]

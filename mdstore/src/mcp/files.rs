@@ -355,7 +355,7 @@ mod tests {
             send(&app, "POST", "/mcp", &[worker], "{}").await.0,
             StatusCode::FORBIDDEN
         );
-        let claim = json!({"op":"claim","recipes":["fixture"]});
+        let claim = json!({"op":"claim","recipes":{"fixture":1}});
         assert_eq!(
             send(
                 &app,
@@ -376,7 +376,8 @@ mod tests {
             claim.to_string(),
         )
         .await;
-        let assignment: Value = serde_json::from_slice(&body).unwrap();
+        let assignments: Value = serde_json::from_slice(&body).unwrap();
+        let assignment = &assignments[0];
         let attempt = assignment["job"]["attempt"].as_str().unwrap();
         let query = json!({"space":{"namespace":"speakers","recipe":"fixture","dimensions":2},"vector":[1,0],"limit":5});
         for request in [

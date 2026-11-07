@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
+from queue import Empty, Queue
 import fcntl
 import hashlib
 import importlib.util
@@ -38,7 +40,7 @@ def capabilities():
     return result
 
 
-def execute(client, assignment, cache, *, models, heartbeat_seconds=30):
+def execute(client, assignment, cache, *, models, heartbeat_seconds=30, inference=None):
     job = assignment["job"]
     scope = hashlib.sha256(client.server.encode()).hexdigest()
     cache_root = cache.expanduser().resolve() / scope
@@ -47,7 +49,7 @@ def execute(client, assignment, cache, *, models, heartbeat_seconds=30):
         with tempfile.TemporaryDirectory(prefix="retrieval-", dir=cache_root) as directory:
             root = Path(directory) / "work"
             root.mkdir(mode=0o700)
-            return _execute_locked(client, assignment, root, heartbeat_seconds, models)
+            return _execute_locked(client, assignment, root, heartbeat_seconds, models, inference)
     identity = hashlib.sha256(job["id"].encode()).hexdigest()
     job_root = cache_root / identity
     job_root.mkdir(exist_ok=True, mode=0o700)
@@ -61,10 +63,10 @@ def execute(client, assignment, cache, *, models, heartbeat_seconds=30):
             if previous.is_dir() and previous != root:
                 shutil.rmtree(previous)
         root.mkdir(exist_ok=True, mode=0o700)
-        _execute_locked(client, assignment, root, heartbeat_seconds, models)
+        _execute_locked(client, assignment, root, heartbeat_seconds, models, inference)
 
 
-def _execute_locked(client, assignment, root, heartbeat_seconds, models):
+def _execute_locked(client, assignment, root, heartbeat_seconds, models, inference):
     job = assignment["job"]
     lease = {"id": job["id"], "attempt": job["attempt"]}
     scratch = root.parent / ".scratch"
@@ -98,7 +100,7 @@ def _execute_locked(client, assignment, root, heartbeat_seconds, models):
         progress["stage"] = "processing"
         check_lease()
         with models.use(job["recipe"]):
-            recipes.execute(assignment, root, scratch=scratch)
+            recipes.execute(assignment, root, scratch=scratch, inference=inference)
         check_lease()
         progress["stage"] = "publishing"
         for output in outputs:
@@ -141,6 +143,67 @@ def _execute_locked(client, assignment, root, heartbeat_seconds, models):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def execute_batch(client, assignments, cache, *, models, heartbeat_seconds=30):
+    recipe = assignments[0]["job"]["recipe"]
+    if any(assignment["job"]["recipe"] != recipe for assignment in assignments):
+        raise ValueError("claimed jobs must have the same recipe")
+    if len(assignments) == 1 or recipe not in {text.EMBED_RECIPE, text.RERANK_RECIPE}:
+        for assignment in assignments:
+            execute(client, assignment, cache, models=models, heartbeat_seconds=heartbeat_seconds)
+        return
+    requests = Queue()
+    cancelled = threading.Event()
+    def inference(parameters):
+        result = Future()
+        requests.put((parameters, result))
+        while not cancelled.is_set():
+            try:
+                return result.result(timeout=0.1)
+            except TimeoutError:
+                if result.done():
+                    return result.result()
+        raise RuntimeError("worker batch interrupted")
+    # Each job retains its own validation, heartbeat, workspace and publication.
+    # Only the model call is combined, on this thread where MLX was initialized.
+    with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
+        try:
+            jobs = [executor.submit(execute, client, assignment, cache, models=models,
+                                    heartbeat_seconds=heartbeat_seconds, inference=inference)
+                    for assignment in assignments]
+            waiting = []
+            while len(waiting) + sum(job.done() for job in jobs) < len(jobs):
+                try:
+                    waiting.append(requests.get(timeout=0.05))
+                except Empty:
+                    pass
+            prepared, results = [], []
+            for parameters, result in waiting:
+                try:
+                    prepared.append(text.prepare(recipe, parameters))
+                    results.append(result)
+                except Exception as error:
+                    result.set_exception(error)
+            if prepared:
+                try:
+                    outputs = text.infer_batch(recipe, prepared)
+                    for result, output in zip(results, outputs, strict=True):
+                        result.set_result(output)
+                except Exception as error:
+                    for result in results:
+                        if not result.done():
+                            result.set_exception(error)
+            errors = []
+            for job in jobs:
+                try:
+                    job.result()
+                except Exception as error:
+                    errors.append(error)
+            if errors:
+                raise errors[0]
+        finally:
+            cancelled.set()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server")
@@ -148,7 +211,7 @@ def main(argv=None):
     parser.add_argument("--cache", type=Path, default=Path.home() / ".cache/ml-worker")
     parser.add_argument("--recipes", nargs="+", choices=recipes.RECIPES)
     parser.add_argument("--list-recipes", action="store_true")
-    parser.add_argument("--once", action="store_true", help="claim at most one job and exit")
+    parser.add_argument("--once", action="store_true", help="claim at most one batch of jobs and exit")
     args = parser.parse_args(argv)
     available = capabilities()
     if args.list_recipes:
@@ -169,12 +232,14 @@ def main(argv=None):
         text.preload(selected)
         while True:
             try:
-                assignment = client.request("/worker", {"op": "claim", "recipes": selected})
-                if assignment:
-                    execute(client, assignment, args.cache, models=models)
+                assignments = client.request("/worker", {"op": "claim", "recipes": {
+                    recipe: text.INFERENCE_BATCH_SIZE if recipe == text.EMBED_RECIPE else 1
+                    for recipe in selected}})
+                if assignments:
+                    execute_batch(client, assignments, args.cache, models=models)
                 if args.once:
                     return 0
-                if assignment:
+                if assignments:
                     continue
             except Exception as error:
                 print(f"worker: {error}", file=sys.stderr)

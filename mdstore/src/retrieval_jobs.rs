@@ -295,32 +295,36 @@ impl Queue {
 
     pub(crate) fn claim(
         &self,
-        recipes: &[String],
+        recipes: &BTreeMap<String, usize>,
         texts: &HashSet<&str>,
         document: bool,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Vec<Value>> {
         self.locked(|| {
-            self.note_worker(recipes)?;
+            self.note_worker(&recipes.keys().cloned().collect::<Vec<_>>())?;
             let mut jobs = self.jobs()?;
             jobs.sort_by_key(|job| (job.deadline, job.id.clone()));
-            let mut assignment = None;
+            let mut assignments = Vec::new();
+            let mut selected = None;
             for mut job in jobs {
                 if !Self::current(&job, texts) {
                     self.remove(&job)?;
                     continue;
                 }
-                if assignment.is_some()
+                if selected
+                    .as_ref()
+                    .is_some_and(|recipe| recipe != &job.recipe)
+                    || assignments.len() >= recipes.get(&job.recipe).copied().unwrap_or(0)
                     || job.document != document
                     || job.complete
                     || job.error.is_some()
                     || job.expires > now()
-                    || !recipes.contains(&job.recipe)
                 {
                     continue;
                 }
                 job.attempt = Some(secret()?);
                 job.expires = now() + LEASE_SECONDS;
-                assignment = Some(json!({
+                selected = Some(job.recipe.clone());
+                assignments.push(json!({
                     "retrieval": true,
                     "job": {"id": job.id, "recipe": job.recipe, "source": "retrieval/source.md",
                         "source_revision": "", "fingerprint": job.id, "attempt": job.attempt},
@@ -329,7 +333,7 @@ impl Queue {
                 }));
                 self.save(&job)?;
             }
-            Ok(assignment)
+            Ok(assignments)
         })
     }
 

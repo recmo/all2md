@@ -153,13 +153,6 @@ impl Config {
         if !self.search.graph_weight.is_finite() || self.search.graph_weight < 0.0 {
             bail!("search.graph_weight must be finite and non-negative");
         }
-        if self
-            .provider
-            .batch_size
-            .is_some_and(|size| size == 0 || size > 256)
-        {
-            bail!("provider.batch_size must be between 1 and 256");
-        }
         if self.search.candidates > 256 {
             bail!("search.candidates must be at most 256 for the local reranking recipe");
         }
@@ -475,9 +468,6 @@ impl Default for SearchConfig {
 #[serde(deny_unknown_fields)]
 /// Configures retrieval jobs executed by ml-worker.
 pub struct ProviderConfig {
-    #[serde(default)]
-    /// Optional document embedding batch size.
-    pub batch_size: Option<usize>,
     #[serde(default = "default_request_timeout_seconds")]
     /// Interactive job/result lifetime and maximum foreground wait per inference stage.
     pub request_timeout_seconds: u64,
@@ -486,7 +476,6 @@ pub struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            batch_size: Some(4),
             request_timeout_seconds: default_request_timeout_seconds(),
         }
     }
