@@ -37,7 +37,7 @@ def records(value):
 
 
 @cache
-def _load(model_id, revision, *, precision="bf16"):
+def _load(model_id, revision):
     import mlx.core as mx
     from huggingface_hub import snapshot_download
     from mlx_lm import load
@@ -50,7 +50,7 @@ def _load(model_id, revision, *, precision="bf16"):
     model, _ = load(path, tokenizer_config={"trust_remote_code": False})
     if not model.args.tie_word_embeddings:
         raise ValueError("pinned retrieval models require tied readout weights")
-    model.apply(lambda value: value.astype(mx.float32 if precision == "fp32" else mx.bfloat16))
+    model.apply(lambda value: value.astype(mx.bfloat16))
     model.eval()
     mx.eval(model.parameters())
     return tokenizer, model

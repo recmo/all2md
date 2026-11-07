@@ -57,7 +57,6 @@ dependencies and embeds the DeepFilterNet3 model. The text models download
 pinned weights into the Hugging Face cache on first startup; loading disables
 remote Python code and requires safetensors. No packages or toolchains are installed at runtime.
 
-See [runtime measurements](benchmarks.md) for the MacBook batch-size selection.
 Mdstore queues retrieval through these recipes.
 
 Use `--recipes speech2md-v1` for a transcription-only worker.
@@ -244,7 +243,7 @@ Both models have 4B parameters and Apache-2.0 weights. They download on first us
 (roughly 8 GB per model on disk). Both stay loaded while jobs run one at a time,
 using native MLX BF16 on Apple Silicon (macOS 14+).
 Allow roughly 15 GiB for both resident text models before inference buffers;
-long passages use more memory. Benchmarks measured each model separately.
+long passages use more memory.
 Both recipes batch up to 4 inputs within a 2,048-padded-token budget. Longer
 inputs run alone. Causal right padding preserves the last real token for pooling
 and scoring. The original pinned weights are unquantized.

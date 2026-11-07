@@ -43,17 +43,19 @@ def test_native_mlx_loading_and_retrieval_artifacts(tmp_path, monkeypatch, reque
     original_load = text._load
     original_load.cache_clear()
     request.addfinalizer(original_load.cache_clear)
-    loaded = {identity: original_load(identity, revision, precision='fp32') for identity, revision in
+    loaded = {identity: original_load(identity, revision) for identity, revision in
               [(text.EMBED_MODEL, text.EMBED_REVISION), (text.RERANK_MODEL, text.RERANK_REVISION)]}
     assert downloads == [(text.EMBED_MODEL, text.EMBED_REVISION),
                          (text.RERANK_MODEL, text.RERANK_REVISION)]
-    # Check the production BF16 default separately from FP32 batch comparisons.
-    _, bf16 = original_load(text.EMBED_MODEL, text.EMBED_REVISION)
-    assert all(value.dtype == mx.bfloat16 for _, value in tree_flatten(bf16.parameters()))
+    for _, loaded_model in loaded.values():
+        assert all(value.dtype == mx.bfloat16 for _, value in tree_flatten(loaded_model.parameters()))
     text.preload([text.EMBED_RECIPE, text.RERANK_RECIPE])
     warmed = len(downloads)
     text.preload([text.EMBED_RECIPE, text.RERANK_RECIPE])
     assert len(downloads) == warmed
+    # Use FP32 for strict batch comparisons across CPU and Metal test runtimes.
+    for _, loaded_model in loaded.values():
+        loaded_model.apply(lambda value: value.astype(mx.float32))
     monkeypatch.setattr(text, '_load', lambda identity, revision: loaded[identity])
     items = [{'id': str(i), 'text': 'alpha ' * (i + 1) + 'beta'} for i in range(30)]
     parameters = {'texts': items, 'input_type': 'document', 'namespace': 'search',
