@@ -147,7 +147,8 @@ impl WorkerProvider {
             queue.submit(recipe, parameters, document, timeout)
         });
         let id = id.await??;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
+        // Later completions can be reused without holding up this search.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.min(3));
         loop {
             let queue = self.queue.clone();
             let identity = id.clone();
@@ -160,7 +161,7 @@ impl WorkerProvider {
                 return Err(PendingEmbeddings.into());
             }
             if tokio::time::Instant::now() >= deadline {
-                bail!("ML worker timed out: {id}");
+                bail!("ML worker result pending: {id}");
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }

@@ -479,7 +479,7 @@ pub struct ProviderConfig {
     /// Optional document embedding batch size.
     pub batch_size: Option<usize>,
     #[serde(default = "default_request_timeout_seconds")]
-    /// Maximum wait for interactive worker results, in seconds.
+    /// Interactive job/result lifetime; foreground waits are capped at 3 seconds per stage.
     pub request_timeout_seconds: u64,
 }
 

@@ -93,6 +93,25 @@ impl Queue {
         crate::store::write_atomic(&self.path(&job.id)?, &serde_json::to_vec(job)?)
     }
 
+    fn workers(&self) -> Result<BTreeMap<String, u64>> {
+        let path = self.0.join("workers");
+        if path.exists() {
+            Ok(serde_json::from_slice(&fs::read(path)?)?)
+        } else {
+            Ok(BTreeMap::new())
+        }
+    }
+
+    fn note_worker(&self, recipes: &[String]) -> Result<()> {
+        let mut workers = self.workers()?;
+        for recipe in recipes {
+            if revision(recipe).is_ok() {
+                workers.insert(recipe.clone(), now());
+            }
+        }
+        crate::store::write_atomic(&self.0.join("workers"), &serde_json::to_vec(&workers)?)
+    }
+
     fn jobs(&self) -> Result<Vec<Job>> {
         let mut jobs = Vec::new();
         for entry in fs::read_dir(&self.0)? {
@@ -118,13 +137,28 @@ impl Queue {
     ) -> Result<String> {
         self.locked(|| {
             let revision = revision(recipe)?;
-            let nonce = if document { String::new() } else { secret()? };
             let id = format!(
                 "retrieval-{}",
                 crate::validation::source_hash(&format!(
-                    "{recipe}:{revision}:{parameters}:{nonce}"
+                    "{recipe}:{revision}:{parameters}:{document}"
                 ))
             );
+            if self.path(&id)?.exists() {
+                let job = self.read(&id)?;
+                if !document && (job.deadline <= now() || job.error.is_some()) {
+                    self.remove(&job)?;
+                } else if document || job.complete {
+                    return Ok(id);
+                }
+            }
+            if !document {
+                ensure!(
+                    self.workers()?
+                        .get(recipe)
+                        .is_some_and(|last_seen| now().saturating_sub(*last_seen) < 60),
+                    "ML worker unavailable for {recipe}"
+                );
+            }
             if !self.path(&id)?.exists() {
                 self.save(&Job {
                     id: id.clone(),
@@ -132,7 +166,7 @@ impl Queue {
                     revision: revision.into(),
                     parameters,
                     document,
-                    deadline: now() + if document { 86400 * 7 } else { timeout },
+                    deadline: if document { u64::MAX } else { now() + timeout },
                     attempt: None,
                     expires: 0,
                     failures: 0,
@@ -159,7 +193,7 @@ impl Queue {
     }
 
     fn current(job: &Job, texts: &HashSet<&str>) -> bool {
-        job.deadline > now()
+        (job.document || job.deadline > now())
             && revision(&job.recipe).is_ok_and(|revision| revision == job.revision)
             && (!job.document
                 || job.parameters["texts"].as_array().is_some_and(|items| {
@@ -197,7 +231,7 @@ impl Queue {
             job.error = None;
             job.failures = 0;
             job.expires = 0;
-            job.deadline = now() + 86400 * 7;
+            job.deadline = u64::MAX;
             self.save(&job)
         })
     }
@@ -266,6 +300,7 @@ impl Queue {
         document: bool,
     ) -> Result<Option<Value>> {
         self.locked(|| {
+            self.note_worker(recipes)?;
             let mut jobs = self.jobs()?;
             jobs.sort_by_key(|job| (job.deadline, job.id.clone()));
             let mut assignment = None;
@@ -317,6 +352,7 @@ impl Queue {
     ) -> Result<()> {
         self.locked(|| {
             let mut job = self.leased(id, attempt, texts)?;
+            self.note_worker(std::slice::from_ref(&job.recipe))?;
             job.expires = now() + LEASE_SECONDS;
             if let Some(failure) = failure {
                 job.failures += 1;
