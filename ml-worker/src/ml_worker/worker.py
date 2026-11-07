@@ -162,7 +162,8 @@ def execute_batch(client, assignments, cache, *, models, heartbeat_seconds=30):
             except TimeoutError:
                 if result.done():
                     return result.result()
-        raise RuntimeError("worker batch interrupted")
+        # Shutdown must not consume a job's retry attempts.
+        raise SystemExit("worker batch interrupted")
     # Each job retains its own validation, heartbeat, workspace and publication.
     # Only the model call is combined, on this thread where MLX was initialized.
     with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
