@@ -27,21 +27,6 @@ struct StatusMenuView: View {
                 Button("Start recording manually") { model.manualStart() }
                 Text("Records the microphone and every app producing audio as separate tracks.")
                     .font(.caption).foregroundStyle(.secondary)
-            case let .detecting(client, _):
-                Label("Checking \(client.applicationName)…", systemImage: "waveform")
-                Text(client.inputDeviceSummary).font(.caption).foregroundStyle(.secondary)
-            case let .countdown(client, remaining):
-                Text("\(client.applicationName) is using the microphone")
-                    .font(.headline)
-                Text(client.inputDeviceSummary).font(.caption).foregroundStyle(.secondary)
-                Text("Recording in \(remaining) seconds")
-                Text("All application audio will be recorded to separate tracks.").font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button("Start now") { model.startNow() }.keyboardShortcut(.defaultAction)
-                    Button("Skip") { model.skip() }.keyboardShortcut(.cancelAction)
-                }
-                Button("Ignore for one hour") { model.ignoreForHour() }
-                Button("Never record this application") { model.neverRecordApplication() }
             case let .recording(client):
                 Label("Recording \(client.applicationName)", systemImage: "record.circle.fill").foregroundStyle(.red)
                 if let startedAt = capture.startedAt { TimelineView(.periodic(from: .now, by: 1)) { _ in Text(startedAt, style: .timer).monospacedDigit() } }
@@ -49,6 +34,8 @@ struct StatusMenuView: View {
                 LevelRow(name: "Application audio", level: capture.processAudioLevel)
                 Text("\(capture.processTrackCount) process track(s)").font(.caption).foregroundStyle(.secondary)
                 Button("Stop") { model.stopRecording() }.keyboardShortcut(.defaultAction)
+                Button("Ignore for one hour") { model.ignoreForHour() }
+                Button("Never record this application") { model.neverRecordApplication() }
             case .finalizing:
                 ProgressView("Preparing recording…")
             case .checkingPermissions:
