@@ -67,6 +67,7 @@ def server():
             if not self.authorized(): return
             value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             if value['op'] == 'claim':
+                assert value['retrieval'] is True
                 assert state['assignment']['job']['recipe'] in value['recipes']
                 self.respond(state['assignment'])
                 return

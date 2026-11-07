@@ -15,6 +15,8 @@ pub(super) enum WorkerRequest {
     },
     Claim {
         recipes: Vec<String>,
+        #[serde(default)]
+        retrieval: bool,
     },
     Heartbeat {
         id: String,
@@ -66,19 +68,22 @@ pub(super) async fn handle(
             )?;
             Ok(json!({"results": results}))
         }
-        WorkerRequest::Claim { recipes } => {
-            if let Some(assignment) = state
-                .store
-                .with_retrieval(|queue, texts| queue.claim(&recipes, texts, false))?
+        WorkerRequest::Claim { recipes, retrieval } => {
+            if retrieval
+                && let Some(assignment) = state
+                    .store
+                    .with_retrieval(|queue, texts| queue.claim(&recipes, texts, false))?
             {
                 Ok(assignment)
             } else if let Some(assignment) = state.store.claim_job(&recipes)? {
                 Ok(serde_json::to_value(assignment)?)
-            } else {
+            } else if retrieval {
                 Ok(state
                     .store
                     .with_retrieval(|queue, texts| queue.claim(&recipes, texts, true))?
                     .unwrap_or(Value::Null))
+            } else {
+                Ok(Value::Null)
             }
         }
         WorkerRequest::Heartbeat {
@@ -216,7 +221,7 @@ mod tests {
             store: store.clone(),
             worker_token: Some("worker".into()),
         });
-        let claim = json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]});
+        let claim = json!({"op":"claim","retrieval":true,"recipes":[EMBED_RECIPE,RERANK_RECIPE]});
         assert!(store.reindex_missing().await.is_err());
         assert!(store.status().unwrap().vectors_total > 0);
         assert_eq!(store.status().unwrap().vectors_ready, 0);
@@ -227,6 +232,15 @@ mod tests {
                 .iter()
                 .all(|job| job.state.status == "queued")
         );
+        // Older workers cannot publish inline retrieval results. Their polls
+        // must neither lease document embeddings nor advertise retrieval presence.
+        let (status, legacy) = request(
+            &app,
+            json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(legacy.is_null());
         // With the MacBook absent, indexing stays queued and search immediately
         // returns lexical results without creating interactive inference jobs.
         let queued = store.jobs().unwrap().len();
@@ -255,14 +269,22 @@ mod tests {
             }
         }
         // Interactive queries precede declared jobs, which precede background indexing.
-        request(&app, json!({"op":"claim","recipes":[RERANK_RECIPE]})).await;
+        request(
+            &app,
+            json!({"op":"claim","retrieval":true,"recipes":[RERANK_RECIPE]}),
+        )
+        .await;
         let interactive = store.retrieval_queue().submit(RERANK_RECIPE,
             json!({"texts":[{"id":"0","text":"Recording"}],"query":"Which recording?","top_n":1}), false, 30).unwrap();
-        let all_recipes = json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE,"fixture-v1"]});
+        let all_recipes = json!({"op":"claim","retrieval":true,"recipes":[EMBED_RECIPE,RERANK_RECIPE,"fixture-v1"]});
         let (_, query) = request(&app, all_recipes.clone()).await;
         assert_eq!(query["job"]["id"], interactive);
         assert_eq!(request(&app, result(&query)).await.0, StatusCode::OK);
-        let (_, declared) = request(&app, all_recipes.clone()).await;
+        let (_, declared) = request(
+            &app,
+            json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE,"fixture-v1"]}),
+        )
+        .await;
         assert_eq!(declared["job"]["recipe"], "fixture-v1");
         let (_, assignment) = request(&app, claim.clone()).await;
         assert_eq!(assignment["parameters"]["ml"]["input_type"], "document");
@@ -435,7 +457,7 @@ mod tests {
         });
         request(
             &app,
-            json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]}),
+            json!({"op":"claim","retrieval":true,"recipes":[EMBED_RECIPE,RERANK_RECIPE]}),
         )
         .await;
         let queued = reopened.jobs().unwrap().len();
@@ -468,7 +490,7 @@ mod tests {
         for _ in 0..2 {
             let (_, assignment) = request(
                 &app,
-                json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]}),
+                json!({"op":"claim","retrieval":true,"recipes":[EMBED_RECIPE,RERANK_RECIPE]}),
             )
             .await;
             assert!(!assignment.is_null());
@@ -488,7 +510,11 @@ mod tests {
                 request(&app, result(&assignment)).await.0,
                 StatusCode::UNPROCESSABLE_ENTITY
             );
-            let (_, replacement) = request(&app, json!({"op":"claim","recipes":[recipe]})).await;
+            let (_, replacement) = request(
+                &app,
+                json!({"op":"claim","retrieval":true,"recipes":[recipe]}),
+            )
+            .await;
             assert_ne!(replacement["job"]["attempt"], assignment["job"]["attempt"]);
             assert_eq!(request(&app, result(&replacement)).await.0, StatusCode::OK);
         }

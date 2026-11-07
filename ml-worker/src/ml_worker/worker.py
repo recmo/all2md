@@ -184,7 +184,7 @@ def main(argv=None):
     try:
         while True:
             try:
-                assignment = client.request("/worker", {"op": "claim", "recipes": selected})
+                assignment = client.request("/worker", {"op": "claim", "recipes": selected, "retrieval": True})
                 if assignment:
                     execute(client, assignment, args.cache, device=args.device, token_env=args.token_env)
                 if args.once:

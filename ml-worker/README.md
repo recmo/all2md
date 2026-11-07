@@ -190,7 +190,10 @@ arbitrary source-body edits are not inputs to an explicit derivation.
 
 Mdstore also queues its own search chunks automatically and sends query embeddings
 and reranking through these same recipes. Workers claim these retrieval assignments
-through `/worker` and return their JSON inline in completion. Mdstore validates the
+through `/worker` with `retrieval: true` and return their JSON inline in completion.
+Workers that do not advertise retrieval support can still claim declared jobs;
+automatic search inference stays queued until an updated worker is available.
+Mdstore validates the
 pinned model, revision, input IDs, dimensions, normalization, and lease before
 installing document vectors into its sidecars and live search index. Retrieval
 assignments do not publish repository artifacts or create Git commits. Each attempt
