@@ -109,10 +109,10 @@ def fixture_models(monkeypatch, *, started=None, loads=None):
     original = subprocess.Popen
     processes = []
     def popen(command, **kwargs):
-        if '--inference-fd' in command:
+        if '--inference-fd' in command and set(command) & {text.EMBED_RECIPE, text.RERANK_RECIPE}:
             code = '''
 import os, sys, runpy
-from ml_worker import text, recipes
+from ml_worker import text
 assert 'MDSTORE_WORKER_TOKEN' not in os.environ
 assert 'CUSTOM_TOKEN' not in os.environ
 from types import SimpleNamespace
@@ -146,8 +146,6 @@ def rerank(p, **kwargs):
     text._load(text.RERANK_MODEL, text.RERANK_REVISION, classifier=True, device=kwargs['device'])
     return {'results': [{'index': i, 'id': p['texts'][i]['id'], 'relevance_score': float(i)} for i in reversed(range(len(p['texts'])))]}
 text.embeddings, text.rerank = embed, rerank
-import subprocess
-recipes._transcribe = lambda source: subprocess.run(['speech2md', str(source), '--force'], check=True)
 '''
             code = f'loads = {str(loads)!r}\n' + code if loads is not None else 'loads = None\n' + code
             code = f'started = {str(started)!r}\n' + code if started is not None else 'started = None\n' + code
@@ -160,6 +158,43 @@ recipes._transcribe = lambda source: subprocess.run(['speech2md', str(source), '
     return processes
 
 
+def fixture_speech(tmp_path, monkeypatch):
+    # Use production model-cache functions, with a tiny fake MLX loader and
+    # pipeline so the lifecycle check runs on Linux without model weights.
+    modules = tmp_path/'modules'
+    speech = modules/'speech2md'
+    speech.mkdir(parents=True)
+    production = Path(os.environ.get('SPEECH2MD_SOURCE',
+        str(Path(__file__).resolve().parents[2]/'speech2md/src/speech2md')))
+    (speech/'__init__.py').write_text(f'__path__.append({str(production)!r})\n')
+    (speech/'pipeline.py').write_text('''from .moss import load_moss_engine
+from .redimnet2 import get_redimnet2_embedder
+import json, os
+
+def transcribe(source, *, force):
+    assert force
+    assert 'MDSTORE_WORKER_TOKEN' not in os.environ
+    moss = source.with_suffix('.transcript.moss.npz')
+    if 'Alice' in source.read_text():
+        assert moss.read_bytes() == b'raw MOSS generation'
+    else:
+        load_moss_engine()
+    moss.write_bytes(b'raw MOSS generation')
+    assert get_redimnet2_embedder() is get_redimnet2_embedder()
+    source.with_suffix('.transcript.md').write_text('# Transcript')
+    source.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'space': {}, 'records': [{'id': 'speaker', 'vector': [1.0], 'metadata': {}}]}))
+''')
+    mlx = modules/'mlx_audio'
+    mlx.mkdir()
+    (mlx/'__init__.py').write_text('')
+    (mlx/'stt.py').write_text(f'''def load(*args, **kwargs):
+    with open({str(tmp_path/'loads')!r}, 'a') as stream:
+        stream.write('loaded\\n')
+    return object()
+''')
+    monkeypatch.setenv('PYTHONPATH', str(modules)+os.pathsep+os.environ.get('PYTHONPATH', ''))
+
+
 @pytest.mark.parametrize(('recipe', 'capture_version', 'retrieval'), [
     (text.EMBED_RECIPE, None, False), (text.RERANK_RECIPE, None, False), (recipes.LEVELS_RECIPE, None, False),
     (text.EMBED_RECIPE, None, True), (text.RERANK_RECIPE, None, True),
@@ -170,22 +205,7 @@ def test_claim_process_and_publish(server, tmp_path, monkeypatch, recipe, captur
     fixture_models(monkeypatch)
     monkeypatch.setenv('MDSTORE_WORKER_TOKEN', 'fixture-token')
     if recipe == recipes.SPEECH_RECIPE:
-        cli = tmp_path/'speech2md'
-        cli.write_text(f'#!{sys.executable}\n' + '''from pathlib import Path
-import json, sys
-recording=Path(sys.argv[1])
-assert sys.argv[2] == '--force'
-moss = recording.with_suffix('.transcript.moss.npz')
-if 'Alice' in recording.read_text():
-    assert moss.read_bytes() == b'raw MOSS generation'
-else:
-    assert not moss.exists()
-moss.write_bytes(b'raw MOSS generation')
-recording.with_suffix('.transcript.md').write_text('# Transcript\\n')
-recording.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'space':{}, 'records':[{'id':'speaker','vector':[1.0], 'metadata':{}}]}))
-''')
-        cli.chmod(0o755)
-        monkeypatch.setenv('PATH', str(tmp_path)+os.pathsep+os.environ['PATH'])
+        fixture_speech(tmp_path, monkeypatch)
         state['inputs'] = {'jobs/input.wav': b'fixture'}
         params = {}
         outputs = ['jobs/source.transcript.md','jobs/source.transcript.voiceprints.json']
@@ -365,36 +385,7 @@ def test_audio_and_speech_backends_reuse_evict_and_reload(server, tmp_path, monk
     waveform(source)
     state['inputs'] = {'jobs/input.wav': source.read_bytes()}
     if recipe == recipes.SPEECH_RECIPE:
-        # Use production model-cache functions, with a tiny fake MLX loader and
-        # pipeline so the lifecycle check runs on Linux without model weights.
-        modules = tmp_path/'modules'
-        speech = modules/'speech2md'
-        speech.mkdir(parents=True)
-        production = Path(os.environ.get('SPEECH2MD_SOURCE',
-            str(Path(__file__).resolve().parents[2]/'speech2md/src/speech2md')))
-        for name in ('__init__.py', 'moss.py', 'model.py', 'redimnet2.py'):
-            (speech/name).symlink_to(production/name)
-        (speech/'pipeline.py').write_text('''from .moss import load_moss_engine
-from .redimnet2 import get_redimnet2_embedder
-import json, os
-
-def transcribe(source, *, force):
-    assert force
-    assert 'MDSTORE_WORKER_TOKEN' not in os.environ
-    load_moss_engine()
-    assert get_redimnet2_embedder() is get_redimnet2_embedder()
-    source.with_suffix('.transcript.md').write_text('# Transcript')
-    source.with_suffix('.transcript.voiceprints.json').write_text(json.dumps({'space': {}, 'records': []}))
-''')
-        mlx = modules/'mlx_audio'
-        mlx.mkdir()
-        (mlx/'__init__.py').write_text('')
-        (mlx/'stt.py').write_text(f'''def load(*args, **kwargs):
-    with open({str(tmp_path/'loads')!r}, 'a') as stream:
-        stream.write('loaded\\n')
-    return object()
-''')
-        monkeypatch.setenv('PYTHONPATH', str(modules)+os.pathsep+os.environ.get('PYTHONPATH', ''))
+        fixture_speech(tmp_path, monkeypatch)
         outputs = ['jobs/source.transcript.md', 'jobs/source.transcript.voiceprints.json']
         params = {}
     else:
@@ -413,13 +404,10 @@ def transcribe(source, *, force):
         assert backend.process is process and process.poll() is None
         if recipe == recipes.SPEECH_RECIPE:
             assert (tmp_path/'loads').read_text().splitlines() == ['loaded']
-        timer = backend._timer
         deadline = time.monotonic() + 5
-        while process.poll() is None and time.monotonic() < deadline:
+        while backend.connection is not None and time.monotonic() < deadline:
             time.sleep(0.02)
         assert process.poll() is not None
-        # Joining the timer also ensures descriptor cleanup has completed.
-        timer.join(timeout=2)
         assert backend.process is None and backend.connection is None
         worker.execute(client, state['assignment'], tmp_path/'cache', inference=backend)
         assert backend.process is not process and backend.process.poll() is None

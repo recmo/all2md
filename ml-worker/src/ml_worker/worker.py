@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import sys
 import threading
 import tempfile
@@ -175,6 +176,9 @@ def main(argv=None):
                                  idle_seconds=MODEL_IDLE_SECONDS)
     audio_inference = Inference([audio.RECIPE], args.device, args.token_env,
                                 idle_seconds=MODEL_IDLE_SECONDS)
+    def terminate(signum, _frame):
+        raise SystemExit(128 + signum)
+    previous_sigterm = signal.signal(signal.SIGTERM, terminate)
     try:
         if text_recipes:
             text_inference.start(threading.Event())
@@ -203,6 +207,7 @@ def main(argv=None):
     finally:
         for inference in (text_inference, speech_inference, audio_inference):
             inference.close()
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

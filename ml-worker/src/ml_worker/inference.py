@@ -11,7 +11,6 @@ import socket
 import subprocess
 import sys
 import threading
-import time
 
 from . import recipes, text
 
@@ -26,33 +25,29 @@ class Inference:
         self.idle_seconds = idle_seconds
         self._lock = threading.RLock()
         self._timer = None
-        self._deadline = None
 
     def _expire(self):
         with self._lock:
-            if self._deadline is not None and time.monotonic() >= self._deadline:
+            # A cancelled timer may already be waiting for this lock.
+            if threading.current_thread() is self._timer:
                 self.close()
 
     def close(self):
         with self._lock:
-            self._close()
-
-    def _close(self):
-        self._deadline = None
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
-        if self.process is not None:
-            if self.process.poll() is None:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            if self.process is not None:
+                # The group can outlive its leader after a crash.
                 try:
                     os.killpg(self.process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            self.process.wait()
-            self.process = None
-        if self.connection is not None:
-            self.connection.close()
-            self.connection = None
+                self.process.wait()
+                self.process = None
+            if self.connection is not None:
+                self.connection.close()
+                self.connection = None
 
     def _receive(self, lost):
         while not self.connection.poll(0.2):
@@ -66,53 +61,49 @@ class Inference:
 
     def start(self, lost):
         with self._lock:
-            self._start(lost)
-
-    def _start(self, lost):
-        if self.process is not None and self.process.poll() is not None:
-            self.close()
-        if self.process is not None:
-            return
-        parent, child = socket.socketpair()
-        self.connection = Connection(parent.detach())
-        try:
-            command = [sys.executable, "-m", "ml_worker.worker"]
-            if recipes.SPEECH_RECIPE in self.selected:
-                # The Nix speech interpreter owns MLX and torchaudio. Import only
-                # our package into that environment, without shadowing its deps.
-                bootstrap = (
-                    "import importlib.util, runpy, sys; "
-                    "spec = importlib.util.spec_from_file_location('ml_worker', sys.argv.pop(1)); "
-                    "module = importlib.util.module_from_spec(spec); "
-                    "sys.modules['ml_worker'] = module; spec.loader.exec_module(module); "
-                    "runpy.run_module('ml_worker.worker', run_name='__main__')"
+            if self.process is not None and self.process.poll() is not None:
+                self.close()
+            if self.process is not None:
+                return
+            parent, child = socket.socketpair()
+            self.connection = Connection(parent.detach())
+            try:
+                command = [sys.executable, "-m", "ml_worker.worker"]
+                if recipes.SPEECH_RECIPE in self.selected:
+                    # The Nix speech interpreter owns MLX and torchaudio. Import only
+                    # our package into that environment, without shadowing its deps.
+                    bootstrap = (
+                        "import importlib.util, runpy, sys; "
+                        "spec = importlib.util.spec_from_file_location('ml_worker', sys.argv.pop(1)); "
+                        "module = importlib.util.module_from_spec(spec); "
+                        "sys.modules['ml_worker'] = module; spec.loader.exec_module(module); "
+                        "runpy.run_module('ml_worker.worker', run_name='__main__')"
+                    )
+                    command = [os.environ.get("ML_WORKER_SPEECH_PYTHON", sys.executable), "-c", bootstrap,
+                               str(Path(__file__).with_name("__init__.py"))]
+                self.process = subprocess.Popen(
+                    [*command, "--inference-fd", str(child.fileno()),
+                     "--device", self.device, "--recipes", *self.selected],
+                    env={k: v for k, v in os.environ.items()
+                         if k not in {self.token_env, "MDSTORE_WORKER_TOKEN"}},
+                    stdin=subprocess.DEVNULL, start_new_session=True, pass_fds=(child.fileno(),),
                 )
-                command = [os.environ.get("ML_WORKER_SPEECH_PYTHON", sys.executable), "-c", bootstrap,
-                           str(Path(__file__).with_name("__init__.py"))]
-            self.process = subprocess.Popen(
-                [*command, "--inference-fd", str(child.fileno()),
-                 "--device", self.device, "--recipes", *self.selected],
-                env={k: v for k, v in os.environ.items()
-                     if k not in {self.token_env, "MDSTORE_WORKER_TOKEN"}},
-                stdin=subprocess.DEVNULL, start_new_session=True, pass_fds=(child.fileno(),),
-            )
-            self._receive(lost)
-        except BaseException:
-            self.close()
-            raise
-        finally:
-            child.close()
+                self._receive(lost)
+            except BaseException:
+                self.close()
+                raise
+            finally:
+                child.close()
 
     def execute(self, request, lock_fd, lost):
         with self._lock:
-            self._deadline = None
             if self._timer is not None:
                 self._timer.cancel()
+                self._timer = None
             try:
                 self._execute(request, lock_fd, lost)
             finally:
                 if self.process is not None and self.idle_seconds is not None:
-                    self._deadline = time.monotonic() + self.idle_seconds
                     self._timer = threading.Timer(self.idle_seconds, self._expire)
                     self._timer.daemon = True
                     self._timer.start()
@@ -149,7 +140,7 @@ def serve(fd, selected, device):
                 recipes.execute(json.loads(request.read_text()), request.parent, device=device,
                                 scratch=request.parent.parent / ".scratch")
             except Exception as exc:
-                error = str(exc)[:2000]
+                error = f"{type(exc).__name__}: {exc}"[:2000]
             finally:
                 if lock_fd is not None:
                     os.close(lock_fd)

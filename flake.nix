@@ -107,13 +107,14 @@
       };
       # Build a resident Rust backend from the pinned DeepFilterNet source/cargo
       # closure, with DFN3 weights embedded.
-      mkDeepFilter = mlSystem:
+      mkDeepFilterWorker = mlSystem:
         let
           deepfilternet = nixpkgs.legacyPackages.${mlSystem}.deepfilternet;
         in
         assert deepfilternet.version == "0.5.6";
         deepfilternet.overrideAttrs (old: {
-          pname = "deep-filter";
+          pname = "deep-filter-worker";
+          meta = (old.meta or { }) // { mainProgram = "deep-filter-worker"; };
           buildAndTestSubdir = "libDF";
           postPatch = (old.postPatch or "") + ''
             sed -i '/^\[features\]/a worker-json = ["dep:serde_json"]' libDF/Cargo.toml
@@ -149,7 +150,7 @@
           name = "ml-worker";
           runtimeInputs = [
             systemPkgs.ffmpeg
-            (mkDeepFilter mlSystem)
+            (mkDeepFilterWorker mlSystem)
           ];
           text = nixpkgs.lib.optionalString systemPkgs.stdenv.hostPlatform.isDarwin ''
             export ML_WORKER_SPEECH_PYTHON=${speechEnvironment}/bin/python
@@ -165,7 +166,7 @@
           nativeBuildInputs = [
             (systemPkgs.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.pytest ]))
             systemPkgs.ffmpeg
-            (mkDeepFilter mlSystem)
+            (mkDeepFilterWorker mlSystem)
           ];
         } ''
           export PYTHONPATH=${mlProject}/src
@@ -181,7 +182,7 @@
             (systemPkgs.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.pytest ]))
             systemPkgs.uv
             systemPkgs.ffmpeg
-            (mkDeepFilter mlSystem)
+            (mkDeepFilterWorker mlSystem)
           ];
           shellHook = nixpkgs.lib.optionalString systemPkgs.stdenv.hostPlatform.isLinux ''
             export LD_LIBRARY_PATH="${nixpkgs.lib.makeLibraryPath [ systemPkgs.stdenv.cc.cc.lib ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -412,13 +413,13 @@
           doc2md = mkDoc2md docSystem;
           mdstore = mkMdstore docSystem;
           webui = mkMdstoreWeb docSystem;
-          deep-filter = mkDeepFilter docSystem;
+          deep-filter-worker = mkDeepFilterWorker docSystem;
           ml-worker = mkMlWorker docSystem;
         })
         // {
           ${system} = {
             default = pages2md;
-            deep-filter = mkDeepFilter system;
+            deep-filter-worker = mkDeepFilterWorker system;
             inherit
               meeting-capture
               pages2md

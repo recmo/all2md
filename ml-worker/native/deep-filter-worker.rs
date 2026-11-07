@@ -1,15 +1,23 @@
 //! Resident DFN3 inference. Each request starts with fresh DSP and recurrent state.
-use std::{collections::HashMap, io::{self, BufRead, Write}};
+use std::{
+    collections::HashMap,
+    io::{self, BufRead, Write},
+};
 
 use anyhow::{bail, Context, Result};
-use df::{tract::{DfParams, DfTract, ReduceMask, RuntimeParams}, wav_utils::{ReadWav, write_wav_arr2}};
+use df::{
+    tract::{DfParams, DfTract, ReduceMask, RuntimeParams},
+    wav_utils::{write_wav_arr2, ReadWav},
+};
 use ndarray::{Array2, Axis, Slice};
 use serde_json::Value;
 
 fn enhance(request: &Value, models: &mut HashMap<usize, DfTract>) -> Result<()> {
     let source = request["source"].as_str().context("source is required")?;
     let output = request["output"].as_str().context("output is required")?;
-    let attenuation = request["attenuation_db"].as_f64().context("attenuation_db is required")?;
+    let attenuation = request["attenuation_db"]
+        .as_f64()
+        .context("attenuation_db is required")?;
     if !attenuation.is_finite() || !(0.0..=36.0).contains(&attenuation) {
         bail!("attenuation_db must be between 0 and 36");
     }
@@ -33,8 +41,10 @@ fn enhance(request: &Value, models: &mut HashMap<usize, DfTract>) -> Result<()> 
     model.set_atten_lim(attenuation as f32);
     let noisy = reader.samples_arr2()?.as_standard_layout().into_owned();
     let mut enhanced = Array2::<f32>::zeros(noisy.raw_dim());
-    for (input, output) in noisy.axis_chunks_iter(Axis(1), model.hop_size)
-        .zip(enhanced.axis_chunks_iter_mut(Axis(1), model.hop_size)) {
+    for (input, output) in noisy
+        .axis_chunks_iter(Axis(1), model.hop_size)
+        .zip(enhanced.axis_chunks_iter_mut(Axis(1), model.hop_size))
+    {
         if input.len_of(Axis(1)) < model.hop_size {
             break;
         }

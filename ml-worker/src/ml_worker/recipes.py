@@ -34,11 +34,6 @@ def validate_assignment(assignment, root):
     return source, inputs, outputs
 
 
-def _transcribe(source):
-    from speech2md.pipeline import transcribe
-    transcribe(source, force=True)
-
-
 def _speech(assignment, root, source, inputs, outputs):
     import yaml
     raw = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)", source.read_text(encoding="utf-8"), re.S)
@@ -77,7 +72,8 @@ def _speech(assignment, root, source, inputs, outputs):
     if not moss.exists() and cached.is_file():
         shutil.copyfile(cached, moss)
     try:
-        _transcribe(source)
+        from speech2md.pipeline import transcribe
+        transcribe(source, force=True)
     finally:
         if moss.is_file():
             temporary = cached.with_suffix(".part")
