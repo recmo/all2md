@@ -137,8 +137,8 @@ embedding schedule/checkpoints. Its HTTP client retries and its scheduled builds
 resume missing messages; no caller-side queue is needed. Before enabling the
 schedule, build and search a small sample and verify worker recovery. Configure
 Nix only after this all2md change merges, pinning that merged main commit without
-local all2md patches. Hybrid query failure needs the upstream msgvault keyword
-fallback; explicit `mode=fts` remains available during initial indexing.
+local all2md patches. Hybrid query failure uses the msgvault keyword fallback maintained in the Nix
+package patch; explicit `mode=fts` remains available during initial indexing.
 
 Live ZeroEntropy reranking remains separate: msgvault's hybrid engine sends
 candidates directly from fusion to hydration and has no external reranker hook.
