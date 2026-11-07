@@ -195,7 +195,9 @@ def main(argv=None):
                 print(f"worker: {error}", file=sys.stderr)
                 if args.once:
                     return 1
-            time.sleep(10)
+                time.sleep(10)
+                continue
+            time.sleep(1)
     except KeyboardInterrupt:
         return 130
 

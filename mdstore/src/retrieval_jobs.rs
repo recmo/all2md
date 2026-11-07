@@ -112,34 +112,6 @@ impl Queue {
         crate::store::write_atomic(&self.0.join("workers"), &serde_json::to_vec(&workers)?)
     }
 
-    pub(crate) fn interactive_state(
-        &self,
-        recipe: &str,
-        parameters: &Value,
-    ) -> Result<(Option<String>, bool)> {
-        self.locked(|| {
-            let available = self
-                .workers()?
-                .get(recipe)
-                .is_some_and(|last_seen| now().saturating_sub(*last_seen) < 60);
-            for job in self.jobs()? {
-                if !job.document
-                    && job.complete
-                    && job.deadline > now()
-                    && job.recipe == recipe
-                    && job.revision == revision(recipe)?
-                    && job.parameters == *parameters
-                {
-                    return Ok((
-                        Some(fs::read_to_string(self.result_path(&job.id)?)?),
-                        available,
-                    ));
-                }
-            }
-            Ok((None, available))
-        })
-    }
-
     fn jobs(&self) -> Result<Vec<Job>> {
         let mut jobs = Vec::new();
         for entry in fs::read_dir(&self.0)? {
@@ -165,13 +137,28 @@ impl Queue {
     ) -> Result<String> {
         self.locked(|| {
             let revision = revision(recipe)?;
-            let nonce = if document { String::new() } else { secret()? };
             let id = format!(
                 "retrieval-{}",
                 crate::validation::source_hash(&format!(
-                    "{recipe}:{revision}:{parameters}:{nonce}"
+                    "{recipe}:{revision}:{parameters}:{document}"
                 ))
             );
+            if self.path(&id)?.exists() {
+                let job = self.read(&id)?;
+                if !document && (job.deadline <= now() || job.error.is_some()) {
+                    self.remove(&job)?;
+                } else if document || job.complete {
+                    return Ok(id);
+                }
+            }
+            if !document {
+                ensure!(
+                    self.workers()?
+                        .get(recipe)
+                        .is_some_and(|last_seen| now().saturating_sub(*last_seen) < 60),
+                    "ML worker unavailable for {recipe}"
+                );
+            }
             if !self.path(&id)?.exists() {
                 self.save(&Job {
                     id: id.clone(),

@@ -141,19 +141,6 @@ impl WorkerProvider {
                 "worker texts require 1..32768 characters"
             );
         }
-        if !document {
-            let queue = self.queue.clone();
-            let inputs = parameters.clone();
-            let (cached, available) =
-                tokio::task::spawn_blocking(move || queue.interactive_state(recipe, &inputs))
-                    .await??;
-            if let Some(result) = cached {
-                return Ok(result);
-            }
-            if !available {
-                bail!("ML worker unavailable for {recipe}");
-            }
-        }
         let queue = self.queue.clone();
         let timeout = self.config.request_timeout_seconds;
         let id = tokio::task::spawn_blocking(move || {

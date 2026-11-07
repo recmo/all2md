@@ -40,6 +40,8 @@ nix run .#ml-worker -- --server https://your-mdstore-host --once \
   --recipes audio-enhancement-dfn3-v1 text-embeddings-zembed-1-v1 text-rerank-zerank-2-v1
 ```
 
+Idle workers poll once a second; failed requests retry after ten seconds.
+
 `--cache` defaults to `~/.cache/ml-worker`. `--device auto` chooses PyTorch MPS
 when available, otherwise CPU; `--device cpu` forces CPU for text models.
 Text models use FP32 on CPU and BF16 on MPS. Allow roughly 16 GiB for one CPU
