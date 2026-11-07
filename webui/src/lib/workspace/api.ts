@@ -70,7 +70,7 @@ async function mcp<T>(name: string, args: unknown): Promise<T> {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
-        // Search may wait for both embedding and reranking (300 seconds each).
+        // Search uses the daemon's configured embedding and reranking deadlines.
         ...(name === 'search' ? {} : { signal: AbortSignal.timeout(15000) })
       });
       if (response.status >= 500 && attempt + 1 < attempts) {

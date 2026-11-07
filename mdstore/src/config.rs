@@ -21,7 +21,7 @@ fn default_max_chars() -> usize {
 }
 
 fn default_request_timeout_seconds() -> u64 {
-    300
+    30
 }
 
 fn default_push_timeout_seconds() -> u64 {

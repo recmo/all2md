@@ -25,17 +25,27 @@ old sidecars before queuing fresh work. Changed/deleted chunk inputs and expired
 worker attempts reject completion. Query/ranking requests take priority, followed
 by explicitly declared jobs and then background document indexing. Interactive
 jobs and cached results expire after `provider.request_timeout_seconds` (default
-300). Identical requests share one pending job or completed result. Idle workers poll
+30). Identical requests share one pending job or completed result. Idle workers poll
 every second, within the foreground wait budget. With no worker poll
 or matching heartbeat in the last 60 seconds, it skips new interactive inference
 and returns lexical/graph results, plus vector retrieval when a recent query
 embedding is cached. Reranking is skipped unless a matching result is cached.
 Each inference stage waits up to `provider.request_timeout_seconds` (default
-300 seconds) before returning degraded results. The WebUI lets the daemon enforce
+30 seconds) before returning degraded results. The WebUI lets the daemon enforce
 the search deadline; other MCP clients must allow enough time for both embedding
 and reranking. Document embedding jobs remain
 queued without an offline expiry and resume when workers return. Pending/failed jobs
 appear in `/health`; failed retrieval jobs support the existing retry operation.
+
+The default timeout is based on MacBook MLX batch-4 measurements: approximately
+8 seconds to rerank 30 passages of 400 tokens, plus allowances of 5 seconds for
+process startup/model loading, 15 seconds for queueing, and 2 seconds for polling
+and network overhead. These are planning allowances, not measured tail-latency
+guarantees. Embedding and reranking run sequentially, so a search can wait roughly
+60 seconds in total. Set `provider.request_timeout_seconds` higher for longer
+passages, larger candidate sets, or sustained queue contention. Large audio input
+transfers retain their independent worker transport timeout.
+
 `provider.batch_size` controls document jobs (default 4, maximum 256)
 so interactive work can run between jobs. Within each job the worker batches
 both embeddings and reranking, with at most 4 items and 2,048 padded tokens per

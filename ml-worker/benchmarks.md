@@ -74,9 +74,9 @@ reranker implementation is too slow for interactive search. Mdstore defaults to
 is an optimistic workload. Two resident FP32 model processes would require
 roughly 30 GiB based on the individual measurements; co-residency was not tested.
 These measurements motivate an optimized, quality-checked inference backend.
-Mdstore now queues all search inference to the local worker, with a configurable
-300-second default interactive timeout. That integration does not improve these
-model latencies; long jobs can still time out and leave search degraded.
+At the time of these CPU measurements, mdstore queued inference with a
+300-second job lifetime. Queue integration did not improve model latency. The
+current MLX search budget is documented below.
 
 The Nix-packaged Python 3.13 runtime was also checked with a real query through
 the production CPU loader: 0.609 s warm median (0.596, 0.612, 0.609 s), with
@@ -227,3 +227,21 @@ memory cost are sufficient to reject this backend for this deployment.
 The worker no longer installs PyTorch, offers CPU text inference, or advertises
 text recipes on Linux. Linux audio recipes remain available. This decision does
 not claim that all CPUs or alternative inference engines have the same limits.
+
+
+## Search deadline
+
+The default `provider.request_timeout_seconds` is 30 seconds per inference stage.
+The default 30-candidate, 400-token rerank is estimated at 7.9 seconds warm from
+3.82 passages/s; this is an extrapolation from the measured 16-passage requests.
+Allow 5 seconds for process startup and model loading, 15 seconds for queueing,
+and 2 seconds for polling and network overhead, then round to 30 seconds.
+The stage deadline includes queueing, not just model execution. Embedding and
+reranking may therefore wait up to roughly 60 seconds together. Clients must
+allow both stages; the WebUI lets the daemon enforce these deadlines.
+
+The small benchmark sample does not establish p95/p99 latency. Longer passages,
+more candidates, concurrent foreground requests, or long document jobs may need
+a higher configured timeout. Timeout returns degraded search results rather
+than holding callers indefinitely. Worker lease renewal and large-file transport
+timeouts are separate from this search budget.
