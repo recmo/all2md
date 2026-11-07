@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shutil
-from pathlib import Path
 
 from . import audio, text
 from .client import digest, local_path

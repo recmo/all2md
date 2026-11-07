@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import atexit
 import json
 from pathlib import Path
 import subprocess
@@ -33,9 +32,6 @@ def close_denoiser():
         _denoiser = None
 
 
-atexit.register(close_denoiser)
-
-
 def denoise_file(source, output, attenuation_db):
     global _denoiser
     if _denoiser is not None and _denoiser.poll() is not None:
@@ -49,7 +45,7 @@ def denoise_file(source, output, attenuation_db):
         _denoiser.stdin.flush()
         response = _denoiser.stdout.readline()
         if not response:
-            raise RuntimeError("DeepFilterNet inference process exited")
+            raise RuntimeError("DeepFilterNet helper exited")
         error = json.loads(response)
     except BaseException:
         close_denoiser()
@@ -116,7 +112,7 @@ def enhance(source: Path, output: Path, *, stream_index=0, denoise=True, levels=
         processed = decoded
         if denoise:
             padded = root / "padded.wav"
-            # deep-filter trims its lookahead but does not flush the tail. Padding
+            # DFN trims its lookahead but does not flush the tail. Padding
             # before inference protects the final speech; trim it only afterwards.
             run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(decoded),
                 "-af", "apad=pad_dur=1", "-c:a", "pcm_s16le", str(padded))

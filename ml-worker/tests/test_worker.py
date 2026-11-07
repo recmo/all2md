@@ -2,7 +2,6 @@
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-from pathlib import Path
 import sys
 import types
 import threading
@@ -270,7 +269,7 @@ def test_corrupt_input_and_unassigned_audio_never_publish(server, tmp_path):
 
 def test_audio_enhancement_keeps_tail_channels_and_silence(tmp_path):
     if not __import__('shutil').which('deep-filter-worker'):
-        pytest.skip('requires the Nix DeepFilterNet3 CLI')
+        pytest.skip('requires the native DeepFilterNet3 helper')
     source, output = tmp_path/'source.wav', tmp_path/'enhanced.wav'
     count = waveform(source, channels=2)
     result = audio.enhance(source, output)
