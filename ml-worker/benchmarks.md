@@ -145,3 +145,55 @@ overhead alone cannot address a matrix-dominated workload. The dynamic INT8
 operator also quantizes activations and returns FP32 between linear layers;
 see the [PyTorch 2.11 implementation](https://github.com/pytorch/pytorch/blob/v2.11.0/aten/src/ATen/native/quantized/cpu/qlinear_dynamic.cpp).
 This is not a fully integer transformer graph.
+
+## MacBook batch-size tuning
+
+The historical CPU measurements above used single-item calls. The worker now
+uses up to 8 inputs and 2,048 padded tokens per call; longer inputs run alone.
+These are provisional limits, not an established optimum for the MacBook.
+
+`benchmark.py --device mlx` loads the original pinned BF16 safetensors using
+MLX-LM's Qwen3 implementation. It does not quantize or substitute a community
+checkpoint. This benchmark path uses native MLX arrays, causal right padding,
+last-real-token pooling, and the tied readout's Yes logit. The production worker
+still uses PyTorch; choosing its runtime requires the target-machine results.
+`--device mps` runs the production PyTorch path on the Mac GPU. Both paths
+materialize their results before stopping the timer.
+
+From the updated repository checkout on the MacBook:
+
+```sh
+nix develop .#ml-worker --command bash
+uv sync --project ml-worker --extra dev
+mkdir -p /tmp/all2md-batch
+for device in mlx mps; do
+  for model in embed rerank; do
+    for size in 1 2 4 8 16 32; do
+      PYTHONPATH=ml-worker/src uv run --project ml-worker --with mlx-lm \
+        python ml-worker/benchmark.py "$model" --device "$device" \
+        --precision bf16 --tokens 400 --candidates 64 \
+        --batch-size "$size" --batch-tokens 32768 --repeats 5 --compare-single \
+        | tee "/tmp/all2md-batch/$device-$model-$size.jsonl"
+    done
+  done
+done
+```
+
+This measures throughput over 64 passages, independently of the 30-candidate
+interactive search default. Each run starts a fresh process, loads one model,
+and excludes loading and the first inference from warm timing. Compare results
+for embeddings and reranking separately; the best batch size may differ.
+Repeat the winning configurations with 128- and 1,024-token passages and with
+30 reranking candidates to check the actual search latency. Keep the Mac plugged
+in and avoid running other GPU jobs during the comparison. Compare warm
+`passages_per_second`, `median_seconds`, `max_warm_seconds`, `peak_rss_gib`, and
+MLX's additional `mlx_peak_allocated_gib`; MLX allocator memory and RSS are
+different measures. `--compare-single` checks each batch against that runtime's
+single-item inference, not cross-runtime quality agreement.
+
+Choose the smallest batch near the throughput plateau that leaves memory
+headroom. Investigate score/order changes against representative relevance
+judgments. A synthetic relevant-first assertion alone does not establish quality.
+After choosing the runtime and batch limits, measure full queued searches and
+indexing together: loading, queueing, and long document jobs still affect search
+latency. Batching alone does not guarantee the response deadline will be met.

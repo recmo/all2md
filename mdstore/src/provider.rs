@@ -148,7 +148,7 @@ impl WorkerProvider {
         });
         let id = id.await??;
         // Later completions can be reused without holding up this search.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.min(3));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
         loop {
             let queue = self.queue.clone();
             let identity = id.clone();

@@ -13,6 +13,8 @@ DIMENSIONS = 2560
 MAX_TOKENS = 32768
 MAX_ITEMS = 256
 MAX_TEXT = 32768
+INFERENCE_BATCH_SIZE = 8
+INFERENCE_BATCH_TOKENS = 2048
 # Pinned zerank-2 1_LogitScore/config.json selects the raw "Yes" logit.
 YES_TOKEN = 9454
 
@@ -46,13 +48,29 @@ def _load(model_id, revision, *, classifier, device):
     return tokenizer, model, device
 
 
-def _batch(tokenizer, formatted, device):
-    # Process one item at a time: these are 4B models with potentially long inputs.
+def _batches(tokenizer, formatted, device):
+    # Left padding keeps the real final token at -1 for pooling and scoring.
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     # Reject oversize inputs rather than losing text or the closing scoring prompt.
-    batch = tokenizer([formatted], truncation=False, return_tensors="pt")
-    if batch["input_ids"].shape[1] > MAX_TOKENS:
+    encoded = tokenizer(formatted, truncation=False, padding=False)
+    lengths = [len(ids) for ids in encoded["input_ids"]]
+    if max(lengths) > MAX_TOKENS:
         raise ValueError(f"formatted input exceeds {MAX_TOKENS} tokens; split into smaller passages")
-    return batch.to(device)
+    start = 0
+    while start < len(lengths):
+        end = start + 1
+        longest = lengths[start]
+        while end < len(lengths) and end - start < INFERENCE_BATCH_SIZE:
+            longest = max(longest, lengths[end])
+            if longest * (end - start + 1) > INFERENCE_BATCH_TOKENS:
+                break
+            end += 1
+        # An input larger than the batch budget runs alone, within MAX_TOKENS.
+        yield tokenizer.pad({key: value[start:end] for key, value in encoded.items()},
+                            padding=True, return_tensors="pt").to(device)
+        start = end
 
 
 def embeddings(parameters, *, device="auto"):
@@ -66,10 +84,10 @@ def embeddings(parameters, *, device="auto"):
         raise ValueError("a non-speaker text namespace is required")
     tokenizer, model, device = _load(EMBED_MODEL, EMBED_REVISION, classifier=False, device=device)
     vectors = []
-    for item in items:
-        # config_sentence_transformers.json + modeling_zembed.py add this prefix/suffix.
-        formatted = f"<|im_start|>system\n{input_type}<|im_end|>\n<|im_start|>user\n{item['text']}<|im_end|>\n"
-        batch = _batch(tokenizer, formatted, device)
+    # config_sentence_transformers.json + modeling_zembed.py add this prefix/suffix.
+    formatted = [f"<|im_start|>system\n{input_type}<|im_end|>\n<|im_start|>user\n{item['text']}<|im_end|>\n"
+                 for item in items]
+    for batch in _batches(tokenizer, formatted, device):
         with torch.inference_mode():
             # 1_Pooling/config.json specifies last-token pooling, including the prompt.
             hidden = model(**batch, use_cache=False).last_hidden_state[:, -1].float()
@@ -99,15 +117,14 @@ def rerank(parameters, *, device="auto"):
         raise ValueError("top_n must be between 1 and the number of texts")
     tokenizer, model, device = _load(RERANK_MODEL, RERANK_REVISION, classifier=True, device=device)
     scores = []
-    for item in items:
-        # Pinned chat_template.jinja: query is system, document is user; score next token.
-        formatted = tokenizer.apply_chat_template(
-            [{"role": "query", "content": query}, {"role": "document", "content": item["text"]}],
-            tokenize=False, add_generation_prompt=True)
-        batch = _batch(tokenizer, formatted, device)
+    # Pinned chat_template.jinja: query is system, document is user; score next token.
+    formatted = [tokenizer.apply_chat_template(
+        [{"role": "query", "content": query}, {"role": "document", "content": item["text"]}],
+        tokenize=False, add_generation_prompt=True) for item in items]
+    for batch in _batches(tokenizer, formatted, device):
         with torch.inference_mode():
             logits = model(**batch, use_cache=False, logits_to_keep=1).logits
-            scores.append(float(logits[0, -1, YES_TOKEN].float().cpu()))
+            scores.extend(logits[:, -1, YES_TOKEN].float().cpu().tolist())
     if len(scores) != len(items) or not all(math.isfinite(x) for x in scores):
         raise ValueError("model returned invalid reranking scores")
     order = sorted(range(len(items)), key=lambda i: (-scores[i], i))[:top_n]

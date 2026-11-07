@@ -236,8 +236,11 @@ probabilities. This is a queued batch job, not a synchronous search-time service
 
 Both models have 4B parameters and Apache-2.0 weights. They download on first use
 (roughly 8 GB per model) and run one at a time in the job subprocess, using BF16
-on CPU or MPS. MPS requires a Mac/PyTorch combination with BF16 support (macOS 14+).
+on MPS and FP32 on CPU. MPS requires a Mac/PyTorch combination with BF16 support (macOS 14+).
 Allow memory beyond the weights for inference; long passages use more memory.
+Both recipes use left-padded batches of up to 8 inputs and 2,048 padded tokens.
+Longer inputs run alone. These are conservative starting limits, not measured
+optimal settings; see [benchmarking](benchmarks.md) for batch-size tuning.
 
 Both text recipes accept 1–256 records with unique nonempty string IDs and
 nonempty text of at most 32,768 characters. The formatted input must fit within

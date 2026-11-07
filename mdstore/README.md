@@ -29,12 +29,16 @@ every second, within the foreground wait budget. With no worker poll
 or matching heartbeat in the last 60 seconds, it skips new interactive inference
 and returns lexical/graph results, plus vector retrieval when a recent query
 embedding is cached. Reranking is skipped unless a matching result is cached.
-If a worker disappears during a request, each inference stage waits at most
-3 seconds before returning degraded results. Document embedding jobs remain
+Each inference stage waits up to `provider.request_timeout_seconds` (default
+300 seconds) before returning degraded results. The WebUI lets the daemon enforce
+the search deadline; other MCP clients must allow enough time for both embedding
+and reranking. Document embedding jobs remain
 queued without an offline expiry and resume when workers return. Pending/failed jobs
 appear in `/health`; failed retrieval jobs support the existing retry operation.
-`provider.batch_size` controls document batches (default 1, maximum 256)
-so interactive work can run between document chunks.
+`provider.batch_size` controls document jobs (default 8, maximum 256)
+so interactive work can run between jobs. Within each job the worker batches
+both embeddings and reranking, with at most 8 items and 2,048 padded tokens per
+model call. Longer individual inputs run alone.
 Completed JSON results are stored separately from queue metadata; cache keys include
 the pinned model revision. Models and 2,560-dimensional vectors are fixed by the
 worker recipes. `chunking.max_chars` must be at most 32,768.

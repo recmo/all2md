@@ -479,14 +479,14 @@ pub struct ProviderConfig {
     /// Optional document embedding batch size.
     pub batch_size: Option<usize>,
     #[serde(default = "default_request_timeout_seconds")]
-    /// Interactive job/result lifetime; foreground waits are capped at 3 seconds per stage.
+    /// Interactive job/result lifetime and maximum foreground wait per inference stage.
     pub request_timeout_seconds: u64,
 }
 
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            batch_size: Some(1),
+            batch_size: Some(8),
             request_timeout_seconds: default_request_timeout_seconds(),
         }
     }

@@ -211,6 +211,31 @@ mod tests {
             })
             .unwrap();
         drop(fixture);
+        // Exercise partial indexing with single-chunk document jobs.
+        let config = dir.path().join("config.yaml");
+        let contents = std::fs::read_to_string(&config).unwrap();
+        let mut contents = crate::Config::from_yaml(&contents).unwrap();
+        contents.provider.batch_size = Some(1);
+        std::fs::write(&config, serde_yaml::to_string(&contents).unwrap()).unwrap();
+        for args in [
+            vec!["add", "config.yaml"],
+            vec![
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "Set test batch size",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(dir.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
         let store = Store::open(dir.path()).unwrap();
         let app = application(AppState {
             store: store.clone(),
@@ -427,8 +452,7 @@ mod tests {
             reopened.status().unwrap().vectors_ready,
             reopened.status().unwrap().vectors_total
         );
-        // A freshly seen worker may disappear during inference. Both stages
-        // must still finish comfortably before the WebUI's 15-second deadline.
+        // Concurrent searches share jobs and wait beyond the old three-second cap.
         let app = application(AppState {
             store: reopened.clone(),
             worker_token: Some("worker".into()),
@@ -439,33 +463,18 @@ mod tests {
         )
         .await;
         let queued = reopened.jobs().unwrap().len();
-        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        let searching = reopened.clone();
+        let searches = tokio::spawn(async move {
             tokio::join!(
-                reopened.search("Fresh unavailable", &[]),
-                reopened.search("Fresh unavailable", &[])
+                searching.search("Fresh unavailable", &[]),
+                searching.search("Fresh unavailable", &[])
             )
-        })
-        .await
-        .unwrap();
-        for response in [first.unwrap(), second.unwrap()] {
-            assert!(!response.results.is_empty());
-            assert_eq!(response.degraded.len(), 2);
-        }
-        // Concurrent searches share pending work, even while the worker is gone.
-        assert_eq!(reopened.jobs().unwrap().len(), queued + 2);
-        std::fs::write(retrieval.join("workers"), b"{}").unwrap();
-        let offline = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            reopened.search("Fresh unavailable", &[]),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(offline.degraded.len(), 2);
-        assert_eq!(reopened.jobs().unwrap().len(), queued + 2);
-        // A returning worker completes the pending requests. Replacing an expired
-        // result keeps its cache key but must reject the old attempt's replay.
+        });
+        let mut completed = Vec::new();
         for _ in 0..2 {
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            assert!(!searches.is_finished());
+            assert_eq!(reopened.jobs().unwrap().len(), queued + 1);
             let (_, assignment) = request(
                 &app,
                 json!({"op":"claim","recipes":[EMBED_RECIPE,RERANK_RECIPE]}),
@@ -473,12 +482,29 @@ mod tests {
             .await;
             assert!(!assignment.is_null());
             assert_eq!(request(&app, result(&assignment)).await.0, StatusCode::OK);
+            completed.push(assignment);
+        }
+        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(2), searches)
+            .await
+            .unwrap()
+            .unwrap();
+        for response in [first.unwrap(), second.unwrap()] {
+            assert!(!response.results.is_empty());
+            assert!(response.degraded.is_empty(), "{:?}", response.degraded);
+        }
+        assert_eq!(reopened.jobs().unwrap().len(), queued);
+        std::fs::write(retrieval.join("workers"), b"{}").unwrap();
+        let cached = reopened.search("Fresh unavailable", &[]).await.unwrap();
+        assert!(cached.degraded.is_empty(), "{:?}", cached.degraded);
+        // Replacing an expired result keeps its key but rejects the old attempt.
+        for assignment in completed {
             let id = assignment["job"]["id"].as_str().unwrap();
             let path = retrieval.join(format!("{id}.json"));
             let mut job: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             job["deadline"] = json!(0);
             std::fs::write(&path, serde_json::to_vec(&job).unwrap()).unwrap();
             let recipe = assignment["job"]["recipe"].as_str().unwrap();
+            request(&app, json!({"op":"claim","recipes":[recipe]})).await;
             let replacement = reopened
                 .retrieval_queue()
                 .submit(recipe, assignment["parameters"]["ml"].clone(), false, 300)
@@ -492,7 +518,26 @@ mod tests {
             assert_ne!(replacement["job"]["attempt"], assignment["job"]["attempt"]);
             assert_eq!(request(&app, result(&replacement)).await.0, StatusCode::OK);
         }
-        let cached = reopened.search("Fresh unavailable", &[]).await.unwrap();
-        assert!(cached.degraded.is_empty(), "{:?}", cached.degraded);
+        // A lower configured deadline still bounds a stalled inference stage.
+        let provider = crate::provider::WorkerProvider::new(
+            crate::config::ProviderConfig {
+                request_timeout_seconds: 1,
+                ..Default::default()
+            },
+            &crate::git::git_dir(dir.path()).unwrap(),
+        );
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::provider::RetrievalProvider::embed(
+                &provider,
+                crate::provider::InputType::Query,
+                &["A stalled query".into()],
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().to_string().contains("result pending"));
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
     }
 }

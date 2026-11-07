@@ -852,7 +852,7 @@ impl Store {
                         .config
                         .provider
                         .batch_size
-                        .unwrap_or(1)
+                        .unwrap_or(8)
                         .max(1);
                     let mut pending = false;
                     for batch in chunks.chunks(batch_size) {

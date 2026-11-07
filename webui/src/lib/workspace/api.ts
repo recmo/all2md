@@ -70,7 +70,8 @@ async function mcp<T>(name: string, args: unknown): Promise<T> {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
-        signal: AbortSignal.timeout(15000)
+        // Search may wait for both embedding and reranking (300 seconds each).
+        ...(name === 'search' ? {} : { signal: AbortSignal.timeout(15000) })
       });
       if (response.status >= 500 && attempt + 1 < attempts) {
         await response.body?.cancel();
