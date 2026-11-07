@@ -53,9 +53,6 @@ model call. Longer individual inputs run alone.
 Completed JSON results are stored separately from queue metadata; cache keys include
 the pinned model revision. Models and 2,560-dimensional vectors are fixed by the
 worker recipes. `chunking.max_chars` must be at most 32,768.
-Remove old `provider.base_url`, `api_key_env`, `embedding_model`, `rerank_model`,
-and `dimensions` settings from existing configurations; old hosted sidecars
-are rebuilt automatically with the local embedding-space identity.
 
 Declare other derived outputs in root `config.yaml` under `derivations`; see the
 [ML worker](../ml-worker/README.md) for recipes, model versions, and configuration.

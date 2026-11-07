@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "MIT"
 dependencies = [
+  "speech2md; sys_platform == 'darwin'",
   "numpy>=2,<3",
   "pyyaml>=6,<7",
   "mlx-lm==0.32.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -28,3 +29,6 @@ packages = ["src/ml_worker"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.uv.sources]
+speech2md = { path = "../speech2md" }

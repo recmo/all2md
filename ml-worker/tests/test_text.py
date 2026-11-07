@@ -6,7 +6,7 @@ import pytest
 from ml_worker import text
 
 
-def test_native_mlx_loading_and_retrieval_artifacts(tmp_path, monkeypatch):
+def test_native_mlx_loading_and_retrieval_artifacts(tmp_path, monkeypatch, request):
     mx = pytest.importorskip('mlx.core')
     pytest.importorskip('mlx_lm')
     from mlx_lm.models.qwen3 import Model, ModelArgs
@@ -31,16 +31,18 @@ def test_native_mlx_loading_and_retrieval_artifacts(tmp_path, monkeypatch):
     tokenizer.chat_template = "{% for message in messages %}{{message['content']}} {% endfor %}alpha"
     tokenizer.save_pretrained(tmp_path)
     monkeypatch.setattr(text, 'DIMENSIONS', 32)
-    # The test uses MLX's CPU implementation; production requires Metal.
+    # Permit MLX's CPU implementation for offline tests; production requires Metal.
     monkeypatch.setattr(mx.metal, 'is_available', lambda: True)
     monkeypatch.setattr(AutoTokenizer, 'from_pretrained', lambda *args, **kwargs: tokenizer)
     downloads = []
     def snapshot(model_id, *, revision, allow_patterns):
         downloads.append((model_id, revision))
-        assert '*.safetensors' in allow_patterns
+        assert 'model*.safetensors' in allow_patterns
         return str(tmp_path)
     monkeypatch.setattr(huggingface_hub, 'snapshot_download', snapshot)
     original_load = text._load
+    original_load.cache_clear()
+    request.addfinalizer(original_load.cache_clear)
     loaded = {identity: original_load(identity, revision, precision='fp32') for identity, revision in
               [(text.EMBED_MODEL, text.EMBED_REVISION), (text.RERANK_MODEL, text.RERANK_REVISION)]}
     assert downloads == [(text.EMBED_MODEL, text.EMBED_REVISION),
@@ -48,10 +50,14 @@ def test_native_mlx_loading_and_retrieval_artifacts(tmp_path, monkeypatch):
     # Check the production BF16 default separately from FP32 batch comparisons.
     _, bf16 = original_load(text.EMBED_MODEL, text.EMBED_REVISION)
     assert all(value.dtype == mx.bfloat16 for _, value in tree_flatten(bf16.parameters()))
+    text.preload([text.EMBED_RECIPE, text.RERANK_RECIPE])
+    warmed = len(downloads)
+    text.preload([text.EMBED_RECIPE, text.RERANK_RECIPE])
+    assert len(downloads) == warmed
     monkeypatch.setattr(text, '_load', lambda identity, revision: loaded[identity])
     items = [{'id': str(i), 'text': 'alpha ' * (i + 1) + 'beta'} for i in range(30)]
     parameters = {'texts': items, 'input_type': 'document', 'namespace': 'search',
-                  'query': 'alpha beta', 'top_n': 10}
+                  'query': 'alpha beta', 'top_n': len(items)}
     vectors = text.embeddings(parameters)
     scores = text.rerank(parameters)
     assert vectors['space'] == {'namespace': 'search', 'recipe': text.EMBED_RECIPE, 'dimensions': 32}
@@ -61,8 +67,9 @@ def test_native_mlx_loading_and_retrieval_artifacts(tmp_path, monkeypatch):
     for item, record in zip(items, vectors['records'], strict=True):
         assert record['metadata'] == {'text': item['text'], 'input_type': 'document'}
         assert abs(sum(x*x for x in record['vector']) - 1) < 1e-5
-    assert len(scores['results']) == 10
-    assert len({r['index'] for r in scores['results']}) == 10
+    assert len(scores['results']) == len(items)
+    assert len({r['index'] for r in scores['results']}) == len(items)
+    assert text.rerank({**parameters, 'top_n': 10})['results'] == scores['results'][:10]
     for result in scores['results']:
         assert result['id'] == items[result['index']]['id']
         assert math.isfinite(result['relevance_score'])
@@ -72,9 +79,9 @@ def test_native_mlx_loading_and_retrieval_artifacts(tmp_path, monkeypatch):
     single_scores = text.rerank(parameters)
     for a, b in zip(vectors['records'], single_vectors['records'], strict=True):
         assert sum(x*y for x, y in zip(a['vector'], b['vector'], strict=True)) > .99999
-    assert [r['index'] for r in scores['results']] == [r['index'] for r in single_scores['results']]
-    for a, b in zip(scores['results'], single_scores['results'], strict=True):
-        assert abs(a['relevance_score'] - b['relevance_score']) < 1e-5
+    reference = {r['id']: r['relevance_score'] for r in single_scores['results']}
+    for result in scores['results']:
+        assert abs(result['relevance_score'] - reference[result['id']]) < 1e-5
     monkeypatch.setattr(text, 'INFERENCE_BATCH_SIZE', 4)
     monkeypatch.setattr(text, 'INFERENCE_BATCH_TOKENS', 1)
     assert text.rerank(parameters) == single_scores

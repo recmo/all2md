@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from functools import cache
 
 EMBED_MODEL = "zeroentropy/zembed-1-embedding"
 EMBED_REVISION = "cf13c81f3274394053d166740294f7eea4586f7a"
@@ -35,6 +36,7 @@ def records(value):
     return value
 
 
+@cache
 def _load(model_id, revision, *, precision="bf16"):
     import mlx.core as mx
     from huggingface_hub import snapshot_download
@@ -44,7 +46,7 @@ def _load(model_id, revision, *, precision="bf16"):
         raise RuntimeError("text inference requires Apple Silicon with Metal")
     tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision, trust_remote_code=False)
     path = snapshot_download(model_id, revision=revision,
-                             allow_patterns=["*.json", "*.safetensors", "*.txt", "*.jinja", "*.model"])
+                             allow_patterns=["*.json", "model*.safetensors", "*.txt", "*.jinja", "*.model"])
     model, _ = load(path, tokenizer_config={"trust_remote_code": False})
     if not model.args.tie_word_embeddings:
         raise ValueError("pinned retrieval models require tied readout weights")
@@ -52,6 +54,15 @@ def _load(model_id, revision, *, precision="bf16"):
     model.eval()
     mx.eval(model.parameters())
     return tokenizer, model
+
+
+def preload(selected):
+    for recipe, model, revision in (
+        (EMBED_RECIPE, EMBED_MODEL, EMBED_REVISION),
+        (RERANK_RECIPE, RERANK_MODEL, RERANK_REVISION),
+    ):
+        if recipe in selected:
+            _load(model, revision)
 
 
 def _batches(tokenizer, formatted):

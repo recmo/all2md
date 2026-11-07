@@ -80,7 +80,7 @@ private final class NotchPanel: NSPanel {
 private extension AppModel.State {
     var showsHUD: Bool {
         switch self {
-        case .countdown, .recording, .finalizing: true
+        case .recording, .finalizing: true
         default: false
         }
     }
@@ -232,8 +232,6 @@ private struct RecordingHUD: View {
 
     @ViewBuilder private var statusMark: some View {
         switch model.state {
-        case .countdown:
-            Image(systemName: "mic.fill").foregroundStyle(.orange)
         case .recording:
             Circle().fill(.red).frame(width: 8, height: 8)
         case .finalizing:
@@ -244,42 +242,18 @@ private struct RecordingHUD: View {
     }
 
     @ViewBuilder private var statusDetail: some View {
-        switch model.state {
-        case let .countdown(_, remaining):
-            Text("in \(remaining)s")
-                .font(.system(size: 11, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-        case .recording:
-            if let startedAt = capture.startedAt {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    Text(startedAt, style: .timer)
-                        .font(.system(size: 11, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
+        if case .recording = model.state, let startedAt = capture.startedAt {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                Text(startedAt, style: .timer)
+                    .font(.system(size: 11, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
-        default:
-            EmptyView()
         }
     }
 
     @ViewBuilder private var actionButtons: some View {
-        switch model.state {
-        case .countdown:
-            Button(action: model.skip) {
-                Image(systemName: "xmark").frame(width: 18, height: 18)
-            }
-            .buttonStyle(.plain)
-            .help("Skip")
-            Button(action: model.startNow) {
-                Image(systemName: "record.circle.fill")
-                    .foregroundStyle(.red)
-                    .frame(width: 18, height: 18)
-            }
-            .buttonStyle(.plain)
-            .help("Start recording")
-        case .recording:
+        if case .recording = model.state {
             Button(action: model.stopRecording) {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 9, weight: .bold))
@@ -288,14 +262,12 @@ private struct RecordingHUD: View {
             }
             .buttonStyle(.plain)
             .help("Stop recording")
-        default:
-            EmptyView()
         }
     }
 
     private var applicationName: String {
         switch model.state {
-        case let .countdown(client, _), let .recording(client):
+        case let .recording(client):
             client.applicationName
         case .finalizing:
             "Preparing recording…"
@@ -304,10 +276,5 @@ private struct RecordingHUD: View {
         }
     }
 
-    private var visible: Bool {
-        switch model.state {
-        case .countdown, .recording, .finalizing: true
-        default: false
-        }
-    }
+    private var visible: Bool { model.state.showsHUD }
 }

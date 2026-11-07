@@ -61,7 +61,7 @@ def main():
                                                  add_special_tokens=False)[:tokens])
 
     # Exercise the production formatting, pooling and scoring, while keeping each
-    # model resident. The queued worker currently reloads it for every job.
+    # model resident, as the persistent worker does across jobs.
     with patch.object(text, "_load", return_value=(tokenizer, model)):
         for tokens in ([0] + args.tokens if embedding else args.tokens):
             for count in ([1] if tokens == 0 else args.candidates):
@@ -85,9 +85,8 @@ def main():
                         tokenize=False, add_generation_prompt=True)
                     assert result["results"][0]["id"] == "0", "relevant passage lost first place"
                 peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                memory = {}
                 import mlx.core as mx
-                memory["mlx_peak_allocated_gib"] = mx.get_peak_memory() / 1024**3
+                peak_allocated = mx.get_peak_memory() / 1024**3
                 comparison = {}
                 if args.compare_single:
                     with patch.object(text, "INFERENCE_BATCH_SIZE", 1):
@@ -114,7 +113,7 @@ def main():
                     "passages_per_second": count / statistics.median(times[1:]),
                     "peak_rss_gib": peak_rss / (1024**3 if sys.platform == "darwin" else 1024**2),
                     **comparison,
-                    **memory,
+                    "mlx_peak_allocated_gib": peak_allocated,
                 }), flush=True)
 
 

@@ -188,14 +188,24 @@ mod tests {
     #[tokio::test]
     async fn retrieval_workers_index_search_restart_and_fence_changed_chunks() {
         let (dir, fixture) = crate::store::artifacts::tests::fixture();
+        drop(fixture);
+        let fixture = Store::open(dir.path()).unwrap();
         fixture
             .apply_edits(&ApplyEditsRequest {
                 summary: "Add searchable body".into(),
-                edits: vec![crate::EditOperation::Append {
-                    path: "recording.md".into(),
-                    anchor: None,
-                    content: "Recording content to search.\n\n## Details\n\nAdditional recording details.\n".into(),
-                }],
+                edits: vec![
+                    crate::EditOperation::Append {
+                        path: "recording.md".into(),
+                        anchor: None,
+                        content: "Recording content to search.\n\n## Details\n\nAdditional recording details.\n".into(),
+                    },
+                    // Single-chunk jobs exercise partial indexing and foreground priority.
+                    crate::EditOperation::Append {
+                        path: "config.yaml".into(),
+                        anchor: None,
+                        content: "provider:\n  batch_size: 1\n".into(),
+                    },
+                ],
                 expected_commit: None,
                 moves: vec![],
             })
@@ -211,31 +221,6 @@ mod tests {
             })
             .unwrap();
         drop(fixture);
-        // Exercise partial indexing with single-chunk document jobs.
-        let config = dir.path().join("config.yaml");
-        let contents = std::fs::read_to_string(&config).unwrap();
-        let mut contents = crate::Config::from_yaml(&contents).unwrap();
-        contents.provider.batch_size = Some(1);
-        std::fs::write(&config, serde_yaml::to_string(&contents).unwrap()).unwrap();
-        for args in [
-            vec!["add", "config.yaml"],
-            vec![
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-qm",
-                "Set test batch size",
-            ],
-        ] {
-            assert!(
-                std::process::Command::new("git")
-                    .current_dir(dir.path())
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
         let store = Store::open(dir.path()).unwrap();
         let app = application(AppState {
             store: store.clone(),

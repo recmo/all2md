@@ -847,13 +847,7 @@ impl Store {
                     sidecar_path,
                 } => {
                     let mut vectors = Vec::new();
-                    let batch_size = context
-                        .snapshot
-                        .config
-                        .provider
-                        .batch_size
-                        .unwrap_or(4)
-                        .max(1);
+                    let batch_size = context.snapshot.config.provider.batch_size.unwrap_or(4);
                     let mut pending = false;
                     for batch in chunks.chunks(batch_size) {
                         let input: Vec<String> = batch

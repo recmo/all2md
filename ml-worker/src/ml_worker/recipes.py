@@ -5,8 +5,6 @@ import json
 import os
 import re
 import shutil
-from pathlib import Path
-import subprocess
 
 from . import audio, text
 from .client import digest, local_path
@@ -73,7 +71,8 @@ def _speech(assignment, root, source, inputs, outputs):
     if not moss.exists() and cached.is_file():
         shutil.copyfile(cached, moss)
     try:
-        subprocess.run(["speech2md", str(source), "--force"], check=True, stdin=subprocess.DEVNULL)
+        from speech2md.pipeline import transcribe
+        transcribe(source, force=True)
     finally:
         if moss.is_file():
             temporary = cached.with_suffix(".part")
