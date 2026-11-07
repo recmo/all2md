@@ -251,7 +251,6 @@ final class AppModel: ObservableObject {
     private func beginRecording(_ client: AudioClient, method: TriggerMethod = .audioProcess) {
         guard startupReport != nil else { return }
         guard case .idle = state else { return }
-        stopTask?.cancel(); stopTask = nil
         recordingMethod = method
         state = .finalizing
         captureFailure = nil

@@ -242,24 +242,18 @@ private struct RecordingHUD: View {
     }
 
     @ViewBuilder private var statusDetail: some View {
-        switch model.state {
-        case .recording:
-            if let startedAt = capture.startedAt {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    Text(startedAt, style: .timer)
-                        .font(.system(size: 11, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
+        if case .recording = model.state, let startedAt = capture.startedAt {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                Text(startedAt, style: .timer)
+                    .font(.system(size: 11, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
-        default:
-            EmptyView()
         }
     }
 
     @ViewBuilder private var actionButtons: some View {
-        switch model.state {
-        case .recording:
+        if case .recording = model.state {
             Button(action: model.stopRecording) {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 9, weight: .bold))
@@ -268,8 +262,6 @@ private struct RecordingHUD: View {
             }
             .buttonStyle(.plain)
             .help("Stop recording")
-        default:
-            EmptyView()
         }
     }
 
@@ -284,10 +276,5 @@ private struct RecordingHUD: View {
         }
     }
 
-    private var visible: Bool {
-        switch model.state {
-        case .recording, .finalizing: true
-        default: false
-        }
-    }
+    private var visible: Bool { model.state.showsHUD }
 }
