@@ -28,10 +28,15 @@ targets:
           helper_dir="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
           mkdir -p "$helper_dir"
           cp "$BUILT_PRODUCTS_DIR/MeetingCaptureWorker" "$helper_dir/MeetingCaptureWorker"
+          agent_dir="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents"
+          mkdir -p "$agent_dir"
+          cp "$SRCROOT/ventures.wicked.MeetingCapture.keep-running.plist" "$agent_dir/"
         inputFiles:
           - $(BUILT_PRODUCTS_DIR)/MeetingCaptureWorker
+          - $(SRCROOT)/ventures.wicked.MeetingCapture.keep-running.plist
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/MeetingCaptureWorker
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/ventures.wicked.MeetingCapture.keep-running.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ventures.wicked.MeetingCapture

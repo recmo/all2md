@@ -14,6 +14,9 @@ enum MeetingCaptureWorker {
             let arguments = Array(CommandLine.arguments.dropFirst())
             guard let command = arguments.first else { throw WorkerMainError.invalidArguments }
             switch command {
+            case "keep-running":
+                guard arguments.count == 1 else { throw WorkerMainError.invalidArguments }
+                try keepRunning()
             case "check-permissions":
                 try runRequest(URL.self, arguments: arguments, operation: WorkerOperations.checkPermissions)
             case "check-access":
@@ -35,6 +38,23 @@ enum MeetingCaptureWorker {
             FileHandle.standardError.write(Data("MeetingCaptureWorker: \(error.localizedDescription)\n".utf8))
             exit(EXIT_FAILURE)
         }
+    }
+
+    private static func keepRunning() throws {
+        var path = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+        guard proc_pidpath(getpid(), &path, UInt32(PROC_PIDPATHINFO_MAXSIZE)) > 0 else {
+            throw WorkerMainError.invalidArguments
+        }
+        let app = URL(filePath: String(cString: path))
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        // LaunchServices reuses a manually opened instance. Wait for that app
+        // to exit so launchd can restart it, including after a clean exit.
+        let launcher = Process()
+        launcher.executableURL = URL(filePath: "/usr/bin/open")
+        launcher.arguments = ["-g", "-W", app.path]
+        try launcher.run()
+        launcher.waitUntilExit()
+        exit(launcher.terminationStatus)
     }
 
     private static func runRequest<Request: Decodable, Value: Codable>(

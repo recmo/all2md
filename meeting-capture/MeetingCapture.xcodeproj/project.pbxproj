@@ -305,16 +305,18 @@
 			);
 			inputPaths = (
 				"$(BUILT_PRODUCTS_DIR)/MeetingCaptureWorker",
+				"$(SRCROOT)/ventures.wicked.MeetingCapture.keep-running.plist",
 			);
 			name = "Embed background worker";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/MeetingCaptureWorker",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/ventures.wicked.MeetingCapture.keep-running.plist",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "helper_dir=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nmkdir -p \"$helper_dir\"\ncp \"$BUILT_PRODUCTS_DIR/MeetingCaptureWorker\" \"$helper_dir/MeetingCaptureWorker\"\n";
+			shellScript = "helper_dir=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nmkdir -p \"$helper_dir\"\ncp \"$BUILT_PRODUCTS_DIR/MeetingCaptureWorker\" \"$helper_dir/MeetingCaptureWorker\"\nagent_dir=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents\"\nmkdir -p \"$agent_dir\"\ncp \"$SRCROOT/ventures.wicked.MeetingCapture.keep-running.plist\" \"$agent_dir/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

@@ -11,9 +11,24 @@ Records are written to `~/Documents/Meetings/YYYY/MM/`. The canonical archive
 is one audio-only Matroska (`.mka`) file with independently selectable Opus
 streams; a versioned JSON manifest carries capture provenance for `speech2md`.
 
+On first launch, the app registers a bundled launch agent using Apple's
+[SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice).
+It starts at login and launchd restarts it after a crash or exit, with a
+10-second throttle to avoid rapid restart loops. The agent opens the app through
+LaunchServices and waits for it to exit, reusing any manually opened instance.
+Monitoring starts from the application launch delegate without waiting for the
+menu to appear. Registration errors and required Login Items approval appear in
+the menu.
+
+Turn off **Start at login and keep running** to disable automatic startup and
+restart while leaving the current app open. **Disable and Quit** unregisters the
+agent before exiting. These choices, including disabling the agent in System
+Settings, survive manual launches and upgrades. Enable the menu toggle to resume
+automatic startup and restart. Logging out stops the app until the next login.
+
 ## Build, test, and install locally
 
-Quit Meeting Capture, then run this one command from the repository root:
+Choose **Disable and Quit**, then run this command from the repository root:
 
 ```sh
 bash meeting-capture/install-local.sh
@@ -25,6 +40,8 @@ requirement. Only after those checks pass does it replace
 `~/Applications/MeetingCapture.app` and reopen it. It creates no backups and
 refuses to replace a running app. The app also refuses Quit while recording or
 starting/stopping capture. The `result` link retains the Nix runtime dependencies.
+After installation, enable **Start at login and keep running** again if you
+disabled it to install the update.
 
 Signing follows
 [`recmo/nix/home/remco/darwin.nix`](https://github.com/recmo/nix/blob/main/home/remco/darwin.nix):
@@ -99,7 +116,11 @@ action. macOS may require quitting and reopening the installed app after a grant
 Permission rechecks cannot run during capture or capture startup. Optional
 Accessibility metadata does not gate recording or prompt automatically.
 A process capture failure stops recording visibly rather than silently dropping
-that process. A quiet system can produce a complete microphone-only archive.
+that process. Transient capture errors show their details and return to monitoring
+after 10 seconds; an active meeting can then start a new recording. Failure does
+not suppress the meeting's microphone session as an explicit Stop does. Recording
+check failures still require fixing access and choosing Retry. A quiet system can
+produce a complete microphone-only archive.
 The startup check exercises default devices; it cannot
 guarantee that permissions or a meeting application's devices will remain usable.
 
@@ -216,6 +237,16 @@ and two start/stop cycles:
 MEETING_CAPTURE_TEST_PROCESS_TAP=1 nix develop .#meeting-capture --command \
   bash meeting-capture/test-local.sh
 ```
+
+For lifecycle acceptance, enable **Start at login and keep running**, approve it
+in Login Items if requested, and log out and back in. Confirm monitoring starts
+without opening the menu. Kill the GUI app PID and confirm one menu item returns.
+Repeat with a manually opened instance. Disable the toggle and
+confirm a killed app stays stopped; reopen it and confirm the toggle stays off.
+Verify **Disable and Quit** exits without relaunching and remains disabled after
+login. An ordinary capture failure should retain its unfinished files and resume
+monitoring after the retry delay; an explicit Stop should suppress the current
+microphone session.
 
 ## Milestone 1 acceptance
 
