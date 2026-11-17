@@ -164,8 +164,12 @@ for manual salvage rather than guessed into the new format.
   with bounded silence buffers, and duplicate/overlapping frames are trimmed.
   Per-track start times align process audio to the session start. The file closes
   after callbacks stop and the writer queue drains, before finalization reads it.
-  Tap callbacks only copy into 32 preallocated buffers (up to 8192 frames each);
-  a separate queue writes them to disk. A full queue fails capture visibly.
+  Tap callbacks pack audio into preallocated 4096-frame blocks, buffering up to
+  30 seconds per process (about 11 MiB at 48 kHz stereo Float32); a separate queue
+  writes them to disk. If the queue fills, incoming audio is dropped until space
+  returns. Recording continues, timestamps preserve the gap as silence, and the
+  manifest records a warning. Gaps and overlaps start new blocks, so frequent
+  discontinuities can reduce the buffered duration.
   Process exit releases its tap without failing the session; disk errors remain fatal.
   Capture failures stop
   recording visibly and produce an incomplete archive, even if audio files exist.

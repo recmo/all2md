@@ -15,9 +15,12 @@ final class SystemAudioRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
     private var sampleAt: Date?
+    private var warning: String?
+    var captureWarning: String? { lock.withLock { warning } }
     var firstSampleAt: Date? { lock.withLock { sampleAt } }
     var onLevel: (@Sendable (Float) -> Void)?
     var onError: (@Sendable (Error) -> Void)?
+    var onWarning: (@Sendable (String) -> Void)?
 
     func start(processObject: AudioObjectID, to url: URL, startTime: CMTime) async throws {
         guard processObject != kAudioObjectUnknown else { throw CaptureError.triggeringApplicationUnavailable }
@@ -89,8 +92,13 @@ final class SystemAudioRecorder: @unchecked Sendable {
                 self.onLevel?(0.35)
             }
             writer.onError = { [weak self] in self?.reportFailure($0) }
+            writer.onWarning = { [weak self] message in
+                guard let self else { return }
+                self.lock.withLock { self.warning = message }
+                self.onWarning?(message)
+            }
             self.writer = writer
-            lock.withLock { deliveryError = nil; sampleAt = nil }
+            lock.withLock { deliveryError = nil; sampleAt = nil; warning = nil }
             try check(AudioObjectAddPropertyListenerBlock(tapID, &address, queue, listener), "Watch tap format")
             formatListener = listener
             try check(AudioDeviceCreateIOProcIDWithBlock(&ioProcID, deviceID, queue) {
@@ -181,6 +189,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
 // only this separate queue may allocate PCMFile buffers or touch the filesystem.
 final class TapPCMWriter: @unchecked Sendable {
     private let file: PCMFile
+    private let format: AVAudioFormat
     private final class Slot {
         let buffer: AVAudioPCMBuffer
         var timestamp: UInt64 = 0
@@ -195,14 +204,21 @@ final class TapPCMWriter: @unchecked Sendable {
     private let source: DispatchSourceUserDataOr
     private let finished = DispatchSemaphore(value: 0)
     private var failed = false // Writer queue only.
+    private var overflowReported = false // Writer queue only.
+    private var pendingFrames = 0 // Producer only, unpublished until a slot fills.
     var onSample: (@Sendable () -> Void)?
     var onError: (@Sendable (Error) -> Void)?
+    var onWarning: (@Sendable (String) -> Void)?
 
     init(format: AVAudioFormat, url: URL, startTime: Double) throws {
+        self.format = format
         file = PCMFile(url: url, startTime: startTime)
-        // Bounded storage: 32 callbacks of up to 8192 frames each.
-        slots = try (0..<32).map { _ in
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192) else {
+        // Pack small HAL callbacks into blocks instead of spending a whole slot
+        // on each callback. Thirty seconds of stereo Float32 at 48 kHz is 11 MiB.
+        let blockFrames = 4096
+        let slotCount = Int(ceil(format.sampleRate * 30 / Double(blockFrames))) + 1
+        slots = try (0..<slotCount).map { _ in
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(blockFrames)) else {
                 throw CaptureError.writerFailure("Could not allocate process audio queue")
             }
             return Slot(buffer)
@@ -211,7 +227,10 @@ final class TapPCMWriter: @unchecked Sendable {
         source.setEventHandler { [weak self] in
             guard let self else { return }
             let events = self.source.data
-            if events & 2 != 0 { self.fail("Process audio queue overflow; audio could not be saved fast enough") }
+            if events & 2 != 0, !self.overflowReported {
+                self.overflowReported = true
+                self.onWarning?("Process audio queue filled; some audio was dropped. Recording continued; missing audio is silence.")
+            }
             if events & 4 != 0 { self.fail("Invalid process audio buffer or timestamp") }
             self.drain()
             if events & 8 != 0 {
@@ -227,26 +246,56 @@ final class TapPCMWriter: @unchecked Sendable {
         let incoming = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         guard incoming.contains(where: { $0.mDataByteSize > 0 }) else { return }
         guard timestamp.mFlags.contains(.hostTimeValid) else { source.or(data: 4); return }
-        let write = writeIndex.load(ordering: .relaxed)
-        guard write - readIndex.load(ordering: .acquiring) < slots.count else { source.or(data: 2); return }
-        let slot = slots[write % slots.count]
-        let buffer = slot.buffer
-        let bytesPerFrame = Int(buffer.format.streamDescription.pointee.mBytesPerFrame)
-        let destination = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
         let bytes = Int(incoming[0].mDataByteSize)
-        guard bytesPerFrame > 0, bytes % bytesPerFrame == 0,
-              bytes / bytesPerFrame <= Int(buffer.frameCapacity), incoming.count == destination.count else {
+        let bufferCount = format.isInterleaved ? 1 : Int(format.channelCount)
+        guard bytesPerFrame > 0, bytes % bytesPerFrame == 0, incoming.count == bufferCount else {
             source.or(data: 4); return
         }
         for channel in incoming.indices {
-            guard incoming[channel].mDataByteSize == bytes,
-                  let from = incoming[channel].mData, let to = destination[channel].mData else {
+            guard incoming[channel].mDataByteSize == bytes, incoming[channel].mData != nil else {
                 source.or(data: 4); return
             }
-            to.copyMemory(from: from, byteCount: bytes)
         }
-        buffer.frameLength = AVAudioFrameCount(bytes / bytesPerFrame)
-        slot.timestamp = timestamp.mHostTime
+        let frames = bytes / bytesPerFrame
+        let time = AVAudioTime.seconds(forHostTime: timestamp.mHostTime)
+        if pendingFrames > 0 {
+            let slot = slots[writeIndex.load(ordering: .relaxed) % slots.count]
+            let expected = AVAudioTime.seconds(forHostTime: slot.timestamp) + Double(pendingFrames) / format.sampleRate
+            // Keep gaps and overlaps on their original clock positions.
+            if abs(time - expected) * format.sampleRate > 0.5 { publishPending() }
+        }
+        var offset = 0
+        while offset < frames {
+            let write = writeIndex.load(ordering: .relaxed)
+            guard write - readIndex.load(ordering: .acquiring) < slots.count else {
+                // Never block HAL or poison queued audio. Later timestamps let
+                // PCMFile fill the dropped interval with silence after recovery.
+                source.or(data: 2); return
+            }
+            let slot = slots[write % slots.count]
+            let buffer = slot.buffer
+            if pendingFrames == 0 {
+                slot.timestamp = timestamp.mHostTime + AVAudioTime.hostTime(forSeconds: Double(offset) / format.sampleRate)
+            }
+            let count = min(frames - offset, Int(buffer.frameCapacity) - pendingFrames)
+            let destination = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+            for channel in incoming.indices {
+                destination[channel].mData!.advanced(by: pendingFrames * bytesPerFrame).copyMemory(
+                    from: incoming[channel].mData!.advanced(by: offset * bytesPerFrame),
+                    byteCount: count * bytesPerFrame)
+            }
+            pendingFrames += count
+            offset += count
+            if pendingFrames == Int(buffer.frameCapacity) { publishPending() }
+        }
+    }
+
+    private func publishPending() {
+        guard pendingFrames > 0 else { return }
+        let write = writeIndex.load(ordering: .relaxed)
+        slots[write % slots.count].buffer.frameLength = AVAudioFrameCount(pendingFrames)
+        pendingFrames = 0
         writeIndex.store(write + 1, ordering: .releasing)
         source.or(data: 1)
     }
@@ -276,6 +325,7 @@ final class TapPCMWriter: @unchecked Sendable {
     func finish() {
         // Called only after HAL stops. A final event drains both pending audio
         // and failure flags before acknowledging close to the stopping thread.
+        publishPending()
         source.or(data: 8)
         finished.wait()
     }

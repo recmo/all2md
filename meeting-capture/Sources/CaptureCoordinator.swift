@@ -110,6 +110,7 @@ final class CaptureCoordinator: ObservableObject {
         // track. Exited processes release HAL resources but retain their files.
         for objectID in processRecorders.keys.filter({ !snapshot.all.contains($0) }) {
             if let previous = processRecorders.removeValue(forKey: objectID) {
+                defer { recordWarning(from: previous.recorder, trackID: previous.trackID) }
                 try await previous.recorder.stop(processExited: true)
             }
         }
@@ -117,6 +118,7 @@ final class CaptureCoordinator: ObservableObject {
             guard !stopping, !Task.isCancelled else { return }
             if processRecorders[process.objectID]?.processID == process.processID { continue }
             if let previous = processRecorders.removeValue(forKey: process.objectID) {
+                defer { recordWarning(from: previous.recorder, trackID: previous.trackID) }
                 try await previous.recorder.stop(processExited: true)
             }
             let id = UUID()
@@ -132,6 +134,12 @@ final class CaptureCoordinator: ObservableObject {
                 Task { @MainActor in
                     guard self?.session?.paths.manifest == identity else { return }
                     self?.processAudioLevel = level
+                }
+            }
+            recorder.onWarning = { [weak self, weak recorder] _ in
+                Task { @MainActor in
+                    guard let self, let recorder, self.session?.paths.manifest == identity else { return }
+                    self.recordWarning(from: recorder, trackID: id)
                 }
             }
             recorder.onError = { [weak self] error in
@@ -200,6 +208,16 @@ final class CaptureCoordinator: ObservableObject {
         return session.captureStartedAt.addingTimeInterval((hostTime - hostStart).seconds)
     }
 
+    private func recordWarning(from recorder: SystemAudioRecorder, trackID: UUID) {
+        guard let warning = recorder.captureWarning,
+              let process = session?.processTracks.first(where: { $0.id == trackID })?.process else { return }
+        let message = "\(process.title): \(warning)"
+        guard session?.warnings.contains(message) == false else { return }
+        session?.warnings.append(message)
+        do { try session?.save() }
+        catch { recordFailure("Could not save session: \(error.localizedDescription)") }
+    }
+
     private func recordFailure(_ message: String) {
         guard session != nil, session?.captureFailed == false else { return }
         session?.captureFailed = true
@@ -222,6 +240,7 @@ final class CaptureCoordinator: ObservableObject {
         processCaptureTask = nil
         let liveProcesses = try? processMonitor.processObjectIDs()
         for (objectID, entry) in processRecorders {
+            defer { recordWarning(from: entry.recorder, trackID: entry.trackID) }
             do { try await entry.recorder.stop(processExited: liveProcesses?.contains(objectID) == false) }
             catch { recordFailure(error.localizedDescription) }
         }
