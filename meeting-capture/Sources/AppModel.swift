@@ -75,12 +75,15 @@ final class AppModel: ObservableObject {
         startupReport = nil
         state = .checkingPermissions
         permissionMessage = "Checking microphone and system-audio recording…"
+        CaptureDiagnostics.log("check.start")
         permissionCheckTask = Task {
             do {
                 startupReport = try await checkCapture()
+                CaptureDiagnostics.log("check.finished systemAudioObserved=\(startupReport?.systemAudioObserved == true)")
                 systemAudioAccess = true
                 startMonitoring()
             } catch {
+                CaptureDiagnostics.error("check.failed \(CaptureError.details(error))")
                 if case CaptureError.systemAudioCaptureFailure = error { systemAudioAccess = false }
                 permissionMessage = error is CaptureError ? error.localizedDescription : CaptureError.details(error)
                 state = .permissionRequired
@@ -136,6 +139,7 @@ final class AppModel: ObservableObject {
     }
 
     private func retryAfterFailure(_ message: String) {
+        CaptureDiagnostics.error("capture.retry delaySeconds=10 error=\(message)")
         state = .error(message)
         retryTask?.cancel()
         retryTask = Task { [weak self] in

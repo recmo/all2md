@@ -15,6 +15,8 @@ final class SystemAudioRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
     private var sampleAt: Date?
+    // Read on the control thread, after callbacks are stopped or during capture.
+    var diagnosticSummary: String { writer?.diagnosticSummary ?? "writer=none" }
     private var warning: String?
     var captureWarning: String? { lock.withLock { warning } }
     var firstSampleAt: Date? { lock.withLock { sampleAt } }
@@ -23,6 +25,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
     var onWarning: (@Sendable (String) -> Void)?
 
     func start(processObject: AudioObjectID, to url: URL, startTime: CMTime) async throws {
+        CaptureDiagnostics.log("process.start object=\(processObject) track=\(url.lastPathComponent)")
         guard processObject != kAudioObjectUnknown else { throw CaptureError.triggeringApplicationUnavailable }
         try startCapture(description: CATapDescription(stereoMixdownOfProcesses: [processObject]),
                          to: url, startTime: startTime)
@@ -45,6 +48,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
     }
 
     private func startCapture(description: CATapDescription, to url: URL, startTime: CMTime) throws {
+        CaptureDiagnostics.log("tap.start track=\(url.lastPathComponent) \(CaptureDiagnostics.devices())")
         description.name = "Meeting Capture audio"
         description.isPrivate = true
         description.muteBehavior = .unmuted
@@ -61,6 +65,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
                   format.commonFormat != .otherFormat else {
                 throw CaptureError.writerFailure("Invalid audio process tap format")
             }
+            CaptureDiagnostics.log("tap.format tap=\(tapID) format=\(format)")
             let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 guard let self else { return }
                 // A new layout needs a new segment. Fail visibly rather than
@@ -70,6 +75,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
                 var currentAddress = Self.formatAddress()
                 let status = AudioObjectGetPropertyData(self.tapID, &currentAddress, 0, nil,
                                                         &currentSize, &current)
+                CaptureDiagnostics.log("tap.format.changed tap=\(self.tapID) OSStatus=\(status) rate=\(current.mSampleRate) channels=\(current.mChannelsPerFrame) bytesPerFrame=\(current.mBytesPerFrame) flags=\(current.mFormatFlags)")
                 if status != noErr || AVAudioFormat(streamDescription: &current)?.isEqual(format) != true {
                     self.reportFailure(CaptureError.processTapFailure("Audio process tap format changed; restart recording."))
                 }
@@ -124,9 +130,13 @@ final class SystemAudioRecorder: @unchecked Sendable {
     }
 
     private func stopCapture() throws {
+        if writer != nil || tapID != kAudioObjectUnknown {
+            CaptureDiagnostics.log("tap.stop tap=\(tapID) device=\(deviceID) \(diagnosticSummary)")
+        }
         // Stop callbacks before destroying their device or closing their file.
         var failure: Error?
         func cleanup(_ status: OSStatus, _ operation: String) {
+            CaptureDiagnostics.log("tap.cleanup operation=\(operation) tap=\(tapID) device=\(deviceID) OSStatus=\(status)")
             if status != noErr, failure == nil {
                 failure = CaptureError.processTapFailure("\(operation) (OSStatus \(status))")
             }
@@ -153,6 +163,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
         }
         // The callback has stopped; drain copied samples before closing the file.
         writer?.finish()
+        if let writer { CaptureDiagnostics.log("tap.finished \(writer.diagnosticSummary)") }
         writer = nil
         lock.withLock {
             failure = deliveryError ?? failure
@@ -169,7 +180,10 @@ final class SystemAudioRecorder: @unchecked Sendable {
             deliveryError = error
             return true
         }
-        if first { onError?(error) }
+        if first {
+            CaptureDiagnostics.error("tap.failed \(CaptureError.details(error))")
+            onError?(error)
+        }
     }
 
     private static func formatAddress() -> AudioObjectPropertyAddress {
@@ -179,6 +193,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
     }
 
     private func check(_ status: OSStatus, _ operation: String) throws {
+        CaptureDiagnostics.log("tap.operation operation=\(operation) tap=\(tapID) device=\(deviceID) OSStatus=\(status)")
         guard status == noErr else {
             throw CaptureError.systemAudioCaptureFailure("\(operation) failed (OSStatus \(status))")
         }
@@ -188,6 +203,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
 // HAL invokes IO blocks synchronously. Copy into preallocated slots and return;
 // only this separate queue may allocate PCMFile buffers or touch the filesystem.
 final class TapPCMWriter: @unchecked Sendable {
+    private let diagnosticID: String
     private let file: PCMFile
     private let format: AVAudioFormat
     private final class Slot {
@@ -206,11 +222,22 @@ final class TapPCMWriter: @unchecked Sendable {
     private var failed = false // Writer queue only.
     private var overflowReported = false // Writer queue only.
     private var pendingFrames = 0 // Producer only, unpublished until a slot fills.
+    private let statistics = AudioCallbackStatistics()
+    private let droppedFrames = Atomic<UInt64>(0)
+    private let writtenFrames = Atomic<UInt64>(0)
+    private let peakQueuedBlocks = Atomic<Int>(0)
+    private let lastWriteNanoseconds = Atomic<UInt64>(0)
+    var diagnosticSummary: String {
+        let write = writeIndex.load(ordering: .acquiring)
+        let queued = max(0, write - readIndex.load(ordering: .acquiring))
+        return "file=\(diagnosticID) \(statistics.summary) queuedBlocks=\(queued)/\(slots.count) peakQueuedBlocks=\(peakQueuedBlocks.load(ordering: .relaxed)) droppedFrames=\(droppedFrames.load(ordering: .relaxed)) writtenInputFrames=\(writtenFrames.load(ordering: .relaxed)) lastWriteMs=\(Double(lastWriteNanoseconds.load(ordering: .relaxed)) / 1e6)"
+    }
     var onSample: (@Sendable () -> Void)?
     var onError: (@Sendable (Error) -> Void)?
     var onWarning: (@Sendable (String) -> Void)?
 
     init(format: AVAudioFormat, url: URL, startTime: Double) throws {
+        diagnosticID = url.lastPathComponent
         self.format = format
         file = PCMFile(url: url, startTime: startTime)
         // Pack small HAL callbacks into blocks instead of spending a whole slot
@@ -229,6 +256,7 @@ final class TapPCMWriter: @unchecked Sendable {
             let events = self.source.data
             if events & 2 != 0, !self.overflowReported {
                 self.overflowReported = true
+                CaptureDiagnostics.log("tap.queue.overflow \(self.diagnosticSummary)")
                 self.onWarning?("Process audio queue filled; some audio was dropped. Recording continued; missing audio is silence.")
             }
             if events & 4 != 0 { self.fail("Invalid process audio buffer or timestamp") }
@@ -258,6 +286,7 @@ final class TapPCMWriter: @unchecked Sendable {
             }
         }
         let frames = bytes / bytesPerFrame
+        statistics.record(frames: UInt32(frames), hostTime: timestamp.mHostTime)
         let time = AVAudioTime.seconds(forHostTime: timestamp.mHostTime)
         if pendingFrames > 0 {
             let slot = slots[writeIndex.load(ordering: .relaxed) % slots.count]
@@ -271,6 +300,7 @@ final class TapPCMWriter: @unchecked Sendable {
             guard write - readIndex.load(ordering: .acquiring) < slots.count else {
                 // Never block HAL or poison queued audio. Later timestamps let
                 // PCMFile fill the dropped interval with silence after recovery.
+                droppedFrames.wrappingAdd(UInt64(frames - offset), ordering: .relaxed)
                 source.or(data: 2); return
             }
             let slot = slots[write % slots.count]
@@ -296,6 +326,8 @@ final class TapPCMWriter: @unchecked Sendable {
         let write = writeIndex.load(ordering: .relaxed)
         slots[write % slots.count].buffer.frameLength = AVAudioFrameCount(pendingFrames)
         pendingFrames = 0
+        let queued = write + 1 - readIndex.load(ordering: .acquiring)
+        if queued > peakQueuedBlocks.load(ordering: .relaxed) { peakQueuedBlocks.store(queued, ordering: .relaxed) }
         writeIndex.store(write + 1, ordering: .releasing)
         source.or(data: 1)
     }
@@ -307,7 +339,10 @@ final class TapPCMWriter: @unchecked Sendable {
             let slot = slots[read % slots.count]
             if !failed {
                 do {
+                    let started = DispatchTime.now().uptimeNanoseconds
                     try file.write(slot.buffer, at: AVAudioTime.seconds(forHostTime: slot.timestamp))
+                    lastWriteNanoseconds.store(DispatchTime.now().uptimeNanoseconds - started, ordering: .relaxed)
+                    writtenFrames.wrappingAdd(UInt64(slot.buffer.frameLength), ordering: .relaxed)
                     onSample?()
                 } catch { fail("Process tap PCM write: \(CaptureError.details(error))") }
             }
@@ -319,6 +354,7 @@ final class TapPCMWriter: @unchecked Sendable {
     private func fail(_ message: String) {
         guard !failed else { return }
         failed = true
+        CaptureDiagnostics.error("tap.writer.failed file=\(diagnosticID) \(message)")
         onError?(CaptureError.writerFailure(message))
     }
 

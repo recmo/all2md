@@ -27,6 +27,7 @@ final class CaptureAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard NSClassFromString("XCTestCase") == nil else { return }
+        CaptureDiagnostics.log("app.start pid=\(ProcessInfo.processInfo.processIdentifier) version=\(Bundle.main.infoDictionary?["CFBundleVersion"] ?? "unknown") os=\(ProcessInfo.processInfo.operatingSystemVersionString)")
         model.keepRunning.start()
         model.start()
         HUDController.shared.attach(to: model)

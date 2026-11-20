@@ -3,9 +3,15 @@ import AudioToolbox
 import CoreAudio
 import CoreMedia
 import Foundation
+import Synchronization
 
 final class MicrophoneRecorder: @unchecked Sendable {
     private let engine = AVAudioEngine()
+    private let statistics = AudioCallbackStatistics()
+    private let lastWriteNanoseconds = Atomic<UInt64>(0)
+    var diagnosticSummary: String {
+        "running=\(engine.isRunning) format=\(format?.description ?? "none") \(statistics.summary) lastWriteMs=\(Double(lastWriteNanoseconds.load(ordering: .relaxed)) / 1e6)"
+    }
     private var file: PCMFile?
     private var currentSegmentURL: URL?
     private var currentSegmentStartedAt: Date?
@@ -54,6 +60,9 @@ final class MicrophoneRecorder: @unchecked Sendable {
     }
 
     private func startEngine(deviceID: AudioDeviceID?, to url: URL, startedAt: Date, startTime: CMTime) throws {
+        CaptureDiagnostics.log("microphone.start segment=\(url.lastPathComponent) selected={\(CaptureDiagnostics.device(deviceID ?? AudioDeviceID(kAudioObjectUnknown)))} \(CaptureDiagnostics.devices())")
+        statistics.reset()
+        lastWriteNanoseconds.store(0, ordering: .relaxed)
         let input = engine.inputNode
         if let deviceID {
             guard let audioUnit = input.audioUnit else {
@@ -77,6 +86,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw CaptureError.noMicrophone
         }
+        CaptureDiagnostics.log("microphone.format device=\(deviceID ?? 0) format=\(inputFormat)")
         let file = PCMFile(url: url, startTime: startTime.seconds)
         format = inputFormat
         self.file = file
@@ -91,7 +101,9 @@ final class MicrophoneRecorder: @unchecked Sendable {
         engine.prepare()
         do {
             try engine.start()
+            CaptureDiagnostics.log("microphone.started device=\(deviceID ?? 0) running=\(engine.isRunning)")
         } catch {
+            CaptureDiagnostics.error("microphone.start.failed \(CaptureError.details(error))")
             stopEngine() // Preserve any frames delivered before startup failed.
             throw error
         }
@@ -99,6 +111,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
 
     private func stopEngine() {
         guard engine.isRunning || file != nil else { return }
+        CaptureDiagnostics.log("microphone.stop device=\(deviceID ?? 0) \(diagnosticSummary)")
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
         let endedAt = CMClockGetTime(CMClockGetHostTimeClock())
@@ -118,6 +131,8 @@ final class MicrophoneRecorder: @unchecked Sendable {
     }
 
     private func consume(_ buffer: AVAudioPCMBuffer, time: AVAudioTime) {
+        statistics.record(frames: buffer.frameLength, hostTime: time.isHostTimeValid ? time.hostTime : 0)
+        let writeStarted = DispatchTime.now().uptimeNanoseconds
         onLevel?(Self.level(buffer))
         writeLock.lock()
         var failure: Error?
@@ -128,6 +143,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
             } catch { writeFailure = error; failure = error }
         }
         writeLock.unlock()
+        lastWriteNanoseconds.store(DispatchTime.now().uptimeNanoseconds - writeStarted, ordering: .relaxed)
         if let failure { onError?(failure) }
     }
 

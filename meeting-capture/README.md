@@ -134,6 +134,36 @@ from sharing speaker labels, cache entries, or review hints. Older archived v1/v
 manifests remain readable by `speech2md`; old interrupted journals are preserved
 for manual salvage rather than guessed into the new format.
 
+## Audio diagnostics
+
+Meeting Capture writes audio diagnostics to the macOS unified log under subsystem
+`ventures.wicked.MeetingCapture`, category `audio`. In Console, select the Mac,
+start streaming, and filter for that subsystem. To save the last hour:
+
+```sh
+/usr/bin/log show --last 1h --style compact \
+  --predicate 'subsystem == "ventures.wicked.MeetingCapture" AND category == "audio"' \
+  > ~/Desktop/MeetingCapture-audio.log
+```
+
+Logs include startup/check/retry events, input-process changes, selected/default
+microphone and output device IDs/UIDs, hardware sample rates and buffer sizes,
+microphone formats and configuration changes, process-track/tap/aggregate-device
+creation and teardown, OSStatus results, and recording/finalization failures.
+During recording, five-second health snapshots report microphone engine state
+and level, received callback/frame counts, time since the last callback, process
+queue occupancy and peak occupancy, dropped frames, processed input frames, and
+last write duration. Stop also records final counters after the process writer
+drains. Counters describe sample delivery, not whether a process is audibly
+producing sound; silence alone is not treated as failure.
+
+Audio callbacks only update atomic diagnostic counters. Log formatting and
+emission happen on control or writer queues. Logs include recording filenames,
+application/device identities, and error details, but no audio samples,
+transcripts, or Accessibility tree content. They use normal macOS log retention,
+so export soon after an incident. A failure inside Zoom can still require Zoom
+logs or an Audio System Trace; note the incident time to correlate the records.
+
 ## Current capture path
 
 - Core Audio process objects drive automatic detection. Browser helper

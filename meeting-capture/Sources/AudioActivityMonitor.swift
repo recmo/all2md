@@ -8,10 +8,14 @@ final class AudioActivityMonitor {
     var onClientsChanged: (([AudioClient]) -> Void)?
     private var timer: Timer?
     private var deviceListeners: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
+    private var lastClients: [AudioClient]?
+    private var lastPollError: String?
+    private var propertyErrors: [String: OSStatus] = [:]
     private let ownPID = ProcessInfo.processInfo.processIdentifier
 
     func start() {
         guard timer == nil else { return }
+        CaptureDiagnostics.log("monitor.start")
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
@@ -19,16 +23,34 @@ final class AudioActivityMonitor {
     }
 
     func stop() {
+        CaptureDiagnostics.log("monitor.stop")
         timer?.invalidate()
         timer = nil
         for (objectID, listener) in deviceListeners { removeDeviceListener(listener, from: objectID) }
         deviceListeners.removeAll()
+        lastClients = nil
+        propertyErrors.removeAll()
     }
 
     private func poll() {
-        guard let objectIDs = try? processObjectIDs() else { return }
+        let objectIDs: [AudioObjectID]
+        do {
+            objectIDs = try processObjectIDs()
+            if lastPollError != nil { CaptureDiagnostics.log("monitor.poll.recovered") }
+            lastPollError = nil
+        } catch {
+            let message = CaptureError.details(error)
+            if message != lastPollError { CaptureDiagnostics.error("monitor.poll.failed \(message)") }
+            lastPollError = message
+            return
+        }
         synchronizeDeviceListeners(for: objectIDs)
         let clients = runningClients(from: objectIDs, selector: kAudioProcessPropertyIsRunningInput)
+        if clients != lastClients {
+            let details = clients.map { "pid=\($0.processID) object=\($0.audioObjectID) app=\($0.applicationName) inputs=\($0.inputDeviceSummary)" }.joined(separator: "; ")
+            CaptureDiagnostics.log("monitor.inputs [\(details)]")
+            lastClients = clients
+        }
         onClientsChanged?(clients)
     }
 
@@ -69,7 +91,8 @@ final class AudioActivityMonitor {
             let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 Task { @MainActor in self?.poll() }
             }
-            if AudioObjectAddPropertyListenerBlock(objectID, &address, .main, listener) == noErr {
+            let status = AudioObjectAddPropertyListenerBlock(objectID, &address, .main, listener)
+            if propertyStatus(status, operation: "watch-input-devices", objectID: objectID) {
                 deviceListeners[objectID] = listener
             }
         }
@@ -77,7 +100,8 @@ final class AudioActivityMonitor {
 
     private func removeDeviceListener(_ listener: @escaping AudioObjectPropertyListenerBlock, from objectID: AudioObjectID) {
         var address = devicePropertyAddress()
-        AudioObjectRemovePropertyListenerBlock(objectID, &address, .main, listener)
+        _ = propertyStatus(AudioObjectRemovePropertyListenerBlock(objectID, &address, .main, listener),
+                           operation: "unwatch-input-devices", objectID: objectID)
     }
 
     private func devicePropertyAddress() -> AudioObjectPropertyAddress {
@@ -124,9 +148,11 @@ final class AudioActivityMonitor {
     private func inputDevices(processObjectID: AudioObjectID) -> [AudioInputDevice] {
         var address = devicePropertyAddress()
         var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(processObjectID, &address, 0, nil, &size) == noErr else { return [] }
+        let sizeStatus = AudioObjectGetPropertyDataSize(processObjectID, &address, 0, nil, &size)
+        guard propertyStatus(sizeStatus, operation: "input-device-count", objectID: processObjectID) else { return [] }
         var deviceIDs = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &size, &deviceIDs) == noErr else { return [] }
+        let status = AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &size, &deviceIDs)
+        guard propertyStatus(status, operation: "input-devices", objectID: processObjectID) else { return [] }
         return deviceIDs.compactMap(audioInputDevice)
     }
 
@@ -172,7 +198,17 @@ final class AudioActivityMonitor {
         return value.takeRetainedValue() as String
     }
 
-
+    // A vanished or unsupported process object must not flood the log at 2 Hz.
+    private func propertyStatus(_ status: OSStatus, operation: String, objectID: AudioObjectID) -> Bool {
+        let key = "\(operation) object=\(objectID)"
+        if status == noErr {
+            if propertyErrors.removeValue(forKey: key) != nil { CaptureDiagnostics.log("monitor.property.recovered \(key)") }
+            return true
+        }
+        if propertyErrors[key] != status { CaptureDiagnostics.error("monitor.property.failed \(key) OSStatus=\(status)") }
+        propertyErrors[key] = status
+        return false
+    }
 }
 
 enum ProcessApplicationResolver {
