@@ -47,12 +47,9 @@ final class KeepRunningService: ObservableObject {
     var isRegistered: Bool { status == .enabled || status == .requiresApproval }
 
     func start() {
-        refresh()
-        // Register once, so disabling the agent in System Settings survives
-        // subsequent manual launches and upgrades.
-        guard !UserDefaults.standard.bool(forKey: "keepRunningConfigured") else { return }
-        UserDefaults.standard.set(true, forKey: "keepRunningConfigured")
-        if !isRegistered { setEnabled(true) }
+        // Remember successful setup so System Settings disable survives relaunch.
+        if UserDefaults.standard.bool(forKey: "keepRunningConfigured") { refresh() }
+        else { setEnabled(true) }
     }
 
     func refresh() { status = service.status }

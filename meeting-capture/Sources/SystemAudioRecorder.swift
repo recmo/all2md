@@ -22,10 +22,8 @@ final class SystemAudioRecorder: @unchecked Sendable {
     var firstSampleAt: Date? { lock.withLock { sampleAt } }
     var onLevel: (@Sendable (Float) -> Void)?
     var onError: (@Sendable (Error) -> Void)?
-    var onWarning: (@Sendable (String) -> Void)?
 
     func start(processObject: AudioObjectID, to url: URL, startTime: CMTime) async throws {
-        CaptureDiagnostics.log("process.start object=\(processObject) track=\(url.lastPathComponent)")
         guard processObject != kAudioObjectUnknown else { throw CaptureError.triggeringApplicationUnavailable }
         try startCapture(description: CATapDescription(stereoMixdownOfProcesses: [processObject]),
                          to: url, startTime: startTime)
@@ -101,7 +99,6 @@ final class SystemAudioRecorder: @unchecked Sendable {
             writer.onWarning = { [weak self] message in
                 guard let self else { return }
                 self.lock.withLock { self.warning = message }
-                self.onWarning?(message)
             }
             self.writer = writer
             lock.withLock { deliveryError = nil; sampleAt = nil; warning = nil }
@@ -131,7 +128,7 @@ final class SystemAudioRecorder: @unchecked Sendable {
 
     private func stopCapture() throws {
         if writer != nil || tapID != kAudioObjectUnknown {
-            CaptureDiagnostics.log("tap.stop tap=\(tapID) device=\(deviceID) \(diagnosticSummary)")
+            CaptureDiagnostics.log("tap.stop tap=\(tapID) device=\(deviceID)")
         }
         // Stop callbacks before destroying their device or closing their file.
         var failure: Error?
@@ -286,7 +283,7 @@ final class TapPCMWriter: @unchecked Sendable {
             }
         }
         let frames = bytes / bytesPerFrame
-        statistics.record(frames: UInt32(frames), hostTime: timestamp.mHostTime)
+        statistics.record(frames: UInt32(frames))
         let time = AVAudioTime.seconds(forHostTime: timestamp.mHostTime)
         if pendingFrames > 0 {
             let slot = slots[writeIndex.load(ordering: .relaxed) % slots.count]

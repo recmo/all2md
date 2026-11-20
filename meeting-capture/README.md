@@ -18,7 +18,7 @@ It starts at login and launchd restarts it after a crash or exit, with a
 LaunchServices and waits for it to exit, reusing any manually opened instance.
 Monitoring starts from the application launch delegate without waiting for the
 menu to appear. Registration errors and required Login Items approval appear in
-the menu.
+the menu. Failed initial registration is retried on the next launch.
 
 Turn off **Start at login and keep running** to disable automatic startup and
 restart while leaving the current app open. **Disable and Quit** unregisters the
@@ -153,12 +153,12 @@ creation and teardown, OSStatus results, and recording/finalization failures.
 During recording, five-second health snapshots report microphone engine state
 and level, received callback/frame counts, time since the last callback, process
 queue occupancy and peak occupancy, dropped frames, processed input frames, and
-last write duration. Stop also records final counters after the process writer
-drains. Counters describe sample delivery, not whether a process is audibly
+microphone callback and process-write durations. Stop also records final counters
+after the process writer drains. Counters describe sample delivery, not whether a process is audibly
 producing sound; silence alone is not treated as failure.
 
-Audio callbacks only update atomic diagnostic counters. Log formatting and
-emission happen on control or writer queues. Logs include recording filenames,
+Diagnostic updates in audio callbacks use atomic counters and clock reads.
+Log formatting and emission happen on control or writer queues. Logs include recording filenames,
 application/device identities, and error details, but no audio samples,
 transcripts, or Accessibility tree content. They use normal macOS log retention,
 so export soon after an incident. A failure inside Zoom can still require Zoom

@@ -50,23 +50,20 @@ enum CaptureDiagnostics {
 
 // Audio callbacks update only atomic integers; formatting/logging happens later.
 // Counters are cumulative within a capture segment, not a measure of audibility.
-final class AudioCallbackStatistics: @unchecked Sendable {
+final class AudioCallbackStatistics: Sendable {
     private let callbacks = Atomic<UInt64>(0)
     private let frames = Atomic<UInt64>(0)
     private let lastCallback = Atomic<UInt64>(0)
-    private let lastSample = Atomic<UInt64>(0)
 
-    func record(frames count: UInt32, hostTime: UInt64) {
+    func record(frames count: UInt32) {
         callbacks.wrappingAdd(1, ordering: .relaxed)
         frames.wrappingAdd(UInt64(count), ordering: .relaxed)
-        lastSample.store(hostTime, ordering: .relaxed)
         lastCallback.store(AudioGetCurrentHostTime(), ordering: .relaxed)
     }
 
     func reset() {
         callbacks.store(0, ordering: .relaxed)
         frames.store(0, ordering: .relaxed)
-        lastSample.store(0, ordering: .relaxed)
         lastCallback.store(0, ordering: .relaxed)
     }
 
@@ -74,6 +71,6 @@ final class AudioCallbackStatistics: @unchecked Sendable {
         let last = lastCallback.load(ordering: .relaxed)
         let now = AudioGetCurrentHostTime()
         let age = last == 0 ? "none" : String(format: "%.3f", Double(AudioConvertHostTimeToNanos(now >= last ? now - last : 0)) / 1e9)
-        return "callbacks=\(callbacks.load(ordering: .relaxed)) frames=\(frames.load(ordering: .relaxed)) lastCallbackAgeSeconds=\(age) lastSampleHostTime=\(lastSample.load(ordering: .relaxed))"
+        return "callbacks=\(callbacks.load(ordering: .relaxed)) frames=\(frames.load(ordering: .relaxed)) lastCallbackAgeSeconds=\(age)"
     }
 }

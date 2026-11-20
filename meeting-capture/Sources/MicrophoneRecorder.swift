@@ -8,9 +8,9 @@ import Synchronization
 final class MicrophoneRecorder: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private let statistics = AudioCallbackStatistics()
-    private let lastWriteNanoseconds = Atomic<UInt64>(0)
+    private let lastCallbackNanoseconds = Atomic<UInt64>(0)
     var diagnosticSummary: String {
-        "running=\(engine.isRunning) format=\(format?.description ?? "none") \(statistics.summary) lastWriteMs=\(Double(lastWriteNanoseconds.load(ordering: .relaxed)) / 1e6)"
+        "running=\(engine.isRunning) format=\(format?.description ?? "none") \(statistics.summary) lastCallbackMs=\(Double(lastCallbackNanoseconds.load(ordering: .relaxed)) / 1e6)"
     }
     private var file: PCMFile?
     private var currentSegmentURL: URL?
@@ -62,7 +62,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
     private func startEngine(deviceID: AudioDeviceID?, to url: URL, startedAt: Date, startTime: CMTime) throws {
         CaptureDiagnostics.log("microphone.start segment=\(url.lastPathComponent) selected={\(CaptureDiagnostics.device(deviceID ?? AudioDeviceID(kAudioObjectUnknown)))} \(CaptureDiagnostics.devices())")
         statistics.reset()
-        lastWriteNanoseconds.store(0, ordering: .relaxed)
+        lastCallbackNanoseconds.store(0, ordering: .relaxed)
         let input = engine.inputNode
         if let deviceID {
             guard let audioUnit = input.audioUnit else {
@@ -131,8 +131,8 @@ final class MicrophoneRecorder: @unchecked Sendable {
     }
 
     private func consume(_ buffer: AVAudioPCMBuffer, time: AVAudioTime) {
-        statistics.record(frames: buffer.frameLength, hostTime: time.isHostTimeValid ? time.hostTime : 0)
-        let writeStarted = DispatchTime.now().uptimeNanoseconds
+        statistics.record(frames: buffer.frameLength)
+        let callbackStarted = DispatchTime.now().uptimeNanoseconds
         onLevel?(Self.level(buffer))
         writeLock.lock()
         var failure: Error?
@@ -143,7 +143,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
             } catch { writeFailure = error; failure = error }
         }
         writeLock.unlock()
-        lastWriteNanoseconds.store(DispatchTime.now().uptimeNanoseconds - writeStarted, ordering: .relaxed)
+        lastCallbackNanoseconds.store(DispatchTime.now().uptimeNanoseconds - callbackStarted, ordering: .relaxed)
         if let failure { onError?(failure) }
     }
 

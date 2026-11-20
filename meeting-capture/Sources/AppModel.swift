@@ -222,9 +222,13 @@ final class AppModel: ObservableObject {
     private func finalizeInBackground(_ request: FinalizeCaptureRequest) {
         finalizationsInProgress += 1
         Task {
+            let session = request.paths.session.lastPathComponent
+            CaptureDiagnostics.log("finalize.start session=\(session)")
             do {
                 lastManifest = try await capture.finalize(request)
+                CaptureDiagnostics.log("finalize.finished session=\(session)")
             } catch {
+                CaptureDiagnostics.error("finalize.failed session=\(session) \(CaptureError.details(error))")
                 recoveryError = error.localizedDescription
             }
             finalizationsInProgress -= 1

@@ -10,7 +10,7 @@ final class AudioActivityMonitor {
     private var deviceListeners: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
     private var lastClients: [AudioClient]?
     private var lastPollError: String?
-    private var propertyErrors: [String: OSStatus] = [:]
+    private var propertyErrors: [AudioObjectID: [String: OSStatus]] = [:]
     private let ownPID = ProcessInfo.processInfo.processIdentifier
 
     func start() {
@@ -86,6 +86,7 @@ final class AudioActivityMonitor {
             guard let listener = deviceListeners.removeValue(forKey: objectID) else { continue }
             removeDeviceListener(listener, from: objectID)
         }
+        propertyErrors = propertyErrors.filter { currentIDs.contains($0.key) }
         for objectID in objectIDs where deviceListeners[objectID] == nil {
             var address = devicePropertyAddress()
             let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
@@ -200,13 +201,14 @@ final class AudioActivityMonitor {
 
     // A vanished or unsupported process object must not flood the log at 2 Hz.
     private func propertyStatus(_ status: OSStatus, operation: String, objectID: AudioObjectID) -> Bool {
-        let key = "\(operation) object=\(objectID)"
+        let previous = propertyErrors[objectID]?[operation]
         if status == noErr {
-            if propertyErrors.removeValue(forKey: key) != nil { CaptureDiagnostics.log("monitor.property.recovered \(key)") }
+            propertyErrors[objectID]?[operation] = nil
+            if previous != nil { CaptureDiagnostics.log("monitor.property.recovered \(operation) object=\(objectID)") }
             return true
         }
-        if propertyErrors[key] != status { CaptureDiagnostics.error("monitor.property.failed \(key) OSStatus=\(status)") }
-        propertyErrors[key] = status
+        if previous != status { CaptureDiagnostics.error("monitor.property.failed \(operation) object=\(objectID) OSStatus=\(status)") }
+        propertyErrors[objectID, default: [:]][operation] = status
         return false
     }
 }

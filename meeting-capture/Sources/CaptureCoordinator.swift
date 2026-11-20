@@ -147,12 +147,6 @@ final class CaptureCoordinator: ObservableObject {
                     self?.processAudioLevel = level
                 }
             }
-            recorder.onWarning = { [weak self, weak recorder] _ in
-                Task { @MainActor in
-                    guard let self, let recorder, self.session?.paths.manifest == identity else { return }
-                    self.recordWarning(from: recorder, trackID: id)
-                }
-            }
             recorder.onError = { [weak self] error in
                 let message = "\(process.title): \(error.localizedDescription)"
                 Task { @MainActor in
@@ -178,6 +172,9 @@ final class CaptureCoordinator: ObservableObject {
                 throw CaptureError.writerFailure("\(process.title): \(error.localizedDescription)")
             }
             processTrackCount = session?.processTracks.count ?? 0
+        }
+        for entry in processRecorders.values {
+            recordWarning(from: entry.recorder, trackID: entry.trackID)
         }
     }
 
@@ -224,7 +221,7 @@ final class CaptureCoordinator: ObservableObject {
         guard let session else { return }
         CaptureDiagnostics.log("capture.health session=\(session.paths.session.lastPathComponent) processes=\(processRecorders.count) \(CaptureDiagnostics.devices())")
         CaptureDiagnostics.log("microphone.health selected={\(CaptureDiagnostics.device(currentMicrophoneDevice?.id ?? 0))} \(microphone.diagnosticSummary) level=\(microphoneLevel)")
-        for (_, entry) in processRecorders.sorted(by: { $0.key < $1.key }) {
+        for entry in processRecorders.values {
             CaptureDiagnostics.log("process.health pid=\(entry.processID) track=\(entry.trackID) \(entry.recorder.diagnosticSummary)")
         }
     }
@@ -255,7 +252,6 @@ final class CaptureCoordinator: ObservableObject {
     func stop() async throws -> FinalizeCaptureRequest {
         guard session != nil else { throw CaptureError.writerFailure("No active recording") }
         CaptureDiagnostics.log("capture.stop")
-        logHealth()
         stopping = true
         defer { reset() }
         session?.microphoneSegments = microphone.stop()
@@ -287,15 +283,7 @@ final class CaptureCoordinator: ObservableObject {
     func finalize(_ request: FinalizeCaptureRequest) async throws -> URL {
         defer { claimedRecordings.remove(request.paths.manifest) }
         guard let backgroundWorker else { throw BackgroundWorkerError.unavailable }
-        CaptureDiagnostics.log("finalize.start session=\(request.paths.session.lastPathComponent)")
-        do {
-            let result = try await backgroundWorker.finalize(request)
-            CaptureDiagnostics.log("finalize.finished")
-            return result
-        } catch {
-            CaptureDiagnostics.error("finalize.failed \(CaptureError.details(error))")
-            throw error
-        }
+        return try await backgroundWorker.finalize(request)
     }
 
     func recoverableFiles() -> [URL] { store.interruptedRecordings(excluding: claimedRecordings) }
