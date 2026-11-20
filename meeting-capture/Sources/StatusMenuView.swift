@@ -3,10 +3,12 @@ import SwiftUI
 struct StatusMenuView: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var capture: CaptureCoordinator
+    @ObservedObject private var keepRunning: KeepRunningService
 
     init(model: AppModel) {
         self.model = model
         capture = model.capture
+        keepRunning = model.keepRunning
     }
 
     var body: some View {
@@ -63,7 +65,9 @@ struct StatusMenuView: View {
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
-                Button("Dismiss") { model.dismissError() }
+                Text("Monitoring retries automatically in 10 seconds.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Retry now") { model.dismissError() }
             }
             if model.showsMaintenance {
                 if model.lastManifest != nil { Button("Reveal last recording") { model.revealLastRecording() } }
@@ -106,7 +110,19 @@ struct StatusMenuView: View {
             Text("✓ Available   ○ Unavailable   — Unknown\nAudio access reflects the last recording check.\nClick a permission to open System Settings.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
-            Button("Quit") { NSApplication.shared.terminate(nil) }
+            Toggle("Start at login and keep running", isOn: Binding(
+                get: { keepRunning.isRegistered },
+                set: { keepRunning.setEnabled($0) }
+            ))
+            if keepRunning.status == .requiresApproval {
+                Button("Allow in Login Items…") { keepRunning.openSettings() }
+                Text("Automatic startup and restart require approval in System Settings.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let error = keepRunning.errorMessage {
+                Text(error).textSelection(.enabled)
+            }
+            Button("Disable and Quit") { keepRunning.disableAndQuit() }
                 .disabled(!model.allowsTermination)
         }
         .lineLimit(nil)
@@ -114,8 +130,12 @@ struct StatusMenuView: View {
         .fixedSize(horizontal: false, vertical: true)
         .padding(14)
         .frame(width: 320)
-        .task { await model.refreshPermissionStatus() }
+        .task {
+            keepRunning.refresh()
+            await model.refreshPermissionStatus()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            keepRunning.refresh()
             Task { await model.refreshPermissionStatus() }
         }
     }

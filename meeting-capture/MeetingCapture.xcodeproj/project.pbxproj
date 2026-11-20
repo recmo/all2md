@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D01A60000000000000000001 /* CaptureDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D01A60000000000000000002 /* CaptureDiagnostics.swift */; };
 		1374A3296BCB527EEE34A8CE /* AccessibilityMetadataProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E18E979B02A5E440D77924E /* AccessibilityMetadataProvider.swift */; };
 		1739D94D26118EB78B1B7598 /* StatusMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B4163AE64E3D7D074701FCC /* StatusMenuView.swift */; };
 		26E88B9365440C1A0EBB2401 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 57DBAADC234A81C14B254516 /* Assets.xcassets */; };
@@ -63,6 +64,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D01A60000000000000000002 /* CaptureDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureDiagnostics.swift; sourceTree = "<group>"; };
 		004F3D933EA6D6CF314F97D7 /* CaptureCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureCoordinator.swift; sourceTree = "<group>"; };
 		0749EA236967FF20E57AD97C /* AudioActivityMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioActivityMonitor.swift; sourceTree = "<group>"; };
 		09C5FA6A2A2354EDD730FF13 /* BackgroundWorkerProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundWorkerProtocol.swift; sourceTree = "<group>"; };
@@ -137,6 +139,7 @@
 				BD57CB2B550A57193DEDA1E0 /* AudioFinalizer.swift */,
 				E47FE754D884F4C611E2CE50 /* BackgroundWorkerClient.swift */,
 				004F3D933EA6D6CF314F97D7 /* CaptureCoordinator.swift */,
+				D01A60000000000000000002 /* CaptureDiagnostics.swift */,
 				CEC9B13E6CBFE8197D1A3EB6 /* CaptureError.swift */,
 				2501C526AE496B370359ED3D /* HUDController.swift */,
 				18DD35ED00ADD46EF006D7B6 /* MeetingCaptureApp.swift */,
@@ -305,16 +308,18 @@
 			);
 			inputPaths = (
 				"$(BUILT_PRODUCTS_DIR)/MeetingCaptureWorker",
+				"$(SRCROOT)/ventures.wicked.MeetingCapture.keep-running.plist",
 			);
 			name = "Embed background worker";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/MeetingCaptureWorker",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/ventures.wicked.MeetingCapture.keep-running.plist",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "helper_dir=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nmkdir -p \"$helper_dir\"\ncp \"$BUILT_PRODUCTS_DIR/MeetingCaptureWorker\" \"$helper_dir/MeetingCaptureWorker\"\n";
+			shellScript = "helper_dir=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nmkdir -p \"$helper_dir\"\ncp \"$BUILT_PRODUCTS_DIR/MeetingCaptureWorker\" \"$helper_dir/MeetingCaptureWorker\"\nagent_dir=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents\"\nmkdir -p \"$agent_dir\"\ncp \"$SRCROOT/ventures.wicked.MeetingCapture.keep-running.plist\" \"$agent_dir/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -355,6 +360,7 @@
 				F75B6EE9C18C19AAF538E84D /* BackgroundWorkerClient.swift in Sources */,
 				607376059C58718079CC2226 /* BackgroundWorkerProtocol.swift in Sources */,
 				C69865E1976D7DDD1827CDB1 /* CaptureCoordinator.swift in Sources */,
+				D01A60000000000000000001 /* CaptureDiagnostics.swift in Sources */,
 				621DC59197140E2FDF32FB60 /* CaptureError.swift in Sources */,
 				9B5125CE45C59978F8237FDE /* HUDController.swift in Sources */,
 				7864B4E13F70DD2709A6661E /* MeetingCaptureApp.swift in Sources */,

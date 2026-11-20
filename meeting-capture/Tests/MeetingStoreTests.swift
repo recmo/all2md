@@ -271,14 +271,23 @@ final class MeetingStoreTests: XCTestCase {
                 var time = AudioTimeStamp()
                 time.mFlags = .hostTimeValid
                 time.mHostTime = timestamp
-                queued.enqueue(pcm.audioBufferList, timestamp: time)
+                queued.onError = { XCTFail("Unexpected audio writer error: \($0)") }
+                queued.onWarning = { XCTFail("Unexpected audio writer warning: \($0)") }
+                // Many tiny callbacks cross block boundaries and leave a partial
+                // final block. Every frame must survive copying and finish.
+                let callbackCount = 1025
+                for index in 0..<callbackCount {
+                    time.mHostTime = timestamp + AVAudioTime.hostTime(forSeconds: Double(index * 64) / sampleRate)
+                    queued.enqueue(pcm.audioBufferList, timestamp: time)
+                }
                 for buffer in buffers { memset(buffer.mData, 0, Int(buffer.mDataByteSize)) }
                 queued.finish()
                 let copied = try AVAudioFile(forReading: queuedURL)
-                XCTAssertEqual(copied.length, 64)
-                let copy = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: copied.processingFormat, frameCapacity: 64))
+                XCTAssertEqual(copied.length, Int64(callbackCount * 64))
+                let copy = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: copied.processingFormat,
+                                                        frameCapacity: AVAudioFrameCount(callbackCount * 64)))
                 try copied.read(into: copy)
-                for frame in 0..<64 {
+                for frame in 0..<(callbackCount * 64) {
                     XCTAssertEqual(copy.floatChannelData?[0][frame] ?? 0, 0.25, accuracy: 0.00001)
                     XCTAssertEqual(copy.floatChannelData?[1][frame] ?? 0, -0.5, accuracy: 0.00001)
                 }

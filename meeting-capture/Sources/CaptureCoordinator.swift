@@ -34,6 +34,7 @@ final class CaptureCoordinator: ObservableObject {
         hostStart = CMClockGetTime(CMClockGetHostTimeClock())
         let start = Date()
         let paths = try store.paths(startedAt: start, title: trigger.applicationName)
+        CaptureDiagnostics.log("capture.start session=\(paths.session.lastPathComponent) trigger=\(trigger.method.rawValue) pid=\(trigger.processID ?? 0) \(CaptureDiagnostics.devices())")
         recordingClaim = try RecordingClaim(paths)
         claimedRecordings.insert(paths.manifest)
         session = FinalizeCaptureRequest(
@@ -59,6 +60,7 @@ final class CaptureCoordinator: ObservableObject {
             let message = error.localizedDescription
             Task { @MainActor in
                 guard self?.session?.paths.manifest == identity else { return }
+                CaptureDiagnostics.error("microphone.failed \(CaptureError.details(error))")
                 self?.recordFailure(message)
             }
         }
@@ -66,7 +68,9 @@ final class CaptureCoordinator: ObservableObject {
         microphone.onConfigurationChange = { [weak self] in
             Task { @MainActor in
                 guard let self, self.session?.paths.manifest == identity,
-                      !self.stopping, !self.microphone.isRunning else { return }
+                      !self.stopping else { return }
+                CaptureDiagnostics.log("microphone.configurationChanged \(self.microphone.diagnosticSummary) \(CaptureDiagnostics.devices())")
+                guard !self.microphone.isRunning else { return }
                 self.restartMicrophone(device: self.currentMicrophoneDevice, reason: "Microphone audio configuration changed")
             }
         }
@@ -76,12 +80,18 @@ final class CaptureCoordinator: ObservableObject {
             try microphone.start(to: segment.url, deviceID: microphoneDevice?.id,
                                  startedAt: segment.startedAt, startTime: startTime)
             try await captureOutputProcesses()
+            logHealth()
             processCaptureTask = Task { [weak self] in
+                var nextHealth = ProcessInfo.processInfo.systemUptime + 5
                 do {
                     while !Task.isCancelled {
                         try await Task.sleep(for: .milliseconds(250))
                         guard let self, !self.stopping else { return }
                         try await self.captureOutputProcesses()
+                        if ProcessInfo.processInfo.systemUptime >= nextHealth {
+                            self.logHealth()
+                            nextHealth = ProcessInfo.processInfo.systemUptime + 5
+                        }
                     }
                 } catch is CancellationError {
                     // Stopping waits for any in-flight tap startup below.
@@ -110,6 +120,7 @@ final class CaptureCoordinator: ObservableObject {
         // track. Exited processes release HAL resources but retain their files.
         for objectID in processRecorders.keys.filter({ !snapshot.all.contains($0) }) {
             if let previous = processRecorders.removeValue(forKey: objectID) {
+                defer { recordWarning(from: previous.recorder, trackID: previous.trackID) }
                 try await previous.recorder.stop(processExited: true)
             }
         }
@@ -117,6 +128,7 @@ final class CaptureCoordinator: ObservableObject {
             guard !stopping, !Task.isCancelled else { return }
             if processRecorders[process.objectID]?.processID == process.processID { continue }
             if let previous = processRecorders.removeValue(forKey: process.objectID) {
+                defer { recordWarning(from: previous.recorder, trackID: previous.trackID) }
                 try await previous.recorder.stop(processExited: true)
             }
             let id = UUID()
@@ -125,6 +137,7 @@ final class CaptureCoordinator: ObservableObject {
                 url: active.paths.processTemporary(id), startedAt: captureDate(at: startTime))
             session?.processTracks.append(track)
             try session?.save() // Journal identity and timing before opening a file.
+            CaptureDiagnostics.log("process.track.start id=\(id) process=\(process.title) object=\(process.objectID)")
             let recorder = SystemAudioRecorder()
             processRecorders[process.objectID] = (process.processID, id, recorder)
             let identity = active.paths.manifest
@@ -160,6 +173,9 @@ final class CaptureCoordinator: ObservableObject {
             }
             processTrackCount = session?.processTracks.count ?? 0
         }
+        for entry in processRecorders.values {
+            recordWarning(from: entry.recorder, trackID: entry.trackID)
+        }
     }
 
     func updateMicrophoneDevices(_ devices: [AudioInputDevice]) {
@@ -172,6 +188,7 @@ final class CaptureCoordinator: ObservableObject {
     private func restartMicrophone(device: AudioInputDevice?, reason: String) {
         guard session?.captureFailed == false else { return }
         let start = captureDate()
+        CaptureDiagnostics.log("microphone.restart reason=\(reason) selected={\(CaptureDiagnostics.device(device?.id ?? 0))}")
         do {
             let startTime = CMClockGetTime(CMClockGetHostTimeClock())
             let segment = try prepareMicrophoneSegment(at: startTime)
@@ -200,8 +217,29 @@ final class CaptureCoordinator: ObservableObject {
         return session.captureStartedAt.addingTimeInterval((hostTime - hostStart).seconds)
     }
 
+    private func logHealth() {
+        guard let session else { return }
+        CaptureDiagnostics.log("capture.health session=\(session.paths.session.lastPathComponent) processes=\(processRecorders.count) \(CaptureDiagnostics.devices())")
+        CaptureDiagnostics.log("microphone.health selected={\(CaptureDiagnostics.device(currentMicrophoneDevice?.id ?? 0))} \(microphone.diagnosticSummary) level=\(microphoneLevel)")
+        for entry in processRecorders.values {
+            CaptureDiagnostics.log("process.health pid=\(entry.processID) track=\(entry.trackID) \(entry.recorder.diagnosticSummary)")
+        }
+    }
+
+    private func recordWarning(from recorder: SystemAudioRecorder, trackID: UUID) {
+        guard let warning = recorder.captureWarning,
+              let process = session?.processTracks.first(where: { $0.id == trackID })?.process else { return }
+        let message = "\(process.title): \(warning)"
+        guard session?.warnings.contains(message) == false else { return }
+        session?.warnings.append(message)
+        CaptureDiagnostics.log("capture.warning \(message)")
+        do { try session?.save() }
+        catch { recordFailure("Could not save session: \(error.localizedDescription)") }
+    }
+
     private func recordFailure(_ message: String) {
         guard session != nil, session?.captureFailed == false else { return }
+        CaptureDiagnostics.error("capture.failed \(message)")
         session?.captureFailed = true
         session?.warnings.append(message)
         let date = captureDate()
@@ -213,6 +251,7 @@ final class CaptureCoordinator: ObservableObject {
 
     func stop() async throws -> FinalizeCaptureRequest {
         guard session != nil else { throw CaptureError.writerFailure("No active recording") }
+        CaptureDiagnostics.log("capture.stop")
         stopping = true
         defer { reset() }
         session?.microphoneSegments = microphone.stop()
@@ -222,6 +261,7 @@ final class CaptureCoordinator: ObservableObject {
         processCaptureTask = nil
         let liveProcesses = try? processMonitor.processObjectIDs()
         for (objectID, entry) in processRecorders {
+            defer { recordWarning(from: entry.recorder, trackID: entry.trackID) }
             do { try await entry.recorder.stop(processExited: liveProcesses?.contains(objectID) == false) }
             catch { recordFailure(error.localizedDescription) }
         }
@@ -231,6 +271,7 @@ final class CaptureCoordinator: ObservableObject {
         session?.processTracks.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
         accessibilityWorker?.terminate()
         guard let finished = session else { throw CaptureError.writerFailure("No active recording") }
+        CaptureDiagnostics.log("capture.stopped failed=\(finished.captureFailed) warnings=\(finished.warnings.count)")
         do { try finished.save() }
         catch { claimedRecordings.remove(finished.paths.manifest); throw error }
         if finished.microphoneSegments.isEmpty, finished.processTracks.isEmpty {

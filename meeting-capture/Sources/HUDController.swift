@@ -254,7 +254,7 @@ private struct RecordingHUD: View {
 
     @ViewBuilder private var actionButtons: some View {
         if case .recording = model.state {
-            Button(action: model.stopRecording) {
+            Button(action: { model.stopRecording() }) {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 9, weight: .bold))
                     .frame(width: 20, height: 20)

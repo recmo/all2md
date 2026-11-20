@@ -29,6 +29,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var recoveryError: String?
     @Published private(set) var finalizationsInProgress = 0
     let capture = CaptureCoordinator()
+    lazy var keepRunning = KeepRunningService()
 
     private let monitor: AudioActivityMonitor?
     private var stopTask: Task<Void, Never>?
@@ -38,6 +39,7 @@ final class AppModel: ObservableObject {
     private var activeMicrophoneClients = Set<pid_t>()
     private var suppressedClients = Set<pid_t>()
     private var captureFailure: String?
+    private var retryTask: Task<Void, Never>?
 
     init(checkCapture: @escaping @MainActor () async throws -> StartupCaptureReport = StartupCaptureCheck.run,
          monitor: AudioActivityMonitor? = AudioActivityMonitor()) {
@@ -46,7 +48,7 @@ final class AppModel: ObservableObject {
         capture.onFailure = { [weak self] message in
             guard let self else { return }
             self.captureFailure = message
-            if case .recording = self.state { self.stopRecording() }
+            if case .recording = self.state { self.stopRecording(suppressClients: false) }
         }
     }
 
@@ -68,16 +70,20 @@ final class AppModel: ObservableObject {
     func checkPermissions() {
         guard permissionCheckTask == nil else { return }
         guard Self.allowsPermissionCheck(in: state) else { return }
+        retryTask?.cancel(); retryTask = nil
         monitor?.stop()
         startupReport = nil
         state = .checkingPermissions
         permissionMessage = "Checking microphone and system-audio recording…"
+        CaptureDiagnostics.log("check.start")
         permissionCheckTask = Task {
             do {
                 startupReport = try await checkCapture()
+                CaptureDiagnostics.log("check.finished systemAudioObserved=\(startupReport?.systemAudioObserved == true)")
                 systemAudioAccess = true
                 startMonitoring()
             } catch {
+                CaptureDiagnostics.error("check.failed \(CaptureError.details(error))")
                 if case CaptureError.systemAudioCaptureFailure = error { systemAudioAccess = false }
                 permissionMessage = error is CaptureError ? error.localizedDescription : CaptureError.details(error)
                 state = .permissionRequired
@@ -105,27 +111,42 @@ final class AppModel: ObservableObject {
         stopRecording()
     }
 
-    func stopRecording() {
+    func stopRecording(suppressClients: Bool = true) {
         guard case let .recording(client) = state else { return }
-        if client.processID == 0 { suppressedClients.formUnion(activeMicrophoneClients) }
-        else { suppressedClients.insert(client.processID) }
+        if suppressClients {
+            if client.processID == 0 { suppressedClients.formUnion(activeMicrophoneClients) }
+            else { suppressedClients.insert(client.processID) }
+        }
         stopTask?.cancel(); stopTask = nil
         state = .finalizing
         Task {
             do {
                 let request = try await capture.stop()
-                state = captureFailure.map(State.error) ?? .idle
+                if let captureFailure { retryAfterFailure(captureFailure) }
+                else { state = .idle }
                 finalizeInBackground(request)
             }
             catch {
                 recoverableFiles = capture.recoverableFiles()
-                state = .error(error.localizedDescription)
+                retryAfterFailure(error.localizedDescription)
             }
         }
     }
 
     func dismissError() {
+        retryTask?.cancel(); retryTask = nil
         if startupReport == nil { checkPermissions() } else { state = .idle }
+    }
+
+    private func retryAfterFailure(_ message: String) {
+        CaptureDiagnostics.error("capture.retry delaySeconds=10 error=\(message)")
+        state = .error(message)
+        retryTask?.cancel()
+        retryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(10)) }
+            catch { return }
+            self?.dismissError()
+        }
     }
 
     func refreshPermissionStatus() async {
@@ -201,9 +222,13 @@ final class AppModel: ObservableObject {
     private func finalizeInBackground(_ request: FinalizeCaptureRequest) {
         finalizationsInProgress += 1
         Task {
+            let session = request.paths.session.lastPathComponent
+            CaptureDiagnostics.log("finalize.start session=\(session)")
             do {
                 lastManifest = try await capture.finalize(request)
+                CaptureDiagnostics.log("finalize.finished session=\(session)")
             } catch {
+                CaptureDiagnostics.error("finalize.failed session=\(session) \(CaptureError.details(error))")
                 recoveryError = error.localizedDescription
             }
             finalizationsInProgress -= 1
@@ -259,7 +284,7 @@ final class AppModel: ObservableObject {
             do {
                 try await capture.start(trigger: trigger, microphoneDevice: client.primaryInputDevice)
                 state = .recording(client)
-                if captureFailure != nil { stopRecording() }
+                if captureFailure != nil { stopRecording(suppressClients: false) }
             }
             catch {
                 recoverableFiles = capture.recoverableFiles()
@@ -275,7 +300,7 @@ final class AppModel: ObservableObject {
                     default: break
                     }
                 }
-                state = .error(error.localizedDescription)
+                retryAfterFailure(error.localizedDescription)
             }
         }
     }
