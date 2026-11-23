@@ -296,10 +296,17 @@ final class CaptureCoordinator: @unchecked Sendable {
 
     private func publish() {
         guard let session, let id = sessionID else { return }
+        let warning: String? = if microphoneInterruptedAt != nil {
+            "Microphone unavailable; retrying."
+        } else if !retries.isEmpty {
+            "Application audio interrupted; retrying."
+        } else if session.captureFailed {
+            "Some audio was dropped or interrupted."
+        } else { nil }
         onStatus?(CaptureStatus(sessionID: id, startedAt: session.captureStartedAt,
             microphoneName: microphoneDevice?.name ?? "System default microphone",
             microphoneLevel: microphone.level, processAudioLevel: processes.values.map { $0.recorder.level }.max() ?? 0,
-            processTrackCount: session.processTracks.count, warning: session.warnings.last))
+            processTrackCount: session.processTracks.count, warning: warning))
     }
 
     private func stopCapture(at time: CMTime = CMClockGetTime(CMClockGetHostTimeClock())) throws -> RecordingSession {

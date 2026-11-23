@@ -88,8 +88,8 @@ Each new process lifetime or restarted tap receives a new track UUID.
 
 A failed source is stopped and retried after ten seconds while healthy sources
 continue. Device changes retry the microphone immediately. Lost audio and retry
-intervals are recorded in the journal and manifest, and the menu shows the latest
-warning. Missing microphone callbacks for five seconds trigger a restart;
+intervals are recorded in the journal and manifest, and the menu shows current
+audio health. Missing microphone callbacks for five seconds trigger a restart;
 quiet process audio does not. Storage or journal failures stop the session and
 retry after ten seconds.
 Manual recordings start a new session automatically; automatically detected
