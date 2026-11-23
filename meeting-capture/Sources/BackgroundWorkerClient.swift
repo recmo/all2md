@@ -158,10 +158,6 @@ private struct WorkerInvocation: Sendable {
 
     func execute(cancellation: WorkerCancellation) throws -> Data? {
         if cancellation.isCancelled { throw CancellationError() }
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.qualityOfService = .utility
         // A worker can fill a pipe before exiting, or leave an inherited pipe
         // open in a subprocess. Neither may defeat the startup deadline.
         guard let errorStream = tmpfile() else {
@@ -169,8 +165,6 @@ private struct WorkerInvocation: Sendable {
         }
         defer { fclose(errorStream) }
         let errorFile = FileHandle(fileDescriptor: fileno(errorStream), closeOnDealloc: false)
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = errorFile
         // EOF asks the worker to stop its own tool. The worker signals only a
         // positive child PID while holding its spawn/reap lock.
         let lifetime = Pipe()
@@ -178,46 +172,83 @@ private struct WorkerInvocation: Sendable {
         guard fcntl(lifetime.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC) == 0 else {
             throw BackgroundWorkerError.launch("Could not create worker lifetime pipe")
         }
-        process.standardInput = lifetime.fileHandleForReading
+        var environment = ProcessInfo.processInfo.environment
         if let progressURL {
             try Data().write(to: progressURL)
-            var environment = ProcessInfo.processInfo.environment
             environment["MEETING_CAPTURE_PROGRESS_FILE"] = progressURL.path
-            process.environment = environment
         }
-        do { try process.run() }
-        catch { throw BackgroundWorkerError.launch(error.localizedDescription) }
+        // Own both spawn and reap here. Foundation's asynchronous reaper would
+        // let a saved PID be reused before a timeout could safely signal it.
+        func check(_ status: Int32) throws {
+            guard status == 0 else { throw BackgroundWorkerError.launch(String(cString: strerror(status))) }
+        }
+        var actions: posix_spawn_file_actions_t? = nil
+        try check(posix_spawn_file_actions_init(&actions))
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        let nullOutput = FileHandle.nullDevice
+        try check(posix_spawn_file_actions_adddup2(&actions, lifetime.fileHandleForReading.fileDescriptor, STDIN_FILENO))
+        try check(posix_spawn_file_actions_adddup2(&actions, nullOutput.fileDescriptor, STDOUT_FILENO))
+        try check(posix_spawn_file_actions_adddup2(&actions, errorFile.fileDescriptor, STDERR_FILENO))
+        var attributes: posix_spawnattr_t? = nil
+        try check(posix_spawnattr_init(&attributes))
+        defer { posix_spawnattr_destroy(&attributes) }
+        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)))
+        let strings = ([executableURL.path] + arguments).map { strdup($0) }
+        defer { strings.forEach { free($0) } }
+        var argv = strings + [nil]
+        let entries = environment.map { strdup("\($0.key)=\($0.value)") }
+        defer { entries.forEach { free($0) } }
+        var envp = entries + [nil]
+        var pid: pid_t = 0
+        try withExtendedLifetime(nullOutput) {
+            try check(posix_spawn(&pid, executableURL.path, &actions, &attributes, &argv, &envp))
+        }
         try? lifetime.fileHandleForReading.close()
         var deadline = ProcessInfo.processInfo.systemUptime + timeout
         var lastProgress: String?
-        while process.isRunning {
-            if let progressURL,
+        var stoppingAt: TimeInterval?
+        var exit = siginfo_t()
+        while true {
+            if waitid(P_PID, id_t(pid), &exit, WEXITED | WNOHANG) < 0 {
+                if errno == EINTR { continue }
+                throw BackgroundWorkerError.launch("Could not wait for worker: \(String(cString: strerror(errno)))")
+            }
+            if exit.si_pid != 0 { break }
+            let now = ProcessInfo.processInfo.systemUptime
+            if stoppingAt == nil, let progressURL,
                let progress = WorkerProgress.signature(at: progressURL),
                progress != lastProgress {
                 lastProgress = progress
-                deadline = ProcessInfo.processInfo.systemUptime + timeout
+                deadline = now + timeout
             }
-            if cancellation.isCancelled || ProcessInfo.processInfo.systemUptime >= deadline {
+            if stoppingAt == nil, cancellation.isCancelled || now >= deadline {
+                CaptureDiagnostics.error("worker.stop command=\(arguments.first ?? "unknown") pid=\(pid) cancelled=\(cancellation.isCancelled) timeout=\(timeout)")
                 try? lifetime.fileHandleForWriting.close()
-                process.waitUntilExit()
-                if cancellation.isCancelled { throw CancellationError() }
-                throw BackgroundWorkerError.operation("Background \(arguments.first ?? "unknown") made no progress for \(Int(timeout)) seconds. Original audio was kept; retry recovery.")
+                stoppingAt = now + 3
+            }
+            if let stoppingAt, now >= stoppingAt, pid > 0 {
+                // This positive PID is still our unreaped child. Give EOF time
+                // to stop its tools, then also stop an unresponsive helper.
+                _ = kill(pid, SIGKILL)
             }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        process.waitUntilExit()
+        if stoppingAt != nil {
+            if cancellation.isCancelled { throw CancellationError() }
+            throw BackgroundWorkerError.operation("Background \(arguments.first ?? "unknown") made no progress for \(Int(timeout)) seconds. Original audio was kept; retry recovery.")
+        }
         try errorFile.seek(toOffset: 0)
         let standardError = errorFile.readDataToEndOfFile()
-        guard process.terminationStatus == 0 else {
-            if process.terminationReason == .exit,
+        let reason: Process.TerminationReason = exit.si_code == CLD_EXITED ? .exit : .uncaughtSignal
+        guard reason == .exit, exit.si_status == 0 else {
+            if reason == .exit,
                let message = String(data: standardError, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                !message.isEmpty {
                 throw BackgroundWorkerError.operation(message)
             }
             throw BackgroundWorkerError.crashed(
                 command: arguments.first ?? "unknown",
-                reason: process.terminationReason,
-                status: process.terminationStatus
+                reason: reason, status: exit.si_status
             )
         }
         guard let responseURL else { return nil }

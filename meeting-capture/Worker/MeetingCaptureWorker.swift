@@ -44,14 +44,13 @@ enum MeetingCaptureWorker {
         }
         let app = URL(fileURLWithFileSystemRepresentation: path, isDirectory: false, relativeTo: nil)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        // LaunchServices reuses a manually opened instance. Wait for that app
-        // to exit so launchd can restart it, including after a clean exit.
-        let launcher = Process()
-        launcher.executableURL = URL(filePath: "/usr/bin/open")
-        launcher.arguments = ["-g", "-W", app.path]
-        try launcher.run()
-        launcher.waitUntilExit()
-        exit(launcher.terminationStatus)
+        // LaunchServices reuses an open instance. Become the waiting launcher
+        // so launchd receives its exit directly, without another process waiter.
+        let arguments = ["/usr/bin/open", "-g", "-W", app.path].map { strdup($0) }
+        defer { arguments.forEach { free($0) } }
+        var argv = arguments + [nil]
+        execv("/usr/bin/open", &argv)
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 
     private static func runRequest<Request: Decodable, Value: Codable>(

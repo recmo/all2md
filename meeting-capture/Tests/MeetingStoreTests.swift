@@ -508,7 +508,7 @@ final class MeetingStoreTests: XCTestCase {
             decoder.standardOutput = pipe
             try decoder.run()
             let pcm = pipe.fileHandleForReading.readDataToEndOfFile()
-            decoder.waitUntilExit()
+            while decoder.isRunning { Thread.sleep(forTimeInterval: 0.01) }
             XCTAssertEqual(decoder.terminationStatus, 0)
             XCTAssertEqual(Double(pcm.count) / 4 / 8000, 0.55, accuracy: 0.002)
             if index == 2 {
@@ -565,6 +565,28 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertFalse(AppModel.allowsMaintenance(in: .stopping))
     }
 
+    // Temporary release-review regression; fold into the lifecycle test after validation.
+    func testReleaseReviewUnresponsiveWorkerIsBounded() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appending(path: "unresponsive-worker")
+        try Data("#!/bin/sh\ntrap '' TERM\nexec /bin/sleep 12\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let worker = try BackgroundWorkerClient(executableURL: executable)
+        let start = ProcessInfo.processInfo.systemUptime
+        do {
+            try await worker.verifyCrashIsolation()
+            XCTFail("An unresponsive helper must time out")
+        } catch let error as BackgroundWorkerError {
+            guard case let .operation(message) = error else {
+                return XCTFail("Unexpected timeout error: \(error)")
+            }
+            XCTAssertTrue(message.contains("made no progress for 5 seconds"))
+        }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 10)
+    }
+
     func testWorkerCrashAndCancellationAreIsolated() async throws {
         // Temporary release-review stress; remove after resolving native shutdown.
         for iteration in 0..<30 {
@@ -593,14 +615,17 @@ final class MeetingStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        // Detach the real release worker so its tool search can use a controlled
-        // executable instead of the app's bundled ffmpeg.
-        let detached = root.appending(path: "MeetingCaptureWorker")
+        // Keep the release helper's directory structure with a controlled tool.
+        let helpers = root.appending(path: "Contents/Helpers")
+        let tools = root.appending(path: "Contents/Resources/bin")
+        try FileManager.default.createDirectory(at: helpers, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+        let detached = helpers.appending(path: "MeetingCaptureWorker")
         try FileManager.default.copyItem(at: worker.executableURL, to: detached)
-        let tool = root.appending(path: "ffmpeg")
+        let tool = tools.appending(path: "ffmpeg")
         let script = """
         #!/bin/sh
-        printf '%s' "$$" > "$MEETING_CAPTURE_TEST_CHILD_PID"
+        printf '%s' "$$" > "${0%/*}/../../../child.pid"
         exec /bin/sleep 10
         """
         try Data(script.utf8).write(to: tool)
@@ -618,59 +643,56 @@ final class MeetingStoreTests: XCTestCase {
             metadata: [], warnings: [], interruptions: []
         )
         try session.save()
-        let request = root.appending(path: "request.json")
-        try JSONEncoder().encode(session).write(to: request)
         let childFile = root.appending(path: "child.pid")
-        let lifetime = Pipe()
-        XCTAssertEqual(fcntl(lifetime.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC), 0)
-        let process = Process()
-        process.executableURL = detached
-        process.arguments = ["finalize", request.path, root.appending(path: "response.json").path]
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = root.path + ":" + (environment["PATH"] ?? "")
-        environment["MEETING_CAPTURE_TEST_CHILD_PID"] = childFile.path
-        process.environment = environment
-        process.standardInput = lifetime.fileHandleForReading
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
+        let cancellationWorker = try BackgroundWorkerClient(executableURL: detached)
+        let operation = Task { try await cancellationWorker.finalize(session) }
+        defer { operation.cancel() }
         FileHandle.standardError.write(Data("lifecycle cancel worker started\n".utf8))
-        try lifetime.fileHandleForReading.close()
-        defer {
-            try? lifetime.fileHandleForWriting.close()
-            if process.isRunning { process.terminate(); process.waitUntilExit() }
-        }
         let deadline = ProcessInfo.processInfo.systemUptime + 15
         var childPID: Int32?
-        while childPID == nil, process.isRunning, ProcessInfo.processInfo.systemUptime < deadline {
+        while childPID == nil, ProcessInfo.processInfo.systemUptime < deadline {
             if let value = try? String(contentsOf: childFile, encoding: .utf8) { childPID = Int32(value) }
             if childPID == nil { try await Task.sleep(for: .milliseconds(20)) }
         }
-        XCTAssertTrue(process.isRunning)
         let child = try XCTUnwrap(childPID)
         FileHandle.standardError.write(Data("lifecycle cancel child started\n".utf8))
         XCTAssertEqual(kill(child, 0), 0)
-        let sentinel = Process()
-        sentinel.executableURL = URL(fileURLWithPath: "/bin/sleep")
-        sentinel.arguments = ["10"]
-        try sentinel.run()
-        defer { if sentinel.isRunning { sentinel.terminate(); sentinel.waitUntilExit() } }
-        try lifetime.fileHandleForWriting.close()
-        FileHandle.standardError.write(Data("lifecycle cancel lifetime closed\n".utf8))
-        let stopped = ProcessInfo.processInfo.systemUptime + 5
-        while process.isRunning, ProcessInfo.processInfo.systemUptime < stopped {
-            try await Task.sleep(for: .milliseconds(20))
+        let sentinelArguments = [strdup("/bin/sleep"), strdup("30")]
+        defer { sentinelArguments.forEach { free($0) } }
+        var argv = sentinelArguments + [nil]
+        var envp: [UnsafeMutablePointer<CChar>?] = [nil]
+        var sentinel: pid_t = 0
+        let launched = posix_spawn(&sentinel, "/bin/sleep", nil, nil, &argv, &envp)
+        XCTAssertEqual(launched, 0)
+        guard launched == 0, sentinel > 0 else { return }
+        defer {
+            if sentinel > 0 {
+                _ = kill(sentinel, SIGTERM)
+                var status: Int32 = 0
+                while waitpid(sentinel, &status, 0) < 0 && errno == EINTR {}
+            }
         }
-        XCTAssertFalse(process.isRunning, "Closing the lifetime pipe must stop the worker and tool")
-        FileHandle.standardError.write(Data("lifecycle cancel observed stop=\(!process.isRunning)\n".utf8))
-        guard !process.isRunning else { return }
-        process.waitUntilExit()
+        operation.cancel()
+        FileHandle.standardError.write(Data("lifecycle cancel requested\n".utf8))
+        let stopped = ProcessInfo.processInfo.systemUptime + 5
+        do {
+            _ = try await operation.value
+            XCTFail("Cancellation must stop the worker and its tool")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected cancellation error: \(error)")
+        }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime, stopped)
         FileHandle.standardError.write(Data("lifecycle cancel wait complete\n".utf8))
         while kill(child, 0) == 0, ProcessInfo.processInfo.systemUptime < stopped {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertEqual(kill(child, 0), -1, "The worker's tool must be reaped")
-        XCTAssertTrue(sentinel.isRunning, "Cancellation must leave unrelated processes running")
+        var sentinelStatus: Int32 = 0
+        var observed: pid_t
+        repeat { observed = waitpid(sentinel, &sentinelStatus, WNOHANG) } while observed < 0 && errno == EINTR
+        if observed != 0 { sentinel = 0 } // Do not signal a reaped or unowned PID.
+        XCTAssertEqual(observed, 0, "Cancellation must leave unrelated processes running")
         XCTAssertTrue(RecordingClaim.isAvailable(paths))
         XCTAssertEqual(try Data(contentsOf: input), original)
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.session.path))
@@ -760,7 +782,7 @@ final class MeetingStoreTests: XCTestCase {
             decoderProcess.arguments = ["ffmpeg", "-nostdin", "-v", "error", "-i", paths.archiveFinal.path,
                                  "-map", "0:a:0", "-c:a", "pcm_f32le", restored.path]
             try decoderProcess.run()
-            decoderProcess.waitUntilExit()
+            while decoderProcess.isRunning { Thread.sleep(forTimeInterval: 0.01) }
             XCTAssertEqual(decoderProcess.terminationStatus, 0)
             let audio = try AVAudioFile(forReading: restored)
             let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: audio.processingFormat, frameCapacity: AVAudioFrameCount(audio.length)))
