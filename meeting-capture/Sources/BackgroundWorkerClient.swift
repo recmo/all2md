@@ -185,9 +185,8 @@ private struct WorkerInvocation: Sendable {
         var actions: posix_spawn_file_actions_t? = nil
         try check(posix_spawn_file_actions_init(&actions))
         defer { posix_spawn_file_actions_destroy(&actions) }
-        let nullOutput = FileHandle.nullDevice
         try check(posix_spawn_file_actions_adddup2(&actions, lifetime.fileHandleForReading.fileDescriptor, STDIN_FILENO))
-        try check(posix_spawn_file_actions_adddup2(&actions, nullOutput.fileDescriptor, STDOUT_FILENO))
+        try check(posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0))
         try check(posix_spawn_file_actions_adddup2(&actions, errorFile.fileDescriptor, STDERR_FILENO))
         var attributes: posix_spawnattr_t? = nil
         try check(posix_spawnattr_init(&attributes))
@@ -200,47 +199,45 @@ private struct WorkerInvocation: Sendable {
         defer { entries.forEach { free($0) } }
         var envp = entries + [nil]
         var pid: pid_t = 0
-        try withExtendedLifetime(nullOutput) {
-            try check(posix_spawn(&pid, executableURL.path, &actions, &attributes, &argv, &envp))
-        }
+        try check(posix_spawn(&pid, executableURL.path, &actions, &attributes, &argv, &envp))
         try? lifetime.fileHandleForReading.close()
         var deadline = ProcessInfo.processInfo.systemUptime + timeout
         var lastProgress: String?
-        var stoppingAt: TimeInterval?
-        var exit = siginfo_t()
+        var stopDeadline: TimeInterval?
+        var termination = siginfo_t()
         while true {
-            if waitid(P_PID, id_t(pid), &exit, WEXITED | WNOHANG) < 0 {
+            if waitid(P_PID, id_t(pid), &termination, WEXITED | WNOHANG) < 0 {
                 if errno == EINTR { continue }
                 throw BackgroundWorkerError.launch("Could not wait for worker: \(String(cString: strerror(errno)))")
             }
-            if exit.si_pid != 0 { break }
+            if termination.si_pid != 0 { break }
             let now = ProcessInfo.processInfo.systemUptime
-            if stoppingAt == nil, let progressURL,
+            if stopDeadline == nil, let progressURL,
                let progress = WorkerProgress.signature(at: progressURL),
                progress != lastProgress {
                 lastProgress = progress
                 deadline = now + timeout
             }
-            if stoppingAt == nil, cancellation.isCancelled || now >= deadline {
-                CaptureDiagnostics.error("worker.stop command=\(arguments.first ?? "unknown") pid=\(pid) cancelled=\(cancellation.isCancelled) timeout=\(timeout)")
+            if stopDeadline == nil, cancellation.isCancelled || now >= deadline {
+                CaptureDiagnostics.log("worker.stop command=\(arguments.first ?? "unknown") pid=\(pid) cancelled=\(cancellation.isCancelled) timeout=\(timeout)")
                 try? lifetime.fileHandleForWriting.close()
-                stoppingAt = now + 3
+                stopDeadline = now + 3
             }
-            if let stoppingAt, now >= stoppingAt, pid > 0 {
+            if let stopDeadline, now >= stopDeadline, pid > 0 {
                 // This positive PID is still our unreaped child. Give EOF time
                 // to stop its tools, then also stop an unresponsive helper.
                 _ = kill(pid, SIGKILL)
             }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        if stoppingAt != nil {
+        if stopDeadline != nil {
             if cancellation.isCancelled { throw CancellationError() }
             throw BackgroundWorkerError.operation("Background \(arguments.first ?? "unknown") made no progress for \(Int(timeout)) seconds. Original audio was kept; retry recovery.")
         }
         try errorFile.seek(toOffset: 0)
         let standardError = errorFile.readDataToEndOfFile()
-        let reason: Process.TerminationReason = exit.si_code == CLD_EXITED ? .exit : .uncaughtSignal
-        guard reason == .exit, exit.si_status == 0 else {
+        let reason: Process.TerminationReason = termination.si_code == CLD_EXITED ? .exit : .uncaughtSignal
+        guard reason == .exit, termination.si_status == 0 else {
             if reason == .exit,
                let message = String(data: standardError, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                !message.isEmpty {
@@ -248,7 +245,7 @@ private struct WorkerInvocation: Sendable {
             }
             throw BackgroundWorkerError.crashed(
                 command: arguments.first ?? "unknown",
-                reason: reason, status: exit.si_status
+                reason: reason, status: termination.si_status
             )
         }
         guard let responseURL else { return nil }
