@@ -263,6 +263,32 @@ final class MeetingStoreTests: XCTestCase {
                             }
                         }
                     }
+                    // Disabled HAL streams advertise bytes with nil data. Entirely
+                    // disabled callbacks are ignored; disabled planes are silence.
+                    let disabledURL = root.appending(path: "disabled-\(common.rawValue)-\(interleaved)-\(sampleRate).caf")
+                    let disabled = try BufferedAudioWriter(format: format, url: disabledURL, startTime: 0)
+                    disabled.onError = { XCTFail("Disabled stream reported a source failure: \($0)") }
+                    let descriptors = Array(buffers)
+                    for index in buffers.indices { buffers[index].mData = nil }
+                    disabled.enqueue(pcm.audioBufferList, timestamp: AudioTimeStamp())
+                    for index in buffers.indices { buffers[index] = descriptors[index] }
+                    var enabledTime = AudioTimeStamp()
+                    enabledTime.mFlags = .hostTimeValid
+                    if !interleaved {
+                        buffers[0].mData = nil
+                        disabled.enqueue(pcm.audioBufferList, timestamp: enabledTime)
+                        buffers[0] = descriptors[0]
+                        enabledTime.mHostTime = AVAudioTime.hostTime(forSeconds: 64 / sampleRate)
+                    }
+                    disabled.enqueue(pcm.audioBufferList, timestamp: enabledTime)
+                    disabled.finish()
+                    let enabledFile = try AVAudioFile(forReading: disabledURL)
+                    XCTAssertEqual(enabledFile.length, interleaved ? 64 : 128)
+                    let enabled = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: enabledFile.processingFormat, frameCapacity: 128))
+                    try enabledFile.read(into: enabled)
+                    XCTAssertEqual(enabled.floatChannelData?[0][0], interleaved ? 0.25 : 0)
+                    XCTAssertEqual(enabled.floatChannelData?[1][0], -0.5)
+
                     let url = root.appending(path: "\(common.rawValue)-\(interleaved)-\(sampleRate).caf")
                     let writer = PCMFile(url: url, startTime: 0)
                     let first = 64 / sampleRate

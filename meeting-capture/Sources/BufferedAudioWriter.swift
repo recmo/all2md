@@ -106,7 +106,8 @@ final class BufferedAudioWriter: @unchecked Sendable {
         }
         defer { inputState.bitwiseAnd(~UInt8(1), ordering: .releasing) }
         let incoming = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
-        guard incoming.contains(where: { $0.mDataByteSize > 0 }) else { return }
+        // HAL advertises byte counts even when a disabled stream has no data.
+        guard incoming.contains(where: { $0.mData != nil && $0.mDataByteSize > 0 }) else { return }
         guard timestamp.mFlags.contains(.hostTimeValid) else { source.or(data: 4); return }
         let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
         let bytes = Int(incoming[0].mDataByteSize)
@@ -115,7 +116,7 @@ final class BufferedAudioWriter: @unchecked Sendable {
             source.or(data: 4); return
         }
         for channel in incoming.indices {
-            guard incoming[channel].mDataByteSize == bytes, incoming[channel].mData != nil else {
+            guard incoming[channel].mDataByteSize == bytes else {
                 source.or(data: 4); return
             }
         }
@@ -145,9 +146,12 @@ final class BufferedAudioWriter: @unchecked Sendable {
             let count = min(frames - offset, Int(buffer.frameCapacity) - pendingFrames)
             let destination = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
             for channel in incoming.indices {
-                destination[channel].mData!.advanced(by: pendingFrames * bytesPerFrame).copyMemory(
-                    from: incoming[channel].mData!.advanced(by: offset * bytesPerFrame),
-                    byteCount: count * bytesPerFrame)
+                let target = destination[channel].mData!.advanced(by: pendingFrames * bytesPerFrame)
+                if let data = incoming[channel].mData {
+                    target.copyMemory(from: data.advanced(by: offset * bytesPerFrame), byteCount: count * bytesPerFrame)
+                } else {
+                    target.initializeMemory(as: UInt8.self, repeating: 0, count: count * bytesPerFrame)
+                }
             }
             pendingFrames += count
             offset += count
