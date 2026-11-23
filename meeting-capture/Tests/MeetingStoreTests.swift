@@ -782,7 +782,7 @@ final class MeetingStoreTests: XCTestCase {
             decoderProcess.arguments = ["ffmpeg", "-nostdin", "-v", "error", "-i", paths.archiveFinal.path,
                                  "-map", "0:a:0", "-c:a", "pcm_f32le", restored.path]
             try decoderProcess.run()
-            while decoderProcess.isRunning { Thread.sleep(forTimeInterval: 0.01) }
+            while decoderProcess.isRunning { try await Task.sleep(for: .milliseconds(10)) }
             XCTAssertEqual(decoderProcess.terminationStatus, 0)
             let audio = try AVAudioFile(forReading: restored)
             let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: audio.processingFormat, frameCapacity: AVAudioFrameCount(audio.length)))
