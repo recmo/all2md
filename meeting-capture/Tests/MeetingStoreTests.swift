@@ -667,7 +667,7 @@ final class MeetingStoreTests: XCTestCase {
         guard launched == 0, sentinel > 0 else { return }
         defer {
             if sentinel > 0 {
-                _ = kill(sentinel, SIGTERM)
+                _ = kill(sentinel, SIGKILL)
                 var status: Int32 = 0
                 while waitpid(sentinel, &status, 0) < 0 && errno == EINTR {}
             }
