@@ -110,7 +110,6 @@ struct CaptureManifest: Codable, Equatable, Sendable {
     let slug: String
     let title: String?
     let platform: String?
-    let calendarEventID: String?
     let startedAt: Date
     let endedAt: Date
     let timeZone: String

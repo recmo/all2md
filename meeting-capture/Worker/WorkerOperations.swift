@@ -48,27 +48,24 @@ enum WorkerOperations {
             return "Accessibility: not granted to the metadata worker (optional)."
         }
         let application = AXUIElementCreateApplication(processID)
-        AXUIElementSetMessagingTimeout(application, 1)
+        AXUIElementSetMessagingTimeout(application, 0.2)
         var role: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(application, kAXRoleAttribute as CFString, &role)
         guard result == .success, role != nil else {
             return "Accessibility: authorized, but reading the app could not be verified (\(result.rawValue))."
         }
-        var observer: AXObserver?
-        let observed = AXObserverCreate(processID, { _, _, _, _ in }, &observer)
-        guard observed == .success, observer != nil else {
-            return "Accessibility: reads verified, but observing the app failed (\(observed.rawValue))."
-        }
-        return "Accessibility: metadata worker read and observer checks passed."
+        return "Accessibility: metadata worker read check passed."
     }
 
-    static func finalize(_ request: FinalizeCaptureRequest) throws -> URL {
+    static func finalize(_ request: RecordingSession) throws -> URL {
         let claim = try RecordingClaim(request.paths)
         defer { withExtendedLifetime(claim) {} }
         return try finish(request)
     }
 
-    private static func finish(_ request: FinalizeCaptureRequest) throws -> URL {
+    private static func finish(_ request: RecordingSession) throws -> URL {
+        if let committed = try publishedRecording(request.paths) { return committed }
+        WorkerProgress.touch()
         let accessibility = finalizeAccessibilityArtifact(paths: request.paths)
         var metadata = request.metadata
         if let title = accessibilityWindowTitle(request.paths.accessibilityFinal) {
@@ -96,7 +93,6 @@ enum WorkerOperations {
             slug: String(request.paths.baseName.dropFirst(min(11, request.paths.baseName.count))),
             title: metadata.first(where: { $0.kind == .windowTitle })?.value,
             platform: request.trigger.applicationName,
-            calendarEventID: nil,
             startedAt: request.captureStartedAt,
             endedAt: request.captureEndedAt,
             timeZone: TimeZone.current.identifier,
@@ -109,10 +105,9 @@ enum WorkerOperations {
             warnings: request.warnings,
             status: status
         )
+        try WorkerTools.checkCancellation()
         try MeetingStore().write(manifest, to: request.paths.manifest)
-        for segment in request.microphoneSegments { try? FileManager.default.removeItem(at: segment.url) }
-        for track in request.processTracks { try? FileManager.default.removeItem(at: track.url) }
-        try? FileManager.default.removeItem(at: request.paths.session)
+        try cleanup(request.paths)
         return request.paths.manifest
     }
 
@@ -121,10 +116,11 @@ enum WorkerOperations {
         let paths = store.paths(forInterruptedFile: request.interruptedFile)
         let claim = try RecordingClaim(paths)
         defer { withExtendedLifetime(claim) {} }
+        if let committed = try publishedRecording(paths) { return committed }
         guard FileManager.default.fileExists(atPath: paths.session.path) else {
             throw CaptureError.writerFailure("No timing journal exists for \(paths.baseName). Original audio was kept; use Show files for manual salvage.")
         }
-        var session = try FinalizeCaptureRequest.load(from: paths.session)
+        var session = try RecordingSession.load(from: paths.session)
         // A journal may only refer to this recording's own files.
         guard session.paths.directory.resolvingSymlinksInPath() == paths.directory.resolvingSymlinksInPath(),
               session.paths.baseName == paths.baseName,
@@ -179,6 +175,40 @@ enum WorkerOperations {
         return try finish(session)
     }
 
+    // The manifest is the commit record. Never rebuild a committed archive from
+    // raw files that may already have been partially removed by cleanup.
+    private static func publishedRecording(_ paths: RecordingPaths) throws -> URL? {
+        guard FileManager.default.fileExists(atPath: paths.manifest.path) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let manifest = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: paths.manifest))
+        guard manifest.container.file == paths.archiveFinal.lastPathComponent,
+              try AudioFinalizer.sha256(paths.archiveFinal) == manifest.container.sha256 else {
+            throw CaptureError.writerFailure("Published archive verification failed; all remaining files were kept")
+        }
+        if let metadata = manifest.accessibility {
+            guard metadata.file == paths.accessibilityFinal.lastPathComponent,
+                  try AudioFinalizer.sha256(paths.accessibilityFinal) == metadata.sha256 else {
+                throw CaptureError.writerFailure("Published metadata verification failed; all remaining files were kept")
+            }
+        }
+        try cleanup(paths)
+        return paths.manifest
+    }
+
+    private static func cleanup(_ paths: RecordingPaths) throws {
+        let store = MeetingStore()
+        let files = try FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)
+        for file in files where file.path.hasSuffix(".part.caf") && store.paths(forInterruptedFile: file).baseName == paths.baseName {
+            try WorkerTools.checkCancellation()
+            try FileManager.default.removeItem(at: file)
+        }
+        for file in [paths.archiveTemporary, paths.session] where FileManager.default.fileExists(atPath: file.path) {
+            try WorkerTools.checkCancellation()
+            try FileManager.default.removeItem(at: file)
+        }
+    }
+
     private static func finalizeAccessibilityArtifact(paths: RecordingPaths) -> AccessibilityArtifact? {
         do {
             // A crashed recorder releases its recording claim before its probe
@@ -188,8 +218,11 @@ enum WorkerOperations {
             let lock = open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
             guard lock >= 0 else { return nil }
             defer { close(lock) }
-            while flock(lock, LOCK_EX) != 0 {
-                if errno != EINTR { return nil }
+            let deadline = ProcessInfo.processInfo.systemUptime + 3
+            while flock(lock, LOCK_EX | LOCK_NB) != 0 {
+                guard errno == EWOULDBLOCK || errno == EINTR,
+                      ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+                Thread.sleep(forTimeInterval: 0.05)
             }
             if FileManager.default.fileExists(atPath: paths.accessibilityTemporary.path) {
                 if FileManager.default.fileExists(atPath: paths.accessibilityFinal.path) {
@@ -217,8 +250,9 @@ enum WorkerOperations {
         for line in text.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
                   let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  record["type"] as? String == "probeStarted" else { continue }
-            return record["windowTitle"] as? String
+                  ["probeStarted", "windowTitle"].contains(record["type"] as? String ?? ""),
+                  let title = record["windowTitle"] as? String, !title.isEmpty else { continue }
+            return title
         }
         return nil
     }

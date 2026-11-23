@@ -2,12 +2,10 @@ import SwiftUI
 
 struct StatusMenuView: View {
     @ObservedObject var model: AppModel
-    @ObservedObject private var capture: CaptureCoordinator
     @ObservedObject private var keepRunning: KeepRunningService
 
     init(model: AppModel) {
         self.model = model
-        capture = model.capture
         keepRunning = model.keepRunning
     }
 
@@ -31,17 +29,22 @@ struct StatusMenuView: View {
                     .font(.caption).foregroundStyle(.secondary)
             case let .recording(client):
                 Label("Recording \(client.applicationName)", systemImage: "record.circle.fill").foregroundStyle(.red)
-                if let startedAt = capture.startedAt { TimelineView(.periodic(from: .now, by: 1)) { _ in Text(startedAt, style: .timer).monospacedDigit() } }
-                LevelRow(name: capture.activeMicrophoneName ?? client.inputDeviceSummary, level: capture.microphoneLevel)
-                LevelRow(name: "Application audio", level: capture.processAudioLevel)
-                Text("\(capture.processTrackCount) process track(s)").font(.caption).foregroundStyle(.secondary)
+                if let startedAt = model.captureStatus?.startedAt { TimelineView(.periodic(from: .now, by: 1)) { _ in Text(startedAt, style: .timer).monospacedDigit() } }
+                LevelRow(name: model.captureStatus?.microphoneName ?? client.inputDeviceSummary, level: model.captureStatus?.microphoneLevel ?? 0)
+                LevelRow(name: "Application audio", level: model.captureStatus?.processAudioLevel ?? 0)
+                Text("\(model.captureStatus?.processTrackCount ?? 0) process track(s)").font(.caption).foregroundStyle(.secondary)
+                if let warning = model.captureStatus?.warning {
+                    Text(warning).font(.caption).foregroundStyle(.orange)
+                }
                 Button("Stop") { model.stopRecording() }.keyboardShortcut(.defaultAction)
                 if client.processID > 0 {
                     Button("Ignore for one hour") { model.ignoreForHour() }
                     Button("Never record this application") { model.neverRecordApplication() }
                 }
-            case .finalizing:
-                ProgressView("Preparing recording…")
+            case .starting:
+                ProgressView("Starting recording…")
+            case .stopping:
+                ProgressView("Saving recorded audio…")
             case .checkingPermissions:
                 ProgressView("Checking recording access…")
                 Text("A brief test captures microphone and system audio, then deletes it. Respond to any macOS permission prompts.")
@@ -69,10 +72,13 @@ struct StatusMenuView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Retry now") { model.dismissError() }
             }
+            if model.finalizationsInProgress > 0 || model.recoveryInProgress {
+                Button("Cancel background processing") { model.cancelBackgroundProcessing() }
+            }
             if model.showsMaintenance {
                 if model.lastManifest != nil { Button("Reveal last recording") { model.revealLastRecording() } }
                 if model.finalizationsInProgress > 0 {
-                    ProgressView("Finalizing \(model.finalizationsInProgress) recording(s) in isolated workers…")
+                    ProgressView("Saving \(model.finalizationsInProgress) recording(s)…")
                 }
                 if !model.recoverableFiles.isEmpty {
                     Label {

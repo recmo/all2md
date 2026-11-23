@@ -33,16 +33,16 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
                                                  UInt32(MemoryLayout<pid_t>.size), &pid, &size, &process), noErr)
         XCTAssertNotEqual(process, kAudioObjectUnknown)
-        let recorder = SystemAudioRecorder()
+        let recorder = ProcessAudioRecorder()
         for cycle in 0..<2 {
             let recorded = root.appending(path: "participants-\(cycle).caf")
             do {
-                try await recorder.start(processObject: process, to: recorded,
-                                         startTime: CMClockGetTime(CMClockGetHostTimeClock()))
+                try recorder.start(processObject: process, to: recorded,
+                                   startTime: CMClockGetTime(CMClockGetHostTimeClock()))
                 try await Task.sleep(for: .milliseconds(500))
-                try await recorder.stop()
+                try recorder.stop()
             } catch {
-                try? await recorder.stop()
+                try? recorder.stop()
                 throw error
             }
             XCTAssertNotNil(recorder.firstSampleAt)
@@ -55,7 +55,7 @@ final class MeetingStoreTests: XCTestCase {
             let samples = try XCTUnwrap(buffer.floatChannelData)[0]
             XCTAssertTrue((0..<Int(buffer.frameLength)).contains { abs(samples[$0]) > 0.001 },
                           "Process tap must deliver the known tone, not just silent buffers")
-            try await recorder.stop() // Teardown is idempotent.
+            try recorder.stop() // Teardown is idempotent.
         }
     }
 
@@ -130,7 +130,8 @@ final class MeetingStoreTests: XCTestCase {
     func testPermissionChecksCannotInterruptCapture() {
         let client = AudioClient(audioObjectID: 0, processID: 1, bundleID: nil, applicationName: "Fixture", inputDevices: [])
         XCTAssertFalse(AppModel.allowsPermissionCheck(in: .recording(client)))
-        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .finalizing))
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .starting))
+        XCTAssertFalse(AppModel.allowsPermissionCheck(in: .stopping))
         XCTAssertTrue(AppModel.allowsPermissionCheck(in: .permissionRequired))
         XCTAssertTrue(AppModel.allowsPermissionCheck(in: .idle))
     }
@@ -168,7 +169,7 @@ final class MeetingStoreTests: XCTestCase {
         let input = paths.microphoneTemporary(segment: 1)
         try writeTone(to: input, sampleRate: 48_000, channels: 1, duration: 0.1)
         let original = try Data(contentsOf: input)
-        try FinalizeCaptureRequest(
+        try RecordingSession(
             microphoneSegments: [CapturedAudioSegment(url: input, startedAt: Date(), endedAt: Date())],
             processTracks: [], captureStartedAt: Date(), captureEndedAt: Date(),
             paths: paths, trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: nil),
@@ -211,7 +212,7 @@ final class MeetingStoreTests: XCTestCase {
                 .write(to: corruptMicrophone ? microphone : participants)
             let microphoneData = try Data(contentsOf: microphone)
             let participantData = try Data(contentsOf: participants)
-            let request = FinalizeCaptureRequest(
+            let request = RecordingSession(
                 microphoneSegments: [CapturedAudioSegment(url: microphone, startedAt: start, endedAt: start.addingTimeInterval(0.1))],
                 processTracks: [process],
                 captureStartedAt: start, captureEndedAt: start.addingTimeInterval(0.1),
@@ -266,7 +267,7 @@ final class MeetingStoreTests: XCTestCase {
                 // The tap queue owns a copy, and finish must drain it before close.
                 let queuedURL = root.appending(path: "queued-\(interleaved)-\(sampleRate).caf")
                 let timestamp = AudioGetCurrentHostTime()
-                let queued = try TapPCMWriter(format: format, url: queuedURL,
+                let queued = try BufferedAudioWriter(format: format, url: queuedURL,
                     startTime: AVAudioTime.seconds(forHostTime: timestamp))
                 var time = AudioTimeStamp()
                 time.mFlags = .hostTimeValid
@@ -310,27 +311,6 @@ final class MeetingStoreTests: XCTestCase {
         }
     }
 
-    func testAccessibilityTreeDiffRecordsAddedRemovedAndChangedAttributes() {
-        let before = [
-            AccessibilitySnapshotNode(path: "0", attributes: ["AXRole": "AXApplication"]),
-            AccessibilitySnapshotNode(path: "0/0", attributes: ["AXTitle": "Alice", "AXValue": "idle"]),
-            AccessibilitySnapshotNode(path: "0/1", attributes: ["AXTitle": "Bob"]),
-        ]
-        let after = [
-            AccessibilitySnapshotNode(path: "0", attributes: ["AXRole": "AXApplication"]),
-            AccessibilitySnapshotNode(path: "0/0", attributes: ["AXTitle": "Alice", "AXValue": "speaking"]),
-            AccessibilitySnapshotNode(path: "0/2", attributes: ["AXTitle": "Carol"]),
-        ]
-
-        let diff = AccessibilityProbe.difference(from: before, to: after)
-
-        XCTAssertEqual(diff.added.map(\.path), ["0/2"])
-        XCTAssertEqual(diff.removed, ["0/1"])
-        XCTAssertEqual(diff.changed, [
-            AccessibilityAttributeChange(path: "0/0", attribute: "AXValue", before: "idle", after: "speaking"),
-        ])
-    }
-
     func testSlugNormalizesTitle() {
         XCTAssertEqual(MeetingStore.slug("  Leadership Wéékly / Europe  "), "leadership-weekly-europe")
         XCTAssertEqual(MeetingStore.slug("🎙️"), "meeting")
@@ -351,6 +331,9 @@ final class MeetingStoreTests: XCTestCase {
 
         let second = try store.paths(startedAt: date, title: "Leadership Weekly")
         XCTAssertEqual(second.baseName, "2026-08-02-leadership-weekly-2")
+        try Data("{}".utf8).write(to: second.session)
+        XCTAssertEqual(try store.paths(startedAt: date, title: "Leadership Weekly").baseName,
+                       "2026-08-02-leadership-weekly-3")
 
         let interrupted = first.directory.appending(path: ".2026-08-02-leadership-weekly-microphone-0002.part.caf")
         XCTAssertEqual(store.paths(forInterruptedFile: interrupted).baseName, first.baseName)
@@ -368,7 +351,6 @@ final class MeetingStoreTests: XCTestCase {
             slug: "leadership-weekly",
             title: "Leadership Weekly",
             platform: "Zoom",
-            calendarEventID: nil,
             startedAt: now,
             endedAt: now.addingTimeInterval(60),
             timeZone: "Europe/Warsaw",
@@ -526,7 +508,8 @@ final class MeetingStoreTests: XCTestCase {
         )
         XCTAssertTrue(AppModel.allowsMaintenance(in: .idle))
         XCTAssertFalse(AppModel.allowsMaintenance(in: .recording(client)))
-        XCTAssertFalse(AppModel.allowsMaintenance(in: .finalizing))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .starting))
+        XCTAssertFalse(AppModel.allowsMaintenance(in: .stopping))
     }
 
     func testWorkerSegfaultDoesNotCrashHost() async throws {
@@ -570,7 +553,7 @@ final class MeetingStoreTests: XCTestCase {
         try writeTone(to: process.url, sampleRate: 48_000, channels: 2, duration: 1)
         let otherProcess = processTrack(paths, startedAt: start.addingTimeInterval(0.2), processID: 43)
         try writeTone(to: otherProcess.url, sampleRate: 44_100, channels: 2, duration: 0.5)
-        var session = FinalizeCaptureRequest(
+        var session = RecordingSession(
             microphoneSegments: [
                 CapturedAudioSegment(url: first, startedAt: start, endedAt: start),
                 CapturedAudioSegment(url: second, startedAt: start.addingTimeInterval(0.4), endedAt: start.addingTimeInterval(0.4))
@@ -581,8 +564,10 @@ final class MeetingStoreTests: XCTestCase {
         )
         try session.save()
         XCTAssertEqual(store.interruptedRecordings().map { $0.resolvingSymlinksInPath() }, [paths.session.resolvingSymlinksInPath()])
-        let loaded = try FinalizeCaptureRequest.load(from: paths.session)
+        let loaded = try RecordingSession.load(from: paths.session)
         XCTAssertEqual(loaded.microphoneSegments.map(\.startedAt), session.microphoneSegments.map(\.startedAt))
+        let journalBeforeRecovery = try Data(contentsOf: paths.session)
+        let remainingProcess = try Data(contentsOf: process.url)
         let worker = try workerClient()
         let manifestURL = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
         let decoder = JSONDecoder()
@@ -593,6 +578,31 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(manifest.audio.compactMap(\.id), [process.id, otherProcess.id])
         XCTAssertEqual(manifest.audio.compactMap(\.process).map(\.processID), [42, 43])
         XCTAssertTrue(store.interruptedRecordings().isEmpty)
+
+        // Simulate a crash halfway through cleanup after publication. Only one
+        // raw input remains; recovery must reuse the complete committed archive.
+        let committedArchive = try Data(contentsOf: paths.archiveFinal)
+        let committedManifest = try Data(contentsOf: manifestURL)
+        try journalBeforeRecovery.write(to: paths.session)
+        try remainingProcess.write(to: process.url)
+        _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
+        XCTAssertEqual(try Data(contentsOf: paths.archiveFinal), committedArchive)
+        XCTAssertEqual(try Data(contentsOf: manifestURL), committedManifest)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: process.url.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.session.path))
+
+        // A corrupt publication cannot authorize deleting the remaining inputs.
+        try journalBeforeRecovery.write(to: paths.session)
+        try remainingProcess.write(to: process.url)
+        try Data("corrupt".utf8).write(to: paths.archiveFinal)
+        do {
+            _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
+            XCTFail("Recovery must reject a checksum mismatch")
+        } catch {}
+        XCTAssertEqual(try Data(contentsOf: process.url), remainingProcess)
+        XCTAssertEqual(try Data(contentsOf: paths.session), journalBeforeRecovery)
+        try committedArchive.write(to: paths.archiveFinal)
+        _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
         let restored = root.appending(path: "recovered-microphone.caf")
         let decoderProcess = Process()
         decoderProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -617,7 +627,7 @@ final class MeetingStoreTests: XCTestCase {
         try writeTone(to: mic, sampleRate: 48_000, channels: 1, duration: 0.1)
         let failedProcess = processTrack(failedPaths, startedAt: start)
         try writeTone(to: failedProcess.url, sampleRate: 48_000, channels: 2, duration: 0.1)
-        session = FinalizeCaptureRequest(
+        session = RecordingSession(
             microphoneSegments: [CapturedAudioSegment(url: mic, startedAt: start, endedAt: start.addingTimeInterval(0.1))],
             processTracks: [failedProcess],
             captureStartedAt: start, captureEndedAt: start.addingTimeInterval(0.1), paths: failedPaths,

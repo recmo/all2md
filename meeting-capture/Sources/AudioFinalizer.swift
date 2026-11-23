@@ -98,17 +98,21 @@ enum AudioFinalizer {
             guard stream.tags?["title"] == expectedTitle else {
                 throw CaptureError.writerFailure("archive track \(index) is missing its \(expectedTitle) identity")
             }
-            try runTool("ffmpeg", arguments: [
-                "-nostdin", "-v", "error", "-xerror", "-i", temporaryDestination.path,
-                "-map", "0:a:\(index)", "-f", "null", "-",
-            ])
         }
 
+        try runTool("ffmpeg", arguments: [
+            "-nostdin", "-v", "error", "-xerror", "-i", temporaryDestination.path,
+            "-map", "0:a", "-f", "null", "-",
+        ])
+        WorkerProgress.touch()
         if FileManager.default.fileExists(atPath: finalDestination.path) {
             _ = try FileManager.default.replaceItemAt(finalDestination, withItemAt: temporaryDestination)
         } else {
             try FileManager.default.moveItem(at: temporaryDestination, to: finalDestination)
         }
+        let published = try FileHandle(forWritingTo: finalDestination)
+        defer { try? published.close() }
+        try published.synchronize()
         let archiveDuration = Double(probe.format.duration ?? "") ?? duration
         let tracks = maps.enumerated().map { index, map in
             let stream = probe.streams[index]
@@ -146,7 +150,15 @@ enum AudioFinalizer {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty { hasher.update(data: data) }
+        var heartbeat = ProcessInfo.processInfo.systemUptime
+        while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
+            try WorkerTools.checkCancellation()
+            hasher.update(data: data)
+            if ProcessInfo.processInfo.systemUptime - heartbeat >= 1 {
+                WorkerProgress.touch()
+                heartbeat = ProcessInfo.processInfo.systemUptime
+            }
+        }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
@@ -165,7 +177,12 @@ enum AudioFinalizer {
         arguments: [String],
         captureStandardOutput: Bool = false
     ) throws -> Data {
+        WorkerProgress.touch()
         let executable = try executable(named: name)
+        var arguments = arguments
+        if name == "ffmpeg", let progress = WorkerProgress.url {
+            arguments = ["-progress", progress.path, "-stats_period", "1"] + arguments
+        }
         let standardOutput = Pipe()
         guard let errorStream = tmpfile() else {
             throw CaptureError.writerFailure("Could not capture \(name) errors: \(String(cString: strerror(errno)))")
@@ -191,16 +208,10 @@ enum AudioFinalizer {
         let environment = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
         defer { environment.forEach { free($0) } }
         var envp = environment + [nil]
-        var processID: pid_t = 0
-        // Foundation Process creates a separate process group. Spawn directly
-        // so tools stay in the worker's group and its deadline stops them too.
-        try check(posix_spawn(&processID, executable.path, &actions, nil, &argv, &envp))
+        let processID = try WorkerTools.spawn(executable.path, actions: &actions, argv: &argv, envp: &envp)
         try standardOutput.fileHandleForWriting.close()
         let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        var status: Int32 = 0
-        while waitpid(processID, &status, 0) < 0 {
-            if errno != EINTR { try check(errno) }
-        }
+        let status = try WorkerTools.wait(processID)
         try errorFile.seek(toOffset: 0)
         let error = errorFile.readDataToEndOfFile()
         guard status == 0 else {

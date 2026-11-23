@@ -7,7 +7,8 @@ final class AppModel: ObservableObject {
     enum State: Equatable {
         case idle
         case recording(AudioClient)
-        case finalizing
+        case starting
+        case stopping
         case permissionRequired
         case checkingPermissions
         case error(String)
@@ -28,7 +29,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var recoveryInProgress = false
     @Published private(set) var recoveryError: String?
     @Published private(set) var finalizationsInProgress = 0
-    let capture = CaptureCoordinator()
+    private let capture = CaptureCoordinator()
+    @Published private(set) var captureStatus: CaptureStatus?
+    private var activeCaptureID: UUID?
+    private var backgroundTasks: [UUID: Task<Void, Never>] = [:]
     lazy var keepRunning = KeepRunningService()
 
     private let monitor: AudioActivityMonitor?
@@ -45,10 +49,18 @@ final class AppModel: ObservableObject {
          monitor: AudioActivityMonitor? = AudioActivityMonitor()) {
         self.checkCapture = checkCapture
         self.monitor = monitor
-        capture.onFailure = { [weak self] message in
-            guard let self else { return }
-            self.captureFailure = message
-            if case .recording = self.state { self.stopRecording(suppressClients: false) }
+        capture.onStatus = { [weak self] status in
+            Task { @MainActor in
+                guard let self, self.activeCaptureID == status.sessionID else { return }
+                self.captureStatus = status
+            }
+        }
+        capture.onFailure = { [weak self] id, message in
+            Task { @MainActor in
+                guard let self, self.activeCaptureID == id else { return }
+                self.captureFailure = message
+                if case .recording = self.state { self.stopRecording(suppressClients: false) }
+            }
         }
     }
 
@@ -63,7 +75,7 @@ final class AppModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        recoverableFiles = capture.recoverableFiles()
+        Task { recoverableFiles = await capture.recoverableFiles() }
         checkPermissions()
     }
 
@@ -118,16 +130,20 @@ final class AppModel: ObservableObject {
             else { suppressedClients.insert(client.processID) }
         }
         stopTask?.cancel(); stopTask = nil
-        state = .finalizing
+        state = .stopping
         Task {
             do {
                 let request = try await capture.stop()
+                activeCaptureID = nil
+                captureStatus = nil
                 if let captureFailure { retryAfterFailure(captureFailure) }
                 else { state = .idle }
                 finalizeInBackground(request)
             }
             catch {
-                recoverableFiles = capture.recoverableFiles()
+                activeCaptureID = nil
+                captureStatus = nil
+                recoverableFiles = await capture.recoverableFiles()
                 retryAfterFailure(error.localizedDescription)
             }
         }
@@ -184,13 +200,15 @@ final class AppModel: ObservableObject {
               recoverableFiles.contains(interruptedFile) else { return }
         recoveryInProgress = true
         recoveryError = nil
-        Task {
+        let id = UUID()
+        backgroundTasks[id] = Task {
+            defer { backgroundTasks[id] = nil }
             do {
                 lastManifest = try await capture.recoverInterruptedRecording(interruptedFile)
-                recoverableFiles = capture.recoverableFiles()
+                recoverableFiles = await capture.recoverableFiles()
             } catch {
-                recoverableFiles = capture.recoverableFiles()
-                recoveryError = error.localizedDescription
+                recoverableFiles = await capture.recoverableFiles()
+                recoveryError = error is CancellationError ? "Background processing cancelled. Saved audio remains available." : error.localizedDescription
             }
             recoveryInProgress = false
         }
@@ -201,7 +219,7 @@ final class AppModel: ObservableObject {
     var allowsTermination: Bool {
         switch state {
         case .idle, .permissionRequired, .checkingPermissions, .error: true
-        case .recording, .finalizing: false
+        case .recording, .starting, .stopping: false
         }
     }
 
@@ -219,9 +237,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func finalizeInBackground(_ request: FinalizeCaptureRequest) {
+    private func finalizeInBackground(_ request: RecordingSession) {
         finalizationsInProgress += 1
-        Task {
+        let id = UUID()
+        backgroundTasks[id] = Task {
+            defer { backgroundTasks[id] = nil }
             let session = request.paths.session.lastPathComponent
             CaptureDiagnostics.log("finalize.start session=\(session)")
             do {
@@ -229,11 +249,15 @@ final class AppModel: ObservableObject {
                 CaptureDiagnostics.log("finalize.finished session=\(session)")
             } catch {
                 CaptureDiagnostics.error("finalize.failed session=\(session) \(CaptureError.details(error))")
-                recoveryError = error.localizedDescription
+                recoveryError = error is CancellationError ? "Background processing cancelled. Saved audio remains available." : error.localizedDescription
             }
             finalizationsInProgress -= 1
-            recoverableFiles = capture.recoverableFiles()
+            recoverableFiles = await capture.recoverableFiles()
         }
+    }
+
+    func cancelBackgroundProcessing() {
+        for task in backgroundTasks.values { task.cancel() }
     }
 
     func revealLastRecording() {
@@ -277,21 +301,25 @@ final class AppModel: ObservableObject {
         guard startupReport != nil else { return }
         guard case .idle = state else { return }
         recordingMethod = method
-        state = .finalizing
+        state = .starting
         captureFailure = nil
+        let id = UUID()
+        activeCaptureID = id
+        captureStatus = nil
         let trigger = CaptureTrigger(method: method, processID: client.processID > 0 ? client.processID : nil, bundleID: client.bundleID, applicationName: client.applicationName)
         Task {
             do {
-                try await capture.start(trigger: trigger, microphoneDevice: client.primaryInputDevice)
+                try await capture.start(id: id, trigger: trigger, microphoneDevice: client.primaryInputDevice)
                 state = .recording(client)
                 if captureFailure != nil { stopRecording(suppressClients: false) }
             }
             catch {
-                recoverableFiles = capture.recoverableFiles()
+                activeCaptureID = nil
+                captureStatus = nil
+                recoverableFiles = await capture.recoverableFiles()
                 if let captureError = error as? CaptureError {
                     switch captureError {
-                    case .systemAudioCaptureFailure, .microphonePermissionRequired:
-                        if case .systemAudioCaptureFailure = captureError { systemAudioAccess = false }
+                    case .microphonePermissionRequired:
                         startupReport = nil
                         monitor?.stop()
                         permissionMessage = error.localizedDescription

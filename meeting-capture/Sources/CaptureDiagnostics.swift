@@ -61,10 +61,11 @@ final class AudioCallbackStatistics: Sendable {
         lastCallback.store(AudioGetCurrentHostTime(), ordering: .relaxed)
     }
 
-    func reset() {
-        callbacks.store(0, ordering: .relaxed)
-        frames.store(0, ordering: .relaxed)
-        lastCallback.store(0, ordering: .relaxed)
+    var callbackAge: TimeInterval? {
+        let last = lastCallback.load(ordering: .relaxed)
+        guard last != 0 else { return nil }
+        let now = AudioGetCurrentHostTime()
+        return Double(AudioConvertHostTimeToNanos(now >= last ? now - last : 0)) / 1e9
     }
 
     var summary: String {

@@ -1,144 +1,158 @@
 # Meeting Capture
 
-Meeting Capture is a local-only macOS menu-bar recorder. It watches Core Audio
-for another process opening a microphone and immediately records
-the microphone plus every process producing audio into separate tracks. This
-includes unrelated applications playing during the recording. Core Audio process
-taps work without an application window, including a FaceTime call bubble.
-Browser and application helpers keep their own process tracks.
+Meeting Capture is a local-only macOS menu-bar recorder. It starts when another
+application uses a microphone and captures the microphone plus every process
+producing audio as separate tracks. This includes unrelated applications playing
+during a meeting. Private, unmuted Core Audio process taps work without a window,
+including a FaceTime call bubble. Browser helpers retain their own process tracks.
+Manual recordings continue until explicitly stopped.
 
-Records are written to `~/Documents/Meetings/YYYY/MM/`. The canonical archive
-is one audio-only Matroska (`.mka`) file with independently selectable Opus
-streams; a versioned JSON manifest carries capture provenance for `speech2md`.
+Recordings live in `~/Documents/Meetings/YYYY/MM/`: one audio-only Matroska
+(`.mka`) archive, a version 3 JSON manifest, and optional window-title metadata.
+`speech2md` uses each process track's UUID to isolate source identities.
 
-On first launch, the app registers a bundled launch agent using Apple's
-[SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice).
-It starts at login and launchd restarts it after a crash or exit, with a
-10-second throttle to avoid rapid restart loops. The agent opens the app through
-LaunchServices and waits for it to exit, reusing any manually opened instance.
-Monitoring starts from the application launch delegate without waiting for the
-menu to appear. Registration errors and required Login Items approval appear in
-the menu. Failed initial registration is retried on the next launch.
+## Build, test, and install
 
-Turn off **Start at login and keep running** to disable automatic startup and
-restart while leaving the current app open. **Disable and Quit** unregisters the
-agent before exiting. These choices, including disabling the agent in System
-Settings, survive manual launches and upgrades. Enable the menu toggle to resume
-automatic startup and restart. Logging out stops the app until the next login.
-
-## Build, test, and install locally
-
-Choose **Disable and Quit**, then run this command from the repository root:
+On a Mac, choose **Disable and Quit**, then run from the repository root:
 
 ```sh
 bash meeting-capture/install-local.sh
 ```
 
-This builds the Nix package, runs the macOS XCTest suite in the Nix development
-shell, and signs both the app and worker using the installed app's designated
-requirement. Only after those checks pass does it replace
-`~/Applications/MeetingCapture.app` and reopen it. It creates no backups and
-refuses to replace a running app. The app also refuses Quit while recording or
-starting/stopping capture. The `result` link retains the Nix runtime dependencies.
-After installation, enable **Start at login and keep running** again if you
-disabled it to install the update.
+The installer builds the Nix package, runs XCTest in the Nix development shell,
+and signs the app and worker using the installed app's designated requirement.
+After those checks pass it replaces `~/Applications/MeetingCapture.app` and
+reopens it. It refuses to replace a running app. The `result` link retains Nix
+runtime dependencies. The app refuses Quit during capture startup, recording,
+and stopping. Interrupted background processing preserves its original audio.
 
 Signing follows
 [`recmo/nix/home/remco/darwin.nix`](https://github.com/recmo/nix/blob/main/home/remco/darwin.nix):
 identifier `ventures.wicked.MeetingCapture`, certificate
-`Apple Development: REMCO BLOEMEN (V458N7266F)`, team `LD6C9WL456`. The
-certificate and private key must already be in the login keychain, and the
-installed developer-signed app must exist. `sign-local.sh` copies its exact
-requirement, preserves entitlements, and verifies both signed executables.
-The Nix package itself is ad-hoc signed; launch the installed copy for permission
-testing. Home Manager's deployment marker is left unchanged.
+`Apple Development: REMCO BLOEMEN (V458N7266F)`, team `LD6C9WL456`.
+The certificate, private key, and existing developer-signed app must be present.
+The Nix package is ad-hoc signed; use the installed copy for permission testing.
 
-For an interactive development shell:
+For development:
 
 ```sh
 nix develop .#meeting-capture --command bash --noprofile --norc
 bash meeting-capture/test-local.sh
 ```
 
-The test script builds the app and test bundle, then runs XCTest directly. It
-works for headless CI accounts without a GUI `testmanagerd` session. Live audio
-capture is opt-in; ordinary tests do not request recording permissions.
+`project.yml` defines the app, worker, and tests. The checked-in Xcode project
+includes the same source files; regenerate it with `xcodegen generate` inside
+`meeting-capture` when changing build settings. The test script builds the app
+and test bundle and runs XCTest without a GUI testmanager session. Live audio
+is opt-in:
 
-Check each permission row opens its own Settings pane, toggle access, return to
-the menu, and retry the recording check. If macOS requests a restart, quit and
-reopen the app. Use **Copy error details** on failure. With audio playing, make
-an attributed manual recording and check the separate microphone and participant
-tracks. Also verify Stop suppresses the current microphone session, input
-device/format changes create a new segment, and interrupted recordings can be
-selected independently for recovery. Raw Accessibility traces remain enabled
-for future speaker attribution.
+```sh
+MEETING_CAPTURE_TEST_PROCESS_TAP=1 nix develop .#meeting-capture --command \
+  bash meeting-capture/test-local.sh
+```
 
-At launch, Meeting Capture requests Microphone access, opens a Core Audio tap
-(which prompts for System Audio Recording access when needed), and tests writing
-to the meeting folder. It opens the real capture paths in the recording app
-for a 1.5-second disposable recording before enabling monitoring or manual
-recording.
-The test requires saved microphone frames (silence is valid), successful
-process-tap start/stop, and readable system audio when samples arrive. On a quiet
-system, the menu explicitly reports that access was authorized but no system
-audio was observed; play audio and rerun the check to verify sample delivery.
-Test audio is deleted and never appears among meetings or recovery files.
+## Capture and failure handling
 
-The startup check also asks the actual worker to read the disposable audio and
-create, verify, hash, rename, and delete a small archive under the meeting folder.
-This exercises worker folder access and its ffmpeg/ffprobe subprocesses. The
-archive check has a 15-second deadline; a timeout stops the worker and its tools
-and offers Retry instead of leaving recording disabled indefinitely. The same
-worker checks Accessibility trust without prompting and, when authorized, tries
-an Accessibility read and observer creation against the app. The menu reports
-the optional metadata check separately; a target meeting app can still expose
-different Accessibility capabilities.
+One serial control queue owns the recording session, native devices, and timing
+journal. The UI receives immutable status snapshots. Device setup, file flushing,
+and journal writes do not run on the UI thread. The menu distinguishes starting,
+recording, and stopping; archive processing is a separate background activity.
 
-The permission inventory is Microphone, System Audio Recording,
-Documents access under Files & Folders, and optional Accessibility. The current
-implementation does not use Camera, Input Monitoring, Automation/Apple Events,
-Calendar, Contacts, or notification authorization, and does not require Full
-Disk Access. The audio-input signing entitlement is included in the app package;
-the real microphone probe exercises that capability as well as user consent.
-The menu always lists these four permissions with checkmarks for available
-access, empty circles for unavailable access, and dashes for unknown status.
-Clicking any row opens its corresponding Settings pane. Microphone, folder, and
-Accessibility status refresh when the menu opens and the app becomes active;
-folder probes run off the UI thread. System audio access reflects the last recording check because taps have no public
-preflight API; rerun the check after changing System Settings. Screen recording
-permission and a connected display are not required. Status refreshes never
-start an audio recording.
-Accessibility trust is queried in a fresh worker, which is the process that
-collects metadata. Folder probes delete their disposable files after each check.
+Core Audio microphone activity triggers recording on a 500 ms poll. Browser
+helpers are resolved to their owning application for detection, and the
+application's input-device list identifies its selected microphone. The recorder
+cannot trigger itself. Stop suppresses the current microphone session until it
+ends. Ignore for one hour and Never record this application are also available.
+Audio before detection and device startup cannot be recovered.
 
-Failures keep recording disabled and expose Settings links and an explicit Retry
-action. macOS may require quitting and reopening the installed app after a grant.
-Permission rechecks cannot run during capture or capture startup. Optional
-Accessibility metadata does not gate recording or prompt automatically.
-A process capture failure stops recording visibly rather than silently dropping
-that process. Transient capture errors show their details and return to monitoring
-after 10 seconds; an active meeting can then start a new recording. Failure does
-not suppress the meeting's microphone session as an explicit Stop does. Recording
-check failures still require fixing access and choosing Retry. A quiet system can
-produce a complete microphone-only archive.
-The startup check exercises default devices; it cannot
-guarantee that permissions or a meeting application's devices will remain usable.
+Both microphone and process callbacks copy native PCM into the same buffered
+writer. They never write files, allocate audio buffers, or wait for a file lock.
+Each source has preallocated 4096-frame blocks covering roughly 30 seconds
+(11 MiB for stereo Float32 at 48 kHz). The bound prevents an indefinitely stalled
+disk from consuming all memory; preallocation keeps allocation off the audio
+callback. Short callbacks pack into blocks, while timestamp discontinuities can
+reduce the buffered duration. When full, the writer drops incoming frames,
+continues recording, preserves their timing as silence, and records a warning.
+Larger memory capacity cannot fix a permanently stalled or full disk.
 
-The v3 manifest records a unique `id` and `process` metadata (raw PID, HAL object
-ID, bundle identifier when available, and process name) for every process stream.
-Matroska stream titles include the name and PID. The session journal saves every
-process file and its start time before capture, so finalization and interrupted
-recovery preserve isolation and align late-starting tracks to the microphone.
-`speech2md` uses `process-<track UUID>` as each source identity, preventing tracks
-from sharing speaker labels, cache entries, or review hints. Older archived v1/v2
-manifests remain readable by `speech2md`; old interrupted journals are preserved
-for manual salvage rather than guessed into the new format.
+A writer queue saves timestamp-aligned PCM CAF files: gaps become silence and
+overlapping samples are trimmed. File handles close after callbacks stop and
+copied samples drain. The microphone uses native device formats and restarts in
+a new segment on device changes, stopped delivery, or an engine failure.
+Process output is discovered every 500 ms. Quiet processes keep their taps;
+exited processes release HAL resources while retaining their saved audio.
+Each new process lifetime or restarted tap receives a new track UUID.
 
-## Audio diagnostics
+A failed source is stopped and retried after ten seconds while healthy sources
+continue. Device changes retry the microphone immediately. Lost audio and retry
+intervals are recorded in the journal and manifest, and the menu shows the latest
+warning. Missing microphone callbacks for five seconds trigger a restart;
+quiet process audio does not. Storage or journal failures stop the session and
+return to monitoring after ten seconds. An active meeting can then start a new
+recording. Explicit Stop suppresses that automatic restart.
 
-Meeting Capture writes audio diagnostics to the macOS unified log under subsystem
-`ventures.wicked.MeetingCapture`, category `audio`. In Console, select the Mac,
-start streaming, and filter for that subsystem. To save the last hour:
+## Archive publication and recovery
+
+Capture performs no live transcoding. After Stop, the app resumes monitoring
+while a worker aligns the native segments into one archive: mono microphone
+Opus at 96 kb/s VBR and stereo Opus at 128 kb/s VBR for each process. Tracks use
+48 kHz, 20 ms frames, the audio application, complexity 10, and no DTX. All tracks
+extend with silence to the session end.
+
+Finalization verifies stream metadata and decodes all streams in one pass,
+publishes and synchronizes the archive, then writes a synchronized manifest with
+its SHA-256. Only after publication succeeds does it remove raw inputs and the
+journal. A source interruption or audio drop produces an incomplete manifest.
+Unreadable inputs fail processing and are retained for recovery.
+
+The manifest and matching archive are the commit record. Recovery verifies a
+published archive and finishes cleanup without rebuilding it from partially
+deleted inputs. A checksum mismatch preserves all remaining files. Uncommitted
+sessions recover using journaled offsets and audio-derived segment lengths.
+Header-only files are marked unrecoverable; files without a journal remain
+available for manual salvage. The menu offers Recover and Show files for each
+interrupted recording. Recovery does not require recording permissions.
+
+Finalization and recovery share one serial job queue. Workers cannot replace
+live capture state. A job with no encoder timestamp advancement or other work
+progress for 120 seconds is stopped; healthy long jobs have no total duration
+limit. **Cancel background processing** cancels queued and running archive jobs.
+Original audio remains available for retry. Recorder exit also closes the
+worker's lifetime pipe. Each worker cancels only its own unreaped tool PID,
+under a shared spawn/signal/reap lock. Per-recording file locks exclude concurrent
+capture and recovery and are released by the OS on process exit.
+
+## Permissions and optional metadata
+
+Startup requests Microphone and System Audio Recording access, records 1.5
+seconds through the real capture paths, and verifies saved microphone frames.
+Silence is valid. On a quiet system the menu reports that no system audio was
+observed; play audio and retry to check delivery. The worker also exercises
+folder access and archive creation with a 15-second deadline. Disposable audio
+and archives are deleted. Recording stays disabled until this check succeeds.
+
+The menu shows Microphone, System Audio Recording, Documents / Files & Folders,
+and optional Accessibility access. Each row opens its Settings pane. Folder and
+Accessibility checks refresh when the menu opens or the app becomes active;
+System Audio status reflects the last recording check. Status refresh does not
+record audio. Permission rechecks cannot interrupt recording. Use Copy error
+details on a failed check, then Retry after addressing it. macOS may require
+quitting and reopening the installed app after a permission change.
+
+An optional worker reads only the meeting application's focused-window title
+every five seconds, with a 200 ms timeout per Accessibility message. It never
+traverses the application tree or subscribes to interface notifications. Its
+append-only, checksummed `*-accessibility.jsonl` sidecar records title changes
+and probe start/stop events. Metadata failures never interrupt audio. Normal Stop
+allows two seconds to close the log; a closed lifetime pipe also stops a hung
+probe. Publication waits at most three seconds for its file lock. Window titles
+can contain private information and remain local.
+
+## Diagnostics
+
+Audio diagnostics use the macOS unified log, subsystem
+`ventures.wicked.MeetingCapture`, category `audio`. In Console, filter for that
+subsystem. To export the last hour:
 
 ```sh
 /usr/bin/log show --last 1h --style compact \
@@ -146,147 +160,40 @@ start streaming, and filter for that subsystem. To save the last hour:
   > ~/Desktop/MeetingCapture-audio.log
 ```
 
-Logs include startup/check/retry events, input-process changes, selected/default
-microphone and output device IDs/UIDs, hardware sample rates and buffer sizes,
-microphone formats and configuration changes, process-track/tap/aggregate-device
-creation and teardown, OSStatus results, and recording/finalization failures.
-During recording, five-second health snapshots report microphone engine state
-and level, received callback/frame counts, time since the last callback, process
-queue occupancy and peak occupancy, dropped frames, processed input frames, and
-microphone callback and process-write durations. Stop also records final counters
-after the process writer drains. Counters describe sample delivery, not whether a process is audibly
-producing sound; silence alone is not treated as failure.
+Logs include checks, capture/retry transitions, process identities, selected and
+default device IDs/UIDs, hardware rates and buffer sizes, native formats,
+configuration changes, tap/aggregate creation and teardown, and OSStatus errors.
+Five-second health snapshots report engine state, callback/frame counts, last
+callback age, queue occupancy and peak, dropped and written frames, and write
+duration. These measure delivery, not audibility. Audio callbacks update only
+atomic counters; formatting and logging run elsewhere. Logs contain filenames,
+application/device identities and errors, but no audio or interface text.
+Export soon after an incident and record its time. Diagnosing a failure inside
+Zoom may also require Zoom logs or an Audio System Trace.
 
-Diagnostic updates in audio callbacks use atomic counters and clock reads.
-Log formatting and emission happen on control or writer queues. Logs include recording filenames,
-application/device identities, and error details, but no audio samples,
-transcripts, or Accessibility tree content. They use normal macOS log retention,
-so export soon after an incident. A failure inside Zoom can still require Zoom
-logs or an Audio System Trace; note the incident time to correlate the records.
+## Startup and restart
 
-## Current capture path
+The bundled SMAppService launch agent starts the app at login and restarts it
+after exit, with a ten-second throttle. LaunchServices reuses a manually opened
+instance. Registration failures and Login Items approval appear in the menu.
+Disable **Start at login and keep running** to keep the app open without automatic
+restart; **Disable and Quit** unregisters the agent before exiting. These choices
+survive upgrades and manual launches. Enable the toggle to resume automatic
+startup and restart. Logout stops recording until the next login.
 
-- Core Audio process objects drive automatic detection. Browser helper
-  processes are resolved to their owning application. Unattributed device activity
-  never triggers automatic recording, so the recorder cannot trigger itself.
-- For attributed clients, the process object's input-scoped device list identifies
-  the microphone selected by the meeting application, even when it is not the
-  macOS default. The active device is shown in the menu and recorded as a
-  `microphoneDevice` metadata event.
-- Recording starts on the first detected microphone activity, without a
-  countdown or sustained-activity delay. Detection polls every 500 ms; audio
-  before detection and capture startup cannot be recovered. Stop suppresses
-  that process until its microphone activity ends. Ignore for one hour and
-  Never record this application are available in the recording menu.
-- The microphone is captured to crash-safe PCM CAF segments in each device's
-  native format. Device changes and AVAudioEngine configuration changes restart
-  the microphone into a new segment; the short restart interval is recorded as an
-  interruption. Application audio uses one private, unmuted Core Audio tap per
-  raw output process, excluding this recorder. New output processes are discovered
-  every 250 ms; very short-lived sounds can precede discovery. Quiet processes
-  retain their tap, preserving gaps when they resume. Exited processes release
-  their tap and retain their recorded file. Each new process lifetime gets a
-  separate track UUID, even if macOS reuses a PID or HAL object ID.
-  Both capture paths share a timestamp-aware PCM writer. The incoming format
-  determines the audio buffers; `AVAudioFile` writes
-  interleaved float PCM to CAF, including when the tap supplies planar samples.
-  Sample timestamps determine the file position: missing time is filled
-  with bounded silence buffers, and duplicate/overlapping frames are trimmed.
-  Per-track start times align process audio to the session start. The file closes
-  after callbacks stop and the writer queue drains, before finalization reads it.
-  Tap callbacks pack audio into preallocated 4096-frame blocks, buffering up to
-  30 seconds per process (about 11 MiB at 48 kHz stereo Float32); a separate queue
-  writes them to disk. If the queue fills, incoming audio is dropped until space
-  returns. Recording continues, timestamps preserve the gap as silence, and the
-  manifest records a warning. Gaps and overlaps start new blocks, so frequent
-  discontinuities can reduce the buffered duration.
-  Process exit releases its tap without failing the session; disk errors remain fatal.
-  Capture failures stop
-  recording visibly and produce an incomplete archive, even if audio files exist.
-- Capture does no live transcoding. After stop, finalization aligns the native
-  segments and creates one `.mka` without a meeting mix: microphone is mono
-  Opus at 96 kb/s VBR and each process is stereo Opus at 128 kb/s VBR.
-  All tracks use 48 kHz, the Opus audio application, 20 ms frames, complexity 10,
-  and no DTX. Every stream is padded with silence through the session end, so
-  short-lived processes remain readable in later transcription windows.
-- Finalization probes the stream contract, decodes every stream, atomically
-  publishes the archive, records its SHA-256 in the v3 manifest, and only then
-  deletes the temporary PCM files. A failed finalization leaves the PCM files
-  available for recovery.
-- Finalization, verification, hashing, manifest publication, interrupted-file
-  recovery, and optional Accessibility probing run in dedicated worker
-  processes. A worker crash or hang cannot terminate the recorder or replace
-  its live state. Stopping a recording returns the app to monitoring before
-  deferred finalization finishes.
-- Accessibility workers exit when their recorder's lifetime pipe closes, even
-  if an Accessibility call is stuck. On normal stop, the recorder requests a
-  final snapshot and closes the pipe after a two-second grace period. No worker
-  PID is handed to finalization. Recovery waits for the metadata writer's
-  file lock before publishing and checksumming its log. Worker request files
-  are removed after loading; normal-exit cleanup also outlives the app's handle.
-- Interrupted CAF chunks are discovered at launch and can be recovered from
-  the menu while idle or after a recording check or capture error. Recovery does
-  not require a working microphone or recording authorization. It remains a
-  secondary maintenance status;
-  it cannot replace capture startup or recording state. Header-only CAF
-  files are preserved with an `.unrecoverable.caf` suffix rather than retried
-  forever.
-- Capture, finalization, and recovery claim each recording exclusively. Claimed
-  recordings are excluded from recovery discovery; worker claims are released by
-  the operating system even if a worker crashes. Unreadable audio fails processing
-  and is preserved for recovery rather than silently omitted and deleted.
-  The menu groups unfinished files by recording and offers Recover and Show files
-  for each one. A damaged recording does not block selecting another. An atomic,
-  synchronized session journal records segment start times, metadata, failures,
-  and interruptions; normal finalization and recovery use the same record.
-  Recovery derives saved segment lengths from the audio while preserving their
-  recorded offsets. Old files without a journal are kept for manual salvage
-  rather than guessed into a potentially misaligned archive. Recovery errors use
-  selectable primary text, with orange reserved for warning icons.
-- Manually started recordings capture all output processes and continue until explicitly stopped even when the meeting is muted.
-- Generic Accessibility inspection currently contributes the focused window
-  title when permission is available; it never gates recording.
-- Every attributed recording also starts a generic Accessibility probe for the
-  same process. Beside the `.mka` it writes a checksummed
-  `*-accessibility.jsonl` sidecar containing an initial tree snapshot, raw AX
-  notifications, attribute-level tree diffs, periodic fallback rescans, and a
-  final diff. A crash leaves the append-only `.part.jsonl` recoverable. Probe
-  logs may contain participant names, captions, and other visible interface
-  text; they never leave the Mac automatically. Missing Accessibility permission
-  becomes a manifest warning and never blocks audio capture.
+## macOS acceptance
 
-For local acceptance, record a FaceTime call with only the call bubble visible,
-verify its audio and the microphone as separate tracks, then repeat with the
-full FaceTime window open. Play audio in a browser too and verify a third track.
-Start another app during capture and verify its track begins at the right offset.
-Check that quiet/resumed processes keep their tracks, process exit preserves saved
-audio, remote silence
-does not stop a manually started recording, and repeated start/stop cycles leave
-no aggregate devices behind. Test permission denial and a retry after granting
-System Audio Recording access. These checks require the installed, signed app
-on macOS. The optional windowless tone test exercises real process-tap delivery
-and two start/stop cycles:
+Record Zoom and a windowless FaceTime call while a browser plays audio. Verify
+separate process streams, microphone sound, and alignment for late-starting
+processes. Change and disconnect input devices; healthy process audio must
+continue and the microphone must recover in a new segment. Check quiet/resumed
+processes, process exit, manual recording while muted, explicit Stop suppression,
+and repeated start/stop cycles with no aggregate devices left behind. Exercise
+cancellation and interrupted recovery. Correlate a Zoom microphone failure with
+the diagnostic logs; its cause cannot be established from Meeting Capture alone.
 
-```sh
-MEETING_CAPTURE_TEST_PROCESS_TAP=1 nix develop .#meeting-capture --command \
-  bash meeting-capture/test-local.sh
-```
-
-For lifecycle acceptance, enable **Start at login and keep running**, approve it
-in Login Items if requested, and log out and back in. Confirm monitoring starts
-without opening the menu. Kill the GUI app PID and confirm one menu item returns.
-Repeat with a manually opened instance. Disable the toggle and
-confirm a killed app stays stopped; reopen it and confirm the toggle stays off.
-Verify **Disable and Quit** exits without relaunching and remains disabled after
-login. An ordinary capture failure should retain its unfinished files and resume
-monitoring after the retry delay; an explicit Stop should suppress the current
-microphone session.
-
-## Milestone 1 acceptance
-
-Schema v3 remains provisional until recordings cover at least five meetings,
-three hours, Zoom and two other applications. The validation pass must also
-confirm isolated process audio, interrupted-recording recovery, false
-trigger rate, HUD behavior, and audio quality. Zoom, Brave/Google Meet,
-FaceTime, Slack, and Signal Accessibility trees should be evaluated during
-those sessions before adding any per-application parser.
+Enable keep-running, approve Login Items if requested, and verify login startup
+and a single app instance after a crash. Disable it and verify the app stays
+stopped after exit and after the next login. Full release acceptance still needs
+at least five meetings, three hours, Zoom and two other applications, covering
+false triggers, HUD behavior, archive quality and interrupted recovery.

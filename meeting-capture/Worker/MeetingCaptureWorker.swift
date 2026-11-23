@@ -6,11 +6,6 @@ enum MeetingCaptureWorker {
     @MainActor
     static func main() {
         do {
-            // Keep tools launched by this worker in a group the app can stop
-            // when a startup check exceeds its deadline.
-            guard getpgrp() == getpid() || setpgid(0, 0) == 0 else {
-                throw WorkerMainError.processGroup
-            }
             let arguments = Array(CommandLine.arguments.dropFirst())
             guard let command = arguments.first else { throw WorkerMainError.invalidArguments }
             switch command {
@@ -24,7 +19,7 @@ enum MeetingCaptureWorker {
             case "check-metadata-access":
                 try runRequest(WorkerAccessRequest.self, arguments: arguments, operation: WorkerOperations.checkMetadataAccess)
             case "finalize":
-                try runRequest(FinalizeCaptureRequest.self, arguments: arguments, operation: WorkerOperations.finalize)
+                try runRequest(RecordingSession.self, arguments: arguments, operation: WorkerOperations.finalize)
             case "recover":
                 try runRequest(RecoverCaptureRequest.self, arguments: arguments, operation: WorkerOperations.recover)
             case "accessibility-probe":
@@ -63,6 +58,7 @@ enum MeetingCaptureWorker {
         operation: (Request) throws -> Value
     ) throws {
         guard arguments.count == 3 else { throw WorkerMainError.invalidArguments }
+        WorkerLifetime.monitor()
         let requestURL = URL(fileURLWithPath: arguments[1])
         let responseURL = URL(fileURLWithPath: arguments[2])
         let request = try JSONDecoder().decode(Request.self, from: Data(contentsOf: requestURL))
@@ -82,13 +78,7 @@ enum MeetingCaptureWorker {
             _ = rmdir(requestDirectory.path)
         }
         defer { removeRequest() }
-        DispatchQueue.global(qos: .utility).async {
-            _ = FileHandle.standardInput.readDataToEndOfFile()
-            removeRequest()
-            // Do not wait for the main queue: an AX call may be hung there.
-            // Exiting closes the log and releases its publication lock.
-            _exit(EXIT_SUCCESS)
-        }
+        WorkerLifetime.monitor(onExit: removeRequest)
         let request = try JSONDecoder().decode(AccessibilityProbeRequest.self, from: Data(contentsOf: requestURL))
         removeRequest()
         // Keep this inode in place so recovery and the writer always lock the
@@ -127,13 +117,11 @@ enum MeetingCaptureWorker {
 
 private enum WorkerMainError: LocalizedError {
     case invalidArguments
-    case processGroup
     case artifactClaim
 
     var errorDescription: String? {
         switch self {
         case .invalidArguments: "invalid worker arguments"
-        case .processGroup: "could not isolate worker subprocesses"
         case .artifactClaim: "could not claim the Accessibility log"
         }
     }

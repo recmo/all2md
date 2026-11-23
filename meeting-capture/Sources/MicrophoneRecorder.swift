@@ -3,16 +3,17 @@ import AudioToolbox
 import CoreAudio
 import CoreMedia
 import Foundation
-import Synchronization
 
 final class MicrophoneRecorder: @unchecked Sendable {
     private let engine = AVAudioEngine()
-    private let statistics = AudioCallbackStatistics()
-    private let lastCallbackNanoseconds = Atomic<UInt64>(0)
     var diagnosticSummary: String {
-        "running=\(engine.isRunning) format=\(format?.description ?? "none") \(statistics.summary) lastCallbackMs=\(Double(lastCallbackNanoseconds.load(ordering: .relaxed)) / 1e6)"
+        "running=\(engine.isRunning) format=\(format?.description ?? "none") \(writer?.diagnosticSummary ?? "writer=none")"
     }
-    private var file: PCMFile?
+    private var writer: BufferedAudioWriter?
+    private var warning: String?
+    var captureWarning: String? { writeLock.withLock { warning } }
+    var callbackAge: TimeInterval? { writer?.callbackAge }
+    var level: Float { writer?.level ?? 0 }
     private var currentSegmentURL: URL?
     private var currentSegmentStartedAt: Date?
     private var currentSegmentHostStart: CMTime?
@@ -22,9 +23,16 @@ final class MicrophoneRecorder: @unchecked Sendable {
     private var writeFailure: Error?
     private(set) var format: AVAudioFormat?
     private(set) var deviceID: AudioDeviceID?
-    var onLevel: (@Sendable (Float) -> Void)?
-    var onError: (@Sendable (Error) -> Void)?
-    var onConfigurationChange: (@Sendable () -> Void)?
+    private var errorCallback: (@Sendable (Error) -> Void)?
+    private var configurationCallback: (@Sendable () -> Void)?
+    var onError: (@Sendable (Error) -> Void)? {
+        get { writeLock.withLock { errorCallback } }
+        set { writeLock.withLock { errorCallback = newValue } }
+    }
+    var onConfigurationChange: (@Sendable () -> Void)? {
+        get { writeLock.withLock { configurationCallback } }
+        set { writeLock.withLock { configurationCallback = newValue } }
+    }
     var isRunning: Bool { engine.isRunning }
     var failure: Error? {
         writeLock.lock()
@@ -52,6 +60,8 @@ final class MicrophoneRecorder: @unchecked Sendable {
         try startEngine(deviceID: deviceID, to: url, startedAt: startedAt, startTime: startTime)
     }
 
+    func pause() { stopEngine() }
+
     func stop() -> [CapturedAudioSegment] {
         stopEngine()
         let result = completedSegments
@@ -61,8 +71,6 @@ final class MicrophoneRecorder: @unchecked Sendable {
 
     private func startEngine(deviceID: AudioDeviceID?, to url: URL, startedAt: Date, startTime: CMTime) throws {
         CaptureDiagnostics.log("microphone.start segment=\(url.lastPathComponent) selected={\(CaptureDiagnostics.device(deviceID ?? AudioDeviceID(kAudioObjectUnknown)))} \(CaptureDiagnostics.devices())")
-        statistics.reset()
-        lastCallbackNanoseconds.store(0, ordering: .relaxed)
         let input = engine.inputNode
         if let deviceID {
             guard let audioUnit = input.audioUnit else {
@@ -87,16 +95,28 @@ final class MicrophoneRecorder: @unchecked Sendable {
             throw CaptureError.noMicrophone
         }
         CaptureDiagnostics.log("microphone.format device=\(deviceID ?? 0) format=\(inputFormat)")
-        let file = PCMFile(url: url, startTime: startTime.seconds)
+        let writer = try BufferedAudioWriter(format: inputFormat, url: url, startTime: startTime.seconds)
+        writer.onError = { [weak self] error in
+            guard let self else { return }
+            self.writeLock.withLock { self.writeFailure = error }
+            self.onError?(error)
+        }
+        writer.onWarning = { [weak self] message in
+            guard let self else { return }
+            self.writeLock.withLock { self.warning = message }
+        }
         format = inputFormat
-        self.file = file
-        writeFailure = nil
+        self.writer = writer
+        writeLock.withLock { writeFailure = nil; warning = nil }
         self.deviceID = deviceID
         currentSegmentURL = url
         currentSegmentStartedAt = startedAt
         currentSegmentHostStart = startTime
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
-            self?.consume(buffer, time: time)
+        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { buffer, time in
+            var timestamp = AudioTimeStamp()
+            timestamp.mHostTime = time.hostTime
+            if time.isHostTimeValid { timestamp.mFlags = .hostTimeValid }
+            writer.enqueue(buffer.audioBufferList, timestamp: timestamp)
         }
         engine.prepare()
         do {
@@ -110,15 +130,13 @@ final class MicrophoneRecorder: @unchecked Sendable {
     }
 
     private func stopEngine() {
-        guard engine.isRunning || file != nil else { return }
+        guard engine.isRunning || writer != nil else { return }
         CaptureDiagnostics.log("microphone.stop device=\(deviceID ?? 0) \(diagnosticSummary)")
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
         let endedAt = CMClockGetTime(CMClockGetHostTimeClock())
-        writeLock.lock()
-        file?.close()
-        file = nil
-        writeLock.unlock()
+        writer?.finish()
+        writer = nil
         if let url = currentSegmentURL, let startedAt = currentSegmentStartedAt,
            let hostStart = currentSegmentHostStart {
             completedSegments.append(CapturedAudioSegment(url: url, startedAt: startedAt,
@@ -130,29 +148,4 @@ final class MicrophoneRecorder: @unchecked Sendable {
         deviceID = nil
     }
 
-    private func consume(_ buffer: AVAudioPCMBuffer, time: AVAudioTime) {
-        statistics.record(frames: buffer.frameLength)
-        let callbackStarted = DispatchTime.now().uptimeNanoseconds
-        onLevel?(Self.level(buffer))
-        writeLock.lock()
-        var failure: Error?
-        if writeFailure == nil {
-            do {
-                guard time.isHostTimeValid else { throw CaptureError.writerFailure("Microphone buffer has no host timestamp") }
-                try file?.write(buffer, at: AVAudioTime.seconds(forHostTime: time.hostTime))
-            } catch { writeFailure = error; failure = error }
-        }
-        writeLock.unlock()
-        lastCallbackNanoseconds.store(DispatchTime.now().uptimeNanoseconds - callbackStarted, ordering: .relaxed)
-        if let failure { onError?(failure) }
-    }
-
-    private static func level(_ buffer: AVAudioPCMBuffer) -> Float {
-        guard let data = buffer.floatChannelData?[0] else { return 0 }
-        let count = Int(buffer.frameLength)
-        guard count > 0 else { return 0 }
-        var sum: Float = 0
-        for index in 0..<count { sum += data[index] * data[index] }
-        return min(1, sqrt(sum / Float(count)) * 4)
-    }
 }

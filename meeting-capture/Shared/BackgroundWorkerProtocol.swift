@@ -15,7 +15,7 @@ struct WorkerAccessReport: Codable, Equatable, Sendable {
     let accessibility: String
 }
 
-struct FinalizeCaptureRequest: Codable, Sendable {
+struct RecordingSession: Codable, Sendable {
     var microphoneSegments: [CapturedAudioSegment]
     var processTracks: [CapturedProcessTrack]
     let captureStartedAt: Date

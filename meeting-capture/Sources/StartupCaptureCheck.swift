@@ -18,6 +18,10 @@ enum StartupCaptureCheck {
             }
         default: throw CaptureError.microphonePermissionRequired
         }
+        return try await Task.detached { try await checkRecording() }.value
+    }
+
+    private nonisolated static func checkRecording() async throws -> StartupCaptureReport {
         try validateStorage(MeetingStore().root)
         let worker = try BackgroundWorkerClient()
 
@@ -31,14 +35,14 @@ enum StartupCaptureCheck {
         let microphoneURL = directory.appending(path: "microphone.caf")
         let systemURL = directory.appending(path: "system.caf")
         let microphone = MicrophoneRecorder()
-        let system = SystemAudioRecorder()
+        let system = ProcessAudioRecorder()
         do {
-            try await system.startAuthorizationCheck(to: systemURL)
+            try system.startAuthorizationCheck(to: systemURL)
             let startTime = CMClockGetTime(CMClockGetHostTimeClock())
             try microphone.start(to: microphoneURL, deviceID: nil, startedAt: Date(), startTime: startTime)
             try await Task.sleep(for: .seconds(1.5))
             _ = microphone.stop()
-            try await system.stop()
+            try system.stop()
             let microphoneFrames = try AVAudioFile(forReading: microphoneURL).length
             try validateMicrophoneFrames(microphoneFrames)
             let observed = system.firstSampleAt != nil
@@ -58,18 +62,18 @@ enum StartupCaptureCheck {
             return StartupCaptureReport(systemAudioObserved: observed, accessibility: accessibility)
         } catch {
             _ = microphone.stop()
-            try? await system.stop()
+            try? system.stop()
             throw error
         }
     }
 
-    static func validateMicrophoneFrames(_ frames: AVAudioFramePosition) throws {
+    nonisolated static func validateMicrophoneFrames(_ frames: AVAudioFramePosition) throws {
         guard frames > 0 else {
             throw CaptureError.writerFailure("The microphone check produced no audio frames. Check Microphone access and your input device, then retry.")
         }
     }
 
-    static func validateStorage(_ root: URL) throws {
+    nonisolated static func validateStorage(_ root: URL) throws {
         do {
             try MeetingStore(root: root).validateAccess()
         } catch {

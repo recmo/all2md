@@ -46,7 +46,7 @@ targets:
         INFOPLIST_KEY_LSUIElement: YES
         INFOPLIST_KEY_NSMicrophoneUsageDescription: Meeting Capture records your microphone during meetings.
         INFOPLIST_KEY_NSAudioCaptureUsageDescription: Meeting Capture records participant audio from meeting applications.
-        INFOPLIST_KEY_NSAccessibilityUsageDescription: Meeting Capture can read meeting titles and participant metadata.
+        INFOPLIST_KEY_NSAccessibilityUsageDescription: Meeting Capture can read the meeting application's window title.
         CODE_SIGN_ENTITLEMENTS: MeetingCapture.entitlements
   MeetingCaptureWorker:
     type: tool
@@ -54,7 +54,6 @@ targets:
     sources:
       - Worker
       - Shared
-      - Sources/AccessibilityProbe.swift
       - Sources/AudioFinalizer.swift
       - Sources/CaptureError.swift
       - Sources/MeetingStore.swift
