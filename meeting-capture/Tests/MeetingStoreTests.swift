@@ -165,13 +165,14 @@ final class MeetingStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = MeetingStore(root: root)
-        let paths = try store.paths(startedAt: Date(), title: "claim")
+        let start = Date()
+        let paths = try store.paths(startedAt: start, title: "claim")
         let input = paths.microphoneTemporary(segment: 1)
         try writeTone(to: input, sampleRate: 48_000, channels: 1, duration: 0.1)
         let original = try Data(contentsOf: input)
         try RecordingSession(
-            microphoneSegments: [CapturedAudioSegment(url: input, startedAt: Date(), endedAt: Date())],
-            processTracks: [], captureStartedAt: Date(), captureEndedAt: Date(),
+            microphoneSegments: [CapturedAudioSegment(url: input, startedAt: start, endedAt: start)],
+            processTracks: [], captureStartedAt: start, captureEndedAt: nil,
             paths: paths, trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: nil),
             metadata: [], warnings: [], interruptions: []
         ).save()
@@ -688,6 +689,33 @@ final class MeetingStoreTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertEqual(kill(child, 0), -1, "The worker's tool must be reaped")
+
+        // A fatal helper crash must also stop its still-running encoder. The
+        // unrelated sentinel remains alive across both kinds of termination.
+        try FileManager.default.removeItem(at: childFile)
+        let crashScript = script.replacingOccurrences(
+            of: "exec /bin/sleep 10", with: "kill -SEGV \"$PPID\"\nexec /bin/sleep 10"
+        )
+        try Data(crashScript.utf8).write(to: tool)
+        FileHandle.standardError.write(Data("lifecycle crash-with-tool begin\n".utf8))
+        do {
+            _ = try await cancellationWorker.finalize(session)
+            XCTFail("The encoder must crash its helper")
+        } catch let error as BackgroundWorkerError {
+            guard case let .crashed(command, reason, status) = error else {
+                return XCTFail("Unexpected helper crash error: \(error)")
+            }
+            XCTAssertEqual(command, "finalize")
+            XCTAssertEqual(reason, .uncaughtSignal)
+            XCTAssertEqual(status, SIGSEGV)
+        }
+        let orphan = try XCTUnwrap(Int32(String(contentsOf: childFile, encoding: .utf8)))
+        let cleaned = ProcessInfo.processInfo.systemUptime + 5
+        while kill(orphan, 0) == 0, ProcessInfo.processInfo.systemUptime < cleaned {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(kill(orphan, 0), -1, "A crashed helper must not leave its encoder running")
+        FileHandle.standardError.write(Data("lifecycle crash-with-tool done\n".utf8))
         var sentinelStatus: Int32 = 0
         var observed: pid_t
         repeat { observed = waitpid(sentinel, &sentinelStatus, WNOHANG) } while observed < 0 && errno == EINTR

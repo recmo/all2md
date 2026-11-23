@@ -127,9 +127,11 @@ progress for 120 seconds is stopped; healthy long jobs have no total duration
 limit. **Cancel background processing** cancels queued and running archive jobs.
 Original audio remains available for retry. Cancellation and recorder exit close
 the worker's lifetime pipe. A worker has two seconds to stop its tool; after
-three seconds the app can force-stop an unresponsive helper whose PID it still
-owns and has not reaped. Each worker cancels only its own unreaped tool PID,
-under a shared spawn/signal/reap lock. Per-recording file locks exclude concurrent
+three seconds the app can force-stop an unresponsive helper and its tools. Each
+helper leads a separate process group. The app keeps that leader unreaped until
+group cleanup, so a helper crash cannot leave an encoder running and the group
+identifier cannot have been reused. Each worker cancels only its own unreaped
+tool PID, under a shared spawn/signal/reap lock. Per-recording file locks exclude concurrent
 capture and recovery and are released by the OS on process exit.
 
 ## Permissions and optional metadata

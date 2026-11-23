@@ -191,7 +191,8 @@ private struct WorkerInvocation: Sendable {
         var attributes: posix_spawnattr_t? = nil
         try check(posix_spawnattr_init(&attributes))
         defer { posix_spawnattr_destroy(&attributes) }
-        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)))
+        try check(posix_spawnattr_setpgroup(&attributes, 0))
+        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP)))
         let strings = ([executableURL.path] + arguments).map { strdup($0) }
         defer { strings.forEach { free($0) } }
         var argv = strings + [nil]
@@ -200,17 +201,27 @@ private struct WorkerInvocation: Sendable {
         var envp = entries + [nil]
         var pid: pid_t = 0
         try check(posix_spawn(&pid, executableURL.path, &actions, &attributes, &argv, &envp))
+        guard pid > 0 else { throw BackgroundWorkerError.launch("Worker did not return a process identifier") }
         try? lifetime.fileHandleForReading.close()
         var deadline = ProcessInfo.processInfo.systemUptime + timeout
         var lastProgress: String?
         var stopDeadline: TimeInterval?
         var termination = siginfo_t()
-        while true {
-            if waitid(P_PID, id_t(pid), &termination, WEXITED | WNOHANG) < 0 {
+        func waitForWorker(_ options: Int32) throws {
+            while waitid(P_PID, id_t(pid), &termination, options) < 0 {
                 if errno == EINTR { continue }
                 throw BackgroundWorkerError.launch("Could not wait for worker: \(String(cString: strerror(errno)))")
             }
-            if termination.si_pid != 0 { break }
+        }
+        while true {
+            try waitForWorker(WEXITED | WNOHANG | WNOWAIT)
+            if termination.si_pid != 0 {
+                // This helper leads its own group. Keep its PID reserved until
+                // cleanup, including when a crash leaves an encoder behind.
+                _ = kill(-pid, SIGKILL)
+                try waitForWorker(WEXITED)
+                break
+            }
             let now = ProcessInfo.processInfo.systemUptime
             if stopDeadline == nil, let progressURL,
                let progress = WorkerProgress.signature(at: progressURL),
@@ -223,10 +234,10 @@ private struct WorkerInvocation: Sendable {
                 try? lifetime.fileHandleForWriting.close()
                 stopDeadline = now + 3
             }
-            if let stopDeadline, now >= stopDeadline, pid > 0 {
-                // This positive PID is still our unreaped child. Give EOF time
-                // to stop its tools, then also stop an unresponsive helper.
-                _ = kill(pid, SIGKILL)
+            if let stopDeadline, now >= stopDeadline {
+                // EOF has had time to stop tools. The group's positive leader
+                // is still our unreaped child, so its ID cannot have been reused.
+                _ = kill(-pid, SIGKILL)
             }
             Thread.sleep(forTimeInterval: 0.1)
         }
