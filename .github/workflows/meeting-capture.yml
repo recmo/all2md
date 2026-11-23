@@ -25,14 +25,24 @@ concurrency:
 
 jobs:
   macos:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
-      - name: Build and run XCTest
-        run: nix develop .#meeting-capture --command bash meeting-capture/test-local.sh
       - name: Build release package
         run: nix build .#meeting-capture --print-build-logs
+      - name: Verify bundled audio tools
+        run: |
+          result/Applications/MeetingCapture.app/Contents/Resources/bin/ffmpeg -version > /dev/null
+          result/Applications/MeetingCapture.app/Contents/Resources/bin/ffprobe -version > /dev/null
+      - name: Build and run XCTest against release worker
+        env:
+          MEETING_CAPTURE_TEST_APP: ${{ github.workspace }}/result/Applications/MeetingCapture.app
+        run: nix develop .#meeting-capture --command bash meeting-capture/test-local.sh

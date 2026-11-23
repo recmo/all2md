@@ -22,7 +22,8 @@ bash meeting-capture/install-local.sh
 The installer builds the Nix package, runs XCTest in the Nix development shell,
 and signs the app and worker using the installed app's designated requirement.
 After those checks pass it replaces `~/Applications/MeetingCapture.app` and
-reopens it. It refuses to replace a running app. The `result` link retains Nix
+reopens it. It refuses to replace a running app and atomically exchanges the
+verified staged bundle with the installed bundle. The `result` link retains Nix
 runtime dependencies. The app refuses Quit during capture startup, recording,
 and stopping. Interrupted background processing preserves its original audio.
 
@@ -43,8 +44,10 @@ bash meeting-capture/test-local.sh
 `project.yml` defines the app, worker, and tests. The checked-in Xcode project
 includes the same source files; regenerate it with `xcodegen generate` inside
 `meeting-capture` when changing build settings. The test script builds the app
-and test bundle and runs XCTest without a GUI testmanager session. Live audio
-is opt-in:
+and test bundle and runs XCTest without a GUI testmanager session. The GitHub
+Actions workflow builds and verifies the release package on macOS 15 and macOS 26,
+then runs this suite against its packaged worker. Set `MEETING_CAPTURE_TEST_APP`
+to an app bundle to exercise another built worker locally. Live audio is opt-in:
 
 ```sh
 MEETING_CAPTURE_TEST_PROCESS_TAP=1 nix develop .#meeting-capture --command \
@@ -88,8 +91,10 @@ continue. Device changes retry the microphone immediately. Lost audio and retry
 intervals are recorded in the journal and manifest, and the menu shows the latest
 warning. Missing microphone callbacks for five seconds trigger a restart;
 quiet process audio does not. Storage or journal failures stop the session and
-return to monitoring after ten seconds. An active meeting can then start a new
-recording. Explicit Stop suppresses that automatic restart.
+retry after ten seconds.
+Manual recordings start a new session automatically; automatically detected
+meetings return to monitoring and restart while microphone activity continues.
+Explicit Stop ends manual retry intent and suppresses automatic restart.
 
 ## Archive publication and recovery
 

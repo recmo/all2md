@@ -68,7 +68,7 @@ struct StatusMenuView: View {
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
-                Text("Monitoring retries automatically in 10 seconds.")
+                Text("Retrying automatically in 10 seconds.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Retry now") { model.dismissError() }
             }

@@ -650,47 +650,14 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertFalse(failed.warnings.isEmpty)
     }
 
-    // Temporary release validation; remove after the native installer check passes.
-    func testReleaseReviewAtomicInstallation() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let installer = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().appending(path: "install-local.sh")
-        let source = try String(contentsOf: installer, encoding: .utf8)
-        let start = try XCTUnwrap(source.range(of: "<<'SWIFT'\n"))
-        let end = try XCTUnwrap(source.range(of: "\nSWIFT", range: start.upperBound..<source.endIndex))
-        let script = Data(source[start.upperBound..<end.lowerBound].utf8)
-        let staged = root.appending(path: "Staged.app")
-        let installed = root.appending(path: "Installed.app")
-        for (path, value) in [(staged, "new"), (installed, "old")] {
-            try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
-            try Data(value.utf8).write(to: path.appending(path: "identity"))
-        }
-        func publish(_ from: URL) throws -> Int32 {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-            process.arguments = ["swift", "-", from.path, installed.path]
-            let input = Pipe()
-            process.standardInput = input
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try process.run()
-            try input.fileHandleForWriting.write(contentsOf: script)
-            try input.fileHandleForWriting.close()
-            process.waitUntilExit()
-            return process.terminationStatus
-        }
-        XCTAssertEqual(try publish(staged), 0)
-        XCTAssertEqual(try String(contentsOf: installed.appending(path: "identity"), encoding: .utf8), "new")
-        XCTAssertEqual(try String(contentsOf: staged.appending(path: "identity"), encoding: .utf8), "old")
-        XCTAssertNotEqual(try publish(root.appending(path: "Missing.app")), 0)
-        XCTAssertEqual(try String(contentsOf: installed.appending(path: "identity"), encoding: .utf8), "new")
-    }
-
     private func workerClient() throws -> BackgroundWorkerClient {
-        let application = Bundle(for: MeetingStoreTests.self).bundleURL
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let application: URL
+        if let path = ProcessInfo.processInfo.environment["MEETING_CAPTURE_TEST_APP"] {
+            application = URL(fileURLWithPath: path)
+        } else {
+            application = Bundle(for: MeetingStoreTests.self).bundleURL
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        }
         return try BackgroundWorkerClient(executableURL: application.appending(path: "Contents/Helpers/MeetingCaptureWorker"))
     }
 

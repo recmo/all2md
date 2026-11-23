@@ -126,6 +126,7 @@ final class AppModel: ObservableObject {
     func stopRecording(suppressClients: Bool = true) {
         guard case let .recording(client) = state else { return }
         if suppressClients {
+            recordingMethod = .audioProcess // Explicit Stop ends manual retry intent.
             if client.processID == 0 { suppressedClients.formUnion(activeMicrophoneClients) }
             else { suppressedClients.insert(client.processID) }
         }
@@ -150,8 +151,13 @@ final class AppModel: ObservableObject {
     }
 
     func dismissError() {
+        guard case .error = state else { return }
         retryTask?.cancel(); retryTask = nil
-        if startupReport == nil { checkPermissions() } else { state = .idle }
+        if startupReport == nil { checkPermissions() }
+        else {
+            state = .idle
+            if recordingMethod == .manual { manualStart() }
+        }
     }
 
     private func retryAfterFailure(_ message: String) {
