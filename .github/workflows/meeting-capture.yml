@@ -43,6 +43,7 @@ jobs:
           result/Applications/MeetingCapture.app/Contents/Resources/bin/ffmpeg -version > /dev/null
           result/Applications/MeetingCapture.app/Contents/Resources/bin/ffprobe -version > /dev/null
       - name: Build and run XCTest against release worker
+        timeout-minutes: 5
         env:
           MEETING_CAPTURE_TEST_APP: ${{ github.workspace }}/result/Applications/MeetingCapture.app
         run: nix develop .#meeting-capture --command bash meeting-capture/test-local.sh

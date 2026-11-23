@@ -566,7 +566,17 @@ final class MeetingStoreTests: XCTestCase {
     }
 
     func testWorkerCrashAndCancellationAreIsolated() async throws {
+        // Temporary release-review stress; remove after resolving native shutdown.
+        for iteration in 0..<30 {
+            FileHandle.standardError.write(Data("lifecycle iteration=\(iteration) start\n".utf8))
+            try await exerciseWorkerCrashAndCancellation()
+            FileHandle.standardError.write(Data("lifecycle iteration=\(iteration) done\n".utf8))
+        }
+    }
+
+    private func exerciseWorkerCrashAndCancellation() async throws {
         let worker = try workerClient()
+        FileHandle.standardError.write(Data("lifecycle crash begin\n".utf8))
         do {
             try await worker.verifyCrashIsolation()
             XCTFail("The crash-test worker unexpectedly succeeded")
@@ -578,6 +588,7 @@ final class MeetingStoreTests: XCTestCase {
             XCTAssertEqual(reason, .uncaughtSignal)
             XCTAssertEqual(status, SIGSEGV)
         }
+        FileHandle.standardError.write(Data("lifecycle crash done\n".utf8))
 
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -623,6 +634,7 @@ final class MeetingStoreTests: XCTestCase {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
+        FileHandle.standardError.write(Data("lifecycle cancel worker started\n".utf8))
         try lifetime.fileHandleForReading.close()
         defer {
             try? lifetime.fileHandleForWriting.close()
@@ -636,6 +648,7 @@ final class MeetingStoreTests: XCTestCase {
         }
         XCTAssertTrue(process.isRunning)
         let child = try XCTUnwrap(childPID)
+        FileHandle.standardError.write(Data("lifecycle cancel child started\n".utf8))
         XCTAssertEqual(kill(child, 0), 0)
         let sentinel = Process()
         sentinel.executableURL = URL(fileURLWithPath: "/bin/sleep")
@@ -643,13 +656,16 @@ final class MeetingStoreTests: XCTestCase {
         try sentinel.run()
         defer { if sentinel.isRunning { sentinel.terminate(); sentinel.waitUntilExit() } }
         try lifetime.fileHandleForWriting.close()
+        FileHandle.standardError.write(Data("lifecycle cancel lifetime closed\n".utf8))
         let stopped = ProcessInfo.processInfo.systemUptime + 5
         while process.isRunning, ProcessInfo.processInfo.systemUptime < stopped {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertFalse(process.isRunning, "Closing the lifetime pipe must stop the worker and tool")
+        FileHandle.standardError.write(Data("lifecycle cancel observed stop=\(!process.isRunning)\n".utf8))
         guard !process.isRunning else { return }
         process.waitUntilExit()
+        FileHandle.standardError.write(Data("lifecycle cancel wait complete\n".utf8))
         while kill(child, 0) == 0, ProcessInfo.processInfo.systemUptime < stopped {
             try await Task.sleep(for: .milliseconds(20))
         }
