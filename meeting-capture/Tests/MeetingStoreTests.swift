@@ -566,40 +566,8 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertFalse(AppModel.allowsMaintenance(in: .stopping))
     }
 
-    // Temporary release-review regression; fold into the lifecycle test after validation.
-    func testReleaseReviewUnresponsiveWorkerIsBounded() async throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let executable = root.appending(path: "unresponsive-worker")
-        try Data("#!/bin/sh\ntrap '' TERM\nexec /bin/sleep 12\n".utf8).write(to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-        let worker = try BackgroundWorkerClient(executableURL: executable)
-        let start = ProcessInfo.processInfo.systemUptime
-        do {
-            try await worker.verifyCrashIsolation()
-            XCTFail("An unresponsive helper must time out")
-        } catch let error as BackgroundWorkerError {
-            guard case let .operation(message) = error else {
-                return XCTFail("Unexpected timeout error: \(error)")
-            }
-            XCTAssertTrue(message.contains("made no progress for 5 seconds"))
-        }
-        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 10)
-    }
-
-    func testWorkerCrashAndCancellationAreIsolated() async throws {
-        // Temporary release-review stress; remove after resolving native shutdown.
-        for iteration in 0..<30 {
-            FileHandle.standardError.write(Data("lifecycle iteration=\(iteration) start\n".utf8))
-            try await exerciseWorkerCrashAndCancellation()
-            FileHandle.standardError.write(Data("lifecycle iteration=\(iteration) done\n".utf8))
-        }
-    }
-
-    private func exerciseWorkerCrashAndCancellation() async throws {
+    func testWorkerLifecyclePreservesRecordings() async throws {
         let worker = try workerClient()
-        FileHandle.standardError.write(Data("lifecycle crash begin\n".utf8))
         do {
             try await worker.verifyCrashIsolation()
             XCTFail("The crash-test worker unexpectedly succeeded")
@@ -611,7 +579,6 @@ final class MeetingStoreTests: XCTestCase {
             XCTAssertEqual(reason, .uncaughtSignal)
             XCTAssertEqual(status, SIGSEGV)
         }
-        FileHandle.standardError.write(Data("lifecycle crash done\n".utf8))
 
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -648,7 +615,6 @@ final class MeetingStoreTests: XCTestCase {
         let cancellationWorker = try BackgroundWorkerClient(executableURL: detached)
         let operation = Task { try await cancellationWorker.finalize(session) }
         defer { operation.cancel() }
-        FileHandle.standardError.write(Data("lifecycle cancel worker started\n".utf8))
         let deadline = ProcessInfo.processInfo.systemUptime + 15
         var childPID: Int32?
         while childPID == nil, ProcessInfo.processInfo.systemUptime < deadline {
@@ -656,7 +622,6 @@ final class MeetingStoreTests: XCTestCase {
             if childPID == nil { try await Task.sleep(for: .milliseconds(20)) }
         }
         let child = try XCTUnwrap(childPID)
-        FileHandle.standardError.write(Data("lifecycle cancel child started\n".utf8))
         XCTAssertEqual(kill(child, 0), 0)
         let sentinelArguments = [strdup("/bin/sleep"), strdup("30")]
         defer { sentinelArguments.forEach { free($0) } }
@@ -674,7 +639,6 @@ final class MeetingStoreTests: XCTestCase {
             }
         }
         operation.cancel()
-        FileHandle.standardError.write(Data("lifecycle cancel requested\n".utf8))
         let stopped = ProcessInfo.processInfo.systemUptime + 5
         do {
             _ = try await operation.value
@@ -684,20 +648,18 @@ final class MeetingStoreTests: XCTestCase {
             XCTFail("Unexpected cancellation error: \(error)")
         }
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime, stopped)
-        FileHandle.standardError.write(Data("lifecycle cancel wait complete\n".utf8))
         while kill(child, 0) == 0, ProcessInfo.processInfo.systemUptime < stopped {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertEqual(kill(child, 0), -1, "The worker's tool must be reaped")
 
         // A fatal helper crash must also stop its still-running encoder. The
-        // unrelated sentinel remains alive across both kinds of termination.
+        // unrelated sentinel remains alive across crashes and cancellation.
         try FileManager.default.removeItem(at: childFile)
         let crashScript = script.replacingOccurrences(
             of: "exec /bin/sleep 10", with: "kill -SEGV \"$PPID\"\nexec /bin/sleep 10"
         )
         try Data(crashScript.utf8).write(to: tool)
-        FileHandle.standardError.write(Data("lifecycle crash-with-tool begin\n".utf8))
         do {
             _ = try await cancellationWorker.finalize(session)
             XCTFail("The encoder must crash its helper")
@@ -715,12 +677,29 @@ final class MeetingStoreTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertEqual(kill(orphan, 0), -1, "A crashed helper must not leave its encoder running")
-        FileHandle.standardError.write(Data("lifecycle crash-with-tool done\n".utf8))
+
+        // A helper that cannot run its EOF monitor must also have a deadline.
+        let executable = root.appending(path: "unresponsive-worker")
+        try Data("#!/bin/sh\ntrap '' TERM\nexec /bin/sleep 12\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let timeoutWorker = try BackgroundWorkerClient(executableURL: executable)
+        let timeoutStarted = ProcessInfo.processInfo.systemUptime
+        do {
+            try await timeoutWorker.verifyCrashIsolation()
+            XCTFail("An unresponsive helper must time out")
+        } catch let error as BackgroundWorkerError {
+            guard case let .operation(message) = error else {
+                return XCTFail("Unexpected timeout error: \(error)")
+            }
+            XCTAssertTrue(message.contains("made no progress for 5 seconds"))
+        }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - timeoutStarted, 10)
+
         var sentinelStatus: Int32 = 0
         var observed: pid_t
         repeat { observed = waitpid(sentinel, &sentinelStatus, WNOHANG) } while observed < 0 && errno == EINTR
         if observed != 0 { sentinel = 0 } // Do not signal a reaped or unowned PID.
-        XCTAssertEqual(observed, 0, "Cancellation must leave unrelated processes running")
+        XCTAssertEqual(observed, 0, "Worker shutdown must leave unrelated processes running")
         XCTAssertTrue(RecordingClaim.isAvailable(paths))
         XCTAssertEqual(try Data(contentsOf: input), original)
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.session.path))
