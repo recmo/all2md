@@ -125,8 +125,10 @@ Finalization and recovery share one serial job queue. Workers cannot replace
 live capture state. A job with no encoder timestamp advancement or other work
 progress for 120 seconds is stopped; healthy long jobs have no total duration
 limit. **Cancel background processing** cancels queued and running archive jobs.
-Original audio remains available for retry. Recorder exit also closes the
-worker's lifetime pipe. Each worker cancels only its own unreaped tool PID,
+Original audio remains available for retry. Cancellation and recorder exit close
+the worker's lifetime pipe. A worker has two seconds to stop its tool; after
+three seconds the app can force-stop an unresponsive helper whose PID it still
+owns and has not reaped. Each worker cancels only its own unreaped tool PID,
 under a shared spawn/signal/reap lock. Per-recording file locks exclude concurrent
 capture and recovery and are released by the OS on process exit.
 
@@ -168,8 +170,9 @@ subsystem. To export the last hour:
   > ~/Desktop/MeetingCapture-audio.log
 ```
 
-Logs include checks, capture/retry transitions, process identities, selected and
-default device IDs/UIDs, hardware rates and buffer sizes, native formats,
+Logs include checks, capture/retry transitions, worker cancellation/deadlines,
+process identities, selected and default device IDs/UIDs, hardware rates and
+buffer sizes, native formats,
 configuration changes, tap/aggregate creation and teardown, and OSStatus errors.
 Five-second health snapshots report engine state, callback/frame counts, last
 callback age, queue occupancy and peak, dropped and written frames, and write

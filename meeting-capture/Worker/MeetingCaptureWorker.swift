@@ -46,7 +46,8 @@ enum MeetingCaptureWorker {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         // LaunchServices reuses an open instance. Become the waiting launcher
         // so launchd receives its exit directly, without another process waiter.
-        let arguments = ["/usr/bin/open", "-g", "-W", app.path].map { strdup($0) }
+        let command: [String] = ["/usr/bin/open", "-g", "-W", app.path]
+        let arguments = command.map { strdup($0) }
         defer { arguments.forEach { free($0) } }
         var argv = arguments + [nil]
         execv("/usr/bin/open", &argv)
