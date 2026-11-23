@@ -268,16 +268,20 @@ final class MeetingStoreTests: XCTestCase {
                     let disabledURL = root.appending(path: "disabled-\(common.rawValue)-\(interleaved)-\(sampleRate).caf")
                     let disabled = try BufferedAudioWriter(format: format, url: disabledURL, startTime: 0)
                     disabled.onError = { XCTFail("Disabled stream reported a source failure: \($0)") }
-                    let descriptors = Array(buffers)
-                    for index in buffers.indices { buffers[index].mData = nil }
-                    disabled.enqueue(pcm.audioBufferList, timestamp: AudioTimeStamp())
-                    for index in buffers.indices { buffers[index] = descriptors[index] }
+                    let disabledBuffers = AudioBufferList.allocate(maximumBuffers: buffers.count)
+                    defer { free(disabledBuffers.unsafeMutablePointer) }
+                    for index in buffers.indices {
+                        disabledBuffers[index] = buffers[index]
+                        disabledBuffers[index].mData = nil
+                    }
+                    disabled.enqueue(disabledBuffers.unsafePointer, timestamp: AudioTimeStamp())
+                    for index in buffers.indices { disabledBuffers[index] = buffers[index] }
                     var enabledTime = AudioTimeStamp()
                     enabledTime.mFlags = .hostTimeValid
                     if !interleaved {
-                        buffers[0].mData = nil
-                        disabled.enqueue(pcm.audioBufferList, timestamp: enabledTime)
-                        buffers[0] = descriptors[0]
+                        disabledBuffers[0].mData = nil
+                        disabled.enqueue(disabledBuffers.unsafePointer, timestamp: enabledTime)
+                        disabledBuffers[0] = buffers[0]
                         enabledTime.mHostTime = AVAudioTime.hostTime(forSeconds: 64 / sampleRate)
                     }
                     disabled.enqueue(pcm.audioBufferList, timestamp: enabledTime)
