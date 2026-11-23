@@ -1,0 +1,38 @@
+name: Meeting Capture
+
+on:
+  pull_request:
+    paths:
+      - meeting-capture/**
+      - flake.nix
+      - flake.lock
+      - .github/workflows/meeting-capture.yml
+  push:
+    branches: [main, codex/meeting-capture-keep-running]
+    paths:
+      - meeting-capture/**
+      - flake.nix
+      - flake.lock
+      - .github/workflows/meeting-capture.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meeting-capture-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
+      - name: Build and run XCTest
+        run: nix develop .#meeting-capture --command bash meeting-capture/test-local.sh
+      - name: Build release package
+        run: nix build .#meeting-capture --print-build-logs
