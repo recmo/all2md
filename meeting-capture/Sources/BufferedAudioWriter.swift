@@ -17,6 +17,8 @@ final class BufferedAudioWriter: @unchecked Sendable {
     private let slots: [Slot]
     // One producer (serial callbacks for one source), one consumer (writer queue).
     // Release/acquire publishes slots and prevents reuse until writing completes.
+    // Bit 0 owns the producer state; bit 1 closes admission during shutdown.
+    private let inputState = Atomic<UInt8>(0)
     private let readIndex = Atomic<Int>(0)
     private let writeIndex = Atomic<Int>(0)
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.pcm-writer")
@@ -65,8 +67,8 @@ final class BufferedAudioWriter: @unchecked Sendable {
             let events = self.source.data
             if events & 2 != 0, !self.overflowReported {
                 self.overflowReported = true
-                CaptureDiagnostics.log("audio.queue.overflow \(self.diagnosticSummary)")
-                self.onWarning?("Audio queue filled; some audio was dropped. Recording continued; missing audio is silence.")
+                CaptureDiagnostics.log("audio.frames.dropped \(self.diagnosticSummary)")
+                self.onWarning?("The audio writer could not accept some frames. Recording continued; missing audio is silence.")
             }
             if events & 4 != 0 { self.fail(CaptureError.writerFailure("Invalid audio buffer or timestamp")) }
             self.drain()
@@ -80,6 +82,23 @@ final class BufferedAudioWriter: @unchecked Sendable {
     }
 
     func enqueue(_ input: UnsafePointer<AudioBufferList>, timestamp: AudioTimeStamp) {
+        let admission = inputState.compareExchange(expected: 0, desired: 1, ordering: .acquiring)
+        guard admission.exchanged else {
+            // A late callback cannot touch producer state after finish starts.
+            // Concurrent callbacks drop input instead of racing over a slot.
+            if admission.original == 1 {
+                let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
+                let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
+                if bytesPerFrame > 0, let bytes = buffers.first?.mDataByteSize {
+                    let frames = bytes / bytesPerFrame
+                    statistics.record(frames: frames)
+                    droppedFrames.wrappingAdd(UInt64(frames), ordering: .relaxed)
+                }
+                source.or(data: 2)
+            }
+            return
+        }
+        defer { inputState.bitwiseAnd(~UInt8(1), ordering: .releasing) }
         let incoming = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         guard incoming.contains(where: { $0.mDataByteSize > 0 }) else { return }
         guard timestamp.mFlags.contains(.hostTimeValid) else { source.or(data: 4); return }
@@ -191,8 +210,10 @@ final class BufferedAudioWriter: @unchecked Sendable {
     }
 
     func finish() {
-        // Called only after callbacks stop. A final event drains both pending audio
-        // and failure flags before acknowledging close to the stopping thread.
+        // Stop accepting callbacks, then wait for any copy already in flight.
+        // Only the source's control queue calls finish.
+        guard inputState.bitwiseOr(2, ordering: .acquiringAndReleasing).oldValue < 2 else { return }
+        while inputState.load(ordering: .acquiring) & 1 != 0 { Thread.sleep(forTimeInterval: 0.001) }
         publishPending()
         source.or(data: 8)
         finished.wait()
