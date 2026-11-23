@@ -314,6 +314,8 @@ final class CaptureCoordinator: @unchecked Sendable {
         // A slow microphone drain must not keep process taps recording after Stop.
         microphone.stopInput()
         for track in processes.values { track.recorder.stopInput() }
+        session?.captureEndedAt = endedAt
+        save() // Recovery must retain Stop even if a later drain is interrupted.
         session?.microphoneSegments = microphone.stop()
         if let failure = microphone.failure { warn("Microphone: \(failure.localizedDescription)", incomplete: true) }
         if let warning = microphone.captureWarning { warn("Microphone: \(warning)", incomplete: true) }
@@ -326,7 +328,6 @@ final class CaptureCoordinator: @unchecked Sendable {
             recordInterruption(since: retry.startedAt, until: endedAt,
                                reason: "\(retry.process.title): Process audio interrupted")
         }
-        session?.captureEndedAt = endedAt
         session?.microphoneSegments.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
         session?.processTracks.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
         accessibilityWorker?.terminate(); accessibilityWorker = nil
