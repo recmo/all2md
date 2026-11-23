@@ -19,7 +19,7 @@ struct RecordingSession: Codable, Sendable {
     var microphoneSegments: [CapturedAudioSegment]
     var processTracks: [CapturedProcessTrack]
     let captureStartedAt: Date
-    var captureEndedAt: Date
+    var captureEndedAt: Date?
     let paths: RecordingPaths
     let trigger: CaptureTrigger
     var metadata: [MetadataEvent]

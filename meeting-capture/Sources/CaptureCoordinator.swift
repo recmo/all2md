@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
+import Synchronization
 
 struct CaptureStatus: Sendable {
     let sessionID: UUID
@@ -31,6 +32,7 @@ final class CaptureCoordinator: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var nextPoll: TimeInterval = 0
     private var nextHealth: TimeInterval = 0
+    private let stopRequested = Atomic<Bool>(false)
     private var fatalFailure = false
     private var microphoneGeneration = UUID()
     private var microphoneDevice: AudioInputDevice?
@@ -57,6 +59,7 @@ final class CaptureCoordinator: @unchecked Sendable {
             guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
                 throw CaptureError.microphonePermissionRequired
             }
+            self.stopRequested.store(false, ordering: .releasing)
             self.hostStart = CMClockGetTime(CMClockGetHostTimeClock())
             let start = Date()
             let paths = try self.store.paths(startedAt: start, title: trigger.applicationName)
@@ -64,7 +67,7 @@ final class CaptureCoordinator: @unchecked Sendable {
             self.claimedRecordings.insert(paths.manifest)
             self.sessionID = id
             self.session = RecordingSession(microphoneSegments: [], processTracks: [],
-                captureStartedAt: start, captureEndedAt: start, paths: paths, trigger: trigger,
+                captureStartedAt: start, captureEndedAt: nil, paths: paths, trigger: trigger,
                 metadata: [], warnings: [], interruptions: [])
             self.microphoneDevice = microphoneDevice
             CaptureDiagnostics.log("capture.start session=\(paths.session.lastPathComponent) pid=\(trigger.processID ?? 0) \(CaptureDiagnostics.devices())")
@@ -93,11 +96,15 @@ final class CaptureCoordinator: @unchecked Sendable {
         }
     }
 
-    func stop() async throws -> RecordingSession { try await perform { try self.stopCapture() } }
+    func stop() async throws -> RecordingSession {
+        let time = CMClockGetTime(CMClockGetHostTimeClock())
+        stopRequested.store(true, ordering: .releasing)
+        return try await perform { try self.stopCapture(at: time) }
+    }
 
     func updateMicrophoneDevices(_ devices: [AudioInputDevice]) {
         queue.async {
-            guard self.session != nil, let next = devices.first, next != self.microphoneDevice else { return }
+            guard self.session != nil, !self.stopRequested.load(ordering: .acquiring), let next = devices.first, next != self.microphoneDevice else { return }
             self.microphoneFailed(CaptureError.deviceSelectionFailure("Input changed to \(next.name)"))
             self.microphoneDevice = next
             self.startMicrophone()
@@ -113,7 +120,7 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     private func tick() {
-        guard session != nil, !fatalFailure else { return }
+        guard session != nil, !fatalFailure, !stopRequested.load(ordering: .acquiring) else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if let retry = microphoneRetry, now >= retry { startMicrophone() }
         if microphoneRetry == nil, microphoneInterruptedAt == nil,
@@ -135,7 +142,7 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     private func startMicrophone() {
-        guard let session, !fatalFailure else { return }
+        guard let session, !fatalFailure, !stopRequested.load(ordering: .acquiring) else { return }
         let host = CMClockGetTime(CMClockGetHostTimeClock())
         let date = captureDate(at: host)
         let segment = CapturedAudioSegment(url: session.paths.microphoneTemporary(segment: session.microphoneSegments.count + 1),
@@ -166,21 +173,22 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     private func microphoneFailed(_ error: Error) {
-        guard session != nil, !fatalFailure else { return }
+        guard session != nil, !fatalFailure, !stopRequested.load(ordering: .acquiring) else { return }
         if case CaptureError.storageFailure = error { fail(error.localizedDescription); return }
         microphoneGeneration = UUID() // Ignore errors already queued by the old segment.
+        microphoneInterruptedAt = microphoneInterruptedAt ?? captureDate()
         microphone.pause()
         // Draining can report an overflow just before a replacement clears it.
         if let warning = microphone.captureWarning { warn("Microphone: \(warning)", incomplete: true) }
         if let failure = microphone.failure, case CaptureError.storageFailure = failure {
             fail(failure.localizedDescription); return
         }
-        microphoneInterruptedAt = microphoneInterruptedAt ?? captureDate()
         microphoneRetry = ProcessInfo.processInfo.systemUptime + 10
         warn("Microphone interrupted; retrying: \(error.localizedDescription)", incomplete: true)
     }
 
     private func pollProcesses() {
+        guard !stopRequested.load(ordering: .acquiring) else { return }
         do {
             let snapshot = try catalog.outputProcesses()
             for object in Array(processes.keys) where !snapshot.all.contains(object) { stopProcess(object, exited: true) }
@@ -199,7 +207,8 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     private func startProcess(_ process: AudioProcess) {
-        guard let session, let identity = sessionID, !fatalFailure else { return }
+        guard let session, let identity = sessionID, !fatalFailure,
+              !stopRequested.load(ordering: .acquiring) else { return }
         let id = UUID()
         let host = CMClockGetTime(CMClockGetHostTimeClock())
         let track = CapturedProcessTrack(id: id, process: process, url: session.paths.processTemporary(id), startedAt: captureDate(at: host))
@@ -220,15 +229,15 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     private func processFailed(_ process: AudioProcess, error: Error) {
-        guard session != nil, !fatalFailure else { return }
+        guard session != nil, !fatalFailure, !stopRequested.load(ordering: .acquiring) else { return }
         if case CaptureError.storageFailure = error { fail(error.localizedDescription); return }
         if CaptureError.isProcessTapFailure(error),
            let live = try? catalog.processObjectIDs(), !live.contains(process.objectID) {
             stopProcess(process.objectID, exited: true)
             return
         }
-        stopProcess(process.objectID, exited: false)
         let began = retries[process.objectID]?.startedAt ?? captureDate()
+        stopProcess(process.objectID, exited: false)
         retries[process.objectID] = Retry(process: process, startedAt: began, after: ProcessInfo.processInfo.systemUptime + 10)
         warn("\(process.title) interrupted; retrying: \(error.localizedDescription)", incomplete: true)
     }
@@ -253,6 +262,7 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     private func recordInterruption(since start: Date, until end: Date, reason: String) {
+        guard end >= start else { return }
         let range = CaptureTimeRange(startedAt: start, endedAt: end, reason: reason)
         session?.interruptions.append(range)
     }
@@ -292,10 +302,11 @@ final class CaptureCoordinator: @unchecked Sendable {
             processTrackCount: session.processTracks.count, warning: session.warnings.last))
     }
 
-    private func stopCapture() throws -> RecordingSession {
+    private func stopCapture(at time: CMTime = CMClockGetTime(CMClockGetHostTimeClock())) throws -> RecordingSession {
         guard session != nil else { throw CaptureError.writerFailure("No active recording") }
         CaptureDiagnostics.log("capture.stop")
-        let endedAt = captureDate()
+        let endedAt = captureDate(at: time)
+        stopRequested.store(true, ordering: .releasing)
         timer?.cancel(); timer = nil
         microphoneGeneration = UUID()
         microphone.onError = nil

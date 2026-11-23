@@ -115,6 +115,8 @@ The manifest and matching archive are the commit record. Recovery verifies a
 published archive and finishes cleanup without rebuilding it from partially
 deleted inputs. A checksum mismatch preserves all remaining files. Uncommitted
 sessions recover using journaled offsets and audio-derived segment lengths.
+Open journals omit an end time; stopped journals retain the requested cutoff
+through recovery, even when raw audio extends past it.
 Header-only files are marked unrecoverable; files without a journal remain
 available for manual salvage. The menu offers Recover and Show files for each
 interrupted recording. Recovery does not require recording permissions.

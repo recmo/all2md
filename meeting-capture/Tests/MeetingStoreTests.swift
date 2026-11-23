@@ -563,105 +563,110 @@ final class MeetingStoreTests: XCTestCase {
     }
 
     func testJournalRecoveryPreservesGapsAndFailureStatus() async throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = MeetingStore(root: root)
-        let start = Date()
-        let paths = try store.paths(startedAt: start, title: "journal")
-        let first = paths.microphoneTemporary(segment: 1)
-        let second = paths.microphoneTemporary(segment: 2)
-        try writeTone(to: first, sampleRate: 48_000, channels: 1, duration: 0.1)
-        try writeTone(to: second, sampleRate: 48_000, channels: 1, duration: 0.1)
-        let process = processTrack(paths, startedAt: start)
-        try writeTone(to: process.url, sampleRate: 48_000, channels: 2, duration: 1)
-        let otherProcess = processTrack(paths, startedAt: start.addingTimeInterval(0.2), processID: 43)
-        try writeTone(to: otherProcess.url, sampleRate: 44_100, channels: 2, duration: 0.5)
-        var session = RecordingSession(
-            microphoneSegments: [
-                CapturedAudioSegment(url: first, startedAt: start, endedAt: start),
-                CapturedAudioSegment(url: second, startedAt: start.addingTimeInterval(0.4), endedAt: start.addingTimeInterval(0.4))
-            ], processTracks: [process, otherProcess],
-            captureStartedAt: start, captureEndedAt: start, paths: paths,
-            trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: "Test"),
-            metadata: [], warnings: [], interruptions: []
-        )
-        try session.save()
-        XCTAssertEqual(store.interruptedRecordings().map { $0.resolvingSymlinksInPath() }, [paths.session.resolvingSymlinksInPath()])
-        let loaded = try RecordingSession.load(from: paths.session)
-        XCTAssertEqual(loaded.microphoneSegments.map(\.startedAt), session.microphoneSegments.map(\.startedAt))
-        let journalBeforeRecovery = try Data(contentsOf: paths.session)
-        let remainingProcess = try Data(contentsOf: process.url)
-        let worker = try workerClient()
-        let manifestURL = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let manifest = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: manifestURL))
-        XCTAssertEqual(manifest.status, .incomplete)
-        XCTAssertEqual(manifest.audio.count, 3)
-        XCTAssertEqual(manifest.audio.compactMap(\.id), [process.id, otherProcess.id])
-        XCTAssertEqual(manifest.audio.compactMap(\.process).map(\.processID), [42, 43])
-        XCTAssertTrue(store.interruptedRecordings().isEmpty)
+        for legacyOpenJournal in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = MeetingStore(root: root)
+            let start = Date()
+            let paths = try store.paths(startedAt: start, title: "journal")
+            let first = paths.microphoneTemporary(segment: 1)
+            let second = paths.microphoneTemporary(segment: 2)
+            try writeTone(to: first, sampleRate: 48_000, channels: 1, duration: 0.1)
+            try writeTone(to: second, sampleRate: 48_000, channels: 1, duration: 0.1)
+            let process = processTrack(paths, startedAt: start)
+            try writeTone(to: process.url, sampleRate: 48_000, channels: 2, duration: 1)
+            let otherProcess = processTrack(paths, startedAt: start.addingTimeInterval(0.2), processID: 43)
+            try writeTone(to: otherProcess.url, sampleRate: 44_100, channels: 2, duration: 0.5)
+            var session = RecordingSession(
+                microphoneSegments: [
+                    CapturedAudioSegment(url: first, startedAt: start, endedAt: start),
+                    CapturedAudioSegment(url: second, startedAt: start.addingTimeInterval(0.4), endedAt: start.addingTimeInterval(0.4))
+                ], processTracks: [process, otherProcess],
+                captureStartedAt: start, captureEndedAt: legacyOpenJournal ? start : nil, paths: paths,
+                trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: "Test"),
+                metadata: [], warnings: [], interruptions: []
+            )
+            try session.save()
+            XCTAssertEqual(store.interruptedRecordings().map { $0.resolvingSymlinksInPath() }, [paths.session.resolvingSymlinksInPath()])
+            let loaded = try RecordingSession.load(from: paths.session)
+            XCTAssertEqual(loaded.microphoneSegments.map(\.startedAt), session.microphoneSegments.map(\.startedAt))
+            XCTAssertEqual(loaded.captureEndedAt, session.captureEndedAt)
+            let journalBeforeRecovery = try Data(contentsOf: paths.session)
+            let remainingProcess = try Data(contentsOf: process.url)
+            let worker = try workerClient()
+            let manifestURL = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let manifest = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: manifestURL))
+            XCTAssertEqual(manifest.status, .incomplete)
+            XCTAssertEqual(manifest.audio.count, 3)
+            XCTAssertEqual(manifest.audio.compactMap(\.id), [process.id, otherProcess.id])
+            XCTAssertEqual(manifest.audio.compactMap(\.process).map(\.processID), [42, 43])
+            XCTAssertTrue(store.interruptedRecordings().isEmpty)
 
-        // Simulate a crash halfway through cleanup after publication. Only one
-        // raw input remains; recovery must reuse the complete committed archive.
-        let committedArchive = try Data(contentsOf: paths.archiveFinal)
-        let committedManifest = try Data(contentsOf: manifestURL)
-        try journalBeforeRecovery.write(to: paths.session)
-        try remainingProcess.write(to: process.url)
-        _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
-        XCTAssertEqual(try Data(contentsOf: paths.archiveFinal), committedArchive)
-        XCTAssertEqual(try Data(contentsOf: manifestURL), committedManifest)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: process.url.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.session.path))
-
-        // A corrupt publication cannot authorize deleting the remaining inputs.
-        try journalBeforeRecovery.write(to: paths.session)
-        try remainingProcess.write(to: process.url)
-        try Data("corrupt".utf8).write(to: paths.archiveFinal)
-        do {
+            // Simulate a crash halfway through cleanup after publication. Only one
+            // raw input remains; recovery must reuse the complete committed archive.
+            let committedArchive = try Data(contentsOf: paths.archiveFinal)
+            let committedManifest = try Data(contentsOf: manifestURL)
+            try journalBeforeRecovery.write(to: paths.session)
+            try remainingProcess.write(to: process.url)
             _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
-            XCTFail("Recovery must reject a checksum mismatch")
-        } catch {}
-        XCTAssertEqual(try Data(contentsOf: process.url), remainingProcess)
-        XCTAssertEqual(try Data(contentsOf: paths.session), journalBeforeRecovery)
-        try committedArchive.write(to: paths.archiveFinal)
-        _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
-        let restored = root.appending(path: "recovered-microphone.caf")
-        let decoderProcess = Process()
-        decoderProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        decoderProcess.arguments = ["ffmpeg", "-nostdin", "-v", "error", "-i", paths.archiveFinal.path,
-                             "-map", "0:a:0", "-c:a", "pcm_f32le", restored.path]
-        try decoderProcess.run()
-        decoderProcess.waitUntilExit()
-        XCTAssertEqual(decoderProcess.terminationStatus, 0)
-        let audio = try AVAudioFile(forReading: restored)
-        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: audio.processingFormat, frameCapacity: AVAudioFrameCount(audio.length)))
-        try audio.read(into: buffer)
-        let samples = try XCTUnwrap(buffer.floatChannelData)[0]
-        XCTAssertGreaterThan(buffer.frameLength, 23_000)
-        let middle = (10_000..<14_000).map { abs(samples[$0]) }.max() ?? 1
-        let resumed = (20_000..<23_000).map { abs(samples[$0]) }.max() ?? 0
-        XCTAssertLessThan(middle, 0.001)
-        XCTAssertGreaterThan(resumed, 0.01)
+            XCTAssertEqual(try Data(contentsOf: paths.archiveFinal), committedArchive)
+            XCTAssertEqual(try Data(contentsOf: manifestURL), committedManifest)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: process.url.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: paths.session.path))
 
-        // A readable two-track recording with a capture error is still incomplete.
-        let failedPaths = try store.paths(startedAt: start, title: "failed")
-        let mic = failedPaths.microphoneTemporary(segment: 1)
-        try writeTone(to: mic, sampleRate: 48_000, channels: 1, duration: 0.1)
-        let failedProcess = processTrack(failedPaths, startedAt: start)
-        try writeTone(to: failedProcess.url, sampleRate: 48_000, channels: 2, duration: 0.1)
-        session = RecordingSession(
-            microphoneSegments: [CapturedAudioSegment(url: mic, startedAt: start, endedAt: start.addingTimeInterval(0.1))],
-            processTracks: [failedProcess],
-            captureStartedAt: start, captureEndedAt: start.addingTimeInterval(0.1), paths: failedPaths,
-            trigger: session.trigger, metadata: [], warnings: ["Capture stopped after a write error"], interruptions: [], captureFailed: true
-        )
-        try session.save()
-        let failedManifest = try await worker.finalize(session)
-        let failed = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: failedManifest))
-        XCTAssertEqual(failed.audio.count, 2)
-        XCTAssertEqual(failed.status, .incomplete)
-        XCTAssertFalse(failed.warnings.isEmpty)
+            // A corrupt publication cannot authorize deleting the remaining inputs.
+            try journalBeforeRecovery.write(to: paths.session)
+            try remainingProcess.write(to: process.url)
+            try Data("corrupt".utf8).write(to: paths.archiveFinal)
+            do {
+                _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
+                XCTFail("Recovery must reject a checksum mismatch")
+            } catch {}
+            XCTAssertEqual(try Data(contentsOf: process.url), remainingProcess)
+            XCTAssertEqual(try Data(contentsOf: paths.session), journalBeforeRecovery)
+            try committedArchive.write(to: paths.archiveFinal)
+            _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
+            let restored = root.appending(path: "recovered-microphone.caf")
+            let decoderProcess = Process()
+            decoderProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            decoderProcess.arguments = ["ffmpeg", "-nostdin", "-v", "error", "-i", paths.archiveFinal.path,
+                                 "-map", "0:a:0", "-c:a", "pcm_f32le", restored.path]
+            try decoderProcess.run()
+            decoderProcess.waitUntilExit()
+            XCTAssertEqual(decoderProcess.terminationStatus, 0)
+            let audio = try AVAudioFile(forReading: restored)
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: audio.processingFormat, frameCapacity: AVAudioFrameCount(audio.length)))
+            try audio.read(into: buffer)
+            let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+            XCTAssertGreaterThan(buffer.frameLength, 23_000)
+            let middle = (10_000..<14_000).map { abs(samples[$0]) }.max() ?? 1
+            let resumed = (20_000..<23_000).map { abs(samples[$0]) }.max() ?? 0
+            XCTAssertLessThan(middle, 0.001)
+            XCTAssertGreaterThan(resumed, 0.01)
+
+            // A readable two-track recording with a capture error is still incomplete.
+            let failedPaths = try store.paths(startedAt: start, title: "failed")
+            let mic = failedPaths.microphoneTemporary(segment: 1)
+            try writeTone(to: mic, sampleRate: 48_000, channels: 1, duration: 0.2)
+            let failedProcess = processTrack(failedPaths, startedAt: start)
+            try writeTone(to: failedProcess.url, sampleRate: 48_000, channels: 2, duration: 0.2)
+            session = RecordingSession(
+                microphoneSegments: [CapturedAudioSegment(url: mic, startedAt: start, endedAt: start.addingTimeInterval(0.1))],
+                processTracks: [failedProcess],
+                captureStartedAt: start, captureEndedAt: start.addingTimeInterval(0.1), paths: failedPaths,
+                trigger: session.trigger, metadata: [], warnings: ["Capture stopped after a write error"], interruptions: [], captureFailed: true
+            )
+            try session.save()
+            // Raw tail can extend past Stop; recovery must preserve that cutoff.
+            let failedManifest = try await worker.recover(RecoverCaptureRequest(interruptedFile: failedPaths.session))
+            let failed = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: failedManifest))
+            XCTAssertEqual(failed.audio.count, 2)
+            XCTAssertEqual(failed.status, .incomplete)
+            XCTAssertTrue(failed.audio.allSatisfy { abs($0.durationSeconds - 0.1) < 0.02 })
+            XCTAssertFalse(failed.warnings.isEmpty)
+        }
     }
 
     private func workerClient() throws -> BackgroundWorkerClient {

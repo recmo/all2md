@@ -65,6 +65,9 @@ enum WorkerOperations {
 
     private static func finish(_ request: RecordingSession) throws -> URL {
         if let committed = try publishedRecording(request.paths) { return committed }
+        guard let endedAt = request.captureEndedAt, endedAt >= request.captureStartedAt else {
+            throw CaptureError.writerFailure("Recording has no valid stop time; original audio was kept")
+        }
         WorkerProgress.touch()
         let accessibility = finalizeAccessibilityArtifact(paths: request.paths)
         var metadata = request.metadata
@@ -81,7 +84,7 @@ enum WorkerOperations {
             microphoneSegments: request.microphoneSegments,
             processTracks: request.processTracks,
             captureStartedAt: request.captureStartedAt,
-            captureEndedAt: request.captureEndedAt,
+            captureEndedAt: endedAt,
             temporaryDestination: request.paths.archiveTemporary,
             finalDestination: request.paths.archiveFinal
         )
@@ -94,7 +97,7 @@ enum WorkerOperations {
             title: metadata.first(where: { $0.kind == .windowTitle })?.value,
             platform: request.trigger.applicationName,
             startedAt: request.captureStartedAt,
-            endedAt: request.captureEndedAt,
+            endedAt: endedAt,
             timeZone: TimeZone.current.identifier,
             trigger: request.trigger,
             container: archive.container,
@@ -134,6 +137,13 @@ enum WorkerOperations {
               Set(session.processTracks.map(\.id)).count == session.processTracks.count else {
             throw CaptureError.writerFailure("Invalid recording session paths; original files were kept")
         }
+        // Old open journals used the start time as a sentinel. New open
+        // journals omit the end time. A stopped session keeps its exact cutoff.
+        let stoppedAt = session.captureEndedAt.flatMap { $0 == session.captureStartedAt ? nil : $0 }
+        guard stoppedAt.map({ $0 >= session.captureStartedAt }) ?? true else {
+            throw CaptureError.writerFailure("Invalid recording stop time; original audio was kept")
+        }
+        var recoveredEnd = session.captureStartedAt
         var segments: [CapturedAudioSegment] = []
         for segment in session.microphoneSegments {
             guard FileManager.default.fileExists(atPath: segment.url.path) else {
@@ -143,7 +153,7 @@ enum WorkerOperations {
             let input = try AVAudioFile(forReading: segment.url)
             let end = segment.startedAt.addingTimeInterval(Double(max(0, input.length)) / input.processingFormat.sampleRate)
             segments.append(CapturedAudioSegment(url: segment.url, startedAt: segment.startedAt, endedAt: end))
-            session.captureEndedAt = max(session.captureEndedAt, end)
+            recoveredEnd = max(recoveredEnd, end)
         }
         session.microphoneSegments = segments
         var tracks: [CapturedProcessTrack] = []
@@ -157,11 +167,12 @@ enum WorkerOperations {
             if input.length > 0 {
                 hasProcessAudio = true
                 let end = track.startedAt.addingTimeInterval(Double(input.length) / input.processingFormat.sampleRate)
-                session.captureEndedAt = max(session.captureEndedAt, end)
+                recoveredEnd = max(recoveredEnd, end)
             }
             tracks.append(track)
         }
         session.processTracks = tracks
+        session.captureEndedAt = stoppedAt ?? recoveredEnd
         guard segments.contains(where: { $0.endedAt > $0.startedAt }) || hasProcessAudio else {
             let files = try FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)
                 .filter { store.paths(forInterruptedFile: $0).baseName == paths.baseName && $0.path.hasSuffix(".part.caf") }
