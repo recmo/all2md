@@ -240,72 +240,81 @@ final class MeetingStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        for interleaved in [false, true] {
-            for sampleRate in [44_100.0, 48_000.0] {
-                let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                                       sampleRate: sampleRate, channels: 2,
-                                                       interleaved: interleaved))
-                let pcm = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 64))
-                pcm.frameLength = 64
-                let buffers = UnsafeMutableAudioBufferListPointer(pcm.mutableAudioBufferList)
-                for frame in 0..<64 {
-                    for channel in 0..<2 {
-                        let data = try XCTUnwrap(buffers[interleaved ? 0 : channel].mData)
-                            .assumingMemoryBound(to: Float.self)
-                        data[interleaved ? frame * 2 + channel : frame] = channel == 0 ? 0.25 : -0.5
+        for common in [AVAudioCommonFormat.pcmFormatFloat32, .pcmFormatFloat64, .pcmFormatInt16, .pcmFormatInt32] {
+            for interleaved in [false, true] {
+                for sampleRate in [44_100.0, 48_000.0] {
+                    let format = try XCTUnwrap(AVAudioFormat(commonFormat: common,
+                                                           sampleRate: sampleRate, channels: 2,
+                                                           interleaved: interleaved))
+                    let pcm = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 64))
+                    pcm.frameLength = 64
+                    let buffers = UnsafeMutableAudioBufferListPointer(pcm.mutableAudioBufferList)
+                    for frame in 0..<64 {
+                        for channel in 0..<2 {
+                            let data = try XCTUnwrap(buffers[interleaved ? 0 : channel].mData)
+                            let index = interleaved ? frame * 2 + channel : frame
+                            let value = channel == 0 ? 0.25 : -0.5
+                            switch common {
+                            case .pcmFormatFloat32: data.assumingMemoryBound(to: Float.self)[index] = Float(value)
+                            case .pcmFormatFloat64: data.assumingMemoryBound(to: Double.self)[index] = value
+                            case .pcmFormatInt16: data.assumingMemoryBound(to: Int16.self)[index] = Int16(value * 32768)
+                            case .pcmFormatInt32: data.assumingMemoryBound(to: Int32.self)[index] = Int32(value * 2147483648)
+                            default: XCTFail("Unsupported fixture format")
+                            }
+                        }
                     }
-                }
-                let url = root.appending(path: "\(interleaved)-\(sampleRate).caf")
-                let writer = PCMFile(url: url, startTime: 0)
-                let first = 64 / sampleRate
-                try writer.write(pcm, at: first) // Leading silence, then 64 frames of audio.
-                try writer.write(pcm, at: first) // A duplicated callback must not add time.
-                try writer.write(pcm, at: 192 / sampleRate)
-                try writer.write(pcm, at: 224 / sampleRate)
-                writer.close() // The overlapping final buffer adds only 32 frames.
+                    let url = root.appending(path: "\(common.rawValue)-\(interleaved)-\(sampleRate).caf")
+                    let writer = PCMFile(url: url, startTime: 0)
+                    let first = 64 / sampleRate
+                    try writer.write(pcm, at: first) // Leading silence, then 64 frames of audio.
+                    try writer.write(pcm, at: first) // A duplicated callback must not add time.
+                    try writer.write(pcm, at: 192 / sampleRate)
+                    try writer.write(pcm, at: 224 / sampleRate)
+                    writer.close() // The overlapping final buffer adds only 32 frames.
 
-                // The tap queue owns a copy, and finish must drain it before close.
-                let queuedURL = root.appending(path: "queued-\(interleaved)-\(sampleRate).caf")
-                let timestamp = AudioGetCurrentHostTime()
-                let queued = try BufferedAudioWriter(format: format, url: queuedURL,
-                    startTime: AVAudioTime.seconds(forHostTime: timestamp))
-                var time = AudioTimeStamp()
-                time.mFlags = .hostTimeValid
-                time.mHostTime = timestamp
-                queued.onError = { XCTFail("Unexpected audio writer error: \($0)") }
-                queued.onWarning = { XCTFail("Unexpected audio writer warning: \($0)") }
-                // Many tiny callbacks cross block boundaries and leave a partial
-                // final block. Every frame must survive copying and finish.
-                let callbackCount = 1025
-                for index in 0..<callbackCount {
-                    time.mHostTime = timestamp + AVAudioTime.hostTime(forSeconds: Double(index * 64) / sampleRate)
-                    queued.enqueue(pcm.audioBufferList, timestamp: time)
-                }
-                for buffer in buffers { memset(buffer.mData, 0, Int(buffer.mDataByteSize)) }
-                queued.finish()
-                let copied = try AVAudioFile(forReading: queuedURL)
-                XCTAssertEqual(copied.length, Int64(callbackCount * 64))
-                let copy = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: copied.processingFormat,
-                                                        frameCapacity: AVAudioFrameCount(callbackCount * 64)))
-                try copied.read(into: copy)
-                for frame in 0..<(callbackCount * 64) {
-                    XCTAssertEqual(copy.floatChannelData?[0][frame] ?? 0, 0.25, accuracy: 0.00001)
-                    XCTAssertEqual(copy.floatChannelData?[1][frame] ?? 0, -0.5, accuracy: 0.00001)
-                }
+                    // The tap queue owns a copy, and finish must drain it before close.
+                    let queuedURL = root.appending(path: "queued-\(common.rawValue)-\(interleaved)-\(sampleRate).caf")
+                    let timestamp = AudioGetCurrentHostTime()
+                    let queued = try BufferedAudioWriter(format: format, url: queuedURL,
+                        startTime: AVAudioTime.seconds(forHostTime: timestamp))
+                    var time = AudioTimeStamp()
+                    time.mFlags = .hostTimeValid
+                    time.mHostTime = timestamp
+                    queued.onError = { XCTFail("Unexpected audio writer error: \($0)") }
+                    queued.onWarning = { XCTFail("Unexpected audio writer warning: \($0)") }
+                    // Many tiny callbacks cross block boundaries and leave a partial
+                    // final block. Every frame must survive copying and finish.
+                    let callbackCount = 1025
+                    for index in 0..<callbackCount {
+                        time.mHostTime = timestamp + AVAudioTime.hostTime(forSeconds: Double(index * 64) / sampleRate)
+                        queued.enqueue(pcm.audioBufferList, timestamp: time)
+                    }
+                    for buffer in buffers { memset(buffer.mData, 0, Int(buffer.mDataByteSize)) }
+                    queued.finish()
+                    let copied = try AVAudioFile(forReading: queuedURL)
+                    XCTAssertEqual(copied.length, Int64(callbackCount * 64))
+                    let copy = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: copied.processingFormat,
+                                                            frameCapacity: AVAudioFrameCount(callbackCount * 64)))
+                    try copied.read(into: copy)
+                    for frame in 0..<(callbackCount * 64) {
+                        XCTAssertEqual(copy.floatChannelData?[0][frame] ?? 0, 0.25, accuracy: 0.00001)
+                        XCTAssertEqual(copy.floatChannelData?[1][frame] ?? 0, -0.5, accuracy: 0.00001)
+                    }
 
-                let saved = try AVAudioFile(forReading: url)
-                XCTAssertEqual(saved.length, 288)
-                XCTAssertEqual(saved.fileFormat.sampleRate, sampleRate)
-                XCTAssertEqual(saved.fileFormat.channelCount, 2)
-                XCTAssertTrue(saved.fileFormat.isInterleaved)
-                let result = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: saved.processingFormat, frameCapacity: 288))
-                try saved.read(into: result)
-                XCTAssertEqual(result.frameLength, 288)
-                let channels = try XCTUnwrap(result.floatChannelData)
-                for frame in 0..<288 {
-                    let silent = frame < 64 || (128..<192).contains(frame)
-                    XCTAssertEqual(channels[0][frame], silent ? 0 : 0.25, accuracy: 0.00001)
-                    XCTAssertEqual(channels[1][frame], silent ? 0 : -0.5, accuracy: 0.00001)
+                    let saved = try AVAudioFile(forReading: url)
+                    XCTAssertEqual(saved.length, 288)
+                    XCTAssertEqual(saved.fileFormat.sampleRate, sampleRate)
+                    XCTAssertEqual(saved.fileFormat.channelCount, 2)
+                    XCTAssertTrue(saved.fileFormat.isInterleaved)
+                    let result = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: saved.processingFormat, frameCapacity: 288))
+                    try saved.read(into: result)
+                    XCTAssertEqual(result.frameLength, 288)
+                    let channels = try XCTUnwrap(result.floatChannelData)
+                    for frame in 0..<288 {
+                        let silent = frame < 64 || (128..<192).contains(frame)
+                        XCTAssertEqual(channels[0][frame], silent ? 0 : 0.25, accuracy: 0.00001)
+                        XCTAssertEqual(channels[1][frame], silent ? 0 : -0.5, accuracy: 0.00001)
+                    }
                 }
             }
         }
@@ -639,6 +648,44 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(failed.audio.count, 2)
         XCTAssertEqual(failed.status, .incomplete)
         XCTAssertFalse(failed.warnings.isEmpty)
+    }
+
+    // Temporary release validation; remove after the native installer check passes.
+    func testReleaseReviewAtomicInstallation() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installer = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appending(path: "install-local.sh")
+        let source = try String(contentsOf: installer, encoding: .utf8)
+        let start = try XCTUnwrap(source.range(of: "<<'SWIFT'\n"))
+        let end = try XCTUnwrap(source.range(of: "\nSWIFT", range: start.upperBound..<source.endIndex))
+        let script = Data(source[start.upperBound..<end.lowerBound].utf8)
+        let staged = root.appending(path: "Staged.app")
+        let installed = root.appending(path: "Installed.app")
+        for (path, value) in [(staged, "new"), (installed, "old")] {
+            try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+            try Data(value.utf8).write(to: path.appending(path: "identity"))
+        }
+        func publish(_ from: URL) throws -> Int32 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            process.arguments = ["swift", "-", from.path, installed.path]
+            let input = Pipe()
+            process.standardInput = input
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            try input.fileHandleForWriting.write(contentsOf: script)
+            try input.fileHandleForWriting.close()
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+        XCTAssertEqual(try publish(staged), 0)
+        XCTAssertEqual(try String(contentsOf: installed.appending(path: "identity"), encoding: .utf8), "new")
+        XCTAssertEqual(try String(contentsOf: staged.appending(path: "identity"), encoding: .utf8), "old")
+        XCTAssertNotEqual(try publish(root.appending(path: "Missing.app")), 0)
+        XCTAssertEqual(try String(contentsOf: installed.appending(path: "identity"), encoding: .utf8), "new")
     }
 
     private func workerClient() throws -> BackgroundWorkerClient {

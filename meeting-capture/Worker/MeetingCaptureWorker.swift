@@ -42,7 +42,7 @@ enum MeetingCaptureWorker {
         guard proc_pidpath(getpid(), &path, UInt32(capacity)) > 0 else {
             throw WorkerMainError.invalidArguments
         }
-        let app = URL(filePath: String(cString: path))
+        let app = URL(fileURLWithFileSystemRepresentation: path, isDirectory: false, relativeTo: nil)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         // LaunchServices reuses a manually opened instance. Wait for that app
         // to exit so launchd can restart it, including after a clean exit.
