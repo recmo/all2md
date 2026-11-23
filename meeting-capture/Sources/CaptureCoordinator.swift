@@ -170,6 +170,8 @@ final class CaptureCoordinator: @unchecked Sendable {
         if case CaptureError.storageFailure = error { fail(error.localizedDescription); return }
         microphoneGeneration = UUID() // Ignore errors already queued by the old segment.
         microphone.pause()
+        // Draining can report an overflow just before a replacement clears it.
+        if let warning = microphone.captureWarning { warn("Microphone: \(warning)", incomplete: true) }
         if let failure = microphone.failure, case CaptureError.storageFailure = failure {
             fail(failure.localizedDescription); return
         }

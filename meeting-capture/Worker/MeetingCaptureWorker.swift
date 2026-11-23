@@ -36,8 +36,10 @@ enum MeetingCaptureWorker {
     }
 
     private static func keepRunning() throws {
-        var path = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
-        guard proc_pidpath(getpid(), &path, UInt32(PROC_PIDPATHINFO_MAXSIZE)) > 0 else {
+        // Swift cannot import libproc's composed PROC_PIDPATHINFO_MAXSIZE macro.
+        let capacity = 4 * Int(MAXPATHLEN)
+        var path = [CChar](repeating: 0, count: capacity)
+        guard proc_pidpath(getpid(), &path, UInt32(capacity)) > 0 else {
             throw WorkerMainError.invalidArguments
         }
         let app = URL(filePath: String(cString: path))

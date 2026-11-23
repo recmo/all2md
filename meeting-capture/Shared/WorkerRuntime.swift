@@ -85,7 +85,9 @@ enum WorkerProgress {
         guard let data = try? handle.read(upToCount: 4096), let text = String(data: data, encoding: .utf8) else { return nil }
         // ffmpeg appends reports even when the timestamp has not advanced.
         // File modification alone is therefore not evidence of progress.
-        if let time = text.split(separator: "\n").last(where: { $0.hasPrefix("out_time_us=") }) { return String(time) }
+        let completeLines = text.split(separator: "\n", omittingEmptySubsequences: false).dropLast()
+        if let time = completeLines.last(where: { $0.hasPrefix("out_time_us=") }),
+           Int64(time.dropFirst("out_time_us=".count)) != nil { return String(time) }
         return text.hasPrefix("work=") ? text : nil
     }
 }

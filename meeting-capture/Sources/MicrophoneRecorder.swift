@@ -5,9 +5,9 @@ import CoreMedia
 import Foundation
 
 final class MicrophoneRecorder: @unchecked Sendable {
-    private let engine = AVAudioEngine()
+    private var engine: AVAudioEngine?
     var diagnosticSummary: String {
-        "running=\(engine.isRunning) format=\(format?.description ?? "none") \(writer?.diagnosticSummary ?? "writer=none")"
+        "running=\(isRunning) format=\(format?.description ?? "none") \(writer?.diagnosticSummary ?? "writer=none")"
     }
     private var writer: BufferedAudioWriter?
     private var warning: String?
@@ -33,17 +33,11 @@ final class MicrophoneRecorder: @unchecked Sendable {
         get { writeLock.withLock { configurationCallback } }
         set { writeLock.withLock { configurationCallback = newValue } }
     }
-    var isRunning: Bool { engine.isRunning }
+    var isRunning: Bool { engine?.isRunning == true }
     var failure: Error? {
         writeLock.lock()
         defer { writeLock.unlock() }
         return writeFailure
-    }
-
-    init() {
-        configurationObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
-        ) { [weak self] _ in self?.onConfigurationChange?() }
     }
 
     deinit {
@@ -51,6 +45,7 @@ final class MicrophoneRecorder: @unchecked Sendable {
     }
 
     func start(to url: URL, deviceID: AudioDeviceID?, startedAt: Date, startTime: CMTime) throws {
+        stopEngine()
         completedSegments = []
         try startEngine(deviceID: deviceID, to: url, startedAt: startedAt, startTime: startTime)
     }
@@ -71,6 +66,10 @@ final class MicrophoneRecorder: @unchecked Sendable {
 
     private func startEngine(deviceID: AudioDeviceID?, to url: URL, startedAt: Date, startTime: CMTime) throws {
         CaptureDiagnostics.log("microphone.start segment=\(url.lastPathComponent) selected={\(CaptureDiagnostics.device(deviceID ?? AudioDeviceID(kAudioObjectUnknown)))} \(CaptureDiagnostics.devices())")
+        // A disconnected device can leave its engine/input unit unusable. Each
+        // segment resolves its device and format through a fresh engine.
+        let engine = AVAudioEngine()
+        self.engine = engine
         let input = engine.inputNode
         if let deviceID {
             guard let audioUnit = input.audioUnit else {
@@ -112,6 +111,9 @@ final class MicrophoneRecorder: @unchecked Sendable {
         currentSegmentURL = url
         currentSegmentStartedAt = startedAt
         currentSegmentHostStart = startTime
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in self?.onConfigurationChange?() }
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { buffer, time in
             var timestamp = AudioTimeStamp()
             timestamp.mHostTime = time.hostTime
@@ -130,10 +132,13 @@ final class MicrophoneRecorder: @unchecked Sendable {
     }
 
     private func stopEngine() {
-        guard engine.isRunning || writer != nil else { return }
+        guard let engine else { return }
+        defer { self.engine = nil }
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+        configurationObserver = nil
         CaptureDiagnostics.log("microphone.stop device=\(deviceID ?? 0) \(diagnosticSummary)")
         engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
+        if writer != nil { engine.inputNode.removeTap(onBus: 0) }
         let endedAt = CMClockGetTime(CMClockGetHostTimeClock())
         writer?.finish()
         writer = nil
@@ -147,5 +152,4 @@ final class MicrophoneRecorder: @unchecked Sendable {
         currentSegmentHostStart = nil
         deviceID = nil
     }
-
 }

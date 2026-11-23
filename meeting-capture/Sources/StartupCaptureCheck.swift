@@ -43,6 +43,10 @@ enum StartupCaptureCheck {
             try await Task.sleep(for: .seconds(1.5))
             _ = microphone.stop()
             try system.stop()
+            if let failure = microphone.failure { throw failure }
+            if let warning = microphone.captureWarning ?? system.captureWarning {
+                throw CaptureError.writerFailure("The startup recording dropped audio: \(warning)")
+            }
             let microphoneFrames = try AVAudioFile(forReading: microphoneURL).length
             try validateMicrophoneFrames(microphoneFrames)
             let observed = system.firstSampleAt != nil

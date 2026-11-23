@@ -8,7 +8,7 @@ on:
       - flake.lock
       - .github/workflows/meeting-capture.yml
   push:
-    branches: [main, codex/meeting-capture-keep-running]
+    branches: [main]
     paths:
       - meeting-capture/**
       - flake.nix
