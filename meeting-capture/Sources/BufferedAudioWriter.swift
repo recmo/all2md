@@ -24,7 +24,8 @@ final class BufferedAudioWriter: @unchecked Sendable {
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.pcm-writer")
     private let source: DispatchSourceUserDataOr
     private let finished = DispatchSemaphore(value: 0)
-    private var failed = false // Writer queue only.
+    private var failed = false // Storage failure; writer queue only.
+    private var invalidInputReported = false // Writer queue only.
     private var overflowReported = false // Writer queue only.
     private var pendingFrames = 0 // Producer only, unpublished until a slot fills.
     private let statistics = AudioCallbackStatistics()
@@ -70,7 +71,12 @@ final class BufferedAudioWriter: @unchecked Sendable {
                 CaptureDiagnostics.log("audio.frames.dropped \(self.diagnosticSummary)")
                 self.onWarning?("The audio writer could not accept some frames. Recording continued; missing audio is silence.")
             }
-            if events & 4 != 0 { self.fail(CaptureError.writerFailure("Invalid audio buffer or timestamp")) }
+            if events & 4 != 0, !self.invalidInputReported {
+                self.invalidInputReported = true
+                let error = CaptureError.writerFailure("Invalid audio buffer or timestamp")
+                CaptureDiagnostics.error("audio.input.failed file=\(self.diagnosticID) \(error.localizedDescription)")
+                self.onError?(error)
+            }
             self.drain()
             if events & 8 != 0 {
                 self.file.close()

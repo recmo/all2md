@@ -301,6 +301,20 @@ final class MeetingStoreTests: XCTestCase {
                         XCTAssertEqual(copy.floatChannelData?[1][frame] ?? 0, -0.5, accuracy: 0.00001)
                     }
 
+                    // A malformed callback ends the source, but valid audio
+                    // already copied into the final partial block must survive.
+                    let tailURL = root.appending(path: "tail-\(common.rawValue)-\(interleaved)-\(sampleRate).caf")
+                    let tail = try BufferedAudioWriter(format: format, url: tailURL,
+                        startTime: AVAudioTime.seconds(forHostTime: timestamp))
+                    let invalid = expectation(description: "Invalid input reported")
+                    tail.onError = { _ in invalid.fulfill() }
+                    time.mHostTime = timestamp
+                    tail.enqueue(pcm.audioBufferList, timestamp: time)
+                    tail.enqueue(pcm.audioBufferList, timestamp: AudioTimeStamp())
+                    tail.finish()
+                    wait(for: [invalid], timeout: 1)
+                    XCTAssertEqual(try AVAudioFile(forReading: tailURL).length, 64)
+
                     let saved = try AVAudioFile(forReading: url)
                     XCTAssertEqual(saved.length, 288)
                     XCTAssertEqual(saved.fileFormat.sampleRate, sampleRate)

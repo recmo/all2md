@@ -170,9 +170,11 @@ final class ProcessAudioRecorder: @unchecked Sendable {
 
     private func reportFailure(_ error: Error) {
         let first = lock.withLock {
-            // A real writer failure must survive a concurrent process-exit error.
-            if let previous = deliveryError,
-               !CaptureError.isProcessTapFailure(previous) || CaptureError.isProcessTapFailure(error) { return false }
+            // A storage failure must survive an earlier source or process error.
+            if let previous = deliveryError {
+                if case CaptureError.storageFailure = previous { return false }
+                guard case CaptureError.storageFailure = error else { return false }
+            }
             deliveryError = error
             return true
         }
