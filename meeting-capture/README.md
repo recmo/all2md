@@ -79,8 +79,8 @@ continues recording, preserves their timing as silence, and records a warning.
 Larger memory capacity cannot fix a permanently stalled or full disk.
 
 A writer queue saves timestamp-aligned PCM CAF files: gaps become silence and
-overlapping samples are trimmed. File handles close after callbacks stop and
-copied samples drain. The microphone uses native device formats and restarts in
+overlapping samples are trimmed. All native inputs stop before any file writer drains; archive duration ends at
+the Stop request. File handles close after copied samples drain. The microphone uses native device formats and restarts in
 a new segment on device changes, stopped delivery, or an engine failure.
 Process output is discovered every 500 ms. Quiet processes keep their taps;
 exited processes release HAL resources while retaining their saved audio.
@@ -95,6 +95,7 @@ retry after ten seconds.
 Manual recordings start a new session automatically; automatically detected
 meetings return to monitoring and restart while microphone activity continues.
 Explicit Stop ends manual retry intent and suppresses automatic restart.
+The error menu also offers Stop retrying.
 
 ## Archive publication and recovery
 

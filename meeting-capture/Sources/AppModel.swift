@@ -124,6 +124,13 @@ final class AppModel: ObservableObject {
     }
 
     func stopRecording(suppressClients: Bool = true) {
+        if case .error = state, suppressClients {
+            retryTask?.cancel(); retryTask = nil
+            recordingMethod = .audioProcess
+            suppressedClients.formUnion(activeMicrophoneClients)
+            state = .idle
+            return
+        }
         guard case let .recording(client) = state else { return }
         if suppressClients {
             recordingMethod = .audioProcess // Explicit Stop ends manual retry intent.

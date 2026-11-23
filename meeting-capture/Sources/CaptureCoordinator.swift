@@ -153,7 +153,7 @@ final class CaptureCoordinator: @unchecked Sendable {
         do {
             try microphone.restart(to: segment.url, deviceID: microphoneDevice?.id, startedAt: date, startTime: host)
             if let interrupted = microphoneInterruptedAt {
-                recordInterruption(since: interrupted, reason: "Microphone interrupted")
+                recordInterruption(since: interrupted, until: captureDate(), reason: "Microphone interrupted")
             }
             microphoneStarted = ProcessInfo.processInfo.systemUptime
             microphoneInterruptedAt = nil
@@ -248,12 +248,12 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     private func endInterruption(_ retry: Retry, reason: String) {
-        recordInterruption(since: retry.startedAt, reason: "\(retry.process.title): \(reason)")
+        recordInterruption(since: retry.startedAt, until: captureDate(), reason: "\(retry.process.title): \(reason)")
         save()
     }
 
-    private func recordInterruption(since start: Date, reason: String) {
-        let range = CaptureTimeRange(startedAt: start, endedAt: captureDate(), reason: reason)
+    private func recordInterruption(since start: Date, until end: Date, reason: String) {
+        let range = CaptureTimeRange(startedAt: start, endedAt: end, reason: reason)
         session?.interruptions.append(range)
     }
 
@@ -295,20 +295,26 @@ final class CaptureCoordinator: @unchecked Sendable {
     private func stopCapture() throws -> RecordingSession {
         guard session != nil else { throw CaptureError.writerFailure("No active recording") }
         CaptureDiagnostics.log("capture.stop")
+        let endedAt = captureDate()
         timer?.cancel(); timer = nil
         microphoneGeneration = UUID()
         microphone.onError = nil
         microphone.onConfigurationChange = nil
+        // A slow microphone drain must not keep process taps recording after Stop.
+        microphone.stopInput()
+        for track in processes.values { track.recorder.stopInput() }
         session?.microphoneSegments = microphone.stop()
         if let failure = microphone.failure { warn("Microphone: \(failure.localizedDescription)", incomplete: true) }
         if let warning = microphone.captureWarning { warn("Microphone: \(warning)", incomplete: true) }
         let live = try? catalog.processObjectIDs()
         for object in Array(processes.keys) { stopProcess(object, exited: live?.contains(object) == false) }
         if let interrupted = microphoneInterruptedAt {
-            recordInterruption(since: interrupted, reason: "Microphone interrupted")
+            recordInterruption(since: interrupted, until: endedAt, reason: "Microphone interrupted")
         }
-        for retry in retries.values { endInterruption(retry, reason: "Process audio interrupted") }
-        let endedAt = captureDate()
+        for retry in retries.values {
+            recordInterruption(since: retry.startedAt, until: endedAt,
+                               reason: "\(retry.process.title): Process audio interrupted")
+        }
         session?.captureEndedAt = endedAt
         session?.microphoneSegments.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
         session?.processTracks.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }

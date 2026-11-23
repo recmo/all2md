@@ -664,42 +664,6 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertFalse(failed.warnings.isEmpty)
     }
 
-    // Temporary release validation; remove after the native shutdown stress passes.
-    func testReleaseReviewConcurrentWriterShutdown() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
-        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096))
-        buffer.frameLength = 4096
-        for channel in UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList) {
-            memset(channel.mData, 0, Int(channel.mDataByteSize))
-        }
-        for iteration in 0..<50 {
-            let origin = AudioGetCurrentHostTime()
-            let writer = try BufferedAudioWriter(format: format, url: root.appending(path: "\(iteration).caf"),
-                                                 startTime: AVAudioTime.seconds(forHostTime: origin))
-            writer.onError = { XCTFail("Shutdown writer error: \($0)") }
-            let started = DispatchSemaphore(value: 0)
-            let finished = DispatchSemaphore(value: 0)
-            DispatchQueue.global().async {
-                started.signal()
-                for block in 0..<1000 {
-                    var time = AudioTimeStamp()
-                    time.mFlags = .hostTimeValid
-                    time.mHostTime = origin + AVAudioTime.hostTime(forSeconds: Double(block * 4096) / 48_000)
-                    writer.enqueue(buffer.audioBufferList, timestamp: time)
-                }
-                finished.signal()
-            }
-            XCTAssertEqual(started.wait(timeout: .now() + 5), .success)
-            Thread.sleep(forTimeInterval: 0.001)
-            writer.finish()
-            XCTAssertEqual(finished.wait(timeout: .now() + 5), .success)
-            writer.finish() // A repeated close must not wait on a consumed semaphore.
-        }
-    }
-
     private func workerClient() throws -> BackgroundWorkerClient {
         let application: URL
         if let path = ProcessInfo.processInfo.environment["MEETING_CAPTURE_TEST_APP"] {

@@ -41,6 +41,8 @@ enum StartupCaptureCheck {
             let startTime = CMClockGetTime(CMClockGetHostTimeClock())
             try microphone.start(to: microphoneURL, deviceID: nil, startedAt: Date(), startTime: startTime)
             try await Task.sleep(for: .seconds(1.5))
+            microphone.stopInput()
+            system.stopInput()
             _ = microphone.stop()
             try system.stop()
             if let failure = microphone.failure { throw failure }
@@ -65,6 +67,8 @@ enum StartupCaptureCheck {
             catch { accessibility = "Accessibility: optional check failed. \(error.localizedDescription)" }
             return StartupCaptureReport(systemAudioObserved: observed, accessibility: accessibility)
         } catch {
+            microphone.stopInput()
+            system.stopInput()
             _ = microphone.stop()
             try? system.stop()
             throw error

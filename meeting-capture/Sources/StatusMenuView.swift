@@ -71,6 +71,7 @@ struct StatusMenuView: View {
                 Text("Retrying automatically in 10 seconds.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Retry now") { model.dismissError() }
+                Button("Stop retrying") { model.stopRecording() }
             }
             if model.finalizationsInProgress > 0 || model.recoveryInProgress {
                 Button("Cancel background processing") { model.cancelBackgroundProcessing() }

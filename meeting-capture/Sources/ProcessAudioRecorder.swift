@@ -12,6 +12,7 @@ final class ProcessAudioRecorder: @unchecked Sendable {
     private var formatListener: AudioObjectPropertyListenerBlock?
     private var writer: BufferedAudioWriter?
     private var deliveryError: Error?
+    private var stopFailure: Error? // Control queue only.
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
     private var sampleAt: Date?
@@ -125,8 +126,9 @@ final class ProcessAudioRecorder: @unchecked Sendable {
         }
     }
 
-    private func stopCapture() throws {
-        if writer != nil || tapID != kAudioObjectUnknown {
+    // Release HAL resources before the control queue waits for any file writer.
+    func stopInput() {
+        if tapID != kAudioObjectUnknown || deviceID != kAudioObjectUnknown {
             CaptureDiagnostics.log("tap.stop tap=\(tapID) device=\(deviceID)")
         }
         // Stop callbacks before destroying their device or closing their file.
@@ -157,14 +159,20 @@ final class ProcessAudioRecorder: @unchecked Sendable {
             cleanup(AudioHardwareDestroyProcessTap(tapID), "Destroy process tap")
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
-        // The callback has stopped; drain copied samples before closing the file.
+        stopFailure = stopFailure ?? failure
+    }
+
+    private func stopCapture() throws {
+        stopInput()
+        // Callbacks have stopped; retain every valid copied sample before close.
         writer?.finish()
         if let writer { CaptureDiagnostics.log("tap.finished \(writer.diagnosticSummary)") }
         writer = nil
-        lock.withLock {
-            failure = deliveryError ?? failure
-            deliveryError = nil
+        let failure = lock.withLock {
+            defer { deliveryError = nil }
+            return deliveryError ?? stopFailure
         }
+        stopFailure = nil
         if let failure { throw failure }
     }
 

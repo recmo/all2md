@@ -132,6 +132,14 @@ final class MicrophoneRecorder: @unchecked Sendable {
     }
 
     private func stopEngine() {
+        stopInput()
+        writer?.finish()
+        if let writer { CaptureDiagnostics.log("microphone.finished \(writer.diagnosticSummary)") }
+        writer = nil
+    }
+
+    // Halt callbacks separately so all sources can stop before any disk drain.
+    func stopInput() {
         guard let engine else { return }
         defer { self.engine = nil }
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
@@ -140,8 +148,6 @@ final class MicrophoneRecorder: @unchecked Sendable {
         engine.stop()
         if writer != nil { engine.inputNode.removeTap(onBus: 0) }
         let endedAt = CMClockGetTime(CMClockGetHostTimeClock())
-        writer?.finish()
-        writer = nil
         if let url = currentSegmentURL, let startedAt = currentSegmentStartedAt,
            let hostStart = currentSegmentHostStart {
             completedSegments.append(CapturedAudioSegment(url: url, startedAt: startedAt,
