@@ -99,15 +99,15 @@ enum MeetingCaptureWorker {
         }
         var session = try RecordingSession.load(from: paths.session)
         // A journal may only refer to this recording's own files.
-        let directory = paths.directory.resolvingSymlinksInPath()
+        let directory = paths.directory.resolvingSymlinksInPath().path
         let prefix = ".\(paths.baseName)-"
         func owns(_ segment: CapturedAudioSegment, sources: [String]) -> Bool {
             let url = segment.url
-            return url.resolvingSymlinksInPath().deletingLastPathComponent() == directory
+            return url.isFileURL && url.resolvingSymlinksInPath().deletingLastPathComponent().path == directory
                 && store.paths(forInterruptedFile: url).baseName == paths.baseName
                 && sources.contains { url.lastPathComponent.hasPrefix(prefix + $0 + "-") }
         }
-        guard session.paths.directory.resolvingSymlinksInPath() == directory,
+        guard session.paths.directory.isFileURL, session.paths.directory.resolvingSymlinksInPath().path == directory,
               session.paths.baseName == paths.baseName,
               session.microphoneSegments.allSatisfy({ owns($0, sources: ["microphone"]) }),
               session.systemSegments.allSatisfy({ owns($0, sources: ["system", "process"]) }) else {
