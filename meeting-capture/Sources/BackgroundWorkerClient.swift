@@ -1,230 +1,106 @@
-import Foundation
 import Darwin
+import Foundation
+import Synchronization
 
-enum BackgroundWorkerError: LocalizedError {
-    case unavailable
-    case launch(String)
-    case crashed(command: String, reason: Process.TerminationReason, status: Int32)
-    case invalidResponse
-    case operation(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .unavailable:
-            "The Meeting Capture background worker is unavailable."
-        case let .launch(message):
-            "Could not launch the Meeting Capture background worker: \(message)"
-        case let .crashed(command, reason, status):
-            "Background \(command) worker terminated (\(reason == .uncaughtSignal ? "signal" : "exit") \(status)). Live recording was not affected."
-        case .invalidResponse:
-            "The Meeting Capture background worker returned an invalid response."
-        case let .operation(message):
-            message
-        }
-    }
-}
-
+// Archive jobs are serial. Capture uses its own queue and never waits for them.
 struct BackgroundWorkerClient: Sendable {
+    private static let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.archives", qos: .utility)
     let executableURL: URL
 
-    init(executableURL: URL? = nil) throws {
-        let candidate = executableURL ?? Bundle.main.bundleURL
-            .appending(path: "Contents/Helpers/MeetingCaptureWorker")
-        guard FileManager.default.isExecutableFile(atPath: candidate.path) else {
-            throw BackgroundWorkerError.unavailable
-        }
-        self.executableURL = candidate
+    init(executableURL: URL? = nil) {
+        self.executableURL = executableURL ?? Bundle.main.bundleURL.appending(path: "Contents/Helpers/MeetingCaptureWorker")
     }
 
-    func finalize(_ request: FinalizeCaptureRequest) async throws -> URL {
-        try await run(command: "finalize", request: request)
-    }
-
-    func checkAccess(_ request: WorkerAccessRequest) async throws -> WorkerAccessReport {
-        try await run(command: "check-access", request: request, timeout: 15)
-    }
-
-    func checkMetadataAccess(_ request: WorkerAccessRequest) async throws -> WorkerAccessReport {
-        try await run(command: "check-metadata-access", request: request, timeout: 5)
-    }
-
-    func checkPermissions(root: URL) async throws -> WorkerPermissionReport {
-        try await run(command: "check-permissions", request: root, timeout: 5)
+    func finalize(_ session: RecordingSession) async throws -> URL {
+        try await run("finalize", request: session)
     }
 
     func recover(_ request: RecoverCaptureRequest) async throws -> URL {
-        try await run(command: "recover", request: request)
+        try await run("recover", request: request)
     }
 
-    func verifyCrashIsolation() async throws {
-        let invocation = WorkerInvocation(
-            executableURL: executableURL,
-            arguments: ["crash-test"],
-            responseURL: nil
-        )
-        _ = try await Task.detached { try invocation.execute() }.value
+    private func run<Request: Encodable>(_ command: String, request: Request) async throws -> URL {
+        let job = WorkerJob(executable: executableURL, command: command, request: try JSONEncoder().encode(request))
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                Self.queue.async { continuation.resume(with: Result { try job.run() }) }
+            }
+        } onCancel: { job.cancelled.store(true, ordering: .relaxed) }
+    }
+}
+
+private final class WorkerJob: Sendable {
+    let cancelled = Atomic<Bool>(false)
+    private let executable: URL
+    private let command: String
+    private let request: Data
+
+    init(executable: URL, command: String, request: Data) {
+        self.executable = executable
+        self.command = command
+        self.request = request
     }
 
-    @MainActor
-    func startAccessibilityProbe(
-        _ request: AccessibilityProbeRequest,
-        onUnexpectedExit: @escaping @MainActor (BackgroundWorkerError) -> Void
-    ) throws -> BackgroundWorkerProcess {
-        let directory = FileManager.default.temporaryDirectory
-            .appending(path: "MeetingCaptureWorker-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let requestURL = directory.appending(path: "request.json")
-        try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = ["accessibility-probe", requestURL.path]
-        process.qualityOfService = .utility
-        // Only the recorder holds the write end. EOF also stops a probe whose
-        // main thread is stuck in Accessibility when the recorder crashes.
-        let lifetime = Pipe()
-        guard fcntl(lifetime.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC) == 0 else {
-            try? FileManager.default.removeItem(at: directory)
-            throw BackgroundWorkerError.launch("Could not isolate the metadata worker lifetime pipe")
-        }
-        defer { try? lifetime.fileHandleForReading.close() }
-        process.standardInput = lifetime.fileHandleForReading
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        let handle = BackgroundWorkerProcess(
-            process: process, temporaryDirectory: directory,
-            lifetimeWriter: lifetime.fileHandleForWriting, onUnexpectedExit: onUnexpectedExit
-        )
-        do { try process.run() }
-        catch {
-            try? lifetime.fileHandleForWriting.close()
-            try? FileManager.default.removeItem(at: directory)
-            throw BackgroundWorkerError.launch(error.localizedDescription)
-        }
-        return handle
-    }
-
-    private func run<Request: Encodable, Value: Codable>(command: String, request: Request, timeout: TimeInterval? = nil) async throws -> Value {
-        let directory = FileManager.default.temporaryDirectory
-            .appending(path: "MeetingCaptureWorker-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let requestURL = directory.appending(path: "request.json")
-        let responseURL = directory.appending(path: "response.json")
-        try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
-        let invocation = WorkerInvocation(
-            executableURL: executableURL,
-            arguments: [command, requestURL.path, responseURL.path],
-            responseURL: responseURL,
-            timeout: timeout
-        )
+    func run() throws -> URL {
+        if cancelled.load(ordering: .relaxed) { throw CancellationError() }
+        let directory = FileManager.default.temporaryDirectory.appending(path: "MeetingCapture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
-        let data = try await Task.detached { try invocation.execute() }.value
-        guard let data else { throw BackgroundWorkerError.invalidResponse }
-        let response = try JSONDecoder().decode(WorkerResponse<Value>.self, from: data)
-        if let error = response.error { throw BackgroundWorkerError.operation(error) }
-        guard let value = response.value else { throw BackgroundWorkerError.invalidResponse }
+        let input = directory.appending(path: "request.json")
+        let output = directory.appending(path: "response.json")
+        try request.write(to: input)
+
+        func check(_ status: Int32) throws {
+            guard status == 0 else { throw CaptureError.writerFailure(String(cString: strerror(status))) }
+        }
+        var actions: posix_spawn_file_actions_t? = nil
+        try check(posix_spawn_file_actions_init(&actions))
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        for descriptor in [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO] {
+            try check(posix_spawn_file_actions_addopen(&actions, descriptor, "/dev/null",
+                                                      descriptor == STDIN_FILENO ? O_RDONLY : O_WRONLY, 0))
+        }
+        var attributes: posix_spawnattr_t? = nil
+        try check(posix_spawnattr_init(&attributes))
+        defer { posix_spawnattr_destroy(&attributes) }
+        try check(posix_spawnattr_setpgroup(&attributes, 0))
+        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP)))
+        let arguments = [executable.path, command, input.path, output.path]
+        let strings = arguments.map { strdup($0) }
+        defer { strings.forEach { free($0) } }
+        var argv = strings + [nil]
+        let environment = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
+        defer { environment.forEach { free($0) } }
+        var envp = environment + [nil]
+        var pid: pid_t = 0
+        try check(posix_spawn(&pid, executable.path, &actions, &attributes, &argv, &envp))
+        guard pid > 0 else { throw CaptureError.writerFailure("Could not start audio processing") }
+
+        var status = siginfo_t()
+        func wait(_ options: Int32) throws {
+            while waitid(P_PID, id_t(pid), &status, options) < 0 {
+                if errno != EINTR { throw CaptureError.writerFailure("Could not wait for audio processing") }
+            }
+        }
+        var stopped = false
+        while true {
+            try wait(WEXITED | WNOHANG | WNOWAIT)
+            // Keep the group's leader unreaped until all encoders are stopped.
+            // Its PID is still reserved, so cleanup cannot target a reused ID.
+            if status.si_pid != 0 { break }
+            if cancelled.load(ordering: .relaxed) { stopped = true; _ = kill(-pid, SIGKILL) }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        _ = kill(-pid, SIGKILL)
+        try wait(WEXITED)
+        if stopped { throw CancellationError() }
+        guard status.si_code == CLD_EXITED, status.si_status == 0 else {
+            throw CaptureError.writerFailure("Audio processing exited with status \(status.si_status)")
+        }
+        let response = try JSONDecoder().decode(WorkerResponse.self, from: Data(contentsOf: output))
+        if let error = response.error { throw CaptureError.writerFailure(error) }
+        guard let value = response.value else { throw CaptureError.writerFailure("No audio processing result") }
         return value
-    }
-}
-
-private struct WorkerInvocation: Sendable {
-    let executableURL: URL
-    let arguments: [String]
-    let responseURL: URL?
-    var timeout: TimeInterval? = nil
-
-    func execute() throws -> Data? {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.qualityOfService = .utility
-        // A worker can fill a pipe before exiting, or leave an inherited pipe
-        // open in a subprocess. Neither may defeat the startup deadline.
-        guard let errorStream = tmpfile() else {
-            throw BackgroundWorkerError.launch("Could not capture worker errors: \(String(cString: strerror(errno)))")
-        }
-        defer { fclose(errorStream) }
-        let errorFile = FileHandle(fileDescriptor: fileno(errorStream), closeOnDealloc: false)
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = errorFile
-        do { try process.run() }
-        catch { throw BackgroundWorkerError.launch(error.localizedDescription) }
-        if let timeout {
-            let deadline = ProcessInfo.processInfo.systemUptime + timeout
-            while process.isRunning, ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.02) }
-            if process.isRunning {
-                // This is our own, still-unreaped child, so its PID cannot be reused.
-                // The worker creates its own process group before launching
-                // tools. Stop those tools too, before deleting their inputs.
-                kill(-process.processIdentifier, SIGKILL)
-                kill(process.processIdentifier, SIGKILL)
-                process.waitUntilExit()
-                let message = arguments.first == "check-access"
-                    ? "The worker storage / archive check timed out. Retry the recording check."
-                    : "Optional metadata permission check timed out."
-                throw BackgroundWorkerError.operation(message)
-            }
-        }
-        process.waitUntilExit()
-        try errorFile.seek(toOffset: 0)
-        let standardError = errorFile.readDataToEndOfFile()
-        guard process.terminationStatus == 0 else {
-            if process.terminationReason == .exit,
-               let message = String(data: standardError, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !message.isEmpty {
-                throw BackgroundWorkerError.operation(message)
-            }
-            throw BackgroundWorkerError.crashed(
-                command: arguments.first ?? "unknown",
-                reason: process.terminationReason,
-                status: process.terminationStatus
-            )
-        }
-        guard let responseURL else { return nil }
-        return try Data(contentsOf: responseURL)
-    }
-}
-
-@MainActor
-final class BackgroundWorkerProcess {
-    private let process: Process
-    private let lifetimeWriter: FileHandle
-    private var expectedTermination = false
-
-    init(
-        process: Process,
-        temporaryDirectory: URL,
-        lifetimeWriter: FileHandle,
-        onUnexpectedExit: @escaping @MainActor (BackgroundWorkerError) -> Void
-    ) {
-        self.process = process
-        self.lifetimeWriter = lifetimeWriter
-        process.terminationHandler = { [weak self] process in
-            // The coordinator releases its handle immediately after stopping.
-            // Cleanup and the lifetime pipe must outlive that handle.
-            try? lifetimeWriter.close()
-            try? FileManager.default.removeItem(at: temporaryDirectory)
-            Task { @MainActor in
-                guard let self else { return }
-                guard !self.expectedTermination, process.terminationStatus != 0 else { return }
-                onUnexpectedExit(.crashed(
-                    command: "accessibility-probe",
-                    reason: process.terminationReason,
-                    status: process.terminationStatus
-                ))
-            }
-        }
-    }
-
-    func terminate() {
-        guard !expectedTermination else { return }
-        expectedTermination = true
-        guard process.isRunning else { return }
-        process.terminate()
-        // Give the probe time to flush its final snapshot. Closing our pipe
-        // then stops even a hung AX call, without signalling a saved PID.
-        Task {
-            try? await Task.sleep(for: .seconds(2))
-            try? lifetimeWriter.close()
-        }
     }
 }

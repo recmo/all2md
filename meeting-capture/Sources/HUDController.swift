@@ -80,7 +80,7 @@ private final class NotchPanel: NSPanel {
 private extension AppModel.State {
     var showsHUD: Bool {
         switch self {
-        case .recording, .finalizing: true
+        case .recording, .starting, .stopping: true
         default: false
         }
     }
@@ -154,12 +154,10 @@ struct HUDLayout {
 
 private struct RecordingHUD: View {
     @ObservedObject var model: AppModel
-    @ObservedObject private var capture: CaptureCoordinator
     let layout: HUDLayout
 
     init(model: AppModel, layout: HUDLayout) {
         self.model = model
-        capture = model.capture
         self.layout = layout
     }
 
@@ -234,7 +232,7 @@ private struct RecordingHUD: View {
         switch model.state {
         case .recording:
             Circle().fill(.red).frame(width: 8, height: 8)
-        case .finalizing:
+        case .starting, .stopping:
             ProgressView().controlSize(.small).tint(.white)
         default:
             EmptyView()
@@ -242,7 +240,7 @@ private struct RecordingHUD: View {
     }
 
     @ViewBuilder private var statusDetail: some View {
-        if case .recording = model.state, let startedAt = capture.startedAt {
+        if case .recording = model.state, let startedAt = model.captureStatus?.startedAt {
             TimelineView(.periodic(from: .now, by: 1)) { _ in
                 Text(startedAt, style: .timer)
                     .font(.system(size: 11, design: .rounded))
@@ -254,7 +252,7 @@ private struct RecordingHUD: View {
 
     @ViewBuilder private var actionButtons: some View {
         if case .recording = model.state {
-            Button(action: model.stopRecording) {
+            Button(action: { model.stopRecording() }) {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 9, weight: .bold))
                     .frame(width: 20, height: 20)
@@ -269,8 +267,10 @@ private struct RecordingHUD: View {
         switch model.state {
         case let .recording(client):
             client.applicationName
-        case .finalizing:
-            "Preparing recording…"
+        case .starting:
+            "Starting recording…"
+        case .stopping:
+            "Saving recorded audio…"
         default:
             ""
         }

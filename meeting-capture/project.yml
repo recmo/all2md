@@ -28,10 +28,15 @@ targets:
           helper_dir="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
           mkdir -p "$helper_dir"
           cp "$BUILT_PRODUCTS_DIR/MeetingCaptureWorker" "$helper_dir/MeetingCaptureWorker"
+          agent_dir="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents"
+          mkdir -p "$agent_dir"
+          cp "$SRCROOT/ventures.wicked.MeetingCapture.keep-running.plist" "$agent_dir/"
         inputFiles:
           - $(BUILT_PRODUCTS_DIR)/MeetingCaptureWorker
+          - $(SRCROOT)/ventures.wicked.MeetingCapture.keep-running.plist
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/MeetingCaptureWorker
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/ventures.wicked.MeetingCapture.keep-running.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ventures.wicked.MeetingCapture
@@ -40,8 +45,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSUIElement: YES
         INFOPLIST_KEY_NSMicrophoneUsageDescription: Meeting Capture records your microphone during meetings.
-        INFOPLIST_KEY_NSAudioCaptureUsageDescription: Meeting Capture records participant audio from meeting applications.
-        INFOPLIST_KEY_NSAccessibilityUsageDescription: Meeting Capture can read meeting titles and participant metadata.
+        INFOPLIST_KEY_NSAudioCaptureUsageDescription: Meeting Capture records all system audio during meetings.
         CODE_SIGN_ENTITLEMENTS: MeetingCapture.entitlements
   MeetingCaptureWorker:
     type: tool
@@ -49,11 +53,9 @@ targets:
     sources:
       - Worker
       - Shared
-      - Sources/AccessibilityProbe.swift
       - Sources/AudioFinalizer.swift
       - Sources/CaptureError.swift
       - Sources/MeetingStore.swift
-      - Sources/Models.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ventures.wicked.MeetingCapture.worker

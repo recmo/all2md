@@ -57,6 +57,7 @@ stdenvNoCC.mkDerivation {
       --sign - \
       --entitlements MeetingCapture.entitlements \
       "$out/Applications/MeetingCapture.app"
+    codesign --verify --deep --strict "$out/Applications/MeetingCapture.app"
 
     runHook postInstall
   '';

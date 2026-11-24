@@ -43,6 +43,9 @@ struct MeetingStore: Sendable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(manifest).write(to: url, options: .atomic)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.synchronize()
     }
 
     func interruptedRecordings(excluding claimed: Set<URL> = []) -> [URL] {
@@ -51,24 +54,12 @@ struct MeetingStore: Sendable {
         var recordings: [URL: URL] = [:]
         for file in enumerator.compactMap({ $0 as? URL }) {
             guard file.lastPathComponent.hasSuffix(".part.caf") || file.lastPathComponent.hasSuffix(".session.json") else { continue }
-            let paths = paths(forInterruptedFile: file)
+            let paths = RecordingPaths(interruptedFile: file)
             let identity = paths.directory.resolvingSymlinksInPath().appending(path: paths.manifest.lastPathComponent)
             guard !identities.contains(identity), RecordingClaim.isAvailable(paths) else { continue }
             if recordings[identity] == nil || file.path.hasSuffix(".session.json") { recordings[identity] = file }
         }
         return recordings.values.sorted { $0.path < $1.path }
-    }
-
-    func paths(forInterruptedFile file: URL) -> RecordingPaths {
-        var name = file.lastPathComponent
-        if name.hasPrefix(".") { name.removeFirst() }
-        if name.hasSuffix(".session.json") {
-            return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: String(name.dropLast(".session.json".count)))
-        }
-        let suffix = #"-(?:microphone-[0-9]+|process-[0-9a-fA-F-]{36}|microphone|participants)\.part\.caf$"#
-        let baseName = name.range(of: suffix, options: .regularExpression)
-            .map { String(name[..<$0.lowerBound]) } ?? file.deletingPathExtension().lastPathComponent
-        return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: baseName)
     }
 
     static func slug(_ value: String) -> String {
@@ -81,7 +72,7 @@ struct MeetingStore: Sendable {
 
     private static func recordingExists(named baseName: String, in directory: URL) -> Bool {
         let manager = FileManager.default
-        if ["\(baseName)-capture.json", "\(baseName).mka", "\(baseName)-accessibility.jsonl", "\(baseName)-microphone.flac", "\(baseName)-participants.flac"]
+        if ["\(baseName)-capture.json", ".\(baseName).session.json", "\(baseName).mka"]
             .contains(where: { manager.fileExists(atPath: directory.appending(path: $0).path) }) {
             return true
         }

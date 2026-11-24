@@ -2,51 +2,33 @@
 import CoreAudio
 import CoreMedia
 import Foundation
-import Synchronization
 
-// Private, unmuted taps capture process output without requiring a window.
+// One private, unmuted tap mixes all system output without changing playback.
 final class SystemAudioRecorder: @unchecked Sendable {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var deviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private var formatListener: AudioObjectPropertyListenerBlock?
-    private var writer: TapPCMWriter?
+    private var writer: BufferedAudioWriter?
     private var deliveryError: Error?
+    private var stopFailure: Error? // Control queue only.
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
-    private var sampleAt: Date?
-    var firstSampleAt: Date? { lock.withLock { sampleAt } }
-    var onLevel: (@Sendable (Float) -> Void)?
+    // Read on the control thread, after callbacks are stopped or during capture.
+    var diagnosticSummary: String { writer?.diagnosticSummary ?? "writer=none" }
+    private var warning: String?
+    var captureWarning: String? { lock.withLock { warning } }
+    var level: Float { writer?.level ?? 0 }
     var onError: (@Sendable (Error) -> Void)?
 
-    func start(processObject: AudioObjectID, to url: URL, startTime: CMTime) async throws {
-        guard processObject != kAudioObjectUnknown else { throw CaptureError.triggeringApplicationUnavailable }
-        try startCapture(description: CATapDescription(stereoMixdownOfProcesses: [processObject]),
-                         to: url, startTime: startTime)
-    }
-
-    func startAuthorizationCheck(to url: URL) async throws {
-        // The disposable check uses the system mix, excluding this recorder.
-        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-                                                mScope: kAudioObjectPropertyScopeGlobal,
-                                                mElement: kAudioObjectPropertyElementMain)
-        var pid = ProcessInfo.processInfo.processIdentifier
-        var ownObject = AudioObjectID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        try check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
-                                            UInt32(MemoryLayout<pid_t>.size), &pid, &size, &ownObject),
-                  "Find recorder audio process")
-        let excluded = ownObject == kAudioObjectUnknown ? [] : [ownObject]
-        try startCapture(description: CATapDescription(stereoGlobalTapButExcludeProcesses: excluded),
-                         to: url, startTime: CMClockGetTime(CMClockGetHostTimeClock()))
-    }
-
-    private func startCapture(description: CATapDescription, to url: URL, startTime: CMTime) throws {
+    func start(to url: URL, startTime: CMTime) throws {
+        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        CaptureDiagnostics.log("tap.start track=\(url.lastPathComponent) \(CaptureDiagnostics.devices())")
         description.name = "Meeting Capture audio"
         description.isPrivate = true
         description.muteBehavior = .unmuted
         do {
-            try check(AudioHardwareCreateProcessTap(description, &tapID), "Create audio process tap")
+            try check(AudioHardwareCreateProcessTap(description, &tapID), "Create system audio tap")
             var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyFormat,
                                                     mScope: kAudioObjectPropertyScopeGlobal,
                                                     mElement: kAudioObjectPropertyElementMain)
@@ -56,8 +38,9 @@ final class SystemAudioRecorder: @unchecked Sendable {
             guard let format = AVAudioFormat(streamDescription: &asbd),
                   format.sampleRate > 0, format.channelCount > 0,
                   format.commonFormat != .otherFormat else {
-                throw CaptureError.writerFailure("Invalid audio process tap format")
+                throw CaptureError.writerFailure("Invalid system audio tap format")
             }
+            CaptureDiagnostics.log("tap.format tap=\(tapID) format=\(format)")
             let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 guard let self else { return }
                 // A new layout needs a new segment. Fail visibly rather than
@@ -67,8 +50,9 @@ final class SystemAudioRecorder: @unchecked Sendable {
                 var currentAddress = Self.formatAddress()
                 let status = AudioObjectGetPropertyData(self.tapID, &currentAddress, 0, nil,
                                                         &currentSize, &current)
+                CaptureDiagnostics.log("tap.format.changed tap=\(self.tapID) OSStatus=\(status) rate=\(current.mSampleRate) channels=\(current.mChannelsPerFrame) bytesPerFrame=\(current.mBytesPerFrame) flags=\(current.mFormatFlags)")
                 if status != noErr || AVAudioFormat(streamDescription: &current)?.isEqual(format) != true {
-                    self.reportFailure(CaptureError.processTapFailure("Audio process tap format changed; restart recording."))
+                    self.reportFailure(CaptureError.systemAudioCaptureFailure("System audio tap format changed."))
                 }
             }
             let aggregate: [String: Any] = [
@@ -82,45 +66,38 @@ final class SystemAudioRecorder: @unchecked Sendable {
                 ]],
             ]
             try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &deviceID), "Create tap device")
-            let writer = try TapPCMWriter(format: format, url: url, startTime: startTime.seconds)
-            writer.onSample = { [weak self] in
-                guard let self else { return }
-                self.lock.withLock { if self.sampleAt == nil { self.sampleAt = Date() } }
-                self.onLevel?(0.35)
-            }
+            let writer = try BufferedAudioWriter(format: format, url: url, startTime: startTime.seconds)
             writer.onError = { [weak self] in self?.reportFailure($0) }
+            writer.onWarning = { [weak self] message in
+                guard let self else { return }
+                self.lock.withLock { self.warning = message }
+            }
             self.writer = writer
-            lock.withLock { deliveryError = nil; sampleAt = nil }
+            lock.withLock { deliveryError = nil; warning = nil }
             try check(AudioObjectAddPropertyListenerBlock(tapID, &address, queue, listener), "Watch tap format")
             formatListener = listener
             try check(AudioDeviceCreateIOProcIDWithBlock(&ioProcID, deviceID, queue) {
                 _, input, timestamp, _, _ in
                 writer.enqueue(input, timestamp: timestamp.pointee)
             }, "Create tap audio callback")
-            try check(AudioDeviceStart(deviceID, ioProcID), "Start audio process tap")
+            try check(AudioDeviceStart(deviceID, ioProcID), "Start system audio tap")
         } catch {
-            let startupError = error
-            do { try stopCapture() }
-            catch {
-                if !CaptureError.isProcessTapFailure(error) { throw error }
-            }
-            throw startupError
+            try? stop()
+            throw error
         }
     }
 
-    func stop(processExited: Bool = false) async throws {
-        do { try stopCapture() }
-        catch where processExited && CaptureError.isProcessTapFailure(error) {
-            // HAL can invalidate a tap when its process exits. Saved PCM is intact.
+    // Release HAL resources before the control queue waits for any file writer.
+    func stopInput() {
+        if tapID != kAudioObjectUnknown || deviceID != kAudioObjectUnknown {
+            CaptureDiagnostics.log("tap.stop tap=\(tapID) device=\(deviceID)")
         }
-    }
-
-    private func stopCapture() throws {
         // Stop callbacks before destroying their device or closing their file.
         var failure: Error?
         func cleanup(_ status: OSStatus, _ operation: String) {
+            CaptureDiagnostics.log("tap.cleanup operation=\(operation) tap=\(tapID) device=\(deviceID) OSStatus=\(status)")
             if status != noErr, failure == nil {
-                failure = CaptureError.processTapFailure("\(operation) (OSStatus \(status))")
+                failure = CaptureError.systemAudioCaptureFailure("\(operation) (OSStatus \(status))")
             }
         }
         if let formatListener {
@@ -143,25 +120,33 @@ final class SystemAudioRecorder: @unchecked Sendable {
             cleanup(AudioHardwareDestroyProcessTap(tapID), "Destroy process tap")
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
-        // The callback has stopped; drain copied samples before closing the file.
+        stopFailure = stopFailure ?? failure
+    }
+
+    func stop() throws {
+        stopInput()
+        // Callbacks have stopped; retain every valid copied sample before close.
         writer?.finish()
+        if let writer { CaptureDiagnostics.log("tap.finished \(writer.diagnosticSummary)") }
         writer = nil
-        lock.withLock {
-            failure = deliveryError ?? failure
-            deliveryError = nil
+        let failure = lock.withLock {
+            defer { deliveryError = nil }
+            return deliveryError ?? stopFailure
         }
+        stopFailure = nil
         if let failure { throw failure }
     }
 
     private func reportFailure(_ error: Error) {
         let first = lock.withLock {
-            // A real writer failure must survive a concurrent process-exit error.
-            if let previous = deliveryError,
-               !CaptureError.isProcessTapFailure(previous) || CaptureError.isProcessTapFailure(error) { return false }
+            guard deliveryError == nil else { return false }
             deliveryError = error
             return true
         }
-        if first { onError?(error) }
+        if first {
+            CaptureDiagnostics.error("tap.failed \(CaptureError.details(error))")
+            onError?(error)
+        }
     }
 
     private static func formatAddress() -> AudioObjectPropertyAddress {
@@ -171,194 +156,9 @@ final class SystemAudioRecorder: @unchecked Sendable {
     }
 
     private func check(_ status: OSStatus, _ operation: String) throws {
+        CaptureDiagnostics.log("tap.operation operation=\(operation) tap=\(tapID) device=\(deviceID) OSStatus=\(status)")
         guard status == noErr else {
             throw CaptureError.systemAudioCaptureFailure("\(operation) failed (OSStatus \(status))")
         }
     }
-}
-
-// HAL invokes IO blocks synchronously. Copy into preallocated slots and return;
-// only this separate queue may allocate PCMFile buffers or touch the filesystem.
-final class TapPCMWriter: @unchecked Sendable {
-    private let file: PCMFile
-    private final class Slot {
-        let buffer: AVAudioPCMBuffer
-        var timestamp: UInt64 = 0
-        init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
-    }
-    private let slots: [Slot]
-    // One producer (the serial HAL callback queue), one consumer (writer queue).
-    // Release/acquire publishes slots and prevents reuse until writing completes.
-    private let readIndex = Atomic<Int>(0)
-    private let writeIndex = Atomic<Int>(0)
-    private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.pcm-writer")
-    private let source: DispatchSourceUserDataOr
-    private let finished = DispatchSemaphore(value: 0)
-    private var failed = false // Writer queue only.
-    var onSample: (@Sendable () -> Void)?
-    var onError: (@Sendable (Error) -> Void)?
-
-    init(format: AVAudioFormat, url: URL, startTime: Double) throws {
-        file = PCMFile(url: url, startTime: startTime)
-        // Bounded storage: 32 callbacks of up to 8192 frames each.
-        slots = try (0..<32).map { _ in
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192) else {
-                throw CaptureError.writerFailure("Could not allocate process audio queue")
-            }
-            return Slot(buffer)
-        }
-        source = DispatchSource.makeUserDataOrSource(queue: queue)
-        source.setEventHandler { [weak self] in
-            guard let self else { return }
-            let events = self.source.data
-            if events & 2 != 0 { self.fail("Process audio queue overflow; audio could not be saved fast enough") }
-            if events & 4 != 0 { self.fail("Invalid process audio buffer or timestamp") }
-            self.drain()
-            if events & 8 != 0 {
-                self.file.close()
-                self.source.cancel()
-                self.finished.signal()
-            }
-        }
-        source.resume()
-    }
-
-    func enqueue(_ input: UnsafePointer<AudioBufferList>, timestamp: AudioTimeStamp) {
-        let incoming = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
-        guard incoming.contains(where: { $0.mDataByteSize > 0 }) else { return }
-        guard timestamp.mFlags.contains(.hostTimeValid) else { source.or(data: 4); return }
-        let write = writeIndex.load(ordering: .relaxed)
-        guard write - readIndex.load(ordering: .acquiring) < slots.count else { source.or(data: 2); return }
-        let slot = slots[write % slots.count]
-        let buffer = slot.buffer
-        let bytesPerFrame = Int(buffer.format.streamDescription.pointee.mBytesPerFrame)
-        let destination = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-        let bytes = Int(incoming[0].mDataByteSize)
-        guard bytesPerFrame > 0, bytes % bytesPerFrame == 0,
-              bytes / bytesPerFrame <= Int(buffer.frameCapacity), incoming.count == destination.count else {
-            source.or(data: 4); return
-        }
-        for channel in incoming.indices {
-            guard incoming[channel].mDataByteSize == bytes,
-                  let from = incoming[channel].mData, let to = destination[channel].mData else {
-                source.or(data: 4); return
-            }
-            to.copyMemory(from: from, byteCount: bytes)
-        }
-        buffer.frameLength = AVAudioFrameCount(bytes / bytesPerFrame)
-        slot.timestamp = timestamp.mHostTime
-        writeIndex.store(write + 1, ordering: .releasing)
-        source.or(data: 1)
-    }
-
-    private func drain() {
-        while true {
-            let read = readIndex.load(ordering: .relaxed)
-            guard read < writeIndex.load(ordering: .acquiring) else { return }
-            let slot = slots[read % slots.count]
-            if !failed {
-                do {
-                    try file.write(slot.buffer, at: AVAudioTime.seconds(forHostTime: slot.timestamp))
-                    onSample?()
-                } catch { fail("Process tap PCM write: \(CaptureError.details(error))") }
-            }
-            // This slot stays owned by the writer until disk I/O completes.
-            readIndex.store(read + 1, ordering: .releasing)
-        }
-    }
-
-    private func fail(_ message: String) {
-        guard !failed else { return }
-        failed = true
-        onError?(CaptureError.writerFailure(message))
-    }
-
-    func finish() {
-        // Called only after HAL stops. A final event drains both pending audio
-        // and failure flags before acknowledging close to the stopping thread.
-        source.or(data: 8)
-        finished.wait()
-    }
-}
-
-// Both capture paths use the same timestamp-aware PCM writer. Callers serialize
-// access on their delivery queue or lock; the file always stores interleaved PCM.
-final class PCMFile {
-    private let url: URL
-    private var file: AVAudioFile?
-    private var startTime: Double?
-
-    init(url: URL, startTime: Double? = nil) {
-        self.url = url
-        self.startTime = startTime
-    }
-
-    func write(_ input: AVAudioPCMBuffer, at time: Double) throws {
-        guard input.frameLength > 0 else { return }
-        let format = input.format
-        guard time.isFinite, format.sampleRate > 0, format.channelCount > 0,
-              format.commonFormat != .otherFormat else {
-            throw CaptureError.writerFailure("Invalid PCM format or timestamp")
-        }
-        if file == nil {
-            guard let diskFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                                sampleRate: format.sampleRate,
-                                                channels: format.channelCount, interleaved: true) else {
-                throw CaptureError.writerFailure("Invalid audio file format")
-            }
-            file = try AVAudioFile(forWriting: url, settings: diskFormat.settings,
-                                   commonFormat: format.commonFormat, interleaved: format.isInterleaved)
-        }
-        guard let file, file.processingFormat.sampleRate == format.sampleRate,
-              file.processingFormat.channelCount == format.channelCount,
-              file.processingFormat.commonFormat == format.commonFormat,
-              file.processingFormat.isInterleaved == format.isInterleaved else {
-            throw CaptureError.writerFailure("Audio format changed without starting a new segment")
-        }
-        let origin = startTime ?? time
-        startTime = origin
-        let position = (time - origin) * format.sampleRate
-        guard position.isFinite, abs(position) < Double(Int64.max / 2) else {
-            throw CaptureError.writerFailure("Invalid audio sample position")
-        }
-        let target = AVAudioFramePosition(position.rounded())
-        if target > file.framePosition {
-            guard let silence = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4096) else {
-                throw CaptureError.writerFailure("Could not allocate silence buffer")
-            }
-            silence.frameLength = silence.frameCapacity
-            for buffer in UnsafeMutableAudioBufferListPointer(silence.mutableAudioBufferList) {
-                buffer.mData?.initializeMemory(as: UInt8.self, repeating: 0, count: Int(buffer.mDataByteSize))
-            }
-            while file.framePosition < target {
-                silence.frameLength = AVAudioFrameCount(min(4096, target - file.framePosition))
-                try file.write(from: silence)
-            }
-        }
-        let offset = min(Int64(input.frameLength), max(0, file.framePosition - target))
-        let remaining = input.frameLength - AVAudioFrameCount(offset)
-        guard remaining > 0 else { return }
-        if offset == 0, format.isEqual(file.processingFormat) {
-            try file.write(from: input)
-            return
-        }
-        guard let output = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: remaining) else {
-            throw CaptureError.writerFailure("Could not allocate audio buffer")
-        }
-        output.frameLength = remaining
-        let source = UnsafeMutableAudioBufferListPointer(input.mutableAudioBufferList)
-        let destination = UnsafeMutableAudioBufferListPointer(output.mutableAudioBufferList)
-        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
-        guard source.count == destination.count else { throw CaptureError.writerFailure("PCM buffer layout mismatch") }
-        for index in source.indices {
-            guard let from = source[index].mData, let to = destination[index].mData,
-                  Int(source[index].mDataByteSize) >= (Int(offset) + Int(remaining)) * bytesPerFrame else {
-                throw CaptureError.writerFailure("Incomplete PCM audio buffer")
-            }
-            to.copyMemory(from: from.advanced(by: Int(offset) * bytesPerFrame), byteCount: Int(remaining) * bytesPerFrame)
-        }
-        try file.write(from: output)
-    }
-
-    func close() { file = nil }
 }

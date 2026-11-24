@@ -26,8 +26,17 @@ if /usr/bin/pgrep -x MeetingCapture >/dev/null; then
     exit 1
 fi
 /usr/bin/chflags -R nouchg "$installed"
-rm -rf "$installed"
-mv "$staging/MeetingCapture.app" "$installed"
+# Both bundles are on the same volume. An atomic exchange leaves the installed
+# app intact if publication fails; the old bundle is then removed by the trap.
+/usr/bin/xcrun swift - "$staging/MeetingCapture.app" "$installed" <<'SWIFT'
+import Darwin
+let staged = CommandLine.arguments[1]
+let installed = CommandLine.arguments[2]
+guard renamex_np(staged, installed, UInt32(RENAME_SWAP)) == 0 else {
+    perror("Could not publish Meeting Capture")
+    exit(EXIT_FAILURE)
+}
+SWIFT
 /usr/bin/codesign --verify --deep --strict "$installed"
 /usr/bin/chflags -R uchg "$installed"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$installed"
