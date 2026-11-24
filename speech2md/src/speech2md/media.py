@@ -94,10 +94,6 @@ def resolve_input(requested: Path) -> ResolvedInput:
             if not {"streamIndex", "role"} <= track.keys():
                 raise ValueError("capture audio track is incomplete")
             role = track["role"]
-            if schema_version == 3 and role == "process":
-                if not track.get("id") or not isinstance(track.get("process"), dict):
-                    raise ValueError("capture process track is missing its identity")
-                role = f"process-{track['id']}"
             sources.append((container_path, role, container["sha256"], int(track["streamIndex"])))
         if len({source[1] for source in sources}) != len(sources):
             raise ValueError("capture track identities must be unique")

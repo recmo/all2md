@@ -8,8 +8,7 @@ struct CaptureStatus: Sendable {
     let startedAt: Date
     let microphoneName: String
     let microphoneLevel: Float
-    let processAudioLevel: Float
-    let processTrackCount: Int
+    let systemAudioLevel: Float
     let warning: String?
 }
 
@@ -21,7 +20,7 @@ final class CaptureCoordinator: @unchecked Sendable {
     var onFailure: (@Sendable (UUID, String) -> Void)?
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.capture", qos: .userInitiated)
     private let microphone = MicrophoneRecorder()
-    private let catalog = AudioProcessCatalog()
+    private let systemAudio = SystemAudioRecorder()
     private let store = MeetingStore()
     private let backgroundWorker = BackgroundWorkerClient()
     private var session: RecordingSession?
@@ -30,7 +29,6 @@ final class CaptureCoordinator: @unchecked Sendable {
     private var claimedRecordings = Set<URL>()
     private var hostStart: CMTime = .zero
     private var timer: DispatchSourceTimer?
-    private var nextPoll: TimeInterval = 0
     private var nextHealth: TimeInterval = 0
     private let stopRequested = Atomic<Bool>(false)
     private var fatalFailure = false
@@ -38,13 +36,8 @@ final class CaptureCoordinator: @unchecked Sendable {
     private var microphoneDevice: AudioInputDevice?
     private var microphoneStarted: TimeInterval = 0
     private var microphoneRetry: TimeInterval?
-    private struct ProcessTrack {
-        let process: AudioProcess
-        let id: UUID
-        let recorder: ProcessAudioRecorder
-    }
-    private var processes: [UInt32: ProcessTrack] = [:]
-    private var retries: [UInt32: (pid: Int32, after: TimeInterval)] = [:]
+    private var systemGeneration = UUID()
+    private var systemRetry: TimeInterval?
 
     func start(id: UUID, trigger: CaptureTrigger, microphoneDevice: AudioInputDevice?) async throws {
         try await perform { [self] in
@@ -59,7 +52,7 @@ final class CaptureCoordinator: @unchecked Sendable {
             self.claim = try RecordingClaim(paths)
             self.claimedRecordings.insert(paths.manifest)
             self.sessionID = id
-            self.session = RecordingSession(microphoneSegments: [], processTracks: [],
+            self.session = RecordingSession(microphoneSegments: [], systemSegments: [],
                 captureStartedAt: start, captureEndedAt: nil, paths: paths, trigger: trigger,
                 metadata: [], warnings: [], interruptions: [])
             self.microphoneDevice = microphoneDevice
@@ -67,7 +60,7 @@ final class CaptureCoordinator: @unchecked Sendable {
             do {
                 try self.session?.save()
                 self.startMicrophone()
-                self.pollProcesses()
+                self.startSystemAudio()
                 self.startTimer()
                 self.publish()
                 if self.fatalFailure { throw CaptureError.writerFailure(self.session?.warnings.last ?? "Could not persist the recording session") }
@@ -111,16 +104,14 @@ final class CaptureCoordinator: @unchecked Sendable {
            !microphone.isRunning || (microphone.callbackAge ?? (now - microphoneStarted)) > 5 {
             microphoneFailed(CaptureError.deviceSelectionFailure("Microphone stopped delivering audio"))
         }
-        if now >= nextPoll { nextPoll = now + 0.5; pollProcesses() }
+        if let retry = systemRetry, now >= retry { startSystemAudio() }
         if let warning = microphone.captureWarning { warn("Microphone: \(warning)", incomplete: true) }
-        for track in processes.values { recordWarning(track) }
+        if let warning = systemAudio.captureWarning { warn("System audio: \(warning)", incomplete: true) }
         if now >= nextHealth {
             nextHealth = now + 5
-            CaptureDiagnostics.log("capture.health processes=\(processes.count) \(CaptureDiagnostics.devices())")
+            CaptureDiagnostics.log("capture.health \(CaptureDiagnostics.devices())")
             CaptureDiagnostics.log("microphone.health \(microphone.diagnosticSummary)")
-            for track in processes.values {
-                CaptureDiagnostics.log("process.health pid=\(track.process.processID) track=\(track.id) \(track.recorder.diagnosticSummary)")
-            }
+            CaptureDiagnostics.log("system.health \(systemAudio.diagnosticSummary)")
         }
         publish()
     }
@@ -165,66 +156,38 @@ final class CaptureCoordinator: @unchecked Sendable {
         warn("Microphone interrupted; retrying: \(microphone.failure?.localizedDescription ?? error.localizedDescription)", incomplete: true)
     }
 
-    private func pollProcesses() {
-        guard !stopRequested.load(ordering: .acquiring) else { return }
-        do {
-            let snapshot = try catalog.outputProcesses()
-            for object in Array(processes.keys) where !snapshot.all.contains(object) { stopProcess(object, exited: true) }
-            retries = retries.filter { snapshot.all.contains($0.key) }
-            for process in snapshot.active {
-                if processes[process.objectID]?.process.processID == process.processID { continue }
-                if processes[process.objectID] != nil { stopProcess(process.objectID, exited: true) }
-                if let retry = retries[process.objectID], retry.pid == process.processID,
-                   ProcessInfo.processInfo.systemUptime < retry.after { continue }
-                startProcess(process)
-            }
-        } catch { warn("Process discovery unavailable; retrying: \(error.localizedDescription)") }
-    }
-
-    private func startProcess(_ process: AudioProcess) {
-        guard let session, let identity = sessionID, !fatalFailure,
-              !stopRequested.load(ordering: .acquiring) else { return }
-        let id = UUID()
+    private func startSystemAudio() {
+        guard let session, !fatalFailure, !stopRequested.load(ordering: .acquiring) else { return }
         let host = CMClockGetTime(CMClockGetHostTimeClock())
-        let track = CapturedProcessTrack(id: id, process: process, url: session.paths.processTemporary(id), startedAt: captureDate(at: host))
-        self.session?.processTracks.append(track)
+        let segment = CapturedAudioSegment(url: session.paths.systemTemporary(segment: session.systemSegments.count + 1),
+                                           startedAt: captureDate(at: host))
+        self.session?.systemSegments.append(segment)
         guard save() else { return }
-        let recorder = ProcessAudioRecorder()
-        processes[process.objectID] = ProcessTrack(process: process, id: id, recorder: recorder)
-        recorder.onError = { [weak self] error in
+        let generation = UUID()
+        systemGeneration = generation
+        systemAudio.onError = { [weak self] error in
             self?.queue.async { [weak self] in
-                guard let self, self.sessionID == identity, self.processes[process.objectID]?.id == id else { return }
-                self.processFailed(process, error: error)
+                guard let self, self.systemGeneration == generation else { return }
+                self.systemFailed(error)
             }
         }
         do {
-            try recorder.start(processObject: process.objectID, to: track.url, startTime: host)
-            retries[process.objectID] = nil
-        } catch { processFailed(process, error: error) }
+            try systemAudio.start(to: segment.url, startTime: host)
+            systemRetry = nil
+        } catch { systemFailed(error) }
     }
 
-    private func processFailed(_ process: AudioProcess, error: Error) {
+    private func systemFailed(_ error: Error) {
         guard session != nil, !fatalFailure, !stopRequested.load(ordering: .acquiring) else { return }
-        if CaptureError.isProcessTapFailure(error),
-           let live = try? catalog.processObjectIDs(), !live.contains(process.objectID) {
-            stopProcess(process.objectID, exited: true)
-            return
+        systemGeneration = UUID()
+        var failure = error
+        do { try systemAudio.stop() } catch { failure = error }
+        if let last = session?.systemSegments.last, !FileManager.default.fileExists(atPath: last.url.path) {
+            session?.systemSegments.removeLast()
         }
-        stopProcess(process.objectID, exited: false)
-        retries[process.objectID] = (pid: process.processID, after: ProcessInfo.processInfo.systemUptime + 10)
-        warn("\(process.title) interrupted; retrying: \(error.localizedDescription)", incomplete: true)
-    }
-
-    private func stopProcess(_ object: UInt32, exited: Bool) {
-        guard let track = processes.removeValue(forKey: object) else { return }
-        do { try track.recorder.stop(processExited: exited) }
-        catch { warn("\(track.process.title): \(error.localizedDescription)", incomplete: true) }
-        recordWarning(track)
-        session?.processTracks.removeAll { $0.id == track.id && !FileManager.default.fileExists(atPath: $0.url.path) }
-    }
-
-    private func recordWarning(_ track: ProcessTrack) {
-        if let warning = track.recorder.captureWarning { warn("\(track.process.title): \(warning)", incomplete: true) }
+        if let warning = systemAudio.captureWarning { warn("System audio: \(warning)", incomplete: true) }
+        systemRetry = ProcessInfo.processInfo.systemUptime + 10
+        warn("System audio interrupted; retrying: \(failure.localizedDescription)", incomplete: true)
     }
 
     private func warn(_ message: String, incomplete: Bool = false) {
@@ -258,15 +221,14 @@ final class CaptureCoordinator: @unchecked Sendable {
         guard let session, let id = sessionID else { return }
         let warning: String? = if microphoneRetry != nil {
             "Microphone unavailable; retrying."
-        } else if !retries.isEmpty {
-            "Application audio interrupted; retrying."
+        } else if systemRetry != nil {
+            "System audio interrupted; retrying."
         } else if session.captureFailed {
             "Some audio was dropped or interrupted."
         } else { nil }
         onStatus?(CaptureStatus(sessionID: id, startedAt: session.captureStartedAt,
             microphoneName: microphoneDevice?.name ?? "System default microphone",
-            microphoneLevel: microphone.level, processAudioLevel: processes.values.map { $0.recorder.level }.max() ?? 0,
-            processTrackCount: session.processTracks.count, warning: warning))
+            microphoneLevel: microphone.level, systemAudioLevel: systemAudio.level, warning: warning))
     }
 
     private func stopCapture(at time: CMTime = CMClockGetTime(CMClockGetHostTimeClock())) throws -> RecordingSession {
@@ -277,23 +239,26 @@ final class CaptureCoordinator: @unchecked Sendable {
         timer?.cancel(); timer = nil
         microphoneGeneration = UUID()
         microphone.onError = nil
-        // A slow microphone drain must not keep process taps recording after Stop.
+        systemGeneration = UUID()
+        systemAudio.onError = nil
+        // Stop both native inputs before either writer can block on disk.
         microphone.stopInput()
-        for track in processes.values { track.recorder.stopInput() }
+        systemAudio.stopInput()
         session?.captureEndedAt = endedAt
         save() // Recovery must retain Stop even if a later drain is interrupted.
         microphone.stop()
         if let failure = microphone.failure { warn("Microphone: \(failure.localizedDescription)", incomplete: true) }
         if let warning = microphone.captureWarning { warn("Microphone: \(warning)", incomplete: true) }
-        let live = try? catalog.processObjectIDs()
-        for object in Array(processes.keys) { stopProcess(object, exited: live?.contains(object) == false) }
+        do { try systemAudio.stop() }
+        catch { warn("System audio: \(error.localizedDescription)", incomplete: true) }
+        if let warning = systemAudio.captureWarning { warn("System audio: \(warning)", incomplete: true) }
         session?.microphoneSegments.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
-        session?.processTracks.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
+        session?.systemSegments.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
         guard let finished = session else { throw CaptureError.writerFailure("No active recording") }
         defer {
             session = nil; sessionID = nil; claim = nil; fatalFailure = false
             microphoneRetry = nil; microphoneDevice = nil
-            retries.removeAll(); nextPoll = 0; nextHealth = 0
+            systemRetry = nil; nextHealth = 0
         }
         do { try finished.save() }
         catch { claimedRecordings.remove(finished.paths.manifest); throw error }

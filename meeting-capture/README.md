@@ -1,14 +1,14 @@
 # Meeting Capture
 
 A local macOS menu-bar recorder. It starts when another application uses a
-microphone and records the microphone and each process's output as separate
-tracks. Process taps work without application windows, including FaceTime's
-call bubble. All applications playing audio during a recording are captured.
-Manual recording continues until Stop.
+microphone and records two separate tracks: microphone input and all system
+output. One global audio tap captures output without application windows,
+including FaceTime's call bubble. Notifications, music and other application
+audio are included. Manual recording continues until Stop.
 
 Recordings live in `~/Documents/Meetings/YYYY/MM/`: one audio-only Matroska
-(`.mka`) archive and a version 3 JSON manifest. Process track UUIDs let `speech2md`
-keep speakers from different applications separate.
+(`.mka`) archive and a version 3 JSON manifest. `speech2md` reads the microphone
+and system tracks independently.
 
 ## Build and install
 
@@ -62,7 +62,7 @@ suppresses automatic capture until the triggering microphone client goes away.
 
 Stop halts all inputs before draining their writers. A background worker aligns
 segments and creates an archive with mono microphone Opus at 96 kb/s and stereo
-application Opus at 128 kb/s per process. Tracks extend with silence to the Stop
+system Opus at 128 kb/s. Restarts join into the same two tracks. Tracks extend with silence to the Stop
 time. Jobs run one at a time and can be cancelled from the menu. Quitting lets
 an already running archive job finish.
 
@@ -75,7 +75,7 @@ untouched. Archiving failures never stop a new live recording.
 ## Permissions and diagnostics
 
 Startup requests Microphone access and checks that the meetings folder is
-writable. macOS requests System Audio Recording access when capturing application
+writable. macOS requests System Audio Recording access when capturing system
 audio. The Permissions menu opens the relevant System Settings panes. No startup
 test recording or Accessibility permission is needed.
 

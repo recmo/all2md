@@ -16,7 +16,7 @@ enum WorkerOperations {
         }
         let archive = try AudioFinalizer.createArchive(
             microphoneSegments: request.microphoneSegments,
-            processTracks: request.processTracks,
+            systemSegments: request.systemSegments,
             captureStartedAt: request.captureStartedAt,
             captureEndedAt: endedAt,
             temporaryDestination: request.paths.archiveTemporary,
@@ -59,14 +59,13 @@ enum WorkerOperations {
         // A journal may only refer to this recording's own files.
         guard session.paths.directory.resolvingSymlinksInPath() == paths.directory.resolvingSymlinksInPath(),
               session.paths.baseName == paths.baseName,
-              session.microphoneSegments.allSatisfy({
-                  $0.url.deletingLastPathComponent().resolvingSymlinksInPath() == paths.directory.resolvingSymlinksInPath()
-                      && $0.url.lastPathComponent.hasPrefix(".\(paths.baseName)-microphone-")
-                      && $0.url.lastPathComponent.hasSuffix(".part.caf")
-              }), session.processTracks.allSatisfy({
-                  $0.url.resolvingSymlinksInPath() == paths.processTemporary($0.id).resolvingSymlinksInPath()
-              }),
-              Set(session.processTracks.map(\.id)).count == session.processTracks.count else {
+              [(session.microphoneSegments, "microphone"), (session.systemSegments, "system")].allSatisfy({ segments, source in
+                  segments.allSatisfy {
+                      $0.url.resolvingSymlinksInPath().deletingLastPathComponent() == paths.directory.resolvingSymlinksInPath()
+                          && $0.url.lastPathComponent.hasPrefix(".\(paths.baseName)-\(source)-")
+                          && $0.url.lastPathComponent.hasSuffix(".part.caf")
+                  }
+              }) else {
             throw CaptureError.writerFailure("Invalid recording session paths; original files were kept")
         }
         // Old open journals used the start time as a sentinel. New open
@@ -76,9 +75,9 @@ enum WorkerOperations {
             throw CaptureError.writerFailure("Invalid recording stop time; original audio was kept")
         }
         session.microphoneSegments = session.microphoneSegments.filter { FileManager.default.fileExists(atPath: $0.url.path) }
-        session.processTracks = session.processTracks.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+        session.systemSegments = session.systemSegments.filter { FileManager.default.fileExists(atPath: $0.url.path) }
         let inputs = session.microphoneSegments.map { ($0.url, $0.startedAt) }
-            + session.processTracks.map { ($0.url, $0.startedAt) }
+            + session.systemSegments.map { ($0.url, $0.startedAt) }
         var recoveredEnd = session.captureStartedAt
         for (url, start) in inputs {
             let input = try AVAudioFile(forReading: url)

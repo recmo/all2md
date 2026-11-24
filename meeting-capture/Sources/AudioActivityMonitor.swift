@@ -67,7 +67,21 @@ final class AudioActivityMonitor {
         )
     }
 
-    private func processObjectIDs() throws -> [AudioObjectID] { try AudioProcessCatalog().processObjectIDs() }
+    private func processObjectIDs() throws -> [AudioObjectID] {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        let sizeStatus = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size)
+        guard sizeStatus == noErr else {
+            throw CaptureError.writerFailure("Cannot enumerate audio processes (OSStatus \(sizeStatus))")
+        }
+        var values = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &values)
+        guard status == noErr else {
+            throw CaptureError.writerFailure("Cannot read audio processes (OSStatus \(status))")
+        }
+        values = Array(values.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
+        return values
+    }
 
     private func audioClient(
         for objectID: AudioObjectID,

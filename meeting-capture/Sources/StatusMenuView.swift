@@ -21,8 +21,7 @@ struct StatusMenuView: View {
                 Label("Recording \(client.applicationName)", systemImage: "record.circle.fill").foregroundStyle(.red)
                 if let startedAt = model.captureStatus?.startedAt { TimelineView(.periodic(from: .now, by: 1)) { _ in Text(startedAt, style: .timer).monospacedDigit() } }
                 LevelRow(name: model.captureStatus?.microphoneName ?? client.inputDeviceSummary, level: model.captureStatus?.microphoneLevel ?? 0)
-                LevelRow(name: "Application audio", level: model.captureStatus?.processAudioLevel ?? 0)
-                Text("\(model.captureStatus?.processTrackCount ?? 0) process track(s)").font(.caption).foregroundStyle(.secondary)
+                LevelRow(name: "System audio", level: model.captureStatus?.systemAudioLevel ?? 0)
                 if let warning = model.captureStatus?.warning {
                     Text(warning).font(.caption).foregroundStyle(.orange)
                 }

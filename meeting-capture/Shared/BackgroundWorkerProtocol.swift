@@ -2,7 +2,7 @@ import Foundation
 
 struct RecordingSession: Codable, Sendable {
     var microphoneSegments: [CapturedAudioSegment]
-    var processTracks: [CapturedProcessTrack]
+    var systemSegments: [CapturedAudioSegment]
     let captureStartedAt: Date
     var captureEndedAt: Date?
     let paths: RecordingPaths

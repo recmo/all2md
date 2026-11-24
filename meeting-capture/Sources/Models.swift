@@ -15,22 +15,6 @@ struct AudioClient: Identifiable, Equatable, Sendable {
     }
 }
 
-struct AudioProcess: Codable, Equatable, Sendable {
-    let objectID: UInt32
-    let processID: Int32
-    let bundleID: String?
-    let name: String
-
-    var title: String { "\(name) (PID \(processID))" }
-}
-
-struct CapturedProcessTrack: Codable, Sendable {
-    let id: UUID
-    let process: AudioProcess
-    let url: URL
-    let startedAt: Date
-}
-
 struct AudioInputDevice: Identifiable, Equatable, Sendable {
     let id: UInt32
     let uid: String?
@@ -52,7 +36,7 @@ struct CaptureTrigger: Codable, Equatable, Sendable {
 }
 
 struct AudioTrack: Codable, Equatable, Sendable {
-    enum Role: String, Codable, Sendable { case microphone, process }
+    enum Role: String, Codable, Sendable { case microphone, system }
     let role: Role
     let streamIndex: Int
     let codec: String
@@ -60,8 +44,6 @@ struct AudioTrack: Codable, Equatable, Sendable {
     let channels: Int
     let durationSeconds: Double
     let bitrate: Int
-    var id: UUID? = nil
-    var process: AudioProcess? = nil
 }
 
 struct AudioContainer: Codable, Equatable, Sendable {
@@ -114,8 +96,8 @@ struct RecordingPaths: Codable, Sendable {
     func microphoneTemporary(segment: Int) -> URL {
         directory.appending(path: ".\(baseName)-microphone-\(String(format: "%04d", segment)).part.caf")
     }
-    func processTemporary(_ id: UUID) -> URL {
-        directory.appending(path: ".\(baseName)-process-\(id.uuidString).part.caf")
+    func systemTemporary(segment: Int) -> URL {
+        directory.appending(path: ".\(baseName)-system-\(String(format: "%04d", segment)).part.caf")
     }
     var archiveTemporary: URL { directory.appending(path: ".\(baseName).part.mka") }
     var archiveFinal: URL { directory.appending(path: "\(baseName).mka") }

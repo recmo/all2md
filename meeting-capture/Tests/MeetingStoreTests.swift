@@ -4,20 +4,19 @@ import XCTest
 @testable import MeetingCapture
 
 final class MeetingStoreTests: XCTestCase {
-    func testFinalizationCreatesVerifiedProcessTracks() throws {
+    func testFinalizationCreatesMicrophoneAndSystemTracks() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let microphone1 = root.appending(path: ".fixture-microphone-0001.part.caf")
         let microphone2 = root.appending(path: ".fixture-microphone-0002.part.caf")
         let paths = RecordingPaths(directory: root, baseName: "fixture")
-        let process1 = processTrack(paths, startedAt: Date(timeIntervalSince1970: 1_775_260_800.05))
-        let process2 = processTrack(paths, startedAt: Date(timeIntervalSince1970: 1_775_260_800.15), processID: 43)
-        let participants = process1.url
+        let system1 = CapturedAudioSegment(url: paths.systemTemporary(segment: 1), startedAt: Date(timeIntervalSince1970: 1_775_260_800.05))
+        let system2 = CapturedAudioSegment(url: paths.systemTemporary(segment: 2), startedAt: Date(timeIntervalSince1970: 1_775_260_800.25))
         try writeTone(to: microphone1, sampleRate: 44_100, channels: 1, duration: 0.20)
         try writeTone(to: microphone2, sampleRate: 48_000, channels: 2, duration: 0.20)
-        try writeTone(to: participants, sampleRate: 48_000, channels: 2, duration: 0.50)
-        try writeTone(to: process2.url, sampleRate: 44_100, channels: 2, duration: 0.30)
+        try writeTone(to: system1.url, sampleRate: 48_000, channels: 2, duration: 0.10)
+        try writeTone(to: system2.url, sampleRate: 44_100, channels: 2, duration: 0.20)
         let startedAt = Date(timeIntervalSince1970: 1_775_260_800)
         let temporary = root.appending(path: ".fixture.part.mka")
         let final = root.appending(path: "fixture.mka")
@@ -27,7 +26,7 @@ final class MeetingStoreTests: XCTestCase {
                 CapturedAudioSegment(url: microphone1, startedAt: startedAt),
                 CapturedAudioSegment(url: microphone2, startedAt: startedAt.addingTimeInterval(0.30)),
             ],
-            processTracks: [process1, process2],
+            systemSegments: [system1, system2],
             captureStartedAt: startedAt,
             captureEndedAt: startedAt.addingTimeInterval(0.55),
             temporaryDestination: temporary,
@@ -37,19 +36,19 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(result.container.file, "fixture.mka")
         XCTAssertEqual(result.container.format, "matroska")
         XCTAssertEqual(result.container.sha256.count, 64)
-        XCTAssertEqual(result.tracks.map(\.role), [.microphone, .process, .process])
-        XCTAssertEqual(result.tracks.map(\.streamIndex), [0, 1, 2])
-        XCTAssertEqual(result.tracks.map(\.codec), ["opus", "opus", "opus"])
-        XCTAssertEqual(result.tracks.map(\.channels), [1, 2, 2])
-        XCTAssertEqual(result.tracks.map(\.bitrate), [96_000, 128_000, 128_000])
+        XCTAssertEqual(result.tracks.map(\.role), [.microphone, .system])
+        XCTAssertEqual(result.tracks.map(\.streamIndex), [0, 1])
+        XCTAssertEqual(result.tracks.map(\.codec), ["opus", "opus"])
+        XCTAssertEqual(result.tracks.map(\.channels), [1, 2])
+        XCTAssertEqual(result.tracks.map(\.bitrate), [96_000, 128_000])
         XCTAssertTrue(FileManager.default.fileExists(atPath: final.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: temporary.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: microphone1.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: participants.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: system1.url.path))
 
-        // Each track must decode through the full session, including apps that
-        // stopped early. Later transcription windows must contain silence.
-        for index in 0..<3 {
+        // Both sources keep their timing across segment restarts and extend
+        // with silence to the recording cutoff.
+        for index in 0..<2 {
             let decoder = Process()
             decoder.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             decoder.arguments = ["ffmpeg",
@@ -63,15 +62,15 @@ final class MeetingStoreTests: XCTestCase {
             while decoder.isRunning { Thread.sleep(forTimeInterval: 0.01) }
             XCTAssertEqual(decoder.terminationStatus, 0)
             XCTAssertEqual(Double(pcm.count) / 4 / 8000, 0.55, accuracy: 0.002)
-            if index == 2 {
-                let tail: [Float] = pcm.withUnsafeBytes { bytes in
-                    stride(from: Int(0.50 * 8000) * 4, to: bytes.count, by: 4).map {
-                        bytes.loadUnaligned(fromByteOffset: $0, as: Float.self)
-                    }
+            let samples: [Float] = pcm.withUnsafeBytes { bytes in
+                stride(from: 0, to: bytes.count, by: 4).map {
+                    bytes.loadUnaligned(fromByteOffset: $0, as: Float.self)
                 }
-                XCTAssertFalse(tail.isEmpty)
-                XCTAssertTrue(tail.allSatisfy { abs($0) < 0.002 })
             }
+            let gap = index == 0 ? 0.23..<0.27 : 0.18..<0.22
+            XCTAssertTrue(samples[Int(gap.lowerBound * 8000)..<Int(gap.upperBound * 8000)].allSatisfy { abs($0) < 0.002 })
+            XCTAssertTrue(samples[Int(0.53 * 8000)...].allSatisfy { abs($0) < 0.002 })
+            XCTAssertGreaterThan(samples[Int(0.32 * 8000)..<Int(0.38 * 8000)].map { abs($0) }.max() ?? 0, 0.01)
         }
 
         let retried = try AudioFinalizer.createArchive(
@@ -79,15 +78,13 @@ final class MeetingStoreTests: XCTestCase {
                 CapturedAudioSegment(url: microphone1, startedAt: startedAt),
                 CapturedAudioSegment(url: microphone2, startedAt: startedAt.addingTimeInterval(0.30)),
             ],
-            processTracks: [process1, process2],
+            systemSegments: [system1, system2],
             captureStartedAt: startedAt,
             captureEndedAt: startedAt.addingTimeInterval(0.55),
             temporaryDestination: temporary,
             finalDestination: final
         )
-        XCTAssertEqual(retried.tracks.count, 3)
-        XCTAssertEqual(retried.tracks.compactMap(\.id), [process1.id, process2.id])
-        XCTAssertEqual(retried.tracks.compactMap(\.process).map(\.processID), [42, 43])
+        XCTAssertEqual(retried.tracks.count, 2)
         XCTAssertTrue(FileManager.default.fileExists(atPath: final.path))
     }
 
@@ -102,15 +99,15 @@ final class MeetingStoreTests: XCTestCase {
             let second = paths.microphoneTemporary(segment: 2)
             try writeTone(to: first, sampleRate: 48_000, channels: 1, duration: 0.1)
             try writeTone(to: second, sampleRate: 48_000, channels: 1, duration: 0.1)
-            let process = processTrack(paths, startedAt: start)
-            try writeTone(to: process.url, sampleRate: 48_000, channels: 2, duration: 1)
-            let otherProcess = processTrack(paths, startedAt: start.addingTimeInterval(0.2), processID: 43)
-            try writeTone(to: otherProcess.url, sampleRate: 44_100, channels: 2, duration: 0.5)
+            let system = CapturedAudioSegment(url: paths.systemTemporary(segment: 1), startedAt: start)
+            try writeTone(to: system.url, sampleRate: 48_000, channels: 2, duration: 1)
+            let resumedSystem = CapturedAudioSegment(url: paths.systemTemporary(segment: 2), startedAt: start.addingTimeInterval(1.2))
+            try writeTone(to: resumedSystem.url, sampleRate: 44_100, channels: 2, duration: 0.5)
             var session = RecordingSession(
                 microphoneSegments: [
                     CapturedAudioSegment(url: first, startedAt: start),
                     CapturedAudioSegment(url: second, startedAt: start.addingTimeInterval(0.4))
-                ], processTracks: [process, otherProcess],
+                ], systemSegments: [system, resumedSystem],
                 captureStartedAt: start, captureEndedAt: legacyOpenJournal ? start : nil, paths: paths,
                 trigger: CaptureTrigger(method: .manual, processID: nil, bundleID: nil, applicationName: "Test"),
                 metadata: [], warnings: [], interruptions: []
@@ -121,16 +118,15 @@ final class MeetingStoreTests: XCTestCase {
             XCTAssertEqual(loaded.microphoneSegments.map(\.startedAt), session.microphoneSegments.map(\.startedAt))
             XCTAssertEqual(loaded.captureEndedAt, session.captureEndedAt)
             let journalBeforeRecovery = try Data(contentsOf: paths.session)
-            let remainingProcess = try Data(contentsOf: process.url)
+            let remainingSystem = try Data(contentsOf: system.url)
             let worker = workerClient()
             let manifestURL = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let manifest = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: manifestURL))
             XCTAssertEqual(manifest.status, .incomplete)
-            XCTAssertEqual(manifest.audio.count, 3)
-            XCTAssertEqual(manifest.audio.compactMap(\.id), [process.id, otherProcess.id])
-            XCTAssertEqual(manifest.audio.compactMap(\.process).map(\.processID), [42, 43])
+            XCTAssertEqual(manifest.audio.map(\.role), [.microphone, .system])
+            XCTAssertTrue(manifest.audio.allSatisfy { abs($0.durationSeconds - 1.7) < 0.02 })
             XCTAssertTrue(store.interruptedRecordings().isEmpty)
 
             // Simulate a crash halfway through cleanup after publication. Only one
@@ -138,22 +134,22 @@ final class MeetingStoreTests: XCTestCase {
             let committedArchive = try Data(contentsOf: paths.archiveFinal)
             let committedManifest = try Data(contentsOf: manifestURL)
             try journalBeforeRecovery.write(to: paths.session)
-            try remainingProcess.write(to: process.url)
+            try remainingSystem.write(to: system.url)
             _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
             XCTAssertEqual(try Data(contentsOf: paths.archiveFinal), committedArchive)
             XCTAssertEqual(try Data(contentsOf: manifestURL), committedManifest)
-            XCTAssertFalse(FileManager.default.fileExists(atPath: process.url.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: system.url.path))
             XCTAssertFalse(FileManager.default.fileExists(atPath: paths.session.path))
 
             // A corrupt publication cannot authorize deleting the remaining inputs.
             try journalBeforeRecovery.write(to: paths.session)
-            try remainingProcess.write(to: process.url)
+            try remainingSystem.write(to: system.url)
             try Data("corrupt".utf8).write(to: paths.archiveFinal)
             do {
                 _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
                 XCTFail("Recovery must reject a checksum mismatch")
             } catch {}
-            XCTAssertEqual(try Data(contentsOf: process.url), remainingProcess)
+            XCTAssertEqual(try Data(contentsOf: system.url), remainingSystem)
             XCTAssertEqual(try Data(contentsOf: paths.session), journalBeforeRecovery)
             try committedArchive.write(to: paths.archiveFinal)
             _ = try await worker.recover(RecoverCaptureRequest(interruptedFile: paths.session))
@@ -179,11 +175,11 @@ final class MeetingStoreTests: XCTestCase {
             let failedPaths = try store.paths(startedAt: start, title: "failed")
             let mic = failedPaths.microphoneTemporary(segment: 1)
             try writeTone(to: mic, sampleRate: 48_000, channels: 1, duration: 0.2)
-            let failedProcess = processTrack(failedPaths, startedAt: start)
-            try writeTone(to: failedProcess.url, sampleRate: 48_000, channels: 2, duration: 0.2)
+            let failedSystem = CapturedAudioSegment(url: failedPaths.systemTemporary(segment: 1), startedAt: start)
+            try writeTone(to: failedSystem.url, sampleRate: 48_000, channels: 2, duration: 0.2)
             session = RecordingSession(
                 microphoneSegments: [CapturedAudioSegment(url: mic, startedAt: start)],
-                processTracks: [failedProcess],
+                systemSegments: [failedSystem],
                 captureStartedAt: start, captureEndedAt: start.addingTimeInterval(0.1), paths: failedPaths,
                 trigger: session.trigger, metadata: [], warnings: ["Capture stopped after a write error"], interruptions: [], captureFailed: true
             )
@@ -202,14 +198,6 @@ final class MeetingStoreTests: XCTestCase {
         let application = Bundle(for: MeetingStoreTests.self).bundleURL
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         return BackgroundWorkerClient(executableURL: application.appending(path: "Contents/Helpers/MeetingCaptureWorker"))
-    }
-
-    private func processTrack(_ paths: RecordingPaths, startedAt: Date, processID: Int32 = 42) -> CapturedProcessTrack {
-        let id = UUID()
-        return CapturedProcessTrack(id: id,
-            process: AudioProcess(objectID: UInt32(processID), processID: processID,
-                                  bundleID: "fixture.audio", name: "Fixture"),
-            url: paths.processTemporary(id), startedAt: startedAt)
     }
 
     private func writeTone(to url: URL, sampleRate: Double, channels: AVAudioChannelCount, duration: Double) throws {

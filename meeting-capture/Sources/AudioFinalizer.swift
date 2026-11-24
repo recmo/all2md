@@ -26,58 +26,55 @@ enum AudioFinalizer {
 
     static func createArchive(
         microphoneSegments: [CapturedAudioSegment],
-        processTracks: [CapturedProcessTrack],
+        systemSegments: [CapturedAudioSegment],
         captureStartedAt: Date,
         captureEndedAt: Date,
         temporaryDestination: URL,
         finalDestination: URL
     ) throws -> ArchiveResult {
-        let microphoneSegments = try microphoneSegments.filter { try containsAudio($0.url) }
-        let processTracks = try processTracks.filter { try containsAudio($0.url) }
-        guard !microphoneSegments.isEmpty || !processTracks.isEmpty else {
+        let sources: [(role: AudioTrack.Role, segments: [CapturedAudioSegment], channels: Int, bitrate: Int, title: String)] = try [
+            (.microphone, microphoneSegments.filter { try containsAudio($0.url) }, 1, 96_000, "Microphone"),
+            (.system, systemSegments.filter { try containsAudio($0.url) }, 2, 128_000, "System audio"),
+        ].filter { !$0.segments.isEmpty }
+        guard !sources.isEmpty else {
             throw CaptureError.writerFailure("no captured audio is available for finalization")
         }
 
         try? FileManager.default.removeItem(at: temporaryDestination)
         var arguments = ["-nostdin", "-v", "error", "-xerror", "-y"]
-        for segment in microphoneSegments { arguments += ["-i", segment.url.path] }
-        for track in processTracks { arguments += ["-i", track.url.path] }
+        for source in sources {
+            for segment in source.segments { arguments += ["-i", segment.url.path] }
+        }
 
         let duration = max(0, captureEndedAt.timeIntervalSince(captureStartedAt))
         // FFmpeg's duration options do not accept scientific notation.
         let durationArgument = String(format: "%.9f", locale: Locale(identifier: "en_US_POSIX"), duration)
         var filters: [String] = []
-        var maps: [(label: String, role: AudioTrack.Role, bitrate: Int, channels: Int, title: String, track: CapturedProcessTrack?)] = []
-        if !microphoneSegments.isEmpty {
+        var inputIndex = 0
+        for source in sources {
             var labels: [String] = []
-            for (index, segment) in microphoneSegments.enumerated() {
+            for segment in source.segments {
                 let delay = max(0, Int(segment.startedAt.timeIntervalSince(captureStartedAt) * 1_000))
-                let label = "microphone\(index)"
-                filters.append("[\(index):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono,adelay=\(delay):all=1[\(label)]")
+                let label = "segment\(inputIndex)"
+                let layout = source.channels == 1 ? "mono" : "stereo"
+                filters.append("[\(inputIndex):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=\(layout),adelay=\(delay):all=1[\(label)]")
                 labels.append("[\(label)]")
+                inputIndex += 1
             }
-            filters.append("\(labels.joined())amix=inputs=\(labels.count):duration=longest:normalize=0,apad=whole_dur=\(durationArgument),atrim=duration=\(durationArgument),asetpts=PTS-STARTPTS[microphone]")
-            maps.append(("microphone", .microphone, 96_000, 1, "Microphone", nil))
-        }
-        for (index, track) in processTracks.enumerated() {
-            let inputIndex = microphoneSegments.count + index
-            let label = "process\(index)"
-            let delay = max(0, Int(track.startedAt.timeIntervalSince(captureStartedAt) * 1_000))
-            filters.append("[\(inputIndex):a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=\(delay):all=1,apad=whole_dur=\(durationArgument),atrim=duration=\(durationArgument),asetpts=PTS-STARTPTS[\(label)]")
-            maps.append((label, .process, 128_000, 2, track.process.title, track))
+            filters.append("\(labels.joined())amix=inputs=\(labels.count):duration=longest:normalize=0,apad=whole_dur=\(durationArgument),atrim=duration=\(durationArgument),asetpts=PTS-STARTPTS[\(source.role.rawValue)]")
         }
 
         arguments += ["-filter_complex", filters.joined(separator: ";")]
-        for (index, map) in maps.enumerated() {
+        for (index, source) in sources.enumerated() {
             arguments += [
-                "-map", "[\(map.label)]",
+                "-map", "[\(source.role.rawValue)]",
                 "-c:a:\(index)", "libopus",
-                "-b:a:\(index)", "\(map.bitrate)",
+                "-b:a:\(index)", "\(source.bitrate)",
                 "-vbr:a:\(index)", "on",
                 "-application:a:\(index)", "audio",
                 "-frame_duration:a:\(index)", "20",
                 "-compression_level:a:\(index)", "10",
-                "-metadata:s:a:\(index)", "title=\(map.title)",
+                "-metadata:s:a:\(index)", "title=\(source.title)",
                 "-disposition:a:\(index)", "0",
             ]
         }
@@ -85,10 +82,10 @@ enum AudioFinalizer {
         try runTool("ffmpeg", arguments: arguments)
 
         let probe = try probe(temporaryDestination)
-        guard probe.streams.count == maps.count else {
-            throw CaptureError.writerFailure("archive contains \(probe.streams.count) audio tracks; expected \(maps.count)")
+        guard probe.streams.count == sources.count else {
+            throw CaptureError.writerFailure("archive contains \(probe.streams.count) audio tracks; expected \(sources.count)")
         }
-        for (index, expected) in maps.enumerated() {
+        for (index, expected) in sources.enumerated() {
             let stream = probe.streams[index]
             guard stream.index == index,
                   stream.codec_name == "opus",
@@ -115,18 +112,16 @@ enum AudioFinalizer {
         defer { try? published.close() }
         try published.synchronize()
         let archiveDuration = Double(probe.format.duration ?? "") ?? duration
-        let tracks = maps.enumerated().map { index, map in
+        let tracks = sources.enumerated().map { index, source in
             let stream = probe.streams[index]
             return AudioTrack(
-                role: map.role,
+                role: source.role,
                 streamIndex: index,
                 codec: stream.codec_name,
                 sampleRate: Double(stream.sample_rate) ?? 48_000,
                 channels: stream.channels,
                 durationSeconds: Double(stream.duration ?? "") ?? archiveDuration,
-                bitrate: map.bitrate,
-                id: map.track?.id,
-                process: map.track?.process
+                bitrate: source.bitrate
             )
         }
         return ArchiveResult(

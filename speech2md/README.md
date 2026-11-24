@@ -25,8 +25,8 @@ uv run --project speech2md speech2md recording.md
 The input is an authored Markdown recording document. Its frontmatter references
 an audio/video file with `audio`, or a Meeting Capture manifest with `manifest`.
 Meeting Capture v1 per-file tracks and v2/v3 Matroska containers are accepted.
-Container tracks are read from their declared streams; v3 process IDs distinguish
-application tracks.
+Container tracks are read from their declared streams, with separate microphone
+and system audio sources.
 Manifest checksums are verified before inference. Canonical audio is never
 changed.
 
