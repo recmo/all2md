@@ -56,7 +56,6 @@ targets:
       - Sources/AudioFinalizer.swift
       - Sources/CaptureError.swift
       - Sources/MeetingStore.swift
-      - Sources/Models.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ventures.wicked.MeetingCapture.worker
