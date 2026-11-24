@@ -89,8 +89,7 @@ enum MeetingCaptureWorker {
     }
 
     private static func recover(_ request: RecoverCaptureRequest) throws -> URL {
-        let store = MeetingStore()
-        let paths = store.paths(forInterruptedFile: request.interruptedFile)
+        let paths = RecordingPaths(interruptedFile: request.interruptedFile)
         let claim = try RecordingClaim(paths)
         defer { withExtendedLifetime(claim) {} }
         if let committed = try publishedRecording(paths) { return committed }
@@ -104,7 +103,7 @@ enum MeetingCaptureWorker {
         func owns(_ segment: CapturedAudioSegment, sources: [String]) -> Bool {
             let url = segment.url
             return url.isFileURL && url.resolvingSymlinksInPath().deletingLastPathComponent().path == directory
-                && store.paths(forInterruptedFile: url).baseName == paths.baseName
+                && RecordingPaths(interruptedFile: url).baseName == paths.baseName
                 && sources.contains { url.lastPathComponent.hasPrefix(prefix + $0 + "-") }
         }
         guard session.paths.directory.isFileURL, session.paths.directory.resolvingSymlinksInPath().path == directory,
@@ -153,9 +152,8 @@ enum MeetingCaptureWorker {
     }
 
     private static func cleanup(_ paths: RecordingPaths) throws {
-        let store = MeetingStore()
         let files = try FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)
-        for file in files where file.path.hasSuffix(".part.caf") && store.paths(forInterruptedFile: file).baseName == paths.baseName {
+        for file in files where file.path.hasSuffix(".part.caf") && RecordingPaths(interruptedFile: file).baseName == paths.baseName {
             try FileManager.default.removeItem(at: file)
         }
         for file in [paths.archiveTemporary, paths.session] where FileManager.default.fileExists(atPath: file.path) {

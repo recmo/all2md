@@ -277,7 +277,7 @@ final class CaptureCoordinator: @unchecked Sendable {
 
     func recoverInterruptedRecording(_ file: URL) async throws -> URL {
         let identity = try await perform {
-            let identity = self.store.paths(forInterruptedFile: file).manifest
+            let identity = RecordingPaths(interruptedFile: file).manifest
             guard self.claimedRecordings.insert(identity).inserted else {
                 throw CaptureError.writerFailure("Recording is already being captured or processed")
             }

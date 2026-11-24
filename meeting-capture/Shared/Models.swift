@@ -94,6 +94,21 @@ struct RecordingPaths: Codable, Sendable {
     var session: URL { directory.appending(path: ".\(baseName).session.json") }
 }
 
+extension RecordingPaths {
+    init(interruptedFile file: URL) {
+        directory = file.deletingLastPathComponent()
+        var name = file.lastPathComponent
+        if name.hasPrefix(".") { name.removeFirst() }
+        if name.hasSuffix(".session.json") {
+            baseName = String(name.dropLast(".session.json".count))
+            return
+        }
+        let suffix = #"-(?:(?:microphone|system)-[0-9]+|process-[0-9a-fA-F-]{36})\.part\.caf$"#
+        baseName = name.range(of: suffix, options: .regularExpression)
+            .map { String(name[..<$0.lowerBound]) } ?? file.deletingPathExtension().lastPathComponent
+    }
+}
+
 struct RecordingSession: Codable, Sendable {
     var microphoneSegments: [CapturedAudioSegment]
     var systemSegments: [CapturedAudioSegment]

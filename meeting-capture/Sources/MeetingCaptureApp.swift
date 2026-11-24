@@ -157,7 +157,7 @@ private struct StatusMenuView: View {
                     }
                     Menu("Interrupted recordings") {
                         ForEach(model.recoverableFiles, id: \.self) { file in
-                            Menu(MeetingStore().paths(forInterruptedFile: file).baseName) {
+                            Menu(RecordingPaths(interruptedFile: file).baseName) {
                                 Button("Recover") { model.recoverInterruptedRecording(file) }
                                     .disabled(model.recoveryInProgress)
                                 Button("Show files") { model.revealInterruptedRecording(file) }

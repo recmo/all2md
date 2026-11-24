@@ -54,24 +54,12 @@ struct MeetingStore: Sendable {
         var recordings: [URL: URL] = [:]
         for file in enumerator.compactMap({ $0 as? URL }) {
             guard file.lastPathComponent.hasSuffix(".part.caf") || file.lastPathComponent.hasSuffix(".session.json") else { continue }
-            let paths = paths(forInterruptedFile: file)
+            let paths = RecordingPaths(interruptedFile: file)
             let identity = paths.directory.resolvingSymlinksInPath().appending(path: paths.manifest.lastPathComponent)
             guard !identities.contains(identity), RecordingClaim.isAvailable(paths) else { continue }
             if recordings[identity] == nil || file.path.hasSuffix(".session.json") { recordings[identity] = file }
         }
         return recordings.values.sorted { $0.path < $1.path }
-    }
-
-    func paths(forInterruptedFile file: URL) -> RecordingPaths {
-        var name = file.lastPathComponent
-        if name.hasPrefix(".") { name.removeFirst() }
-        if name.hasSuffix(".session.json") {
-            return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: String(name.dropLast(".session.json".count)))
-        }
-        let suffix = #"-(?:(?:microphone|system)-[0-9]+|process-[0-9a-fA-F-]{36})\.part\.caf$"#
-        let baseName = name.range(of: suffix, options: .regularExpression)
-            .map { String(name[..<$0.lowerBound]) } ?? file.deletingPathExtension().lastPathComponent
-        return RecordingPaths(directory: file.deletingLastPathComponent(), baseName: baseName)
     }
 
     static func slug(_ value: String) -> String {

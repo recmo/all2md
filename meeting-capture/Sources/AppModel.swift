@@ -192,7 +192,7 @@ final class AppModel: ObservableObject {
     }
 
     func revealInterruptedRecording(_ file: URL) {
-        let paths = MeetingStore().paths(forInterruptedFile: file)
+        let paths = RecordingPaths(interruptedFile: file)
         let files = (try? FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)) ?? []
         let related = files.filter {
             $0.lastPathComponent.hasPrefix(".\(paths.baseName)-") || $0 == paths.session
