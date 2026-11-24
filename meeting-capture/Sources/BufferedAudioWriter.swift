@@ -98,7 +98,6 @@ final class BufferedAudioWriter: @unchecked Sendable {
                 let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
                 if bytesPerFrame > 0, let bytes = buffers.first?.mDataByteSize {
                     let frames = bytes / bytesPerFrame
-        lastCallback.store(AudioGetCurrentHostTime(), ordering: .relaxed)
                     droppedFrames.wrappingAdd(UInt64(frames), ordering: .relaxed)
                 }
                 source.or(data: 2)
