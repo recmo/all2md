@@ -37,7 +37,7 @@ enum CaptureError: LocalizedError {
         case .noMicrophone: "No usable microphone is available."
         case let .systemAudioCaptureFailure(message): "System audio capture failed: \(message)"
         case let .processTapFailure(message): message
-        case .microphonePermissionRequired: "Allow Meeting Capture in Privacy & Security > Microphone, then retry the recording check."
+        case .microphonePermissionRequired: "Allow Meeting Capture in Privacy & Security > Microphone, then choose Retry."
         case .triggeringApplicationUnavailable: "The triggering audio process is no longer available. Retry while the call is active."
         case let .deviceSelectionFailure(message): "Could not select microphone: \(message)"
         case let .storageFailure(message): "Could not save audio: \(message)"

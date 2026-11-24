@@ -15,12 +15,10 @@ final class ProcessAudioRecorder: @unchecked Sendable {
     private var stopFailure: Error? // Control queue only.
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "ventures.wicked.MeetingCapture.system-audio")
-    private var sampleAt: Date?
     // Read on the control thread, after callbacks are stopped or during capture.
     var diagnosticSummary: String { writer?.diagnosticSummary ?? "writer=none" }
     private var warning: String?
     var captureWarning: String? { lock.withLock { warning } }
-    var firstSampleAt: Date? { lock.withLock { sampleAt } }
     var level: Float { writer?.level ?? 0 }
     var onError: (@Sendable (Error) -> Void)?
 
@@ -28,22 +26,6 @@ final class ProcessAudioRecorder: @unchecked Sendable {
         guard processObject != kAudioObjectUnknown else { throw CaptureError.triggeringApplicationUnavailable }
         try startCapture(description: CATapDescription(stereoMixdownOfProcesses: [processObject]),
                          to: url, startTime: startTime)
-    }
-
-    func startAuthorizationCheck(to url: URL) throws {
-        // The disposable check uses the system mix, excluding this recorder.
-        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-                                                mScope: kAudioObjectPropertyScopeGlobal,
-                                                mElement: kAudioObjectPropertyElementMain)
-        var pid = ProcessInfo.processInfo.processIdentifier
-        var ownObject = AudioObjectID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        try check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
-                                            UInt32(MemoryLayout<pid_t>.size), &pid, &size, &ownObject),
-                  "Find recorder audio process")
-        let excluded = ownObject == kAudioObjectUnknown ? [] : [ownObject]
-        try startCapture(description: CATapDescription(stereoGlobalTapButExcludeProcesses: excluded),
-                         to: url, startTime: CMClockGetTime(CMClockGetHostTimeClock()))
     }
 
     private func startCapture(description: CATapDescription, to url: URL, startTime: CMTime) throws {
@@ -91,17 +73,13 @@ final class ProcessAudioRecorder: @unchecked Sendable {
             ]
             try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &deviceID), "Create tap device")
             let writer = try BufferedAudioWriter(format: format, url: url, startTime: startTime.seconds)
-            writer.onSample = { [weak self] in
-                guard let self else { return }
-                self.lock.withLock { if self.sampleAt == nil { self.sampleAt = Date() } }
-            }
             writer.onError = { [weak self] in self?.reportFailure($0) }
             writer.onWarning = { [weak self] message in
                 guard let self else { return }
                 self.lock.withLock { self.warning = message }
             }
             self.writer = writer
-            lock.withLock { deliveryError = nil; sampleAt = nil; warning = nil }
+            lock.withLock { deliveryError = nil; warning = nil }
             try check(AudioObjectAddPropertyListenerBlock(tapID, &address, queue, listener), "Watch tap format")
             formatListener = listener
             try check(AudioDeviceCreateIOProcIDWithBlock(&ioProcID, deviceID, queue) {

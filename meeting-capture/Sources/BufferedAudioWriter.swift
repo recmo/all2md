@@ -28,23 +28,24 @@ final class BufferedAudioWriter: @unchecked Sendable {
     private var invalidInputReported = false // Writer queue only.
     private var overflowReported = false // Writer queue only.
     private var pendingFrames = 0 // Producer only, unpublished until a slot fills.
-    private let statistics = AudioCallbackStatistics()
+    private let lastCallback = Atomic<UInt64>(0)
     private let droppedFrames = Atomic<UInt64>(0)
-    private let writtenFrames = Atomic<UInt64>(0)
-    private let peakQueuedBlocks = Atomic<Int>(0)
-    private let lastWriteNanoseconds = Atomic<UInt64>(0)
-    var callbackAge: TimeInterval? { statistics.callbackAge }
+    var callbackAge: TimeInterval? {
+        let last = lastCallback.load(ordering: .relaxed)
+        guard last != 0 else { return nil }
+        let now = AudioGetCurrentHostTime()
+        return AVAudioTime.seconds(forHostTime: now >= last ? now - last : 0)
+    }
     var diagnosticSummary: String {
         let write = writeIndex.load(ordering: .acquiring)
         let queued = max(0, write - readIndex.load(ordering: .acquiring))
-        return "file=\(diagnosticID) \(statistics.summary) queuedBlocks=\(queued)/\(slots.count) peakQueuedBlocks=\(peakQueuedBlocks.load(ordering: .relaxed)) droppedFrames=\(droppedFrames.load(ordering: .relaxed)) writtenInputFrames=\(writtenFrames.load(ordering: .relaxed)) lastWriteMs=\(Double(lastWriteNanoseconds.load(ordering: .relaxed)) / 1e6)"
+        return "file=\(diagnosticID) queued=\(queued)/\(slots.count) dropped=\(droppedFrames.load(ordering: .relaxed)) callbackAge=\(callbackAge ?? -1)"
     }
     private let meter = Atomic<UInt32>(0)
     var level: Float {
         guard let age = callbackAge, age < 0.5 else { return 0 }
         return Float(meter.load(ordering: .relaxed)) / 10000
     }
-    var onSample: (@Sendable () -> Void)?
     var onError: (@Sendable (Error) -> Void)?
     var onWarning: (@Sendable (String) -> Void)?
 
@@ -97,7 +98,7 @@ final class BufferedAudioWriter: @unchecked Sendable {
                 let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
                 if bytesPerFrame > 0, let bytes = buffers.first?.mDataByteSize {
                     let frames = bytes / bytesPerFrame
-                    statistics.record(frames: frames)
+        lastCallback.store(AudioGetCurrentHostTime(), ordering: .relaxed)
                     droppedFrames.wrappingAdd(UInt64(frames), ordering: .relaxed)
                 }
                 source.or(data: 2)
@@ -121,7 +122,7 @@ final class BufferedAudioWriter: @unchecked Sendable {
             }
         }
         let frames = bytes / bytesPerFrame
-        statistics.record(frames: UInt32(frames))
+        lastCallback.store(AudioGetCurrentHostTime(), ordering: .relaxed)
         let time = AVAudioTime.seconds(forHostTime: timestamp.mHostTime)
         if pendingFrames > 0 {
             let slot = slots[writeIndex.load(ordering: .relaxed) % slots.count]
@@ -164,8 +165,6 @@ final class BufferedAudioWriter: @unchecked Sendable {
         let write = writeIndex.load(ordering: .relaxed)
         slots[write % slots.count].buffer.frameLength = AVAudioFrameCount(pendingFrames)
         pendingFrames = 0
-        let queued = write + 1 - readIndex.load(ordering: .acquiring)
-        if queued > peakQueuedBlocks.load(ordering: .relaxed) { peakQueuedBlocks.store(queued, ordering: .relaxed) }
         writeIndex.store(write + 1, ordering: .releasing)
         source.or(data: 1)
     }
@@ -177,12 +176,8 @@ final class BufferedAudioWriter: @unchecked Sendable {
             let slot = slots[read % slots.count]
             if !failed {
                 do {
-                    let started = DispatchTime.now().uptimeNanoseconds
                     try file.write(slot.buffer, at: AVAudioTime.seconds(forHostTime: slot.timestamp))
-                    lastWriteNanoseconds.store(DispatchTime.now().uptimeNanoseconds - started, ordering: .relaxed)
-                    writtenFrames.wrappingAdd(UInt64(slot.buffer.frameLength), ordering: .relaxed)
                     meter.store(UInt32(Self.level(slot.buffer) * 10000), ordering: .relaxed)
-                    onSample?()
                 } catch { fail(CaptureError.storageFailure(CaptureError.details(error))) }
             }
             // This slot stays owned by the writer until disk I/O completes.

@@ -106,7 +106,6 @@ enum AudioFinalizer {
             "-nostdin", "-v", "error", "-xerror", "-i", temporaryDestination.path,
             "-map", "0:a", "-f", "null", "-",
         ])
-        WorkerProgress.touch()
         if FileManager.default.fileExists(atPath: finalDestination.path) {
             _ = try FileManager.default.replaceItemAt(finalDestination, withItemAt: temporaryDestination)
         } else {
@@ -152,14 +151,8 @@ enum AudioFinalizer {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        var heartbeat = ProcessInfo.processInfo.systemUptime
         while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
-            try WorkerTools.checkCancellation()
             hasher.update(data: data)
-            if ProcessInfo.processInfo.systemUptime - heartbeat >= 1 {
-                WorkerProgress.touch()
-                heartbeat = ProcessInfo.processInfo.systemUptime
-            }
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
@@ -179,12 +172,7 @@ enum AudioFinalizer {
         arguments: [String],
         captureStandardOutput: Bool = false
     ) throws -> Data {
-        WorkerProgress.touch()
         let executable = try executable(named: name)
-        var arguments = arguments
-        if name == "ffmpeg", let progress = WorkerProgress.url {
-            arguments = ["-progress", progress.path, "-stats_period", "1"] + arguments
-        }
         let standardOutput = Pipe()
         guard let errorStream = tmpfile() else {
             throw CaptureError.writerFailure("Could not capture \(name) errors: \(String(cString: strerror(errno)))")
@@ -210,10 +198,14 @@ enum AudioFinalizer {
         let environment = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
         defer { environment.forEach { free($0) } }
         var envp = environment + [nil]
-        let processID = try WorkerTools.spawn(executable.path, actions: &actions, argv: &argv, envp: &envp)
+        var processID: pid_t = 0
+        try check(posix_spawn(&processID, executable.path, &actions, nil, &argv, &envp))
         try standardOutput.fileHandleForWriting.close()
         let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let status = try WorkerTools.wait(processID)
+        var status: Int32 = 0
+        while waitpid(processID, &status, 0) < 0 {
+            if errno != EINTR { throw CaptureError.writerFailure("Could not wait for \(name)") }
+        }
         try errorFile.seek(toOffset: 0)
         let error = errorFile.readDataToEndOfFile()
         guard status == 0 else {

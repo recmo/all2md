@@ -7,10 +7,8 @@ import Foundation
 final class AudioActivityMonitor {
     var onClientsChanged: (([AudioClient]) -> Void)?
     private var timer: Timer?
-    private var deviceListeners: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
     private var lastClients: [AudioClient]?
     private var lastPollError: String?
-    private var propertyErrors: [AudioObjectID: [String: OSStatus]] = [:]
     private let ownPID = ProcessInfo.processInfo.processIdentifier
 
     func start() {
@@ -26,10 +24,7 @@ final class AudioActivityMonitor {
         CaptureDiagnostics.log("monitor.stop")
         timer?.invalidate()
         timer = nil
-        for (objectID, listener) in deviceListeners { removeDeviceListener(listener, from: objectID) }
-        deviceListeners.removeAll()
         lastClients = nil
-        propertyErrors.removeAll()
     }
 
     private func poll() {
@@ -44,7 +39,6 @@ final class AudioActivityMonitor {
             lastPollError = message
             return
         }
-        synchronizeDeviceListeners(for: objectIDs)
         let clients = runningClients(from: objectIDs, selector: kAudioProcessPropertyIsRunningInput)
         if clients != lastClients {
             let details = clients.map { "pid=\($0.processID) object=\($0.audioObjectID) app=\($0.applicationName) inputs=\($0.inputDeviceSummary)" }.joined(separator: "; ")
@@ -65,32 +59,6 @@ final class AudioActivityMonitor {
             .sorted { $0.applicationName.localizedStandardCompare($1.applicationName) == .orderedAscending }
     }
 
-    private func synchronizeDeviceListeners(for objectIDs: [AudioObjectID]) {
-        let currentIDs = Set(objectIDs)
-        let staleIDs = deviceListeners.keys.filter { !currentIDs.contains($0) }
-        for objectID in staleIDs {
-            guard let listener = deviceListeners.removeValue(forKey: objectID) else { continue }
-            removeDeviceListener(listener, from: objectID)
-        }
-        propertyErrors = propertyErrors.filter { currentIDs.contains($0.key) }
-        for objectID in objectIDs where deviceListeners[objectID] == nil {
-            var address = devicePropertyAddress()
-            let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-                Task { @MainActor in self?.poll() }
-            }
-            let status = AudioObjectAddPropertyListenerBlock(objectID, &address, .main, listener)
-            if propertyStatus(status, operation: "watch-input-devices", objectID: objectID) {
-                deviceListeners[objectID] = listener
-            }
-        }
-    }
-
-    private func removeDeviceListener(_ listener: @escaping AudioObjectPropertyListenerBlock, from objectID: AudioObjectID) {
-        var address = devicePropertyAddress()
-        _ = propertyStatus(AudioObjectRemovePropertyListenerBlock(objectID, &address, .main, listener),
-                           operation: "unwatch-input-devices", objectID: objectID)
-    }
-
     private func devicePropertyAddress() -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
             mSelector: kAudioProcessPropertyDevices,
@@ -106,14 +74,14 @@ final class AudioActivityMonitor {
         runningSelector: AudioObjectPropertySelector
     ) -> AudioClient? {
         guard uint32Property(runningSelector, objectID: objectID) == 1,
-              let pidValue = pidProperty(objectID: objectID) else { return nil }
+              let pidValue = uint32Property(kAudioProcessPropertyPID, objectID: objectID) else { return nil }
         let bundleID = bundleIDProperty(objectID: objectID)
-        let app = ProcessApplicationResolver.resolve(processID: pidValue, bundleID: bundleID)
+        let app = ProcessApplicationResolver.resolve(processID: pid_t(pidValue), bundleID: bundleID)
         return AudioClient(
             audioObjectID: objectID,
-            processID: app?.processID ?? pidValue,
-            bundleID: app?.bundleID ?? bundleID,
-            applicationName: app?.applicationName ?? "Process \(pidValue)",
+            processID: app?.processIdentifier ?? pid_t(pidValue),
+            bundleID: app?.bundleIdentifier ?? bundleID,
+            applicationName: app?.localizedName ?? "Process \(pidValue)",
             inputDevices: inputDevices(processObjectID: objectID)
         )
     }
@@ -122,10 +90,10 @@ final class AudioActivityMonitor {
         var address = devicePropertyAddress()
         var size: UInt32 = 0
         let sizeStatus = AudioObjectGetPropertyDataSize(processObjectID, &address, 0, nil, &size)
-        guard propertyStatus(sizeStatus, operation: "input-device-count", objectID: processObjectID) else { return [] }
+        guard sizeStatus == noErr else { return [] }
         var deviceIDs = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
         let status = AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &size, &deviceIDs)
-        guard propertyStatus(status, operation: "input-devices", objectID: processObjectID) else { return [] }
+        guard status == noErr else { return [] }
         return deviceIDs.compactMap(audioInputDevice)
     }
 
@@ -155,13 +123,6 @@ final class AudioActivityMonitor {
         return AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value) == noErr ? value : nil
     }
 
-    private func pidProperty(objectID: AudioObjectID) -> pid_t? {
-        var address = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyPID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        var value = pid_t(0)
-        var size = UInt32(MemoryLayout<pid_t>.size)
-        return AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value) == noErr ? value : nil
-    }
-
     private func bundleIDProperty(objectID: AudioObjectID) -> String? {
         var address = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyBundleID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var value: Unmanaged<CFString>?
@@ -171,77 +132,22 @@ final class AudioActivityMonitor {
         return value.takeRetainedValue() as String
     }
 
-    // A vanished or unsupported process object must not flood the log at 2 Hz.
-    private func propertyStatus(_ status: OSStatus, operation: String, objectID: AudioObjectID) -> Bool {
-        let previous = propertyErrors[objectID]?[operation]
-        if status == noErr {
-            propertyErrors[objectID]?[operation] = nil
-            if previous != nil { CaptureDiagnostics.log("monitor.property.recovered \(operation) object=\(objectID)") }
-            return true
-        }
-        if previous != status { CaptureDiagnostics.error("monitor.property.failed \(operation) object=\(objectID) OSStatus=\(status)") }
-        propertyErrors[objectID, default: [:]][operation] = status
-        return false
-    }
 }
 
+@MainActor
 enum ProcessApplicationResolver {
-    static func resolve(processID: pid_t, bundleID: String?) -> CaptureApplicationIdentity? {
-        let applications = NSWorkspace.shared.runningApplications.map {
-            CaptureApplicationIdentity(
-                processID: $0.processIdentifier,
-                bundleID: $0.bundleIdentifier,
-                applicationName: $0.localizedName ?? "Process \($0.processIdentifier)",
-                isUserApplication: $0.activationPolicy != .prohibited
-            )
-        }
-        return resolve(
-            processID: processID,
-            bundleID: bundleID,
-            applications: applications,
-            parentPID: parentPID
-        )
-    }
-
-    static func resolve(
-        processID: pid_t,
-        bundleID: String?,
-        applications: [CaptureApplicationIdentity],
-        parentPID: (pid_t) -> pid_t?
-    ) -> CaptureApplicationIdentity? {
-        let byPID = Dictionary(uniqueKeysWithValues: applications.map { ($0.processID, $0) })
+    static func resolve(processID: pid_t, bundleID: String?) -> NSRunningApplication? {
         var current = processID
-        var visited = Set<pid_t>()
-        var processFallback: CaptureApplicationIdentity?
-
-        while current > 1, visited.insert(current).inserted, visited.count <= 12 {
-            if let application = byPID[current] {
-                processFallback = processFallback ?? application
-                if application.isUserApplication { return application }
-            }
-            guard let parent = parentPID(current) else { break }
-            current = parent
+        for _ in 0..<12 where current > 1 {
+            if let app = NSRunningApplication(processIdentifier: current), app.activationPolicy != .prohibited { return app }
+            var info = proc_bsdinfo()
+            let size = MemoryLayout<proc_bsdinfo>.size
+            guard proc_pidinfo(current, PROC_PIDTBSDINFO, 0, &info, Int32(size)) == size else { break }
+            current = pid_t(info.pbi_ppid)
         }
-
-        if let bundleID {
-            if let exact = applications.first(where: { $0.isUserApplication && $0.bundleID == bundleID }) {
-                return exact
-            }
-            if let owner = applications.first(where: {
-                guard $0.isUserApplication, let candidate = $0.bundleID else { return false }
-                return bundleID.hasPrefix(candidate + ".")
-            }) {
-                return owner
-            }
+        return NSWorkspace.shared.runningApplications.first {
+            guard $0.activationPolicy != .prohibited, let owner = $0.bundleIdentifier, let bundleID else { return false }
+            return owner == bundleID || bundleID.hasPrefix(owner + ".")
         }
-        return processFallback
-    }
-
-    private static func parentPID(_ processID: pid_t) -> pid_t? {
-        var info = proc_bsdinfo()
-        let size = MemoryLayout<proc_bsdinfo>.size
-        guard proc_pidinfo(processID, PROC_PIDTBSDINFO, 0, &info, Int32(size)) == size,
-              info.pbi_ppid > 0 else { return nil }
-        return pid_t(info.pbi_ppid)
     }
 }

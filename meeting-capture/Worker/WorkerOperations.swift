@@ -1,62 +1,8 @@
 import Darwin
 import Foundation
 import AVFoundation
-import ApplicationServices
 
 enum WorkerOperations {
-    static func checkPermissions(_ root: URL) -> WorkerPermissionReport {
-        let documents: Bool
-        do {
-            try MeetingStore(root: root).validateAccess()
-            documents = true
-        } catch { documents = false }
-        return WorkerPermissionReport(documents: documents, accessibility: AXIsProcessTrusted())
-    }
-
-    static func checkAccess(_ request: WorkerAccessRequest) throws -> WorkerAccessReport {
-        // Check the worker's access to app-created audio and the meeting folder.
-        // A successful parent-process write does not verify this execution path.
-        _ = try FileManager.default.contentsOfDirectory(at: request.root, includingPropertiesForKeys: nil)
-        let directory = request.root.appending(path: ".worker-check-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
-                                               attributes: [.posixPermissions: 0o700])
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let input = try AVAudioFile(forReading: request.microphone)
-        guard input.length > 0, input.processingFormat.sampleRate > 0 else {
-            throw CaptureError.writerFailure("Worker could not read the startup recording")
-        }
-        let start = Date()
-        let end = start.addingTimeInterval(Double(input.length) / input.processingFormat.sampleRate)
-        let archive = try AudioFinalizer.createArchive(
-            microphoneSegments: [CapturedAudioSegment(url: request.microphone, startedAt: start, endedAt: end)],
-            processTracks: [],
-            captureStartedAt: start, captureEndedAt: end,
-            temporaryDestination: directory.appending(path: "test.part.mka"),
-            finalDestination: directory.appending(path: "test.mka")
-        )
-        guard archive.tracks.count == 1 else { throw CaptureError.writerFailure("Worker archive check failed") }
-        try FileManager.default.removeItem(at: directory)
-        return WorkerAccessReport(accessibility: "Accessibility: not checked.")
-    }
-
-    static func checkMetadataAccess(_ request: WorkerAccessRequest) -> WorkerAccessReport {
-        WorkerAccessReport(accessibility: checkAccessibility(processID: request.applicationProcessID))
-    }
-
-    private static func checkAccessibility(processID: Int32) -> String {
-        guard AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": false] as CFDictionary) else {
-            return "Accessibility: not granted to the metadata worker (optional)."
-        }
-        let application = AXUIElementCreateApplication(processID)
-        AXUIElementSetMessagingTimeout(application, 0.2)
-        var role: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(application, kAXRoleAttribute as CFString, &role)
-        guard result == .success, role != nil else {
-            return "Accessibility: authorized, but reading the app could not be verified (\(result.rawValue))."
-        }
-        return "Accessibility: metadata worker read check passed."
-    }
-
     static func finalize(_ request: RecordingSession) throws -> URL {
         let claim = try RecordingClaim(request.paths)
         defer { withExtendedLifetime(claim) {} }
@@ -67,18 +13,6 @@ enum WorkerOperations {
         if let committed = try publishedRecording(request.paths) { return committed }
         guard let endedAt = request.captureEndedAt, endedAt >= request.captureStartedAt else {
             throw CaptureError.writerFailure("Recording has no valid stop time; original audio was kept")
-        }
-        WorkerProgress.touch()
-        let accessibility = finalizeAccessibilityArtifact(paths: request.paths)
-        var metadata = request.metadata
-        if let title = accessibilityWindowTitle(request.paths.accessibilityFinal) {
-            metadata.removeAll { $0.kind == .windowTitle }
-            metadata.append(MetadataEvent(
-                timestamp: request.captureStartedAt,
-                kind: .windowTitle,
-                value: title,
-                confidence: 0.7
-            ))
         }
         let archive = try AudioFinalizer.createArchive(
             microphoneSegments: request.microphoneSegments,
@@ -94,21 +28,19 @@ enum WorkerOperations {
             schemaVersion: 3,
             meetingID: UUID(),
             slug: String(request.paths.baseName.dropFirst(min(11, request.paths.baseName.count))),
-            title: metadata.first(where: { $0.kind == .windowTitle })?.value,
+            title: request.trigger.applicationName,
             platform: request.trigger.applicationName,
             startedAt: request.captureStartedAt,
             endedAt: endedAt,
             timeZone: TimeZone.current.identifier,
             trigger: request.trigger,
             container: archive.container,
-            accessibility: accessibility,
             audio: archive.tracks,
             interruptions: request.interruptions,
-            metadataEvents: metadata,
+            metadataEvents: request.metadata,
             warnings: request.warnings,
             status: status
         )
-        try WorkerTools.checkCancellation()
         try MeetingStore().write(manifest, to: request.paths.manifest)
         try cleanup(request.paths)
         return request.paths.manifest
@@ -143,43 +75,21 @@ enum WorkerOperations {
         guard stoppedAt.map({ $0 >= session.captureStartedAt }) ?? true else {
             throw CaptureError.writerFailure("Invalid recording stop time; original audio was kept")
         }
+        session.microphoneSegments = session.microphoneSegments.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+        session.processTracks = session.processTracks.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+        let inputs = session.microphoneSegments.map { ($0.url, $0.startedAt) }
+            + session.processTracks.map { ($0.url, $0.startedAt) }
         var recoveredEnd = session.captureStartedAt
-        var segments: [CapturedAudioSegment] = []
-        for segment in session.microphoneSegments {
-            guard FileManager.default.fileExists(atPath: segment.url.path) else {
-                session.warnings.append("Missing microphone segment: \(segment.url.lastPathComponent)")
-                continue
-            }
-            let input = try AVAudioFile(forReading: segment.url)
-            let end = segment.startedAt.addingTimeInterval(Double(max(0, input.length)) / input.processingFormat.sampleRate)
-            segments.append(CapturedAudioSegment(url: segment.url, startedAt: segment.startedAt, endedAt: end))
-            recoveredEnd = max(recoveredEnd, end)
-        }
-        session.microphoneSegments = segments
-        var tracks: [CapturedProcessTrack] = []
-        var hasProcessAudio = false
-        for track in session.processTracks {
-            guard FileManager.default.fileExists(atPath: track.url.path) else {
-                session.warnings.append("Missing process track: \(track.url.lastPathComponent)")
-                continue
-            }
-            let input = try AVAudioFile(forReading: track.url)
+        for (url, start) in inputs {
+            let input = try AVAudioFile(forReading: url)
             if input.length > 0 {
-                hasProcessAudio = true
-                let end = track.startedAt.addingTimeInterval(Double(input.length) / input.processingFormat.sampleRate)
-                recoveredEnd = max(recoveredEnd, end)
+                recoveredEnd = max(recoveredEnd, start.addingTimeInterval(Double(input.length) / input.processingFormat.sampleRate))
             }
-            tracks.append(track)
         }
-        session.processTracks = tracks
+        guard recoveredEnd > session.captureStartedAt else {
+            throw CaptureError.writerFailure("No audio frames were saved; use Show files to inspect the recording")
+        }
         session.captureEndedAt = stoppedAt ?? recoveredEnd
-        guard segments.contains(where: { $0.endedAt > $0.startedAt }) || hasProcessAudio else {
-            let files = try FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)
-                .filter { store.paths(forInterruptedFile: $0).baseName == paths.baseName && $0.path.hasSuffix(".part.caf") }
-            quarantineEmptyRecoveryFiles(files, archiveTemporary: paths.archiveTemporary)
-            quarantine(paths.session, replacing: ".session.json", with: ".unrecoverable.json")
-            throw CaptureError.writerFailure("No audio frames were saved; empty files were marked unrecoverable")
-        }
         session.captureFailed = true
         session.warnings.append("Recovered after an interrupted recording; saved segment timing was preserved.")
         try session.save()
@@ -197,12 +107,6 @@ enum WorkerOperations {
               try AudioFinalizer.sha256(paths.archiveFinal) == manifest.container.sha256 else {
             throw CaptureError.writerFailure("Published archive verification failed; all remaining files were kept")
         }
-        if let metadata = manifest.accessibility {
-            guard metadata.file == paths.accessibilityFinal.lastPathComponent,
-                  try AudioFinalizer.sha256(paths.accessibilityFinal) == metadata.sha256 else {
-                throw CaptureError.writerFailure("Published metadata verification failed; all remaining files were kept")
-            }
-        }
         try cleanup(paths)
         return paths.manifest
     }
@@ -211,75 +115,10 @@ enum WorkerOperations {
         let store = MeetingStore()
         let files = try FileManager.default.contentsOfDirectory(at: paths.directory, includingPropertiesForKeys: nil)
         for file in files where file.path.hasSuffix(".part.caf") && store.paths(forInterruptedFile: file).baseName == paths.baseName {
-            try WorkerTools.checkCancellation()
             try FileManager.default.removeItem(at: file)
         }
         for file in [paths.archiveTemporary, paths.session] where FileManager.default.fileExists(atPath: file.path) {
-            try WorkerTools.checkCancellation()
             try FileManager.default.removeItem(at: file)
         }
-    }
-
-    private static func finalizeAccessibilityArtifact(paths: RecordingPaths) -> AccessibilityArtifact? {
-        do {
-            // A crashed recorder releases its recording claim before its probe
-            // observes EOF. Wait for that writer to exit before publishing or
-            // hashing the log. The probe's lifetime watcher runs off its AX queue.
-            let lockURL = paths.accessibilityTemporary.appendingPathExtension("lock")
-            let lock = open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
-            guard lock >= 0 else { return nil }
-            defer { close(lock) }
-            let deadline = ProcessInfo.processInfo.systemUptime + 3
-            while flock(lock, LOCK_EX | LOCK_NB) != 0 {
-                guard errno == EWOULDBLOCK || errno == EINTR,
-                      ProcessInfo.processInfo.systemUptime < deadline else { return nil }
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-            if FileManager.default.fileExists(atPath: paths.accessibilityTemporary.path) {
-                if FileManager.default.fileExists(atPath: paths.accessibilityFinal.path) {
-                    _ = try FileManager.default.replaceItemAt(paths.accessibilityFinal, withItemAt: paths.accessibilityTemporary)
-                } else {
-                    try FileManager.default.moveItem(at: paths.accessibilityTemporary, to: paths.accessibilityFinal)
-                }
-            }
-            guard FileManager.default.fileExists(atPath: paths.accessibilityFinal.path) else { return nil }
-            return AccessibilityArtifact(
-                file: paths.accessibilityFinal.lastPathComponent,
-                format: "accessibility-jsonl-v1",
-                sha256: try AudioFinalizer.sha256(paths.accessibilityFinal)
-            )
-        } catch {
-            return nil
-        }
-    }
-
-    private static func accessibilityWindowTitle(_ url: URL) -> String? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: 1_048_576),
-              let text = String(data: data, encoding: .utf8) else { return nil }
-        for line in text.split(separator: "\n") {
-            guard let data = line.data(using: .utf8),
-                  let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  ["probeStarted", "windowTitle"].contains(record["type"] as? String ?? ""),
-                  let title = record["windowTitle"] as? String, !title.isEmpty else { continue }
-            return title
-        }
-        return nil
-    }
-
-    private static func quarantineEmptyRecoveryFiles(_ files: [URL], archiveTemporary: URL) {
-        for file in files { quarantine(file, replacing: ".part.caf", with: ".unrecoverable.caf") }
-        quarantine(archiveTemporary, replacing: ".part.mka", with: ".unrecoverable.mka")
-    }
-
-    private static func quarantine(_ file: URL, replacing suffix: String, with replacement: String) {
-        guard FileManager.default.fileExists(atPath: file.path), file.path.hasSuffix(suffix) else { return }
-        let base = String(file.path.dropLast(suffix.count))
-        var destination = URL(fileURLWithPath: base + replacement)
-        if FileManager.default.fileExists(atPath: destination.path) {
-            destination = URL(fileURLWithPath: base + "-\(UUID().uuidString)" + replacement)
-        }
-        try? FileManager.default.moveItem(at: file, to: destination)
     }
 }

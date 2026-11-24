@@ -14,16 +14,6 @@ struct StatusMenuView: View {
             switch model.state {
             case .idle:
                 Label("Watching microphone activity", systemImage: "mic")
-                if let report = model.startupReport {
-                    Text(report.systemAudioObserved
-                         ? "Startup recording check passed"
-                         : "Microphone verified; system capture authorized. No system audio was observed during the check.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("App and worker storage / archive checks passed.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text(report.accessibility).font(.caption).foregroundStyle(.secondary)
-                }
-                Button("Check recording access again") { model.checkPermissions() }
                 Button("Start recording manually") { model.manualStart() }
                 Text("Records the microphone and every app producing audio as separate tracks.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -47,11 +37,9 @@ struct StatusMenuView: View {
                 ProgressView("Saving recorded audio…")
             case .checkingPermissions:
                 ProgressView("Checking recording access…")
-                Text("A brief test captures microphone and system audio, then deletes it. Respond to any macOS permission prompts.")
-                    .font(.caption).foregroundStyle(.secondary)
             case .permissionRequired:
                 Label {
-                    Text("Recording check failed")
+                    Text("Recording access required")
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
@@ -60,7 +48,7 @@ struct StatusMenuView: View {
                 Text("Retry after addressing the error. If you changed macOS permissions, quit and reopen Meeting Capture first.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Retry recording check") { model.checkPermissions() }
+                Button("Retry") { model.checkPermissions() }
                 Button("Copy error details") { model.copyRecordingCheckError() }
             case let .error(message):
                 Label {
@@ -68,15 +56,12 @@ struct StatusMenuView: View {
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
-                Text("Retrying automatically in 10 seconds.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("Retry now") { model.dismissError() }
-                Button("Stop retrying") { model.stopRecording() }
+                Button("Retry") { model.checkPermissions() }
             }
             if model.finalizationsInProgress > 0 || model.recoveryInProgress {
                 Button("Cancel background processing") { model.cancelBackgroundProcessing() }
             }
-            if model.showsMaintenance {
+            if model.allowsTermination {
                 if model.lastManifest != nil { Button("Reveal last recording") { model.revealLastRecording() } }
                 if model.finalizationsInProgress > 0 {
                     ProgressView("Saving \(model.finalizationsInProgress) recording(s)…")
@@ -109,14 +94,11 @@ struct StatusMenuView: View {
                 }
             }
             Divider()
-            Text("Permissions").font(.caption).foregroundStyle(.secondary)
-            permissionRow("Microphone", granted: model.microphoneAccess, pane: "Privacy_Microphone")
-            permissionRow("System Audio Recording", granted: model.systemAudioAccess, pane: "Privacy_ScreenCapture")
-            permissionRow("Documents / Files & Folders", granted: model.documentsAccess, pane: "Privacy_FilesAndFolders")
-            permissionRow("Accessibility (optional)", granted: model.accessibilityAccess, pane: "Privacy_Accessibility")
-            Text("✓ Available   ○ Unavailable   — Unknown\nAudio access reflects the last recording check.\nClick a permission to open System Settings.")
-                .font(.caption).foregroundStyle(.secondary)
-            Divider()
+            Menu("Permissions") {
+                Button("Microphone…") { model.openPermissionSettings("Privacy_Microphone") }
+                Button("System Audio Recording…") { model.openPermissionSettings("Privacy_ScreenCapture") }
+                Button("Files and Folders…") { model.openPermissionSettings("Privacy_FilesAndFolders") }
+            }
             Toggle("Start at login and keep running", isOn: Binding(
                 get: { keepRunning.isRegistered },
                 set: { keepRunning.setEnabled($0) }
@@ -137,30 +119,10 @@ struct StatusMenuView: View {
         .fixedSize(horizontal: false, vertical: true)
         .padding(14)
         .frame(width: 320)
-        .task {
-            keepRunning.refresh()
-            await model.refreshPermissionStatus()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            keepRunning.refresh()
-            Task { await model.refreshPermissionStatus() }
-        }
-    }
-
-    private func permissionRow(_ title: String, granted: Bool?, pane: String) -> some View {
-        Button { model.openPermissionSettings(pane) } label: {
-            HStack {
-                Image(systemName: granted == true ? "checkmark" : (granted == false ? "circle" : "minus"))
-                    .frame(width: 16)
-                Text(title)
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(title): \(granted == true ? "available" : (granted == false ? "unavailable" : "unknown")). Open System Settings")
+        .task { keepRunning.refresh() }
     }
 }
+
 
 private struct LevelRow: View {
     let name: String

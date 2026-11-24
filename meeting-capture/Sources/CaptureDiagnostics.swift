@@ -1,7 +1,6 @@
 import CoreAudio
 import Foundation
 import OSLog
-import Synchronization
 
 // Call only from control/writer queues, never from an audio callback.
 enum CaptureDiagnostics {
@@ -45,33 +44,5 @@ enum CaptureDiagnostics {
                                                 mElement: kAudioObjectPropertyElementMain)
         var size = UInt32(MemoryLayout<T>.size)
         return AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value)
-    }
-}
-
-// Audio callbacks update only atomic integers; formatting/logging happens later.
-// Counters are cumulative within a capture segment, not a measure of audibility.
-final class AudioCallbackStatistics: Sendable {
-    private let callbacks = Atomic<UInt64>(0)
-    private let frames = Atomic<UInt64>(0)
-    private let lastCallback = Atomic<UInt64>(0)
-
-    func record(frames count: UInt32) {
-        callbacks.wrappingAdd(1, ordering: .relaxed)
-        frames.wrappingAdd(UInt64(count), ordering: .relaxed)
-        lastCallback.store(AudioGetCurrentHostTime(), ordering: .relaxed)
-    }
-
-    var callbackAge: TimeInterval? {
-        let last = lastCallback.load(ordering: .relaxed)
-        guard last != 0 else { return nil }
-        let now = AudioGetCurrentHostTime()
-        return Double(AudioConvertHostTimeToNanos(now >= last ? now - last : 0)) / 1e9
-    }
-
-    var summary: String {
-        let last = lastCallback.load(ordering: .relaxed)
-        let now = AudioGetCurrentHostTime()
-        let age = last == 0 ? "none" : String(format: "%.3f", Double(AudioConvertHostTimeToNanos(now >= last ? now - last : 0)) / 1e9)
-        return "callbacks=\(callbacks.load(ordering: .relaxed)) frames=\(frames.load(ordering: .relaxed)) lastCallbackAgeSeconds=\(age)"
     }
 }
