@@ -4,7 +4,8 @@ A local macOS menu-bar recorder. It starts when another application uses a
 microphone and records two separate tracks: microphone input and all system
 output. One global audio tap captures output without application windows,
 including FaceTime's call bubble. Notifications, music and other application
-audio are included. Manual recording continues until Stop.
+audio are included. Automatic recording stops five seconds after the triggering
+app releases its microphone. Manual recording continues until Stop.
 
 Recordings live in `~/Documents/Meetings/YYYY/MM/`: one audio-only Matroska
 (`.mka`) archive and a version 3 JSON manifest. `speech2md` reads the microphone

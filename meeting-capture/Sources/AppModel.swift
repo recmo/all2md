@@ -214,7 +214,7 @@ final class AppModel: ObservableObject {
                 if current != candidate { state = .recording(current) }
             } else if recordingMethod != .manual, stopTask == nil {
                 stopTask = Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .seconds(15))
+                    try? await Task.sleep(for: .seconds(5))
                     guard !Task.isCancelled else { return }
                     self?.stopRecording()
                     self?.stopTask = nil
