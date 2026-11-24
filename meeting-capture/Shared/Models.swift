@@ -117,6 +117,39 @@ struct RecordingSession: Codable, Sendable {
     }
 }
 
+extension RecordingSession {
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        microphoneSegments = try values.decode([CapturedAudioSegment].self, forKey: .microphoneSegments)
+        captureStartedAt = try values.decode(Date.self, forKey: .captureStartedAt)
+        captureEndedAt = try values.decodeIfPresent(Date.self, forKey: .captureEndedAt)
+        paths = try values.decode(RecordingPaths.self, forKey: .paths)
+        trigger = try values.decode(CaptureTrigger.self, forKey: .trigger)
+        warnings = try values.decode([String].self, forKey: .warnings)
+        captureFailed = try values.decode(Bool.self, forKey: .captureFailed)
+        if values.contains(.systemSegments) {
+            systemSegments = try values.decode([CapturedAudioSegment].self, forKey: .systemSegments)
+            microphoneChanges = try values.decode([MicrophoneChange].self, forKey: .microphoneChanges)
+        } else {
+            let previous = try PreviousCaptureAudio(from: decoder)
+            systemSegments = previous.processTracks
+            microphoneChanges = previous.metadata.filter { $0.kind == "microphoneDevice" }
+                .map { MicrophoneChange(timestamp: $0.timestamp, device: $0.value) }
+            if captureEndedAt == captureStartedAt { captureEndedAt = nil }
+        }
+    }
+
+    private struct PreviousCaptureAudio: Decodable {
+        struct Metadata: Decodable {
+            let kind: String
+            let timestamp: Date
+            let value: String
+        }
+        let processTracks: [CapturedAudioSegment]
+        let metadata: [Metadata]
+    }
+}
+
 struct RecoverCaptureRequest: Codable, Sendable {
     let interruptedFile: URL
 }

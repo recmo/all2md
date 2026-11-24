@@ -237,10 +237,9 @@ final class CaptureCoordinator: @unchecked Sendable {
         let endedAt = captureDate(at: time)
         stopRequested.store(true, ordering: .releasing)
         timer?.cancel(); timer = nil
+        // Invalidate queued errors without changing callbacks while they can still run.
         microphoneGeneration = UUID()
-        microphone.onError = nil
         systemGeneration = UUID()
-        systemAudio.onError = nil
         // Stop both native inputs before either writer can block on disk.
         microphone.stopInput()
         systemAudio.stopInput()

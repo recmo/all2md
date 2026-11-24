@@ -69,7 +69,8 @@ an already running archive job finish.
 
 Raw CAF audio and the timing journal remain until the archive has been verified
 and a checksummed manifest saved. Recover handles interrupted recordings and
-finishes cleanup of an already published archive. Failed recovery preserves the
+finishes cleanup of an already published archive. Recovery mixes output from
+older per-process journals into the system track. Failed recovery preserves the
 remaining files; Show files exposes them for inspection. Empty files remain
 untouched. Archiving failures never stop a new live recording.
 

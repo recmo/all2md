@@ -99,15 +99,18 @@ enum MeetingCaptureWorker {
         }
         var session = try RecordingSession.load(from: paths.session)
         // A journal may only refer to this recording's own files.
-        guard session.paths.directory.resolvingSymlinksInPath() == paths.directory.resolvingSymlinksInPath(),
+        let directory = paths.directory.resolvingSymlinksInPath()
+        let prefix = ".\(paths.baseName)-"
+        func owns(_ segment: CapturedAudioSegment, sources: [String]) -> Bool {
+            let url = segment.url
+            return url.resolvingSymlinksInPath().deletingLastPathComponent() == directory
+                && store.paths(forInterruptedFile: url).baseName == paths.baseName
+                && sources.contains { url.lastPathComponent.hasPrefix(prefix + $0 + "-") }
+        }
+        guard session.paths.directory.resolvingSymlinksInPath() == directory,
               session.paths.baseName == paths.baseName,
-              [(session.microphoneSegments, "microphone"), (session.systemSegments, "system")].allSatisfy({ segments, source in
-                  segments.allSatisfy {
-                      $0.url.resolvingSymlinksInPath().deletingLastPathComponent() == paths.directory.resolvingSymlinksInPath()
-                          && $0.url.lastPathComponent.hasPrefix(".\(paths.baseName)-\(source)-")
-                          && $0.url.lastPathComponent.hasSuffix(".part.caf")
-                  }
-              }) else {
+              session.microphoneSegments.allSatisfy({ owns($0, sources: ["microphone"]) }),
+              session.systemSegments.allSatisfy({ owns($0, sources: ["system", "process"]) }) else {
             throw CaptureError.writerFailure("Invalid recording session paths; original files were kept")
         }
         let stoppedAt = session.captureEndedAt
@@ -139,9 +142,8 @@ enum MeetingCaptureWorker {
     // raw files that may already have been partially removed by cleanup.
     private static func publishedRecording(_ paths: RecordingPaths) throws -> URL? {
         guard FileManager.default.fileExists(atPath: paths.manifest.path) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let manifest = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: paths.manifest))
+        struct Publication: Decodable { let container: AudioContainer }
+        let manifest = try JSONDecoder().decode(Publication.self, from: Data(contentsOf: paths.manifest))
         guard manifest.container.file == paths.archiveFinal.lastPathComponent,
               try AudioFinalizer.sha256(paths.archiveFinal) == manifest.container.sha256 else {
             throw CaptureError.writerFailure("Published archive verification failed; all remaining files were kept")
