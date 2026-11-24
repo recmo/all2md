@@ -54,7 +54,7 @@ final class CaptureCoordinator: @unchecked Sendable {
             self.sessionID = id
             self.session = RecordingSession(microphoneSegments: [], systemSegments: [],
                 captureStartedAt: start, captureEndedAt: nil, paths: paths, trigger: trigger,
-                metadata: [], warnings: [], interruptions: [])
+                microphoneChanges: [], warnings: [])
             self.microphoneDevice = microphoneDevice
             CaptureDiagnostics.log("capture.start session=\(paths.session.lastPathComponent) pid=\(trigger.processID ?? 0) \(CaptureDiagnostics.devices())")
             do {
@@ -137,7 +137,7 @@ final class CaptureCoordinator: @unchecked Sendable {
             microphoneStarted = ProcessInfo.processInfo.systemUptime
             microphoneRetry = nil
             if let device = microphoneDevice {
-                self.session?.metadata.append(MetadataEvent(timestamp: date, kind: .microphoneDevice, value: device.manifestValue, confidence: 1))
+                self.session?.microphoneChanges.append(MicrophoneChange(timestamp: date, device: device.manifestValue))
             }
             save()
         } catch { microphoneFailed(error) }

@@ -1,12 +1,11 @@
 import Foundation
 
-struct AudioClient: Identifiable, Equatable, Sendable {
+struct AudioClient: Equatable, Sendable {
     let audioObjectID: UInt32
     let processID: pid_t
     let bundleID: String?
     let applicationName: String
     let inputDevices: [AudioInputDevice]
-    var id: pid_t { processID }
 
     var primaryInputDevice: AudioInputDevice? { inputDevices.first }
 
@@ -15,7 +14,7 @@ struct AudioClient: Identifiable, Equatable, Sendable {
     }
 }
 
-struct AudioInputDevice: Identifiable, Equatable, Sendable {
+struct AudioInputDevice: Equatable, Sendable {
     let id: UInt32
     let uid: String?
     let name: String
@@ -26,7 +25,7 @@ struct AudioInputDevice: Identifiable, Equatable, Sendable {
     }
 }
 
-enum TriggerMethod: String, Codable, Sendable { case audioProcess, deviceRunning, manual }
+enum TriggerMethod: String, Codable, Sendable { case audioProcess, manual }
 
 struct CaptureTrigger: Codable, Equatable, Sendable {
     let method: TriggerMethod
@@ -57,22 +56,13 @@ struct CapturedAudioSegment: Codable, Equatable, Sendable {
     let startedAt: Date
 }
 
-struct CaptureTimeRange: Codable, Equatable, Sendable {
-    let startedAt: Date
-    let endedAt: Date
-    let reason: String
-}
-
-struct MetadataEvent: Codable, Equatable, Sendable {
-    enum Kind: String, Codable, Sendable { case windowTitle, participant, activeSpeaker, platform, microphoneDevice, note }
+struct MicrophoneChange: Codable, Equatable, Sendable {
     let timestamp: Date
-    let kind: Kind
-    let value: String
-    let confidence: Double?
+    let device: String
 }
 
 struct CaptureManifest: Codable, Equatable, Sendable {
-    enum Status: String, Codable, Sendable { case complete, incomplete, failed }
+    enum Status: String, Codable, Sendable { case complete, incomplete }
     let schemaVersion: Int
     let meetingID: UUID
     let slug: String
@@ -84,8 +74,7 @@ struct CaptureManifest: Codable, Equatable, Sendable {
     let trigger: CaptureTrigger
     let container: AudioContainer
     let audio: [AudioTrack]
-    let interruptions: [CaptureTimeRange]
-    let metadataEvents: [MetadataEvent]
+    let microphoneChanges: [MicrophoneChange]
     let warnings: [String]
     let status: Status
 }
@@ -112,9 +101,8 @@ struct RecordingSession: Codable, Sendable {
     var captureEndedAt: Date?
     let paths: RecordingPaths
     let trigger: CaptureTrigger
-    var metadata: [MetadataEvent]
+    var microphoneChanges: [MicrophoneChange]
     var warnings: [String]
-    var interruptions: [CaptureTimeRange]
     var captureFailed = false
 
     func save() throws {

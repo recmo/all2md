@@ -16,7 +16,6 @@
 		747A9206C742279295390E27 /* MeetingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2E0E7DD1BC627C8D91E34AF /* MeetingStore.swift */; };
 		7864B4E13F70DD2709A6661E /* MeetingCaptureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18DD35ED00ADD46EF006D7B6 /* MeetingCaptureApp.swift */; };
 		7DFD55521B20CC83BDFD4E77 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09C5FA6A2A2354EDD730FF13 /* Models.swift */; };
-		82D3DE9DB4907F04E9D9FCEB /* manifest-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = C24D5A489742BE085F4C29D9 /* manifest-v1.json */; };
 		8A690EA36CA84061000E9065 /* MeetingStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 520E01FDA0F33C14B50F579C /* MeetingStoreTests.swift */; };
 		8D2D9A51832F876CACD8ABB4 /* AudioFinalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD57CB2B550A57193DEDA1E0 /* AudioFinalizer.swift */; };
 		9B5125CE45C59978F8237FDE /* HUDController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2501C526AE496B370359ED3D /* HUDController.swift */; };
@@ -70,7 +69,6 @@
 		995FD8FEA245DBB08333993E /* MeetingCaptureTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeetingCaptureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2608D5C2FB518BB4AD82371 /* SystemAudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioRecorder.swift; sourceTree = "<group>"; };
 		BD57CB2B550A57193DEDA1E0 /* AudioFinalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioFinalizer.swift; sourceTree = "<group>"; };
-		C24D5A489742BE085F4C29D9 /* manifest-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "manifest-v1.json"; sourceTree = "<group>"; };
 		C58BFDACDA8AEB550897A658 /* MicrophoneRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneRecorder.swift; sourceTree = "<group>"; };
 		CEC9B13E6CBFE8197D1A3EB6 /* CaptureError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureError.swift; sourceTree = "<group>"; };
 		E2E0E7DD1BC627C8D91E34AF /* MeetingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingStore.swift; sourceTree = "<group>"; };
@@ -80,19 +78,10 @@
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
-		114CD2B3EDF42630C843A5F2 /* Fixtures */ = {
-			isa = PBXGroup;
-			children = (
-				C24D5A489742BE085F4C29D9 /* manifest-v1.json */,
-			);
-			path = Fixtures;
-			sourceTree = "<group>";
-		};
 		9FC750F119896C2558B7FB16 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
 				520E01FDA0F33C14B50F579C /* MeetingStoreTests.swift */,
-				114CD2B3EDF42630C843A5F2 /* Fixtures */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -264,7 +253,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				82D3DE9DB4907F04E9D9FCEB /* manifest-v1.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

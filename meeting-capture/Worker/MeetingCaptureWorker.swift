@@ -45,6 +45,7 @@ enum MeetingCaptureWorker {
         execv("/usr/bin/open", &argv)
         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
+
     private static func finalize(_ request: RecordingSession) throws -> URL {
         let claim = try RecordingClaim(request.paths)
         defer { withExtendedLifetime(claim) {} }
@@ -78,8 +79,7 @@ enum MeetingCaptureWorker {
             trigger: request.trigger,
             container: archive.container,
             audio: archive.tracks,
-            interruptions: request.interruptions,
-            metadataEvents: request.metadata,
+            microphoneChanges: request.microphoneChanges,
             warnings: request.warnings,
             status: status
         )
@@ -110,9 +110,7 @@ enum MeetingCaptureWorker {
               }) else {
             throw CaptureError.writerFailure("Invalid recording session paths; original files were kept")
         }
-        // Old open journals used the start time as a sentinel. New open
-        // journals omit the end time. A stopped session keeps its exact cutoff.
-        let stoppedAt = session.captureEndedAt.flatMap { $0 == session.captureStartedAt ? nil : $0 }
+        let stoppedAt = session.captureEndedAt
         guard stoppedAt.map({ $0 >= session.captureStartedAt }) ?? true else {
             throw CaptureError.writerFailure("Invalid recording stop time; original audio was kept")
         }

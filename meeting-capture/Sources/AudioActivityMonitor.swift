@@ -39,32 +39,17 @@ final class AudioActivityMonitor {
             lastPollError = message
             return
         }
-        let clients = runningClients(from: objectIDs, selector: kAudioProcessPropertyIsRunningInput)
+        var seen = Set<pid_t>()
+        let clients = objectIDs
+            .compactMap { audioClient(for: $0) }
+            .filter { $0.processID != ownPID && seen.insert($0.processID).inserted }
+            .sorted { $0.applicationName.localizedStandardCompare($1.applicationName) == .orderedAscending }
         if clients != lastClients {
             let details = clients.map { "pid=\($0.processID) object=\($0.audioObjectID) app=\($0.applicationName) inputs=\($0.inputDeviceSummary)" }.joined(separator: "; ")
             CaptureDiagnostics.log("monitor.inputs [\(details)]")
             lastClients = clients
         }
         onClientsChanged?(clients)
-    }
-
-    private func runningClients(
-        from objectIDs: [AudioObjectID],
-        selector: AudioObjectPropertySelector
-    ) -> [AudioClient] {
-        var seen = Set<pid_t>()
-        return objectIDs
-            .compactMap { audioClient(for: $0, runningSelector: selector) }
-            .filter { $0.processID != ownPID && seen.insert($0.processID).inserted }
-            .sorted { $0.applicationName.localizedStandardCompare($1.applicationName) == .orderedAscending }
-    }
-
-    private func devicePropertyAddress() -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(
-            mSelector: kAudioProcessPropertyDevices,
-            mScope: kAudioObjectPropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
     }
 
     private func processObjectIDs() throws -> [AudioObjectID] {
@@ -83,13 +68,10 @@ final class AudioActivityMonitor {
         return values
     }
 
-    private func audioClient(
-        for objectID: AudioObjectID,
-        runningSelector: AudioObjectPropertySelector
-    ) -> AudioClient? {
-        guard uint32Property(runningSelector, objectID: objectID) == 1,
+    private func audioClient(for objectID: AudioObjectID) -> AudioClient? {
+        guard uint32Property(kAudioProcessPropertyIsRunningInput, objectID: objectID) == 1,
               let pidValue = uint32Property(kAudioProcessPropertyPID, objectID: objectID) else { return nil }
-        let bundleID = bundleIDProperty(objectID: objectID)
+        let bundleID = stringProperty(kAudioProcessPropertyBundleID, objectID: objectID)
         let app = ProcessApplicationResolver.resolve(processID: pid_t(pidValue), bundleID: bundleID)
         return AudioClient(
             audioObjectID: objectID,
@@ -101,7 +83,9 @@ final class AudioActivityMonitor {
     }
 
     private func inputDevices(processObjectID: AudioObjectID) -> [AudioInputDevice] {
-        var address = devicePropertyAddress()
+        var address = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyDevices,
+                                                mScope: kAudioObjectPropertyScopeInput,
+                                                mElement: kAudioObjectPropertyElementMain)
         var size: UInt32 = 0
         let sizeStatus = AudioObjectGetPropertyDataSize(processObjectID, &address, 0, nil, &size)
         guard sizeStatus == noErr else { return [] }
@@ -135,15 +119,6 @@ final class AudioActivityMonitor {
         var value: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
         return AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value) == noErr ? value : nil
-    }
-
-    private func bundleIDProperty(objectID: AudioObjectID) -> String? {
-        var address = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyBundleID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        var value: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        guard AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value) == noErr,
-              let value else { return nil }
-        return value.takeRetainedValue() as String
     }
 
 }
