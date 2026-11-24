@@ -154,7 +154,6 @@ final class CaptureCoordinator: @unchecked Sendable {
 
     private func microphoneFailed(_ error: Error) {
         guard session != nil, !fatalFailure, !stopRequested.load(ordering: .acquiring) else { return }
-        if case CaptureError.storageFailure = error { fail(error.localizedDescription); return }
         microphoneGeneration = UUID() // Ignore errors already queued by the old segment.
         microphone.stop()
         if let last = session?.microphoneSegments.last, !FileManager.default.fileExists(atPath: last.url.path) {
@@ -162,11 +161,8 @@ final class CaptureCoordinator: @unchecked Sendable {
         }
         // Draining can report an overflow just before a replacement clears it.
         if let warning = microphone.captureWarning { warn("Microphone: \(warning)", incomplete: true) }
-        if let failure = microphone.failure, case CaptureError.storageFailure = failure {
-            fail(failure.localizedDescription); return
-        }
         microphoneRetry = ProcessInfo.processInfo.systemUptime + 10
-        warn("Microphone interrupted; retrying: \(error.localizedDescription)", incomplete: true)
+        warn("Microphone interrupted; retrying: \(microphone.failure?.localizedDescription ?? error.localizedDescription)", incomplete: true)
     }
 
     private func pollProcesses() {
@@ -209,7 +205,6 @@ final class CaptureCoordinator: @unchecked Sendable {
 
     private func processFailed(_ process: AudioProcess, error: Error) {
         guard session != nil, !fatalFailure, !stopRequested.load(ordering: .acquiring) else { return }
-        if case CaptureError.storageFailure = error { fail(error.localizedDescription); return }
         if CaptureError.isProcessTapFailure(error),
            let live = try? catalog.processObjectIDs(), !live.contains(process.objectID) {
             stopProcess(process.objectID, exited: true)
@@ -223,10 +218,7 @@ final class CaptureCoordinator: @unchecked Sendable {
     private func stopProcess(_ object: UInt32, exited: Bool) {
         guard let track = processes.removeValue(forKey: object) else { return }
         do { try track.recorder.stop(processExited: exited) }
-        catch {
-            if case CaptureError.storageFailure = error { fail(error.localizedDescription) }
-            else if !exited { warn("\(track.process.title): \(error.localizedDescription)", incomplete: true) }
-        }
+        catch { warn("\(track.process.title): \(error.localizedDescription)", incomplete: true) }
         recordWarning(track)
         session?.processTracks.removeAll { $0.id == track.id && !FileManager.default.fileExists(atPath: $0.url.path) }
     }

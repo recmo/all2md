@@ -56,8 +56,8 @@ Missing intervals become silence; queued valid audio is retained.
 
 An unavailable source retries every ten seconds while other sources continue.
 A stopped microphone engine or five seconds without microphone input starts a
-new segment. Device changes use a fresh engine. Storage/journal failures stop
-capture and display an error; fix the problem and choose Retry. Explicit Stop
+new segment. Device changes use a fresh engine. A journal failure stops capture
+and displays an error; fix the problem and choose Retry. Explicit Stop
 suppresses automatic capture until the triggering microphone client goes away.
 
 Stop halts all inputs before draining their writers. A background worker aligns
