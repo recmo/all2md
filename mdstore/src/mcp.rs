@@ -27,8 +27,10 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 struct AppState {
     store: Arc<Store>,
     worker_token: Option<String>,
+    embeddings_token: Option<String>,
 }
 
+mod embeddings;
 mod events;
 mod files;
 mod problem;
@@ -38,6 +40,9 @@ mod worker;
 fn router(store: Arc<Store>) -> Router {
     let state = AppState {
         store,
+        embeddings_token: std::env::var("MDSTORE_EMBEDDINGS_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty()),
         worker_token: std::env::var("MDSTORE_WORKER_TOKEN")
             .ok()
             .filter(|v| !v.is_empty()),
@@ -48,6 +53,7 @@ fn router(store: Arc<Store>) -> Router {
 fn application(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/v1/embeddings", post(embeddings::handle))
         .route("/mcp", post(mcp))
         .route("/path", get(raw_root))
         .route("/path/", get(raw_root))
@@ -225,6 +231,16 @@ async fn authorize(
             == Some(&format!("Bearer {token}"))
     });
     let path = request.uri().path();
+    let embeddings = state.embeddings_token.as_deref().is_some_and(|token| {
+        request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            == Some(&format!("Bearer {token}"))
+    });
+    if embeddings && path != "/v1/embeddings" {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if worker
         && (path == "/health"
             || path == "/path"

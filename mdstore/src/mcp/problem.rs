@@ -59,9 +59,11 @@ impl IntoResponse for Problem {
 // Also normalize router/extractor failures (404, 405, malformed JSON, auth),
 // retaining headers such as Allow, WWW-Authenticate and Content-Range.
 pub(super) async fn normalize(request: Request, next: Next) -> Response {
+    let embeddings = request.uri().path() == "/v1/embeddings";
     let head = request.method() == axum::http::Method::HEAD;
     let response = next.run(request).await;
-    if !(response.status().is_client_error() || response.status().is_server_error())
+    if embeddings
+        || !(response.status().is_client_error() || response.status().is_server_error())
         || response
             .headers()
             .get("content-type")

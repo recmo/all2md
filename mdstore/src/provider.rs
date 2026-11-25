@@ -93,7 +93,7 @@ pub(crate) struct PendingEmbeddings;
 
 pub(crate) const EMBED_RECIPE: &str = "text-embeddings-zembed-1-v1";
 pub(crate) const RERANK_RECIPE: &str = "text-rerank-zerank-2-v1";
-const EMBED_MODEL: &str = "zeroentropy/zembed-1-embedding";
+pub(crate) const EMBED_MODEL: &str = "zeroentropy/zembed-1-embedding";
 const EMBED_REVISION: &str = "cf13c81f3274394053d166740294f7eea4586f7a";
 const RERANK_MODEL: &str = "zeroentropy/zerank-2-reranker";
 const RERANK_REVISION: &str = "5eae30d5ee3c6b2df2ef6d723bde45172d761c4c";

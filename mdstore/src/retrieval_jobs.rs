@@ -29,6 +29,8 @@ struct Job {
     revision: String,
     parameters: Value,
     document: bool,
+    #[serde(default)]
+    external: bool,
     deadline: u64,
     attempt: Option<String>,
     expires: u64,
@@ -135,17 +137,42 @@ impl Queue {
         document: bool,
         timeout: u64,
     ) -> Result<String> {
+        self.submit_job(recipe, parameters, document, timeout, false)
+    }
+
+    pub(crate) fn submit_external(&self, parameters: Value, document: bool) -> Result<String> {
+        // HTTP waits are independent of the durable job/cache lifetime.
+        self.submit_job(
+            crate::provider::EMBED_RECIPE,
+            parameters,
+            document,
+            300,
+            true,
+        )
+    }
+
+    fn submit_job(
+        &self,
+        recipe: &str,
+        parameters: Value,
+        document: bool,
+        timeout: u64,
+        external: bool,
+    ) -> Result<String> {
         self.locked(|| {
             let revision = revision(recipe)?;
             let id = format!(
                 "retrieval-{}",
                 crate::validation::source_hash(&format!(
-                    "{recipe}:{revision}:{parameters}:{document}"
+                    "{}{recipe}:{revision}:{parameters}:{document}",
+                    if external { "external:" } else { "" }
                 ))
             );
             if self.path(&id)?.exists() {
                 let job = self.read(&id)?;
-                if !document && (job.deadline <= now() || job.error.is_some()) {
+                if ((!document || external) && job.deadline <= now())
+                    || (!document && job.error.is_some())
+                {
                     self.remove(&job)?;
                 } else if document || job.complete {
                     return Ok(id);
@@ -166,6 +193,7 @@ impl Queue {
                     revision: revision.into(),
                     parameters,
                     document,
+                    external,
                     deadline: if document { u64::MAX } else { now() + timeout },
                     attempt: None,
                     expires: 0,
@@ -193,9 +221,10 @@ impl Queue {
     }
 
     fn current(job: &Job, texts: &HashSet<&str>) -> bool {
-        (job.document || job.deadline > now())
+        ((job.document && !job.external) || job.deadline > now())
             && revision(&job.recipe).is_ok_and(|revision| revision == job.revision)
             && (!job.document
+                || job.external
                 || job.parameters["texts"].as_array().is_some_and(|items| {
                     items.iter().all(|item| {
                         item["text"]
@@ -208,7 +237,7 @@ impl Queue {
     pub(crate) fn clear_documents(&self) -> Result<()> {
         self.locked(|| {
             for job in self.jobs()? {
-                if job.document {
+                if job.document && !job.external {
                     self.remove(&job)?;
                 }
             }
@@ -305,6 +334,7 @@ impl Queue {
             jobs.sort_by_key(|job| (job.deadline, job.id.clone()));
             let mut assignments = Vec::new();
             let mut selected = None;
+            let mut batch_texts = 0;
             for mut job in jobs {
                 if !Self::current(&job, texts) {
                     self.remove(&job)?;
@@ -318,10 +348,14 @@ impl Queue {
                     || job.complete
                     || job.error.is_some()
                     || job.expires > now()
+                    || (document
+                        && !assignments.is_empty()
+                        && batch_texts + job.parameters["texts"].as_array().map_or(0, Vec::len) > 4)
                 {
                     continue;
                 }
                 job.attempt = Some(secret()?);
+                batch_texts += job.parameters["texts"].as_array().map_or(0, Vec::len);
                 job.expires = now() + LEASE_SECONDS;
                 selected = Some(job.recipe.clone());
                 assignments.push(json!({
@@ -403,6 +437,9 @@ impl Queue {
             validate_result(&job.recipe, &job.parameters, output)?;
             crate::store::write_atomic(&self.result_path(id)?, output.as_bytes())?;
             job.complete = true;
+            if job.external {
+                job.deadline = now() + 86400;
+            }
             self.save(&job)
         })
     }
